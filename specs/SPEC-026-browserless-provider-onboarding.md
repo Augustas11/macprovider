@@ -1,6 +1,12 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.24 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.25 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.25 (2026-07-16, independently versioned Malibu recovery).**
+Malibu and provider CLI marketing versions no longer need to match. SPEC-034 governs
+the signed component tuple, independent app publication, anti-replay, and the
+restricted observation-only state after legacy migration failure. Every credential,
+admission-identity, config, and marker ownership rule below remains in force.
 
 **Change log v0.24 (2026-07-14, issue #585 Option 2 completion).** The
 launchd-managed CLI is the sole runtime authority for provider bearer custody,

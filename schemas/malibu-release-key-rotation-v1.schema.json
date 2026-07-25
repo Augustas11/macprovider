@@ -1,0 +1,73 @@
+{
+  "$id": "https://download.malibu.tech/schemas/malibu-release-key-rotation-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "signature": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"const": "ecdsa-p256-sha256"},
+        "key_id": {"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "type": "string"},
+        "signature": {"minLength": 1, "pattern": "^[A-Za-z0-9_-]+$", "type": "string"}
+      },
+      "required": ["algorithm", "key_id", "signature"],
+      "type": "object"
+    },
+    "trust": {
+      "properties": {
+        "keyring_generation": {"minimum": 1, "type": "integer"},
+        "keyring_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "revocations_generation": {"minimum": 1, "type": "integer"},
+        "revocations_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+      },
+      "required": ["keyring_generation", "keyring_sha256", "revocations_generation", "revocations_sha256"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "malibu-release-key-rotation.v1"},
+    "signatures": {
+      "additionalProperties": false,
+      "properties": {"retiring": {"$ref": "#/$defs/signature"}, "successor": {"$ref": "#/$defs/signature"}},
+      "required": ["retiring", "successor"],
+      "type": "object"
+    },
+    "signed": {
+      "additionalProperties": false,
+      "properties": {
+        "audit": {
+          "additionalProperties": false,
+          "properties": {
+            "report_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+            "reviewer": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{2,127}$", "type": "string"}
+          },
+          "required": ["report_sha256", "reviewer"],
+          "type": "object"
+        },
+        "current_trust": {
+          "allOf": [{"$ref": "#/$defs/trust"}, {"properties": {"retiring_key_id": {"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "type": "string"}}, "required": ["retiring_key_id"]}],
+          "unevaluatedProperties": false
+        },
+        "expires_at": {"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "type": "string"},
+        "incident": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$", "type": "string"},
+        "issued_at": {"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "type": "string"},
+        "issuer": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._@:/-]{2,127}$", "type": "string"},
+        "overlap_index": {
+          "additionalProperties": false,
+          "properties": {"index_generation": {"minimum": 1, "type": "integer"}, "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}},
+          "required": ["index_generation", "sha256"],
+          "type": "object"
+        },
+        "rotation_id": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "successor_trust": {
+          "allOf": [{"$ref": "#/$defs/trust"}, {"properties": {"successor_key_id": {"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "type": "string"}}, "required": ["successor_key_id"]}],
+          "unevaluatedProperties": false
+        }
+      },
+      "required": ["audit", "current_trust", "expires_at", "incident", "issued_at", "issuer", "overlap_index", "rotation_id", "successor_trust"],
+      "type": "object"
+    }
+  },
+  "required": ["schema_version", "signatures", "signed"],
+  "type": "object"
+}

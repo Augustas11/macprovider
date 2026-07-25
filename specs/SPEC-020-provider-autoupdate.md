@@ -1,5 +1,10 @@
 # SPEC-020 - Provider autoupdate
 
+> **Component-discovery boundary (2026-07-16).** This spec selects only provider CLI
+> versions. A Malibu `malibu-v*` release is never a provider target, and generic GitHub
+> `/releases/latest` is not cross-component authority. Malibu release discovery and
+> compatibility are governed separately by SPEC-034.
+
 Version: v0.1.6
 Status: Implemented on branch; v1.8.31 rollout pending. The production path ran
 the 2026-07-10 incident-recovery

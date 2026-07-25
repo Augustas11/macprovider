@@ -84,6 +84,7 @@ jobs:
           echo "prerelease=$RELEASE_PRERELEASE_INPUT" >> "$GITHUB_OUTPUT"
 
       - name: Verify content-pinned app build inputs
+        if: steps.release_source.outputs.tag == 'v1.8.39'
         shell: bash
         run: bash scripts/verify-app-build-inputs.sh "${{ steps.release_source.outputs.commit }}"
 
@@ -149,6 +150,7 @@ jobs:
           grep -Fq "$tag" "$RUNNER_TEMP/gateway-linux-amd64.strings"
 
       - name: Install reviewed XcodeGen artifact
+        if: steps.release_source.outputs.tag == 'v1.8.39'
         shell: bash
         run: |
           set -euo pipefail
@@ -176,6 +178,7 @@ jobs:
             ./package.sh "${{ steps.release_source.outputs.tag }}"
 
       - name: Build Malibu.app
+        if: steps.release_source.outputs.tag == 'v1.8.39'
         shell: bash
         run: |
           set -euo pipefail
@@ -200,19 +203,21 @@ jobs:
           tag="${{ steps.release_source.outputs.tag }}"
           mkdir -p unsigned-release-inputs
           cp "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" unsigned-release-inputs/
-          tar czf unsigned-release-inputs/Malibu.app.tar.gz -C "$RUNNER_TEMP" Malibu.app
           cp "$RUNNER_TEMP/release-toolchain.json" unsigned-release-inputs/
           cp "$RUNNER_TEMP/coordinator-linux-amd64" \
             "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
             "$RUNNER_TEMP/gateway-linux-amd64" unsigned-release-inputs/
           unsigned_assets=(
             "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz"
-            unsigned-release-inputs/Malibu.app.tar.gz
             unsigned-release-inputs/release-toolchain.json
             unsigned-release-inputs/coordinator-linux-amd64
             unsigned-release-inputs/coordinator-cli-linux-amd64
             unsigned-release-inputs/gateway-linux-amd64
           )
+          if [ "$tag" = v1.8.39 ]; then
+            tar czf unsigned-release-inputs/Malibu.app.tar.gz -C "$RUNNER_TEMP" Malibu.app
+            unsigned_assets+=(unsigned-release-inputs/Malibu.app.tar.gz)
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ steps.release_source.outputs.commit }}" \
             "$GITHUB_REPOSITORY" "${{ steps.release_source.outputs.prerelease }}" \
@@ -260,12 +265,14 @@ jobs:
           unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
           unsigned_assets=(
             "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
-            "$unsigned_dir/Malibu.app.tar.gz"
             "$unsigned_dir/release-toolchain.json"
             "$unsigned_dir/coordinator-linux-amd64"
             "$unsigned_dir/coordinator-cli-linux-amd64"
             "$unsigned_dir/gateway-linux-amd64"
           )
+          if [ "$tag" = v1.8.39 ]; then
+            unsigned_assets+=("$unsigned_dir/Malibu.app.tar.gz")
+          fi
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ needs.build.outputs.commit }}" \
             "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
@@ -283,8 +290,10 @@ jobs:
             test ! -L "$source"
             install -m 0755 "$source" "$binary"
           done
-          tar xzf "$RUNNER_TEMP/unsigned-release-inputs/Malibu.app.tar.gz" -C "$RUNNER_TEMP"
-          test -d "$RUNNER_TEMP/Malibu.app"
+          if [ "$tag" = v1.8.39 ]; then
+            tar xzf "$RUNNER_TEMP/unsigned-release-inputs/Malibu.app.tar.gz" -C "$RUNNER_TEMP"
+            test -d "$RUNNER_TEMP/Malibu.app"
+          fi
 
       - name: Verify protected GitHub release posture
         shell: bash
@@ -588,6 +597,7 @@ jobs:
           fi
 
       - name: Sign + notarize + staple Malibu.app
+        if: needs.build.outputs.tag == 'v1.8.39'
         shell: bash
         env:
           APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
@@ -998,6 +1008,7 @@ jobs:
             "$pkg_expand_dir/Payload/compatibility-set.json"
 
       - name: Verify Malibu release cryptographic bindings
+        if: needs.build.outputs.tag == 'v1.8.39'
         shell: bash
         run: |
           set -euo pipefail
@@ -1005,17 +1016,12 @@ jobs:
           dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
           test -f "$dmg"
           bash scripts/verify-malibu-release-artifacts.sh "$dmg"
-          if [ "$tag" = v1.8.39 ]; then
-            appcast="phase3-binary/app/dist/appcast.xml"
-            test -f "$appcast"
-            python3 scripts/verify-malibu-sparkle-signature.py \
-              "$tag" "$dmg" "$appcast" \
-              scripts/dist/malibu-v1.8.32-sparkle-public-key
-            bash scripts/test-coordinator-advertised-version.sh "$tag"
-          elif [ -e phase3-binary/app/dist/appcast.xml ]; then
-            echo "::error::legacy appcast must exist only for v1.8.39" >&2
-            exit 1
-          fi
+          appcast="phase3-binary/app/dist/appcast.xml"
+          test -f "$appcast"
+          python3 scripts/verify-malibu-sparkle-signature.py \
+            "$tag" "$dmg" "$appcast" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+          bash scripts/test-coordinator-advertised-version.sh "$tag"
 
       - name: Prepare release assets
         id: assets
@@ -1099,24 +1105,21 @@ jobs:
             cp "$pkg_src" "$pkg_asset"
             release_assets+=("$pkg_asset")
           fi
-          test -f "$app_dmg_src"
-          cp "$app_dmg_src" "$app_dmg_asset"
-          release_assets+=("$app_dmg_asset")
           if [ "$tag" = v1.8.39 ]; then
             [ "${{ needs.build.outputs.prerelease }}" = false ] || {
               echo "::error::v1.8.39 bootstrap cannot be a prerelease" >&2
               exit 1
             }
+            test -f "$app_dmg_src"
+            cp "$app_dmg_src" "$app_dmg_asset"
+            release_assets+=("$app_dmg_asset")
             test -f "$appcast_src"
             cp "$appcast_src" "$appcast_asset"
             release_assets+=("$appcast_asset")
-          elif [ -e "$appcast_src" ]; then
-            echo "::error::legacy appcast must exist only for v1.8.39" >&2
-            exit 1
-          fi
-          if [ -f "$app_src" ]; then
-            cp "$app_src" "$app_asset"
-            release_assets+=("$app_asset")
+            if [ -f "$app_src" ]; then
+              cp "$app_src" "$app_asset"
+              release_assets+=("$app_asset")
+            fi
           fi
           coordinator_sha="$(shasum -a 256 "$coordinator_asset" | awk '{print $1}')"
           coordinator_cli_sha="$(shasum -a 256 "$coordinator_cli_asset" | awk '{print $1}')"
@@ -1207,7 +1210,6 @@ jobs:
           release_assets+=("$pearl_metadata" "$pearl_metadata_sig")
           artifact_index_arguments=(
             --artifact "provider_cli=$tar_asset"
-            --artifact "malibu_app=$app_dmg_asset"
             --artifact "coordinator=$coordinator_asset"
             --artifact "coordinator_cli=$coordinator_cli_asset"
             --artifact "gateway=$gateway_asset"
@@ -1221,6 +1223,9 @@ jobs:
             --artifact "pearl_metadata=$pearl_metadata"
             --artifact "pearl_metadata_signature=$pearl_metadata_sig"
           )
+          if [ "$tag" = v1.8.39 ]; then
+            artifact_index_arguments+=(--artifact "malibu_app=$app_dmg_asset")
+          fi
           python3 scripts/compatibility-artifact-index.py build \
             --output "$compatibility_artifact_index" \
             --compatibility-manifest "$compatibility_manifest" \
@@ -1267,15 +1272,15 @@ jobs:
           a stapled .pkg asset in addition to the compatibility tarball.
           EOF
           fi
-          if [ -f "phase3-binary/app/dist/Malibu-${tag}.dmg" ]; then
+          if [ "$tag" = v1.8.39 ] && [ -f "phase3-binary/app/dist/Malibu-${tag}.dmg" ]; then
             cat >> release-notes.md <<EOF
 
           **Malibu.app (CLI wrapper)** — this release ships a Developer ID-signed,
           notarized, and stapled \`Malibu-${tag}.dmg\`. Open the disk image, drag
           Malibu.app to Applications, and launch. First run drives install.sh
           onboarding with no terminal setup; Malibu monitors the launchd provider.
-          The launchd-managed CLI owns signed compatibility-set updates and replaces
-          Malibu.app only as one member of the same atomic transaction.
+          This is the frozen one-time bootstrap bridge. It is not the current
+          Malibu release channel.
           EOF
             if [ "$tag" = v1.8.39 ]; then
               cat >> release-notes.md <<EOF
@@ -1283,18 +1288,15 @@ jobs:
           Malibu 1.8.32 installations receive this exact DMG through a one-time,
           EdDSA-signed compatibility appcast. Malibu 1.8.39 contains no Sparkle
           dependency, runtime, or feed; it retains only the frozen 1.8.32 public
-          key needed for trust continuity. Subsequent updates are CLI-owned.
+          key needed for trust continuity.
           EOF
             fi
-          elif [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
+          else
             cat >> release-notes.md <<EOF
 
-          **Malibu.app (App-track provider onboarding)** - this release also
-          ships a Developer ID-signed, notarized, and stapled Malibu.app.pkg
-          for the SPEC-026 browserless one-click provider onboarding flow.
-          Download Malibu-${tag}.pkg and double-click to install Malibu.app
-          to /Applications. First launch drives the whole registration ->
-          autotune -> download -> live flow with no browser and no CLI setup.
+          Malibu is released independently from macprovider-cli. Provider
+          releases do not publish, activate, or roll back Malibu, and the two
+          products do not share a marketing-version requirement.
           EOF
           fi
 

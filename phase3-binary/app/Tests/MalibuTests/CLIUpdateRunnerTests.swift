@@ -3,12 +3,27 @@ import XCTest
 @testable import Malibu
 
 final class CLIUpdateRunnerTests: XCTestCase {
+    private let bridgeNow = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private var legacyBootstrap: MalibuLegacyBootstrapPolicy {
+        MalibuLegacyBootstrapPolicy(
+            expiresAt: bridgeNow.addingTimeInterval(3_600),
+            allowedSourceCohorts: [
+                .init(appVersion: "1.8.39", cliVersion: "1.8.30"),
+                .init(appVersion: "1.8.39", cliVersion: "1.8.32"),
+            ]
+        )
+    }
+
     func testLegacyCLIUsesPinnedCompleteInstaller() throws {
         XCTAssertEqual(
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.30",
                 compatibilitySetID: nil,
-                bundledAppVersion: "1.8.40"
+                authorizedProviderVersion: "1.8.40",
+                legacySourceAppVersion: "1.8.39",
+                legacyBootstrap: legacyBootstrap,
+                now: bridgeNow
             ),
             .pinnedInstaller(version: "v1.8.40")
         )
@@ -16,7 +31,10 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "v1.8.32",
                 compatibilitySetID: "legacy-placeholder",
-                bundledAppVersion: "v1.8.40"
+                authorizedProviderVersion: "v1.8.40",
+                legacySourceAppVersion: "1.8.39",
+                legacyBootstrap: legacyBootstrap,
+                now: bridgeNow
             ),
             .pinnedInstaller(version: "v1.8.40")
         )
@@ -27,33 +45,59 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.33",
                 compatibilitySetID: "Augustas11/macprovider:v1.8.33@abc123",
-                bundledAppVersion: "1.8.40"
+                authorizedProviderVersion: "1.8.40"
             ),
             .installedCompatibilityCLI
         )
     }
 
-    func testMissingCompatibilityIdentityRepairsThroughPinnedInstaller() throws {
-        XCTAssertEqual(
+    func testMissingCompatibilityIdentityOutsideSignedCohortFailsClosed() throws {
+        XCTAssertThrowsError(
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.38",
                 compatibilitySetID: "  ",
-                bundledAppVersion: "1.8.40"
-            ),
-            .pinnedInstaller(version: "v1.8.40")
-        )
+                authorizedProviderVersion: "1.8.40",
+                legacySourceAppVersion: "1.8.39",
+                legacyBootstrap: legacyBootstrap,
+                now: bridgeNow
+            )
+        ) { error in
+            guard case CLIUpdateRunner.Error.legacyBootstrapSourceDenied = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
     }
 
-    func testLegacyRepairRequiresExactBridgeAppVersion() throws {
-        // Any bundle version other than the current pin target disarms the
-        // bridge — including the previous release's target (1.8.39), which must
-        // no longer arm 1.8.40's repair.
-        for appVersion in [nil, "1.8.38", "1.8.39", "1.8.41", "not-a-version"] as [String?] {
+    func testLegacyRepairRejectsWrongSourceAppAndExpiredBridge() throws {
+        for (appVersion, cliVersion, now) in [
+            ("1.8.40", "1.8.30", bridgeNow),
+            ("1.8.39", "1.8.31", bridgeNow),
+            ("1.8.39", "1.8.30", bridgeNow.addingTimeInterval(3_601)),
+        ] {
+            XCTAssertThrowsError(
+                try CLIUpdateRunner.strategy(
+                    installedVersion: cliVersion,
+                    compatibilitySetID: nil,
+                    authorizedProviderVersion: "1.8.40",
+                    legacySourceAppVersion: appVersion,
+                    legacyBootstrap: legacyBootstrap,
+                    now: now
+                )
+            ) { error in
+                guard case CLIUpdateRunner.Error.legacyBootstrapSourceDenied = error else {
+                    return XCTFail("unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testLegacyRepairRequiresSignedProviderTarget() throws {
+        for providerTarget in [nil, "", "not-a-version"] as [String?] {
             XCTAssertThrowsError(
                 try CLIUpdateRunner.strategy(
                     installedVersion: "1.8.30",
                     compatibilitySetID: nil,
-                    bundledAppVersion: appVersion
+                    authorizedProviderVersion: providerTarget
                 )
             ) { error in
                 guard case CLIUpdateRunner.Error.legacyBootstrapUnavailable = error else {
@@ -68,7 +112,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.x",
                 compatibilitySetID: nil,
-                bundledAppVersion: "1.8.40"
+                authorizedProviderVersion: "1.8.40"
             )
         ) { error in
             guard case CLIUpdateRunner.Error.invalidInstalledVersion = error else {
@@ -82,7 +126,7 @@ final class CLIUpdateRunnerTests: XCTestCase {
             try CLIUpdateRunner.strategy(
                 installedVersion: "1.8.41",
                 compatibilitySetID: nil,
-                bundledAppVersion: "1.8.40"
+                authorizedProviderVersion: "1.8.40"
             )
         ) { error in
             guard case CLIUpdateRunner.Error.legacyBootstrapWouldDowngrade = error else {

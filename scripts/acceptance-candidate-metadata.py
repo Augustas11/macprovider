@@ -34,7 +34,6 @@ MAX_JSON_BYTES = 1024 * 1024
 MAX_VALIDITY = dt.timedelta(hours=24)
 MIN_VALIDITY = dt.timedelta(minutes=5)
 REQUIRED_UNSIGNED_NAMES = {
-    "Malibu.app.tar.gz",
     "coordinator-cli-linux-amd64",
     "coordinator-linux-amd64",
     "gateway-linux-amd64",

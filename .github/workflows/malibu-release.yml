@@ -1,0 +1,981 @@
+name: Release independently versioned Malibu app
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Exact reviewed Malibu tag (malibu-vX.Y.Z)"
+        required: true
+        type: string
+      source_commit:
+        description: "Exact 40-character reviewed commit"
+        required: true
+        type: string
+      envelope_generation:
+        description: "Monotonic signed envelope generation"
+        required: true
+        default: "1"
+        type: string
+      index_generation:
+        description: "Monotonic signed discovery-index generation"
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+env:
+  PROVIDER_TAG: v1.8.40
+  PROVIDER_VERSION: 1.8.40
+  PROVIDER_COMMIT: 18638472fe3e885f3534eeac29ab89b4c7ffdd7a
+  PROVIDER_SET_ID: Augustas11/macprovider:v1.8.40@18638472fe3e885f3534eeac29ab89b4c7ffdd7a
+  PROVIDER_SET_SHA256: fe17e7a3cca392edea185c304970ef6d6fb9f06ff65aa6cffed6c7d9325a161c
+  PROVIDER_TAR: macprovider-cli-v1.8.40-darwin-arm64.tar.gz
+
+jobs:
+  sign_publish:
+    name: Rebuild, sign, notarize, draft, and promote app-only release
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout exact reviewed commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.event.inputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify reviewed Malibu tag and independent app version
+        id: source
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_COMMIT: ${{ github.event.inputs.source_commit }}
+          ENVELOPE_GENERATION: ${{ github.event.inputs.envelope_generation }}
+          INDEX_GENERATION: ${{ github.event.inputs.index_generation }}
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_TAG" =~ ^malibu-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::tag must use the malibu-vX.Y.Z namespace" >&2
+            exit 1
+          }
+          [[ "$INPUT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::source_commit must be a full lowercase commit SHA" >&2
+            exit 1
+          }
+          [[ "$ENVELOPE_GENERATION" =~ ^[1-9][0-9]*$ ]]
+          [[ "$INDEX_GENERATION" =~ ^[1-9][0-9]*$ ]]
+          test "$(git rev-parse HEAD)" = "$INPUT_COMMIT"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git fetch --force origin "refs/tags/$INPUT_TAG:refs/tags/$INPUT_TAG"
+          test "$(git rev-parse "$INPUT_TAG^{commit}")" = "$INPUT_COMMIT"
+          git merge-base --is-ancestor "$INPUT_COMMIT" refs/remotes/origin/main || {
+            echo "::error::Malibu release source is not reviewed on origin/main" >&2
+            exit 1
+          }
+
+          app_version="$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' phase3-binary/app/project.yml)"
+          app_build="$(awk -F'"' '/CURRENT_PROJECT_VERSION:/ {print $2; exit}' phase3-binary/app/project.yml)"
+          test "$INPUT_TAG" = "malibu-v$app_version" || {
+            echo "::error::Malibu tag does not match the app marketing version" >&2
+            exit 1
+          }
+          [[ "$app_build" =~ ^[1-9][0-9]*$ ]]
+          awk -F '\t' -v version="$app_version" -v build="$app_build" \
+            '$1 == version && $2 == build {found=1} END {exit !found}' \
+            phase3-binary/app/release-builds.tsv
+
+          # There is deliberately no comparison between app_version/app_build
+          # and PROVIDER_VERSION. The signed compatibility set is the authority.
+          echo "app_build=$app_build" >> "$GITHUB_OUTPUT"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "commit=$INPUT_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Assert generic latest is still the provider release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/latest-before.json"
+          python3 scripts/malibu-release-workflow-guard.py verify-latest \
+            --release-json "$RUNNER_TEMP/latest-before.json"
+
+      - name: Download exact immutable public provider artifacts by numeric ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          provider_dir="$RUNNER_TEMP/provider-release"
+          mkdir -p "$provider_dir"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$PROVIDER_TAG" \
+            > "$provider_dir/release.json"
+          python3 - "$provider_dir/release.json" "$provider_dir/assets.tsv" <<'PY'
+          import json
+          import sys
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          required = {
+              "macprovider-cli-v1.8.40-darwin-arm64.tar.gz",
+              "compatibility-set.json",
+              "checksums.txt",
+              "checksums.txt.sig",
+          }
+          rows = {row["name"]: row for row in release.get("assets", [])}
+          if not required <= rows.keys():
+              raise SystemExit("immutable v1.8.40 release lacks a required provider asset")
+          with open(sys.argv[2], "w", encoding="utf-8") as output:
+              for name in sorted(required):
+                  output.write(f'{rows[name]["id"]}\t{name}\n')
+          PY
+          while IFS=$'\t' read -r asset_id asset_name; do
+            [[ "$asset_id" =~ ^[1-9][0-9]*$ ]]
+            gh api -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              > "$provider_dir/$asset_name"
+          done < "$provider_dir/assets.tsv"
+          python3 scripts/malibu-release-workflow-guard.py verify-provider \
+            --release-json "$provider_dir/release.json" \
+            --assets-dir "$provider_dir" \
+            --output "$provider_dir/provider-publication-provenance.json"
+
+      - name: Verify signed provider set and extract without mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          provider_dir="$RUNNER_TEMP/provider-release"
+          openssl dgst -sha256 -verify ops/pearl-updater/release-signing-public.pem \
+            -signature "$provider_dir/checksums.txt.sig" \
+            "$provider_dir/checksums.txt"
+          checksummed_tar="$(awk -v name="$PROVIDER_TAR" '$2 == name {print $1}' "$provider_dir/checksums.txt")"
+          test "$checksummed_tar" = "1eee4900109f958c95c66830f17295bfba4dfe93e0a72aa720f0ed20a9b2b918"
+          payload="$RUNNER_TEMP/provider-payload"
+          mkdir -p "$payload"
+          tar -tzf "$provider_dir/$PROVIDER_TAR" > "$RUNNER_TEMP/provider-entries.txt"
+          awk '/(^|\/)\.\.($|\/)|^\// {bad=1} END {exit bad}' "$RUNNER_TEMP/provider-entries.txt"
+          tar -xzf "$provider_dir/$PROVIDER_TAR" -C "$payload"
+          if find "$payload" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
+            echo "::error::public provider payload contains a link or special file" >&2
+            exit 1
+          fi
+          cmp "$provider_dir/compatibility-set.json" "$payload/compatibility-set.json"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$payload/compatibility-set.json" \
+            --payload-directory "$payload" \
+            --require-signature \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --expected-tag "$PROVIDER_TAG" \
+            --expected-commit "$PROVIDER_COMMIT"
+          python3 - "$payload/compatibility-set.json" "$PROVIDER_SET_ID" <<'PY'
+          import json
+          import sys
+          document = json.load(open(sys.argv[1], encoding="utf-8"))
+          if document.get("signed", {}).get("compatibility_set_id") != sys.argv[2]:
+              raise SystemExit("provider compatibility set ID mismatch")
+          PY
+          codesign --verify --strict --verbose=2 "$payload/macprovider-cli"
+          codesign --verify --strict --verbose=2 \
+            -R='identifier "live.streamvc.macprovider.cli" and anchor apple generic and certificate leaf[subject.OU] = "YF7XNRJUG4"' \
+            "$payload/macprovider-cli"
+
+      - name: Install reviewed XcodeGen and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
+          bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
+
+      - name: Build unsigned Malibu app and embed exact public CLI bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
+            archive ARCHS=arm64 CODE_SIGNING_ALLOWED=NO
+          app="$RUNNER_TEMP/Malibu.app"
+          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" "$app"
+          payload="$RUNNER_TEMP/provider-payload"
+          cp "$payload/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
+          chmod 755 "$app/Contents/MacOS/macprovider-cli"
+          cp "$payload/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"
+          find "$payload" -mindepth 1 -maxdepth 1 -name '*.bundle' \
+            -exec cp -R {} "$app/Contents/MacOS/" \;
+          cp "$payload/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
+          cmp "$payload/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
+          shasum -a 256 "$app/Contents/MacOS/macprovider-cli" \
+            | awk '{print $1}' > "$RUNNER_TEMP/bundled-cli.sha256"
+
+      - name: Revalidate protected single-job build before importing identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ steps.source.outputs.commit }}"
+          test -d "$RUNNER_TEMP/Malibu.app"
+          actual_cli="$(shasum -a 256 "$RUNNER_TEMP/Malibu.app/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+          test "$actual_cli" = "$(cat "$RUNNER_TEMP/bundled-cli.sha256")"
+          test -s "$RUNNER_TEMP/provider-release/provider-publication-provenance.json"
+          test -s "$RUNNER_TEMP/release-toolchain.json"
+
+      - name: Verify protected GitHub release posture
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        shell: bash
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Import release signing identities
+        id: signing
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$APPLE_NOTARY_TEAM_ID" = YF7XNRJUG4
+          for required in APPLE_DEVELOPER_ID_CERT_P12_BASE64 \
+            APPLE_DEVELOPER_ID_CERT_PASSWORD \
+            APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 \
+            APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD; do
+            test -n "${!required}" || { echo "::error::$required is required" >&2; exit 1; }
+          done
+          keychain_password="$(openssl rand -hex 16)"
+          signing_tmp="$(mktemp -d "$RUNNER_TEMP/malibu-signing.XXXXXX")"
+          printf '%s' "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$signing_tmp/app.p12"
+          printf '%s' "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" | base64 -d > "$signing_tmp/installer.p12"
+          security create-keychain -p "$keychain_password" malibu-release.keychain
+          security default-keychain -s malibu-release.keychain
+          security unlock-keychain -p "$keychain_password" malibu-release.keychain
+          security set-keychain-settings -lut 3600 malibu-release.keychain
+          security import "$signing_tmp/app.p12" -k malibu-release.keychain \
+            -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security import "$signing_tmp/installer.p12" -k malibu-release.keychain \
+            -P "$APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD" -T /usr/bin/productsign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" malibu-release.keychain
+          signing_id="$(security find-identity -v -p codesigning malibu-release.keychain | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          installer_id="$(security find-identity -v malibu-release.keychain | awk -F'"' '/Developer ID Installer/ {print $2; exit}')"
+          test -n "$signing_id"
+          test -n "$installer_id"
+          echo "signing_id=$signing_id" >> "$GITHUB_OUTPUT"
+          echo "installer_id=$installer_id" >> "$GITHUB_OUTPUT"
+          echo "signing_tmp=$signing_tmp" >> "$GITHUB_OUTPUT"
+
+      - name: Sign, notarize, and staple exact Malibu app bytes
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          SIGNING_ID: ${{ steps.signing.outputs.signing_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for required in APPLE_NOTARY_APPLE_ID APPLE_NOTARY_PASSWORD APPLE_NOTARY_TEAM_ID; do
+            test -n "${!required}" || { echo "::error::$required is required" >&2; exit 1; }
+          done
+          app="$RUNNER_TEMP/Malibu.app"
+          cli="$app/Contents/MacOS/macprovider-cli"
+          cli_before="$(shasum -a 256 "$cli" | awk '{print $1}')"
+          test "$cli_before" = "$(cat "$RUNNER_TEMP/bundled-cli.sha256")"
+          codesign --force --options runtime --timestamp \
+            --preserve-metadata=identifier \
+            --entitlements phase3-binary/app/Malibu.entitlements \
+            --sign "$SIGNING_ID" "$app"
+          codesign --verify --strict --verbose=2 --deep "$app"
+          codesign --verify --strict --verbose=2 \
+            -R='identifier "tech.malibu.app" and anchor apple generic and certificate leaf[subject.OU] = "YF7XNRJUG4"' \
+            "$app"
+          test "$cli_before" = "$(shasum -a 256 "$cli" | awk '{print $1}')" || {
+            echo "::error::app signing mutated immutable provider CLI bytes" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 \
+            -R='identifier "live.streamvc.macprovider.cli" and anchor apple generic and certificate leaf[subject.OU] = "YF7XNRJUG4"' \
+            "$cli"
+          /usr/bin/ditto -c -k --keepParent "$app" "$RUNNER_TEMP/Malibu-notary.zip"
+          scripts/notarytool-submit-with-retry.sh "$RUNNER_TEMP/Malibu-notary.zip" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl -a -vvv -t exec "$app"
+
+      - name: Build, sign, notarize, and staple app-only DMG
+        env:
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          SIGNING_ID: ${{ steps.signing.outputs.signing_id }}
+          APP_VERSION: ${{ steps.source.outputs.app_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/malibu-release"
+          mkdir -p "$release_dir"
+          dmg="$release_dir/Malibu-v$APP_VERSION.dmg"
+          dmg_stage="$RUNNER_TEMP/malibu-dmg-stage"
+          mkdir -p "$dmg_stage"
+          cp -R "$RUNNER_TEMP/Malibu.app" "$dmg_stage/"
+          ln -s /Applications "$dmg_stage/Applications"
+          hdiutil create -volname Malibu -srcfolder "$dmg_stage" -ov -format UDZO "$dmg"
+          codesign --sign "$SIGNING_ID" --timestamp "$dmg"
+          scripts/notarytool-submit-with-retry.sh "$dmg" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+
+      - name: Generate and sign Malibu envelope and separate discovery index
+        env:
+          APP_VERSION: ${{ steps.source.outputs.app_version }}
+          APP_BUILD: ${{ steps.source.outputs.app_build }}
+          APP_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          ENVELOPE_GENERATION: ${{ github.event.inputs.envelope_generation }}
+          INDEX_GENERATION: ${{ github.event.inputs.index_generation }}
+          MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM: ${{ secrets.MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM" || {
+            echo "::error::MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM is required" >&2
+            exit 1
+          }
+          release_dir="$RUNNER_TEMP/malibu-release"
+          private_key="${{ steps.signing.outputs.signing_tmp }}/malibu-envelope-signing.pem"
+          printf '%s\n' "$MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM" > "$private_key"
+          chmod 600 "$private_key"
+          actual_envelope_key_sha="$(openssl pkey -in "$private_key" -pubout -outform DER 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+          test "$actual_envelope_key_sha" = 2cd6171cea8cd7964c12292e3443078c2b3d0cdcc20ae600fe8261090392c7f8 || {
+            echo "::error::dedicated Malibu envelope key does not match the reviewed app trust anchor" >&2
+            exit 1
+          }
+          provider_release_key_sha="$(openssl pkey -pubin \
+            -in ops/pearl-updater/release-signing-public.pem -outform DER 2>/dev/null \
+            | shasum -a 256 | awk '{print $1}')"
+          test "$actual_envelope_key_sha" != "$provider_release_key_sha" || {
+            echo "::error::Malibu and provider envelope signing keys must be cryptographically distinct" >&2
+            exit 1
+          }
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          legacy_expires_at="$(date -u -v+30d +%Y-%m-%dT%H:%M:%SZ)"
+          designated_requirement="$(codesign -d -r- "$RUNNER_TEMP/Malibu.app" 2>&1 | sed -n 's/^designated => //p')"
+          test -n "$designated_requirement"
+          python3 scripts/malibu-app-transaction.py inspect \
+            --app "$RUNNER_TEMP/Malibu.app" --expected-owner-uid "$(id -u)" \
+            > "$RUNNER_TEMP/app-evidence.json"
+          dmg="$release_dir/Malibu-v$APP_VERSION.dmg"
+          cli="$RUNNER_TEMP/Malibu.app/Contents/MacOS/macprovider-cli"
+          PUBLISHED_AT="$published_at" LEGACY_EXPIRES_AT="$legacy_expires_at" \
+          DESIGNATED_REQUIREMENT="$designated_requirement" DMG_SHA="$(shasum -a 256 "$dmg" | awk '{print $1}')" \
+          CLI_SHA="$(shasum -a 256 "$cli" | awk '{print $1}')" \
+          python3 - "$release_dir/envelope-unsigned.raw.json" "$RUNNER_TEMP/app-evidence.json" <<'PY'
+          import json
+          import os
+          import sys
+          app_evidence = json.load(open(sys.argv[2], encoding="utf-8"))
+          document = {
+              "schema_version": "malibu-release-envelope.v1",
+              "signed": {
+                  "app": {
+                      "build": int(os.environ["APP_BUILD"]),
+                      "bundle_id": "tech.malibu.app",
+                      "designated_requirement": os.environ["DESIGNATED_REQUIREMENT"],
+                      "entry_count": app_evidence["entry_count"],
+                      "marketing_version": os.environ["APP_VERSION"],
+                      "release_tag": os.environ["APP_TAG"],
+                      "root_mode": app_evidence["root_mode"],
+                      "source_commit": os.environ["SOURCE_COMMIT"],
+                      "team_id": "YF7XNRJUG4",
+                      "tree_sha256": app_evidence["tree_sha256"],
+                  },
+                  "artifacts": {
+                      "bundled_provider_cli": {"sha256": os.environ["CLI_SHA"], "version": "1.8.40"},
+                      "dmg": {"name": f'Malibu-v{os.environ["APP_VERSION"]}.dmg', "sha256": os.environ["DMG_SHA"]},
+                  },
+                  "envelope_generation": int(os.environ["ENVELOPE_GENERATION"]),
+                  "legacy_bootstrap": {
+                      "allowed_source_cohorts": [{
+                          "app_build": 39,
+                          "app_entry_count": 38,
+                          "app_root_mode": 493,
+                          "app_tree_sha256": "4bb36fca3f1341f24058a3e4c905e25551c92149178c74fc4417bc7f23eb1789",
+                          "app_version": "1.8.39",
+                          "cli_version": "1.8.30"
+                      }],
+                      "backend_handoff_required": True,
+                      "caller_selected_target": False,
+                      "expires_at": os.environ["LEGACY_EXPIRES_AT"],
+                      "no_downgrade": True,
+                      "target_cli_version": "1.8.40",
+                      "target_manifest_sha256": os.environ["PROVIDER_SET_SHA256"],
+                  },
+                  "publication": {"published_at": os.environ["PUBLISHED_AT"]},
+                  "runtime_posture": {"hardened_runtime": True, "notarized": True, "stapled": True},
+                  "supported_provider": {
+                      "capabilities": {
+                          "admission_recovery": ["v1"],
+                          "control_socket": ["v1"],
+                          "credential_handoff": ["v1"],
+                          "local_status_reader": ["v1"],
+                      },
+                      "compatibility_sets": [{
+                          "id": os.environ["PROVIDER_SET_ID"],
+                          "manifest_sha256": os.environ["PROVIDER_SET_SHA256"],
+                          "provider_cli": {
+                              "designated_identifier": "live.streamvc.macprovider.cli",
+                              "team_id": "YF7XNRJUG4",
+                              "version": "1.8.40",
+                          },
+                      }],
+                      "provider_mutation": "forbidden",
+                  },
+              },
+          }
+          json.dump(document, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+          PY
+          python3 scripts/malibu-release-envelope.py canonicalize \
+            --input "$release_dir/envelope-unsigned.raw.json" \
+            > "$release_dir/envelope-unsigned.json"
+          envelope="$release_dir/malibu-release-envelope-v$APP_VERSION.json"
+          python3 scripts/malibu-release-envelope.py sign-envelope \
+            --input "$release_dir/envelope-unsigned.json" --private-key "$private_key" \
+            --output "$envelope" --now "$published_at"
+          envelope_sha="$(shasum -a 256 "$envelope" | awk '{print $1}')"
+          index_expires_at="$(date -u -j -f %Y-%m-%dT%H:%M:%SZ "$published_at" -v+7d +%Y-%m-%dT%H:%M:%SZ)"
+          keyring="phase3-binary/app/release-trust/malibu-release-keyring.json"
+          revocations="phase3-binary/app/release-trust/malibu-release-revocations.json"
+          keyring_generation="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["generation"])' "$keyring")"
+          revocations_generation="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["generation"])' "$revocations")"
+          keyring_sha="$(shasum -a 256 "$keyring" | awk '{print $1}')"
+          revocations_sha="$(shasum -a 256 "$revocations" | awk '{print $1}')"
+          ENVELOPE_SHA="$envelope_sha" INDEX_EXPIRES_AT="$index_expires_at" \
+          KEYRING_GENERATION="$keyring_generation" KEYRING_SHA="$keyring_sha" \
+          REVOCATIONS_GENERATION="$revocations_generation" REVOCATIONS_SHA="$revocations_sha" \
+          python3 - "$release_dir/index-unsigned.raw.json" <<'PY'
+          import json
+          import os
+          import sys
+          document = {
+              "schema_version": "malibu-release-index.v1",
+              "signed": {
+                  "channel": "stable",
+                  "envelope": {
+                      "build": int(os.environ["APP_BUILD"]),
+                      "generation": int(os.environ["ENVELOPE_GENERATION"]),
+                      "name": f'malibu-release-envelope-v{os.environ["APP_VERSION"]}.json',
+                      "sha256": os.environ["ENVELOPE_SHA"],
+                  },
+                  "expires_at": os.environ["INDEX_EXPIRES_AT"],
+                  "index_generation": int(os.environ["INDEX_GENERATION"]),
+                  "issued_at": os.environ["PUBLISHED_AT"],
+                  "minimum_accepted_envelope_generation": int(os.environ["ENVELOPE_GENERATION"]),
+                  "trust": {
+                      "keyring_generation": int(os.environ["KEYRING_GENERATION"]),
+                      "keyring_sha256": os.environ["KEYRING_SHA"],
+                      "revocations_generation": int(os.environ["REVOCATIONS_GENERATION"]),
+                      "revocations_sha256": os.environ["REVOCATIONS_SHA"],
+                  },
+              },
+          }
+          json.dump(document, open(sys.argv[1], "w", encoding="utf-8"))
+          PY
+          python3 scripts/malibu-release-envelope.py canonicalize \
+            --input "$release_dir/index-unsigned.raw.json" \
+            > "$release_dir/index-unsigned.json"
+          index="$release_dir/malibu-release-index-stable.json"
+          python3 scripts/malibu-release-envelope.py sign-index \
+            --input "$release_dir/index-unsigned.json" --private-key "$private_key" \
+            --output "$index" --now "$published_at"
+          python3 scripts/malibu-release-envelope.py validate-envelope \
+            --input "$envelope" \
+            --keyring phase3-binary/app/release-trust/malibu-release-keyring.json \
+            --revocations phase3-binary/app/release-trust/malibu-release-revocations.json \
+            --minimum-build "$APP_BUILD" --minimum-envelope-generation "$ENVELOPE_GENERATION" \
+            --now "$published_at"
+          python3 scripts/malibu-release-envelope.py validate-index \
+            --input "$index" --envelope "$envelope" \
+            --keyring phase3-binary/app/release-trust/malibu-release-keyring.json \
+            --revocations phase3-binary/app/release-trust/malibu-release-revocations.json \
+            --minimum-index-generation "$INDEX_GENERATION" --minimum-build "$APP_BUILD" \
+            --minimum-envelope-generation "$ENVELOPE_GENERATION" --now "$published_at"
+
+      - name: Build, sign, notarize, and staple the authenticated app-only installer
+        env:
+          APP_VERSION: ${{ steps.source.outputs.app_version }}
+          APP_BUILD: ${{ steps.source.outputs.app_build }}
+          ENVELOPE_GENERATION: ${{ github.event.inputs.envelope_generation }}
+          INDEX_GENERATION: ${{ github.event.inputs.index_generation }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          INSTALLER_ID: ${{ steps.signing.outputs.installer_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The checked-in installer is intentionally release-specific. A later
+          # app build/generation must update and review its anti-rollback floors.
+          test "$APP_VERSION" = 1.8.41
+          test "$APP_BUILD" = 41
+          test "$ENVELOPE_GENERATION" = 1
+          test "$INDEX_GENERATION" = 1
+
+          release_dir="$RUNNER_TEMP/malibu-release"
+          bundle_name="Malibu-v$APP_VERSION-app-only-installer"
+          pkg_root="$RUNNER_TEMP/malibu-transaction-pkg-root"
+          bundle="$pkg_root/Library/Application Support/Malibu/AppInstaller/v$APP_VERSION"
+          mkdir -p -m 755 "$bundle"
+          install -m 755 scripts/install-malibu-app.sh "$bundle/install-malibu-app.sh"
+          install -m 755 scripts/malibu-app-transaction.py "$bundle/malibu-app-transaction.py"
+          install -m 755 scripts/malibu-release-envelope.py "$bundle/malibu-release-envelope.py"
+          install -m 444 "$release_dir/Malibu-v$APP_VERSION.dmg" \
+            "$bundle/Malibu-v$APP_VERSION.dmg"
+          install -m 444 "$release_dir/malibu-release-envelope-v$APP_VERSION.json" \
+            "$bundle/malibu-release-envelope-v$APP_VERSION.json"
+          install -m 444 "$release_dir/malibu-release-index-stable.json" \
+            "$bundle/malibu-release-index.json"
+          install -m 444 phase3-binary/app/release-trust/malibu-release-keyring.json \
+            "$bundle/malibu-release-keyring.json"
+          install -m 444 phase3-binary/app/release-trust/malibu-release-revocations.json \
+            "$bundle/malibu-release-revocations.json"
+          install -m 444 phase3-binary/app/release-trust/release-signing-public.pem \
+            "$bundle/release-signing-public.pem"
+
+          pkg_scripts="$RUNNER_TEMP/malibu-transaction-pkg-scripts"
+          mkdir -m 700 "$pkg_scripts"
+          cat > "$pkg_scripts/postinstall" <<'POSTINSTALL'
+          #!/bin/bash
+          set -euo pipefail
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          export PATH
+
+          app_version="1.8.41"
+          stage="/Library/Application Support/Malibu/AppInstaller/v$app_version"
+          [[ -d "$stage" && ! -L "$stage" ]] || {
+            echo "Malibu installer payload is missing or unsafe" >&2
+            exit 1
+          }
+          [[ "$(/usr/bin/stat -f '%u' "$stage")" == 0 ]] || {
+            echo "Malibu installer payload is not root-owned" >&2
+            exit 1
+          }
+          stage_mode="$(/usr/bin/stat -f '%Lp' "$stage")"
+          (( (8#$stage_mode & 8#022) == 0 )) || {
+            echo "Malibu installer payload is group/world writable" >&2
+            exit 1
+          }
+          if /usr/bin/find "$stage" -type l -print -quit | /usr/bin/grep -q .; then
+            echo "Malibu installer payload contains a symbolic link" >&2
+            exit 1
+          fi
+          console_user="$(/usr/sbin/scutil <<<'show State:/Users/ConsoleUser' | /usr/bin/awk '/Name :/ {print $3; exit}')"
+          [[ "$console_user" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ && "$console_user" != root && "$console_user" != loginwindow ]] || {
+            echo "Malibu requires an authenticated desktop user" >&2
+            exit 1
+          }
+          uid="$(/usr/bin/id -u "$console_user")"
+          [[ "$uid" =~ ^[1-9][0-9]*$ ]] || exit 1
+          home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
+          [[ "$home" == /* && "$home" != / && -d "$home" && ! -L "$home" ]] || {
+            echo "Malibu could not establish a safe user home" >&2
+            exit 1
+          }
+          [[ "$(/usr/bin/stat -f '%u' "$home")" == "$uid" ]] || {
+            echo "Malibu user home ownership differs" >&2
+            exit 1
+          }
+          [[ -x /usr/bin/python3 && ! -L /usr/bin/python3 \
+             && "$(/usr/bin/stat -f '%u' /usr/bin/python3)" == 0 \
+             && "$(/usr/bin/stat -f '%HT' /usr/bin/python3)" == "Regular File" ]] || {
+            echo "Malibu requires the root-owned system /usr/bin/python3 runtime" >&2
+            exit 1
+          }
+          /usr/bin/python3 - "$stage" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          stage = pathlib.Path(sys.argv[1])
+          root = stage.parent
+          def digest(name):
+              return hashlib.sha256((stage / name).read_bytes()).hexdigest()
+          selector = {
+              "app_build": 41,
+              "app_version": "1.8.41",
+              "helper_path": str(stage / "malibu-app-transaction.py"),
+              "helper_sha256": digest("malibu-app-transaction.py"),
+              "envelope_sha256": digest("malibu-release-envelope-v1.8.41.json"),
+              "index_sha256": digest("malibu-release-index.json"),
+              "keyring_sha256": digest("malibu-release-keyring.json"),
+              "public_key_sha256": digest("release-signing-public.pem"),
+              "revocations_sha256": digest("malibu-release-revocations.json"),
+              "schema_version": "malibu-recovery-selector.v1",
+              "validator_sha256": digest("malibu-release-envelope.py"),
+          }
+          temporary = root / ".pending-recovery.tmp"
+          descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o444)
+          with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+              json.dump(selector, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+              handle.flush()
+              os.fsync(handle.fileno())
+          os.replace(temporary, root / "pending-recovery.json")
+          directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+          try:
+              os.fsync(directory)
+          finally:
+              os.close(directory)
+          PY
+          selector="/Library/Application Support/Malibu/AppInstaller/pending-recovery.json"
+          /bin/chmod 0444 "$selector"
+          /usr/sbin/chown root:wheel "$selector"
+          /bin/launchctl asuser "$uid" /usr/bin/sudo -H -u "$console_user" \
+            /usr/bin/env HOME="$home" USER="$console_user" LOGNAME="$console_user" \
+            "$stage/install-malibu-app.sh"
+          /usr/bin/python3 - "$stage" "$home" "$uid" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import stat
+          import sys
+
+          stage = pathlib.Path(sys.argv[1])
+          home = pathlib.Path(sys.argv[2])
+          uid = int(sys.argv[3])
+          def digest(name):
+              return hashlib.sha256((stage / name).read_bytes()).hexdigest()
+          active = home / "Library/Application Support/Malibu/Release/active"
+          transaction = active / "transaction.json"
+          descriptor = os.open(transaction, os.O_RDONLY | os.O_NOFOLLOW)
+          try:
+              info = os.fstat(descriptor)
+              if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
+                  raise SystemExit("Malibu transaction evidence is unsafe")
+              transaction_data = b""
+              while True:
+                  chunk = os.read(descriptor, 65536)
+                  if not chunk:
+                      break
+                  transaction_data += chunk
+                  if len(transaction_data) > 131072:
+                      raise SystemExit("Malibu transaction evidence is too large")
+          finally:
+              os.close(descriptor)
+          record = json.loads(transaction_data)
+          if json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n" != transaction_data:
+              raise SystemExit("Malibu transaction evidence is not canonical")
+          envelope = json.loads((stage / "malibu-release-envelope-v1.8.41.json").read_bytes())
+          cohorts = envelope["signed"]["legacy_bootstrap"]["allowed_source_cohorts"]
+          legacy_version = record.get("legacy_source_app_version")
+          if legacy_version is not None:
+              previous = record.get("previous")
+              matches = [cohort for cohort in cohorts if previous == {
+                  "build": cohort["app_build"],
+                  "bundle_id": "tech.malibu.app",
+                  "entry_count": cohort["app_entry_count"],
+                  "marketing_version": cohort["app_version"],
+                  "root_mode": cohort["app_root_mode"],
+                  "tree_sha256": cohort["app_tree_sha256"],
+              } and legacy_version == cohort["app_version"]]
+              if not matches or record.get("previous_release") is not None:
+                  raise SystemExit("Malibu legacy source observation is not signed by the release envelope")
+          if record.get("release_envelope_sha256") != digest("malibu-release-envelope-v1.8.41.json") \
+             or record.get("release_index_sha256") != digest("malibu-release-index.json"):
+              raise SystemExit("Malibu transaction differs from the installed package release")
+          marker = {
+              "app_build": 41,
+              "app_version": "1.8.41",
+              "envelope_sha256": digest("malibu-release-envelope-v1.8.41.json"),
+              "helper_sha256": digest("malibu-app-transaction.py"),
+              "index_sha256": digest("malibu-release-index.json"),
+              "keyring_sha256": digest("malibu-release-keyring.json"),
+              "legacy_source_app_version": legacy_version,
+              "public_key_sha256": digest("release-signing-public.pem"),
+              "revocations_sha256": digest("malibu-release-revocations.json"),
+              "schema_version": "malibu-root-install-marker.v1",
+              "transaction_sha256": hashlib.sha256(transaction_data).hexdigest(),
+              "validator_sha256": digest("malibu-release-envelope.py"),
+          }
+          marker_root = stage.parent
+          temporary = marker_root / ".installed-marker.tmp"
+          descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o444)
+          with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+              json.dump(marker, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+              handle.flush()
+              os.fsync(handle.fileno())
+          os.replace(temporary, marker_root / "installed-marker.json")
+          directory = os.open(marker_root, os.O_RDONLY | os.O_DIRECTORY)
+          try:
+              os.fsync(directory)
+          finally:
+              os.close(directory)
+          PY
+          marker="/Library/Application Support/Malibu/AppInstaller/installed-marker.json"
+          retained=(
+            "$stage/malibu-app-transaction.py"
+            "$stage/malibu-release-envelope.py"
+            "$stage/malibu-release-keyring.json"
+            "$stage/malibu-release-revocations.json"
+            "$stage/release-signing-public.pem"
+          )
+          /bin/chmod 0444 "$marker" "${retained[@]}"
+          /usr/sbin/chown root:wheel "$marker" "${retained[@]}"
+          /bin/rm -f "$selector"
+          /bin/rm -f \
+            "$stage/install-malibu-app.sh" \
+            "$stage/Malibu-v$app_version.dmg" \
+            "$stage/malibu-release-envelope-v$app_version.json" \
+            "$stage/malibu-release-index.json"
+          exit 0
+          POSTINSTALL
+          chmod 755 "$pkg_scripts/postinstall"
+
+          unsigned_pkg="$RUNNER_TEMP/$bundle_name-unsigned.pkg"
+          installer_pkg="$release_dir/$bundle_name.pkg"
+          pkgbuild --root "$pkg_root" --install-location / --ownership recommended \
+            --scripts "$pkg_scripts" --identifier tech.malibu.app.transaction-installer \
+            --version "$APP_VERSION" "$unsigned_pkg"
+          productsign --sign "$INSTALLER_ID" "$unsigned_pkg" "$installer_pkg"
+          scripts/notarytool-submit-with-retry.sh "$installer_pkg" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" --wait
+          xcrun stapler staple "$installer_pkg"
+          xcrun stapler validate "$installer_pkg"
+          spctl -a -vvv -t install "$installer_pkg"
+          pkgutil --check-signature "$installer_pkg"
+
+      - name: Capture signed app-only provenance and checksums
+        env:
+          APP_VERSION: ${{ steps.source.outputs.app_version }}
+          APP_BUILD: ${{ steps.source.outputs.app_build }}
+          APP_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/malibu-release"
+          cp "$RUNNER_TEMP/provider-release/provider-publication-provenance.json" "$release_dir/"
+          cp "$RUNNER_TEMP/release-toolchain.json" "$release_dir/"
+          python3 - "$release_dir" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+          root = pathlib.Path(sys.argv[1])
+          assets = {}
+          for path in root.iterdir():
+              if path.is_file() and not path.name.endswith((".raw.json", "-unsigned.json")):
+                  assets[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          provenance = {
+              "schema_version": 1,
+              "repository": "Augustas11/macprovider",
+              "component": "Malibu",
+              "tag": os.environ["APP_TAG"],
+              "commit": os.environ["SOURCE_COMMIT"],
+              "marketing_version": os.environ["APP_VERSION"],
+              "build": int(os.environ["APP_BUILD"]),
+              "provider_tag": "v1.8.40",
+              "provider_commit": os.environ["PROVIDER_COMMIT"],
+              "provider_set_id": os.environ["PROVIDER_SET_ID"],
+              "provider_set_sha256": os.environ["PROVIDER_SET_SHA256"],
+              "assets": dict(sorted(assets.items())),
+          }
+          (root / "malibu-release-provenance.json").write_text(
+              json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          release_assets=(
+            "Malibu-v$APP_VERSION.dmg"
+            "Malibu-v$APP_VERSION-app-only-installer.pkg"
+            "malibu-release-envelope-v$APP_VERSION.json"
+            "malibu-release-index-stable.json"
+            "provider-publication-provenance.json"
+            "release-toolchain.json"
+            "malibu-release-provenance.json"
+          )
+          (cd "$release_dir" && printf '%s\n' "${release_assets[@]}" > release-assets.txt)
+          (cd "$release_dir" && shasum -a 256 "${release_assets[@]}" > checksums.txt)
+          private_key="${{ steps.signing.outputs.signing_tmp }}/malibu-envelope-signing.pem"
+          openssl dgst -sha256 -sign "$private_key" \
+            -out "$release_dir/checksums.txt.sig" "$release_dir/checksums.txt"
+          printf '%s\n' checksums.txt checksums.txt.sig >> "$release_dir/release-assets.txt"
+          cat > "$release_dir/release-notes.md" <<EOF
+          # Malibu $APP_TAG
+
+          Independently versioned Malibu app release, signed for the exact immutable
+          provider compatibility set $PROVIDER_SET_ID. This app-only release does not
+          publish, replace, update, roll back, or retag macprovider-cli.
+
+          Supported installation uses
+          the Developer ID Installer signed, notarized, and stapled package
+          \`Malibu-v$APP_VERSION-app-only-installer.pkg\`. Open that package in
+          macOS Installer; it installs Malibu for the authenticated desktop user.
+
+          \`\`\`bash
+          open Malibu-v$APP_VERSION-app-only-installer.pkg
+          open "\$HOME/Applications/Malibu.app"
+          \`\`\`
+
+          macOS authenticates the package before its signed postinstall transaction
+          verifies the Malibu envelope/index and exact DMG. The transaction installs
+          only Malibu under \`\$HOME/Applications\` plus its signed runtime sidecars.
+          The standalone DMG is an inspection artifact; copying its app alone omits
+          required sidecars and is unsupported. No second executable package is
+          published, so the app-only installer is the sole supported package path.
+          EOF
+
+      - name: Create app-only draft without changing generic latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+          APP_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/malibu-release"
+          git fetch --force origin "refs/tags/$APP_TAG:refs/tags/$APP_TAG"
+          test "$(git rev-parse "$APP_TAG^{commit}")" = "$SOURCE_COMMIT" || {
+            echo "::error::reviewed Malibu tag moved before draft creation" >&2
+            exit 1
+          }
+          gh release view "$APP_TAG" >/dev/null 2>&1 && {
+            echo "::error::Malibu release already exists; never mutate an existing release" >&2
+            exit 1
+          }
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          assets=()
+          while IFS= read -r name; do
+            test -n "$name" && assets+=("$release_dir/$name")
+          done < "$release_dir/release-assets.txt"
+          gh release create "$APP_TAG" "${assets[@]}" \
+            --title "Malibu $APP_TAG" --notes-file "$release_dir/release-notes.md" \
+            --target "$SOURCE_COMMIT" --verify-tag --draft
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$APP_TAG" > "$release_dir/draft-release.json"
+          python3 scripts/malibu-release-workflow-guard.py verify-app-release \
+            --release-json "$release_dir/draft-release.json" --assets-dir "$release_dir" \
+            --asset-names "$release_dir/release-assets.txt" \
+            --provider-provenance "$release_dir/provider-publication-provenance.json" \
+            --tag "$APP_TAG" --commit "$SOURCE_COMMIT" --draft \
+            --output "$release_dir/draft-publication-provenance.json"
+          python3 - "$release_dir/draft-release.json" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+          release_id = json.load(open(sys.argv[1], encoding="utf-8"))["id"]
+          with open(sys.argv[2], "a", encoding="utf-8") as output:
+              output.write(f"release_id={release_id}\n")
+          PY
+        id: draft
+
+      - name: Revalidate numeric draft and promote with make_latest false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+          APP_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/malibu-release"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          git fetch --force origin "refs/tags/$APP_TAG:refs/tags/$APP_TAG"
+          test "$(git rev-parse "$APP_TAG^{commit}")" = "$SOURCE_COMMIT" || {
+            echo "::error::reviewed Malibu tag moved before promotion" >&2
+            exit 1
+          }
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$release_dir/latest-before-promotion.json"
+          python3 scripts/malibu-release-workflow-guard.py verify-latest \
+            --release-json "$release_dir/latest-before-promotion.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$release_dir/final-draft.json"
+          python3 scripts/malibu-release-workflow-guard.py verify-app-release \
+            --release-json "$release_dir/final-draft.json" --assets-dir "$release_dir" \
+            --asset-names "$release_dir/release-assets.txt" \
+            --provider-provenance "$release_dir/provider-publication-provenance.json" \
+            --tag "$APP_TAG" --commit "$SOURCE_COMMIT" --draft --release-id "$RELEASE_ID" \
+            --output "$release_dir/final-draft-publication-provenance.json"
+          cmp "$release_dir/draft-publication-provenance.json" \
+            "$release_dir/final-draft-publication-provenance.json"
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=false -f make_latest=false \
+            > "$release_dir/promotion-response.json"
+
+      - name: Prove app publication and provider latest remained unchanged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/malibu-release"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$release_dir/published-release.json"
+          python3 scripts/malibu-release-workflow-guard.py verify-app-release \
+            --release-json "$release_dir/published-release.json" --assets-dir "$release_dir" \
+            --asset-names "$release_dir/release-assets.txt" \
+            --provider-provenance "$release_dir/provider-publication-provenance.json" \
+            --tag "$APP_TAG" --commit "$SOURCE_COMMIT" --release-id "$RELEASE_ID" \
+            --output "$release_dir/publication-provenance.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$release_dir/latest-after.json"
+          python3 scripts/malibu-release-workflow-guard.py verify-latest \
+            --release-json "$release_dir/latest-after.json"
+
+      - name: Upload numeric release and artifact provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: malibu-publication-${{ steps.draft.outputs.release_id }}
+          path: |
+            ${{ runner.temp }}/malibu-release/provider-publication-provenance.json
+            ${{ runner.temp }}/malibu-release/publication-provenance.json
+            ${{ runner.temp }}/malibu-release/published-release.json
+            ${{ runner.temp }}/malibu-release/latest-after.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove protected signing material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          security delete-keychain malibu-release.keychain >/dev/null 2>&1 || true
+          signing_tmp="${{ steps.signing.outputs.signing_tmp }}"
+          if [ -n "$signing_tmp" ] && [ -d "$signing_tmp" ]; then
+            find "$signing_tmp" -type f -exec sh -c 'for file do : > "$file"; done' sh {} +
+          fi

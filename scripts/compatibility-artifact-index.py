@@ -25,11 +25,15 @@ REQUIRED_ROLES = (
     "coordinator",
     "coordinator_cli",
     "gateway",
-    "malibu_app",
     "pearl_metadata",
     "pearl_metadata_signature",
     "provider_cli",
 )
+LEGACY_OPTIONAL_ROLES = ("malibu_app",)
+LEGACY_MALIBU_RELEASES = {
+    ("v1.8.39", "71eb927a56011f00143b2989cb2bc455b86d4d7c"),
+    ("v1.8.40", "18638472fe3e885f3534eeac29ab89b4c7ffdd7a"),
+}
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
@@ -138,11 +142,14 @@ def parse_artifacts(values: list[str]) -> dict[str, pathlib.Path]:
     result: dict[str, pathlib.Path] = {}
     for value in values:
         role, separator, name = value.partition("=")
-        if not separator or role not in REQUIRED_ROLES or role in result or not name:
+        if not separator or role not in REQUIRED_ROLES + LEGACY_OPTIONAL_ROLES or role in result or not name:
             fail(f"invalid or duplicate artifact mapping: {value!r}")
         result[role] = pathlib.Path(name)
-    if set(result) != set(REQUIRED_ROLES):
-        fail("artifact mappings do not contain the exact required roles")
+    if set(result) not in (
+        set(REQUIRED_ROLES),
+        set(REQUIRED_ROLES + LEGACY_OPTIONAL_ROLES),
+    ):
+        fail("artifact mappings do not contain the independent or legacy role set")
     names = [path.name for path in result.values()]
     if len(names) != len(set(names)):
         fail("artifact mappings contain duplicate asset names")
@@ -187,16 +194,25 @@ def validate_index(
     manifest_repository, manifest_tag, manifest_commit, set_id, manifest_sha = compatibility_identity(manifest_path)
     if (repository, tag, commit) != (manifest_repository, manifest_tag, manifest_commit):
         fail("artifact index: release identity differs from compatibility manifest")
+    if "malibu_app" in artifacts and (tag, commit) not in LEGACY_MALIBU_RELEASES:
+        fail("artifact index: Malibu role is allowed only for an immutable legacy release")
     if value.get("compatibility_set_id") != set_id:
         fail("artifact index: compatibility set id differs from manifest")
     if value.get("compatibility_manifest_sha256") != manifest_sha:
         fail("artifact index: compatibility manifest digest differs")
 
     rows = value.get("artifacts")
-    if not isinstance(rows, dict) or set(rows) != set(REQUIRED_ROLES):
+    if not isinstance(rows, dict) or set(rows) not in (
+        set(REQUIRED_ROLES),
+        set(REQUIRED_ROLES + LEGACY_OPTIONAL_ROLES),
+    ):
         fail("artifact index: artifact roles differ from the supported contract")
+    if set(rows) != set(artifacts):
+        fail("artifact index: artifact roles differ from supplied release assets")
     seen_names: set[str] = set()
-    for role in REQUIRED_ROLES:
+    for role in REQUIRED_ROLES + LEGACY_OPTIONAL_ROLES:
+        if role not in rows:
+            continue
         row = rows.get(role)
         if not isinstance(row, dict):
             fail(f"artifact index: invalid {role} row")

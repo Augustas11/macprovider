@@ -1,9 +1,17 @@
 import Foundation
 import Darwin
 import XCTest
+import Security
 @testable import macprovider_cli
 
 final class SelfUpdateTests: XCTestCase {
+    func testSigningInformationRequestsTeamIdentifierMetadata() {
+        XCTAssertNotEqual(
+            SelfUpdate.signingInformationFlags.rawValue & kSecCSSigningInformation,
+            0
+        )
+    }
+
     func testDefaultReleaseRepositoryMatchesPublicInstaller() {
         XCTAssertEqual(
             SelfUpdate.defaultReleasesAPIURL,
@@ -478,6 +486,108 @@ final class SelfUpdateTests: XCTestCase {
         } catch let error as UpdateError {
             XCTAssertEqual(error.description, UpdateError.missingAsset.description)
         }
+    }
+
+    func testSameVersionGenericLatestIsNoOpBeforeAnyMutation() async throws {
+        let releaseURL = URL(string: SelfUpdate.defaultReleasesAPIURL)!
+        MockURLProtocol.responses = [
+            releaseURL: (200, Data(#"{"tag_name":"v1.8.40","assets":[]}"#.utf8)),
+        ]
+        let fixture = try SelfUpdateNoMutationFixture()
+        defer { fixture.cleanup() }
+        let update = fixture.makeUpdate(releaseURL: releaseURL)
+
+        try await update.run(checkOnly: false)
+
+        XCTAssertEqual(fixture.actions.snapshot(), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.markerStore.pendingURL.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.malibuSentinel), fixture.originalMalibuBytes)
+    }
+
+    func testMalibuNamespaceLatestFailsBeforeAnyMutation() async throws {
+        let releaseURL = URL(string: SelfUpdate.defaultReleasesAPIURL)!
+        MockURLProtocol.responses = [
+            releaseURL: (200, Data(#"{"tag_name":"malibu-v1.8.41","assets":[]}"#.utf8)),
+        ]
+        let fixture = try SelfUpdateNoMutationFixture()
+        defer { fixture.cleanup() }
+        let update = fixture.makeUpdate(releaseURL: releaseURL)
+
+        do {
+            try await update.run(checkOnly: false)
+            XCTFail("app-only release unexpectedly entered provider update")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.invalidReleaseVersion("malibu-v1.8.41").description
+            )
+        }
+
+        XCTAssertEqual(fixture.actions.snapshot(), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.markerStore.pendingURL.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.malibuSentinel), fixture.originalMalibuBytes)
+    }
+
+    func testCanonicalNewerReleaseWithoutProviderAssetsFailsBeforeMutation() async throws {
+        let releaseURL = URL(string: SelfUpdate.defaultReleasesAPIURL)!
+        MockURLProtocol.responses = [
+            releaseURL: (200, Data(#"{"tag_name":"v1.8.41","assets":[]}"#.utf8)),
+        ]
+        let fixture = try SelfUpdateNoMutationFixture()
+        defer { fixture.cleanup() }
+        let update = fixture.makeUpdate(releaseURL: releaseURL)
+
+        do {
+            try await update.run(checkOnly: false)
+            XCTFail("asset-less release unexpectedly entered provider mutation")
+        } catch let error as UpdateError {
+            XCTAssertEqual(error.description, UpdateError.missingAsset.description)
+        }
+
+        XCTAssertEqual(fixture.actions.snapshot(), [])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.markerStore.pendingURL.path))
+        XCTAssertEqual(try Data(contentsOf: fixture.malibuSentinel), fixture.originalMalibuBytes)
+    }
+}
+
+private struct SelfUpdateNoMutationFixture {
+    let root: URL
+    let markerStore: AutoUpdateMarkerStore
+    let malibuSentinel: URL
+    let originalMalibuBytes = Data("malibu-1.8.41".utf8)
+    let actions = UpdateActionRecorder()
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-no-mutation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        markerStore = AutoUpdateMarkerStore(homeDirectory: root)
+        malibuSentinel = root.appendingPathComponent("Malibu.app.sentinel")
+        try originalMalibuBytes.write(to: malibuSentinel, options: .atomic)
+    }
+
+    func makeUpdate(releaseURL: URL) -> SelfUpdate {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        return SelfUpdate(
+            currentVersion: "1.8.40",
+            releasesAPIURL: releaseURL.absoluteString,
+            session: URLSession(configuration: configuration),
+            markerStore: markerStore,
+            drainBeforeReplace: { actions.append("drain") },
+            replaceBinary: { _ in actions.append("replace") },
+            rollbackReplacement: { actions.append("rollback") },
+            restartLaunchd: { actions.append("restart") },
+            postRestartReadiness: {
+                actions.append("readiness")
+                return true
+            },
+            stagedCLIValidator: { _ in actions.append("cli-validate") }
+        )
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: root)
     }
 }
 

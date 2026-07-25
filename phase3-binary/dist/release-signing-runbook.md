@@ -190,6 +190,7 @@ select the `production-release` environment and add these environment secrets:
 | `APPLE_NOTARY_PASSWORD` | The app-specific password from step 4 |
 | `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
 | `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` | P-256 private key matching the public key embedded in `phase3-binary/dist/install.sh` |
+| `MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM` | Dedicated Malibu envelope/index P-256 private key matching `phase3-binary/app/release-trust/release-signing-public.pem`; do not populate this from the provider release-signing secret |
 | `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` | Dedicated P-256 private key matching `security/acceptance-candidate-signing-public.pem`; provision with `scripts/provision-acceptance-signing-key.sh` |
 | `SPARKLE_EDDSA_PRIVATE_KEY` | Base64 Ed25519 seed matching `scripts/dist/malibu-v1.8.32-sparkle-public-key`; used only to generate the frozen stable `v1.8.39` bootstrap appcast |
 | `MALIBU_DOWNLOAD_SSH_KEY` | Complete OpenSSH private-key contents for the root Pearl publication account; the workflow writes it to a mode-0600 temporary file |
@@ -804,16 +805,103 @@ Common follow-up issues:
 
 ## Malibu.app release artifacts (SPEC-025 P2)
 
-When `APPLE_DEVELOPER_ID_CERT_P12_BASE64` is populated, the same release
-tag also publishes:
+### Independent Malibu namespace (SPEC-034)
 
-- **`Malibu-{tag}.dmg`** — primary consumer download. Drag `Malibu.app`
-  to `/Applications`. Notarized and stapled; validate with:
-  `bash scripts/verify-malibu-release-artifacts.sh Malibu-{tag}.dmg`
-- **`Malibu-{tag}.pkg`** — optional double-click installer when
-  `APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64` is also present.
+Beginning with Malibu 1.8.41, Malibu marketing/build versions are independent of
+provider CLI versions. Use the protected app tag `malibu-vX.Y.Z`; never create a
+provider `vX.Y.Z` tag to make the strings match. The app-only release is published
+with `make_latest=false`, and generic GitHub `/releases/latest` plus the provider
+coordinator/index must remain on the intended CLI release (v1.8.40 for Issue #585).
+Provider public-release and private acceptance-candidate workflows remain provider-
+only and must not build, sign, index, or export Malibu artifacts.
 
-Fresh-mac acceptance check after each tagged release:
+The protected `sign_publish` job checks out the exact reviewed tag/commit, consumes
+the exact already-published provider artifact, verifies release signatures and
+SHA-256 values, and rebuilds Malibu on that same protected runner before importing
+signing identities. It must never sign an unsigned app restored from another job.
+The app-only installer must not replace the installed CLI. Sign the envelope and its
+distinct Malibu index with the dedicated
+`MALIBU_RELEASE_ENVELOPE_SIGNING_KEY_PEM`; validate against
+`phase3-binary/app/release-trust/release-signing-public.pem` (key ID
+`macprovider-release-p256-v1`, SPKI DER SHA-256
+`2cd6171cea8cd7964c12292e3443078c2b3d0cdcc20ae600fe8261090392c7f8`).
+
+Promotion evidence records the app tag/commit, numeric GitHub release and artifact
+IDs, exact DMG/package/envelope/index digests, provider-set ID/digest, signer, and
+`phase3-binary/app/release-builds.tsv` entry. A rebuild with different bytes is a new
+candidate and must repeat acceptance. Never upload app-only assets to immutable
+provider v1.8.40 or mark the app release as generic latest.
+
+Before production installation, exercise the exact public v1.8.40 `install.sh`, CLI
+`update`, recovery, and rollback paths in isolation. They must preserve any supported,
+independently versioned Malibu installation or fail before app mutation. Supported
+order is provider CLI first, app-only transaction second; keep provider autoupdate
+disabled while v1.8.40 is the advertised target.
+
+The only supported installation asset is
+**`Malibu-vX.Y.Z-app-only-installer.pkg`**. macOS verifies its Developer ID
+Installer signature and notarization ticket before its package-signed postinstall
+can run. The payload contains the exact signed DMG, signed envelope/index, pinned
+keyring/revocations/public key, and reviewed transaction tools. Open it with macOS
+Installer:
+
+```bash
+open Malibu-vX.Y.Z-app-only-installer.pkg
+open "$HOME/Applications/Malibu.app"
+```
+
+The privileged package stage identifies the authenticated console user, then runs
+the existing transaction as that user with the verified home directory. The
+transaction installs only Malibu to the user-owned
+`$HOME/Applications/Malibu.app` and atomically stages runtime authority under
+`$HOME/Library/Application Support/Malibu/Release/active`. It does not need
+administrator privileges after package authentication and never modifies the
+installed provider CLI. On a fresh Mac it creates `$HOME/Applications` as a private
+user-owned directory. A prior
+`/Applications/Malibu.app` is not mutated; acceptance must launch the exact per-user
+app path above and remove any stale login-item registration through normal Malibu UI
+before treating the old copy as retired.
+
+Before that user transaction starts, the package atomically writes root-owned
+`/Library/Application Support/Malibu/AppInstaller/pending-recovery.json`. It binds
+the incoming app version/build and exact envelope, index, transaction helper,
+validator, keyring, revocation, and public-key digests, and selects the helper that
+owns any interrupted journal. If the new tuple committed but postinstall stopped
+before its final marker write, this pending record is the only accepted bootstrap
+authority. After the user transaction commits, the package atomically replaces the single
+root-owned `/Library/Application Support/Malibu/AppInstaller/installed-marker.json`.
+It binds the current app version/build plus the exact envelope, index, and recovery-
+bundle SHA-256 values. The versioned directory retains the mode-0444 root-owned
+transaction helper, envelope validator, keyring, revocation list, and public key needed
+for startup recovery and signed rollback; the installer wrapper, DMG, envelope, and
+index staging inputs are removed. The pending selector is removed only after the final
+marker is durable. Do not preserve version-scoped install markers. The one global
+marker is the current package-install floor: if the Keychain record is missing, only
+the exact release named by that marker (or the exact still-pending transaction) may
+bootstrap, so restoring an older signed app cannot reset anti-replay state.
+
+The transaction persists and `fsync`s
+`$HOME/Library/Application Support/Malibu/Release/transaction-journal.json`
+through `prepared`, `app-swapped`, and `state-committed`. Every later installer
+invocation reconciles that journal before starting new work; startup integrations
+must invoke `malibu-app-transaction.py recover` before reading `active`. A prepared
+transaction returns to the exact old app/sidecar tuple, while either later phase
+finishes the exact new tuple. Rollback keeps an owner-only pending authorization
+receipt until the target app and sidecars commit, then publishes a completed receipt
+binding the signed authorization digest, current/target high-water tuples, validated
+trust generations/digests, and exact committed `transaction.json` digest. A crash
+before commit leaves the exact protected authorization retryable while it remains
+valid. After expiry, release security must issue a fresh signed authorization for
+the same protected current/target tuple; that grant atomically replaces the stale
+pending receipt. A completed receipt rejects replay. Owner-only transient
+`Release/rollback-inputs` files are removed on every ordinary outcome and reconciled
+after the next successful startup authorization following an abnormal exit.
+
+The release also carries a notarized/stapled **DMG** inspection artifact whose exact
+digest is signed by the envelope. It is not a standalone supported installer: copying
+the DMG app alone omits the signed runtime sidecars and Malibu will fail closed. No
+second executable package is published; `Malibu-vX.Y.Z-app-only-installer.pkg` is the
+sole supported package path. Validate the DMG artifact with:
 
 ```bash
 bash scripts/verify-malibu-release-artifacts.sh Malibu-vX.Y.Z.dmg
@@ -821,6 +909,538 @@ bash scripts/verify-malibu-release-artifacts.sh Malibu-vX.Y.Z.dmg
 
 Expect `codesign --verify`, `stapler validate`, and `spctl` to pass
 without `xattr -d`.
+
+## Issue #585 incident recovery: restore provider v1.8.40 and retry Malibu migration
+
+### Outcome, authority, and stop conditions
+
+Use this bounded procedure for the Issue #585 state in which Malibu is present but
+the provider is stopped, provider identity validation reports no Team ID, or legacy
+provider-config migration cannot start. Completion requires all of the following:
+
+1. the installed provider is the exact public CLI v1.8.40 binary and signed
+   compatibility set identified below;
+2. launchd owns the provider, only a loopback listener is open, and local health is
+   ready or busy;
+3. Malibu retries the existing-config import without selecting **Start Fresh**;
+4. credential custody is restart-safe and no migration is pending;
+5. the coordinator reports the exact live session as buyer-serving after a launchd
+   restart and again after a Mac reboot.
+
+**Malibu's marketing/build version is not a completion requirement and must not be
+compared with `1.8.40`.** Malibu and the provider CLI have independent version
+namespaces. Record the installed Malibu version as evidence only. The compatibility
+set, signed code identity, credential state, and buyer-serving result are the gates.
+Do not install `Malibu-v1.8.40.*` merely to make version strings match.
+
+Stop before mutation if any immutable release field, asset digest, release-key pin,
+signature, compatibility-set field, or signed-code identity below differs. Stop after
+mutation if the installer reports rollback, the provider binds a non-loopback address,
+the app offers only **Start Fresh**, the credential remains migration-pending, or
+buyer-serving cannot be proved. Do not weaken a check, remove quarantine metadata,
+copy a binary into place manually, expose a Keychain secret, or use a `/latest` URL.
+
+Run as the affected logged-in console user on an Apple-silicon Mac with the Login
+Keychain unlocked. Requirements are `curl`, `python3`, `openssl`, `tar`, `shasum`,
+`codesign`, `spctl`, `xcrun`, `lsof`, `launchctl`, and enough free disk space for the
+existing model plus one installer transaction. `COORDINATOR_BASE` is the only external
+deployment variable; retain the default for production or set it to the HTTPS origin
+corresponding to the configured coordinator before buyer-serving verification.
+
+### 1. Make an owner-only backup and collect redacted baseline evidence
+
+The private backup can contain the legacy bearer token. Keep it local, never attach it
+to an issue, and do not inspect the token with `security ... -w`. Malibu's exported
+diagnostics and the command-generated baseline are the shareable artifacts only after
+an operator inspects them for unexpected customer content.
+
+```bash
+set -euo pipefail
+umask 077
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+RECOVERY_ROOT="$HOME/Library/Application Support/macprovider-incident-recovery/incident-585-$STAMP"
+PRIVATE_BACKUP="$RECOVERY_ROOT/private-backup"
+EVIDENCE_DIR="$RECOVERY_ROOT/evidence"
+ASSET_DIR="$RECOVERY_ROOT/assets"
+PAYLOAD_DIR="$RECOVERY_ROOT/v1.8.40-payload"
+TOOLS_DIR="$RECOVERY_ROOT/v1.8.40-tools"
+mkdir -p "$PRIVATE_BACKUP" "$EVIDENCE_DIR" "$ASSET_DIR" "$PAYLOAD_DIR" "$TOOLS_DIR"
+chmod 700 "$RECOVERY_ROOT" "$PRIVATE_BACKUP" "$EVIDENCE_DIR" "$ASSET_DIR" \
+  "$PAYLOAD_DIR" "$TOOLS_DIR"
+
+backup_one() {
+  source_path="$1"
+  backup_name="$2"
+  test ! -e "$source_path" || /usr/bin/ditto "$source_path" "$PRIVATE_BACKUP/$backup_name"
+}
+
+backup_one "$HOME/.config/macprovider" config
+backup_one "$HOME/macprovider" provider-support
+backup_one "$HOME/Library/Application Support/macprovider" install-state
+backup_one "$HOME/Library/Application Support/Malibu" malibu-state
+backup_one "$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist" provider.plist
+backup_one "$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" watchdog.plist
+backup_one "$HOME/Library/Logs/macprovider" provider-logs
+chmod -R go-rwx "$PRIVATE_BACKUP"
+
+MALIBU_APP="$HOME/Applications/Malibu.app"
+test -d "$MALIBU_APP" || MALIBU_APP=/Applications/Malibu.app
+test -d "$MALIBU_APP"
+
+{
+  date -u '+captured_at=%Y-%m-%dT%H:%M:%SZ'
+  sw_vers
+  uname -m
+  printf 'malibu_version=%s\n' \
+    "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || printf unknown)"
+  printf 'malibu_build=%s\n' \
+    "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion 2>/dev/null || printf unknown)"
+  if test -x "$HOME/.local/bin/macprovider-cli"; then
+    printf 'cli_version=%s\n' \
+      "$("$HOME/.local/bin/macprovider-cli" --version 2>/dev/null || printf unavailable)"
+    shasum -a 256 "$HOME/.local/bin/macprovider-cli"
+    codesign -dv --verbose=4 "$HOME/.local/bin/macprovider-cli" 2>&1 \
+      | awk -F= '/^(Identifier|TeamIdentifier)=/{print}'
+  else
+    printf 'cli_version=missing\n'
+  fi
+  launchctl print "gui/$(id -u)/live.streamvc.macprovider" 2>&1 || true
+} | sed "s|$HOME|~|g" > "$EVIDENCE_DIR/baseline.txt"
+chmod 600 "$EVIDENCE_DIR/baseline.txt"
+printf 'private_backup=%s\nredacted_evidence=%s\n' "$PRIVATE_BACKUP" "$EVIDENCE_DIR"
+```
+
+In Malibu, choose **Export redacted diagnostics** and save the JSON in
+`$EVIDENCE_DIR`. Do not substitute raw config, Keychain output, or unredacted log
+files. Preserve the initial error text and screenshot with the evidence.
+
+### 2. Download only the immutable public v1.8.40 assets
+
+These constants are the recovery authority. GitHub release `354899176` is immutable,
+not draft or prerelease, and targets commit
+`18638472fe3e885f3534eeac29ab89b4c7ffdd7a`. Numeric asset endpoints avoid a mutable
+latest selector. The tarball contains the only installer executed by this procedure.
+
+```bash
+set -euo pipefail
+: "${RECOVERY_ROOT:?run section 1 in this shell first}"
+: "${ASSET_DIR:?run section 1 in this shell first}"
+: "${PAYLOAD_DIR:?run section 1 in this shell first}"
+: "${TOOLS_DIR:?run section 1 in this shell first}"
+
+REPOSITORY=Augustas11/macprovider
+PROVIDER_TAG=v1.8.40
+PROVIDER_VERSION=1.8.40
+PROVIDER_COMMIT=18638472fe3e885f3534eeac29ab89b4c7ffdd7a
+PROVIDER_RELEASE_ID=354899176
+PROVIDER_SET_ID="Augustas11/macprovider:v1.8.40@$PROVIDER_COMMIT"
+PROVIDER_SET_SHA256=fe17e7a3cca392edea185c304970ef6d6fb9f06ff65aa6cffed6c7d9325a161c
+PROVIDER_TARBALL=macprovider-cli-v1.8.40-darwin-arm64.tar.gz
+PROVIDER_TARBALL_SHA256=1eee4900109f958c95c66830f17295bfba4dfe93e0a72aa720f0ed20a9b2b918
+PROVIDER_BINARY_SHA256=4392cfff14abc7c4ee4e8992e2f264b465f754594397bfd4f92d5859f4d77ff1
+PROVIDER_TEAM_ID=YF7XNRJUG4
+PROVIDER_IDENTIFIER=live.streamvc.macprovider.cli
+RELEASE_KEY_SPKI_SHA256=2cd6171cea8cd7964c12292e3443078c2b3d0cdcc20ae600fe8261090392c7f8
+
+API=https://api.github.com/repos/Augustas11/macprovider
+curl -fsSL -H 'X-GitHub-Api-Version: 2022-11-28' \
+  "$API/releases/$PROVIDER_RELEASE_ID" -o "$ASSET_DIR/release-metadata.json"
+
+python3 - "$ASSET_DIR/release-metadata.json" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    release = json.load(handle)
+expected_assets = {
+    "macprovider-cli-v1.8.40-darwin-arm64.tar.gz": (478848746, "sha256:1eee4900109f958c95c66830f17295bfba4dfe93e0a72aa720f0ed20a9b2b918"),
+    "compatibility-set.json": (478848772, "sha256:fe17e7a3cca392edea185c304970ef6d6fb9f06ff65aa6cffed6c7d9325a161c"),
+    "checksums.txt": (478848792, "sha256:48c6c736a460d7f31e21c4ea0e779ce6cf1cf8542dd877c1df8ccaa14e33eaf1"),
+    "checksums.txt.sig": (478848796, "sha256:73719f4ccc28c3baf2a91f94461ce35f36ea27b79bbf68d32d0bf8bae901f207"),
+}
+assert release["id"] == 354899176
+assert release["tag_name"] == "v1.8.40"
+assert release["target_commitish"] == "18638472fe3e885f3534eeac29ab89b4c7ffdd7a"
+assert release["immutable"] is True
+assert release["draft"] is False and release["prerelease"] is False
+assets = {asset["name"]: (asset["id"], asset["digest"]) for asset in release["assets"]}
+for name, expected in expected_assets.items():
+    assert assets.get(name) == expected, (name, assets.get(name), expected)
+PY
+
+download_asset() {
+  asset_id="$1"
+  filename="$2"
+  expected_sha="$3"
+  curl -fsSL -H 'Accept: application/octet-stream' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$API/releases/assets/$asset_id" -o "$ASSET_DIR/$filename"
+  test "$(shasum -a 256 "$ASSET_DIR/$filename" | awk '{print $1}')" = "$expected_sha"
+}
+
+download_asset 478848746 "$PROVIDER_TARBALL" "$PROVIDER_TARBALL_SHA256"
+download_asset 478848772 compatibility-set.json "$PROVIDER_SET_SHA256"
+download_asset 478848792 checksums.txt 48c6c736a460d7f31e21c4ea0e779ce6cf1cf8542dd877c1df8ccaa14e33eaf1
+download_asset 478848796 checksums.txt.sig 73719f4ccc28c3baf2a91f94461ce35f36ea27b79bbf68d32d0bf8bae901f207
+
+curl -fsSL \
+  "https://raw.githubusercontent.com/$REPOSITORY/$PROVIDER_COMMIT/ops/pearl-updater/release-signing-public.pem" \
+  -o "$TOOLS_DIR/release-signing-public.pem"
+curl -fsSL \
+  "https://raw.githubusercontent.com/$REPOSITORY/$PROVIDER_COMMIT/scripts/compatibility-set-manifest.py" \
+  -o "$TOOLS_DIR/compatibility-set-manifest.py"
+test "$(shasum -a 256 "$TOOLS_DIR/release-signing-public.pem" | awk '{print $1}')" = \
+  fb5b6af6026e74bcf278acbc4f2d2204d9ebf8909d800c420def6b57ec8a06ee
+test "$(shasum -a 256 "$TOOLS_DIR/compatibility-set-manifest.py" | awk '{print $1}')" = \
+  c92507adfbb7c2c9aa2204e076a8bfa5770bdb95a0e1c001b06f85c8a2f94d15
+test "$(openssl pkey -pubin -in "$TOOLS_DIR/release-signing-public.pem" -outform DER \
+  | shasum -a 256 | awk '{print $1}')" = "$RELEASE_KEY_SPKI_SHA256"
+```
+
+### 3. Verify the complete signature and compatibility chain before install
+
+The signed checksum list binds the tarball and standalone compatibility manifest.
+The compatibility-set signature then binds the provider version, commit, transaction
+members, catalog, launchd contract, and coordinator-admission policy. Extract only
+after the tarball signature chain passes.
+
+```bash
+set -euo pipefail
+openssl dgst -sha256 \
+  -verify "$TOOLS_DIR/release-signing-public.pem" \
+  -signature "$ASSET_DIR/checksums.txt.sig" \
+  "$ASSET_DIR/checksums.txt"
+grep -Fqx "$PROVIDER_TARBALL_SHA256  $PROVIDER_TARBALL" "$ASSET_DIR/checksums.txt"
+grep -Fqx "$PROVIDER_SET_SHA256  compatibility-set.json" "$ASSET_DIR/checksums.txt"
+
+tar -xzf "$ASSET_DIR/$PROVIDER_TARBALL" -C "$PAYLOAD_DIR"
+test "$(shasum -a 256 "$PAYLOAD_DIR/macprovider-cli" | awk '{print $1}')" = \
+  "$PROVIDER_BINARY_SHA256"
+test "$(shasum -a 256 "$PAYLOAD_DIR/compatibility-set.json" | awk '{print $1}')" = \
+  "$PROVIDER_SET_SHA256"
+cmp "$ASSET_DIR/compatibility-set.json" "$PAYLOAD_DIR/compatibility-set.json"
+
+python3 "$TOOLS_DIR/compatibility-set-manifest.py" validate \
+  --input "$PAYLOAD_DIR/compatibility-set.json" \
+  --require-signature \
+  --public-key "$TOOLS_DIR/release-signing-public.pem" \
+  --expected-key-id macprovider-release-p256-v1 \
+  --expected-tag "$PROVIDER_TAG" \
+  --expected-commit "$PROVIDER_COMMIT" \
+  --expected-provider-admission-policy bridge_required \
+  --payload-directory "$PAYLOAD_DIR"
+
+python3 - "$PAYLOAD_DIR/compatibility-set.json" "$PROVIDER_SET_ID" <<'PY'
+import json, sys
+
+path, expected_set = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    signed = json.load(handle)["signed"]
+assert signed["compatibility_set_id"] == expected_set
+assert signed["release"] == {
+    "commit": "18638472fe3e885f3534eeac29ab89b4c7ffdd7a",
+    "repository": "Augustas11/macprovider",
+    "tag": "v1.8.40",
+    "version": "1.8.40",
+}
+assert signed["components"]["provider_cli"] == {
+    "activation": "local",
+    "designated_identifier": "live.streamvc.macprovider.cli",
+    "platform": "darwin-arm64",
+    "status_contract": "macprovider.local-status.v1",
+    "version": "1.8.40",
+}
+PY
+
+codesign --verify --strict --deep "$PAYLOAD_DIR/macprovider-cli"
+test "$(codesign -dv --verbose=4 "$PAYLOAD_DIR/macprovider-cli" 2>&1 \
+  | awk -F= '/^Identifier=/{print $2}')" = "$PROVIDER_IDENTIFIER"
+test "$(codesign -dv --verbose=4 "$PAYLOAD_DIR/macprovider-cli" 2>&1 \
+  | awk -F= '/^TeamIdentifier=/{print $2}')" = "$PROVIDER_TEAM_ID"
+spctl -a -t exec "$PAYLOAD_DIR/macprovider-cli"
+```
+
+### 4. Run the verified v1.8.40 installer transaction
+
+Execute the installer extracted from the verified tarball, not the mutable web
+installer. `MACPROVIDER_VERSION` prevents a latest lookup, `MACPROVIDER_RELEASE_FORMAT`
+forces the checksum-bound tar path, and the repository is explicit. An equal-version
+repair is allowed; a non-emergency downgrade is rejected. Keep Malibu closed during
+the provider transaction. The installer preserves the provider identity/config and
+keeps its own rollback armed until local health and coordinator buyer admission pass.
+
+```bash
+set -euo pipefail
+osascript -e 'tell application id "tech.malibu.app" to quit' 2>/dev/null || true
+
+MACPROVIDER_GITHUB_REPO=Augustas11/macprovider \
+MACPROVIDER_VERSION=v1.8.40 \
+MACPROVIDER_RELEASE_FORMAT=tar \
+  bash "$PAYLOAD_DIR/compatibility-set-local/install.sh"
+```
+
+Do not continue if the installer exits nonzero. Preserve its output, confirm whether
+its transaction restored the prior provider, and follow the rollback section below.
+
+### 5. Verify exact installed identity, launchd ownership, listener, and health
+
+```bash
+set -euo pipefail
+INSTALLED_CLI="$HOME/macprovider/macprovider-cli"
+CLI_LINK="$HOME/.local/bin/macprovider-cli"
+INSTALLED_SET="$HOME/macprovider/compatibility-set.json"
+SERVICE="gui/$(id -u)/live.streamvc.macprovider"
+
+test -x "$INSTALLED_CLI"
+test -x "$CLI_LINK"
+test "$("$CLI_LINK" --version)" = "$PROVIDER_VERSION"
+test "$(shasum -a 256 "$INSTALLED_CLI" | awk '{print $1}')" = "$PROVIDER_BINARY_SHA256"
+test "$(shasum -a 256 "$INSTALLED_SET" | awk '{print $1}')" = "$PROVIDER_SET_SHA256"
+codesign --verify --strict --deep "$INSTALLED_CLI"
+test "$(codesign -dv --verbose=4 "$INSTALLED_CLI" 2>&1 \
+  | awk -F= '/^Identifier=/{print $2}')" = "$PROVIDER_IDENTIFIER"
+test "$(codesign -dv --verbose=4 "$INSTALLED_CLI" 2>&1 \
+  | awk -F= '/^TeamIdentifier=/{print $2}')" = "$PROVIDER_TEAM_ID"
+spctl -a -t exec "$INSTALLED_CLI"
+python3 "$TOOLS_DIR/compatibility-set-manifest.py" validate \
+  --input "$INSTALLED_SET" --require-signature \
+  --public-key "$TOOLS_DIR/release-signing-public.pem" \
+  --expected-key-id macprovider-release-p256-v1 \
+  --expected-tag "$PROVIDER_TAG" --expected-commit "$PROVIDER_COMMIT" \
+  --expected-provider-admission-policy bridge_required
+
+launchctl print "$SERVICE" > "$EVIDENCE_DIR/launchd-after-install.txt"
+PID="$(awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ {print $3}' \
+  "$EVIDENCE_DIR/launchd-after-install.txt")"
+test -n "$PID"
+kill -0 "$PID"
+
+PORT="$(python3 - "$HOME/.config/macprovider/config.yaml" <<'PY'
+import re, sys
+
+port = "8080"
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        match = re.fullmatch(r"port:\s*([0-9]+)\s*", line)
+        if match:
+            port = match.group(1)
+            break
+value = int(port)
+assert 1 <= value <= 65535
+print(value)
+PY
+)"
+
+LISTENERS="$(lsof -nP -a -p "$PID" -iTCP:"$PORT" -sTCP:LISTEN -Fn)"
+printf '%s\n' "$LISTENERS" > "$EVIDENCE_DIR/listener-after-install.txt"
+printf '%s\n' "$LISTENERS" | grep -Eq '^n(127\.0\.0\.1|\[::1\]):'
+if printf '%s\n' "$LISTENERS" | grep -Eq '^n(\*|0\.0\.0\.0|\[::\]):'; then
+  printf 'refusing non-loopback provider listener\n' >&2
+  exit 1
+fi
+
+curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/health" \
+  -o "$EVIDENCE_DIR/health-after-install.json"
+python3 - "$EVIDENCE_DIR/health-after-install.json" <<'PY'
+import json, sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    health = json.load(handle)
+assert health["status"] in {"ready", "busy"}
+assert health["model_loaded"] is True
+PY
+```
+
+### 6. Retry Malibu's legacy-config migration without coupling versions
+
+The screenshot cohort may still be running Malibu 1.8.39, which predates the
+independent app-release contract. Version independence does not mean every historical
+app implements the new recovery path. If the installed app is not an accepted release
+with signed runtime authority for the v1.8.40 provider set, first install the exact
+approved **`Malibu-vX.Y.Z-app-only-installer.pkg`** by the procedure immediately above.
+Its immutable numeric release ID, numeric asset ID, package SHA-256, envelope/index
+digests, and notarization evidence are required external release-ceremony outputs;
+stop if they have not been published and independently accepted. The value of `X.Y.Z`
+does not have to be `1.8.40`. Do not substitute the v1.8.40 DMG/evidence package or an
+unversioned app download. After the app-only transaction, use only
+`$HOME/Applications/Malibu.app` and reset `MALIBU_APP` to that exact path.
+
+Validate Malibu as an independently versioned signed app. Print its version for the
+incident record, but do not assert that it equals the CLI version.
+
+```bash
+set -euo pipefail
+codesign --verify --strict --deep "$MALIBU_APP"
+test "$(codesign -dv --verbose=4 "$MALIBU_APP" 2>&1 \
+  | awk -F= '/^Identifier=/{print $2}')" = tech.malibu.app
+test "$(codesign -dv --verbose=4 "$MALIBU_APP" 2>&1 \
+  | awk -F= '/^TeamIdentifier=/{print $2}')" = "$PROVIDER_TEAM_ID"
+xcrun stapler validate "$MALIBU_APP"
+spctl -a -t exec "$MALIBU_APP"
+printf 'recorded Malibu version=%s build=%s; no CLI-version comparison applies\n' \
+  "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleShortVersionString)" \
+  "$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion)"
+open "$MALIBU_APP"
+```
+
+In the exact app opened above, choose **Import** or **Retry migration**. Authorize the
+Login Keychain prompt if macOS presents one. Never choose **Start Fresh** during this
+recovery: it moves aside the identity the procedure is intended to preserve. Wait for
+Malibu to leave observation-only/migration-repair mode and show the provider running.
+If migration fails, save a new **Export redacted diagnostics** file, leave the private
+backup untouched, and stop; repeated blind imports or manual YAML/Keychain edits are
+not recovery.
+
+Then prove the CLI now owns restart-safe credential custody:
+
+```bash
+set -euo pipefail
+curl -fsS --max-time 10 "http://127.0.0.1:$PORT/v1/status" \
+  -o "$EVIDENCE_DIR/status-after-migration.json"
+python3 - "$EVIDENCE_DIR/status-after-migration.json" "$PROVIDER_SET_ID" <<'PY'
+import json, sys
+
+path, expected_set = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    status = json.load(handle)
+credential = status["credential"]
+coordinator = status["coordinator"]
+telemetry = status["safety_telemetry"]
+assert credential["restart_safe"] is True
+assert credential["migration_pending"] is False
+assert credential["source"] == "keychain"
+assert coordinator["connected"] is True and coordinator["session"]
+assert telemetry["binary_version"] == "1.8.40"
+assert telemetry["compatibility_set_id"] == expected_set
+PY
+```
+
+### 7. Prove restart, reboot, and coordinator buyer-serving
+
+First force a launchd restart and require a new live PID. Model reload can take time;
+do not weaken the 10-minute bounded wait.
+
+```bash
+set -euo pipefail
+OLD_PID="$PID"
+launchctl kickstart -k "$SERVICE"
+
+deadline=$(( $(date +%s) + 600 ))
+while :; do
+  launchctl print "$SERVICE" > "$EVIDENCE_DIR/launchd-after-restart.txt" 2>/dev/null || true
+  PID="$(awk 'NF == 3 && $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ {print $3}' \
+    "$EVIDENCE_DIR/launchd-after-restart.txt")"
+  if test -n "$PID" && test "$PID" != "$OLD_PID" \
+    && curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/health" \
+      -o "$EVIDENCE_DIR/health-after-restart.json"; then
+    if python3 - "$EVIDENCE_DIR/health-after-restart.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    health = json.load(handle)
+raise SystemExit(0 if health.get("status") in {"ready", "busy"} and health.get("model_loaded") is True else 1)
+PY
+    then
+      break
+    fi
+  fi
+  test "$(date +%s)" -lt "$deadline" || { printf 'provider restart timed out\n' >&2; exit 1; }
+  sleep 5
+done
+```
+
+Capture both the local coordinator-authoritative state and the coordinator's direct,
+session-bound pool response:
+
+```bash
+set -euo pipefail
+COORDINATOR_BASE="${COORDINATOR_BASE:-https://coordinator.streamvc.live}"
+STATUS_PATH="$EVIDENCE_DIR/status-after-restart.json"
+POOL_PATH="$EVIDENCE_DIR/pool-after-restart.json"
+curl -fsS --max-time 10 "http://127.0.0.1:$PORT/v1/status" -o "$STATUS_PATH"
+POOL_URL="$(python3 - "$STATUS_PATH" "$COORDINATOR_BASE" <<'PY'
+import json, sys, urllib.parse
+
+path, base = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    status = json.load(handle)
+provider_id = status["provider_id"]
+assigned_id = status["coordinator"]["session"]
+assert provider_id and assigned_id
+query = urllib.parse.urlencode({
+    "provider_id": provider_id,
+    "assigned_id": assigned_id,
+    "details": "readiness",
+})
+print(base.rstrip("/") + "/v1/pool/check?" + query)
+PY
+)"
+curl -fsS --max-time 10 "$POOL_URL" -o "$POOL_PATH"
+python3 - "$STATUS_PATH" "$POOL_PATH" "$PROVIDER_SET_ID" <<'PY'
+import json, sys
+
+status_path, pool_path, expected_set = sys.argv[1:]
+with open(status_path, encoding="utf-8") as handle:
+    status = json.load(handle)
+with open(pool_path, encoding="utf-8") as handle:
+    pool = json.load(handle)
+coordinator = status["coordinator"]
+credential = status["credential"]
+telemetry = status["safety_telemetry"]
+assert status["status"] in {"ready", "busy"}
+assert status["model_loaded"] is True
+assert status["network_state"] == "buyer_serving"
+assert status["buyer_serving_authority"] == "coordinator"
+assert coordinator["connected"] is True and coordinator["session"]
+assert credential["restart_safe"] is True and credential["migration_pending"] is False
+assert telemetry["binary_version"] == "1.8.40"
+assert telemetry["compatibility_set_id"] == expected_set
+assert pool["provider_id"] == status["provider_id"]
+assert pool["assigned_id"] == coordinator["session"]
+assert pool["buyer_serving"] is True
+assert pool["catalog_evidence_source"] == "provider_reported"
+assert pool["catalog_admission_mode"] in {"current", "previous"}
+print("buyer-serving proof passed", status["provider_id"], coordinator["session"])
+PY
+```
+
+The reboot proof is a required manual downtime boundary. After the incident owner has
+approved the interruption, run `sudo shutdown -r now`. After the same user logs back
+in and unlocks the Login Keychain, re-establish the constants from section 2, set
+`EVIDENCE_DIR`, `TOOLS_DIR`, `PORT`, `SERVICE`, and `COORDINATOR_BASE` to their prior
+values, then rerun sections 5 and 7 with output names changed from `after-restart` to
+`after-reboot`. Completion requires a new launchd PID, exact v1.8.40 code/set identity,
+restart-safe non-pending credential custody, and fresh direct buyer-serving proof.
+
+Finally confirm Malibu reports the provider running, the compatibility set reported,
+and migration no longer required. The Malibu version may differ from `1.8.40`.
+
+### Rollback and escalation
+
+- Before installer execution, a failed check has no recovery mutation: retain the
+  evidence and stop.
+- During installer execution, rely on its compatibility-set transaction. A failed
+  local-health or coordinator-admission gate must return nonzero and restore the
+  complete prior provider tuple. Verify the version, binary digest, launchd service,
+  and local health of that restored tuple before recording rollback success.
+- Do not restore individual files from `private-backup` over a running service. That
+  directory is forensic and last-resort recovery input for an incident lead, not a
+  mix-and-match rollback mechanism.
+- Do not set `MACPROVIDER_EMERGENCY_ROLLBACK=1` merely because this procedure failed.
+  A downgrade requires a separately authorized exact signed prior tag, its config
+  backup digest, active coordinator `legacy_bridge` admission, and the full emergency
+  rollback procedure enforced by `install.sh`.
+- If automatic rollback cannot prove the old service healthy, stop the provider to
+  prevent an ambiguous network identity:
+
+  ```bash
+  launchctl bootout "gui/$(id -u)" \
+    "$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist" || true
+  launchctl bootout "gui/$(id -u)" \
+    "$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" || true
+  ```
+
+  Preserve `$RECOVERY_ROOT`, record the installer exit status, and escalate. Do not
+  close Issue #585 until restart and reboot buyer-serving evidence both pass.
 
 ## Publication recovery
 

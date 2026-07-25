@@ -217,7 +217,6 @@ enum CompatibilitySetCutoverPhase: String, CaseIterable, Sendable {
     case providerPlistActivated = "provider_plist_activated"
     case watchdogPlistActivated = "watchdog_plist_activated"
     case binaryActivated = "binary_activated"
-    case malibuAppActivated = "malibu_app_activated"
 }
 
 final class AutoUpdateLock: @unchecked Sendable {
@@ -263,18 +262,6 @@ private struct CompatibilityExternalMemberRecord: Codable, Equatable {
     }
 }
 
-private struct MalibuAppRollbackRecord: Codable, Equatable {
-    let schemaVersion: Int
-    let targetPath: String
-    let archiveSHA256: String
-
-    enum CodingKeys: String, CodingKey {
-        case schemaVersion = "schema_version"
-        case targetPath = "target_path"
-        case archiveSHA256 = "archive_sha256"
-    }
-}
-
 // FileManager is thread-safe for independent filesystem operations. The store
 // carries no mutable shared state beyond that Foundation reference.
 struct AutoUpdateMarkerStore: @unchecked Sendable {
@@ -284,26 +271,26 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     private static let providerPlistName = "provider.plist"
     private static let watchdogScriptName = "watchdog.sh"
     private static let watchdogPlistName = "watchdog.plist"
-    private static let malibuAppBackupName = "Malibu.app.zip"
-    private static let malibuAppStateName = "malibu-app-state.json"
+    // Older provider snapshots may contain these opaque members. Keep accepting
+    // them so provider rollback remains recoverable, but never read or restore
+    // them: Malibu now has an independent signed transaction boundary.
+    private static let legacyMalibuAppBackupName = "Malibu.app.zip"
+    private static let legacyMalibuAppStateName = "malibu-app-state.json"
     static let compatibilityAdmissionValiditySeconds: TimeInterval = 90
     private static let compatibilityAdmissionMaximumBytes = 4_096
 
     let homeDirectory: URL
     let fileManager: FileManager
     private let installerOwnerLiveOverride: (@Sendable () -> Bool)?
-    private let malibuAppCandidateOverride: [URL]?
 
     init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fileManager: FileManager = .default,
-        installerOwnerLiveOverride: (@Sendable () -> Bool)? = nil,
-        malibuAppCandidateOverride: [URL]? = nil
+        installerOwnerLiveOverride: (@Sendable () -> Bool)? = nil
     ) {
         self.homeDirectory = homeDirectory
         self.fileManager = fileManager
         self.installerOwnerLiveOverride = installerOwnerLiveOverride
-        self.malibuAppCandidateOverride = malibuAppCandidateOverride
     }
 
     var root: URL {
@@ -735,7 +722,6 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             try preserveExternalLocalMembers(
                 into: releaseBackup.appendingPathComponent(Self.externalBackupDirectoryName, isDirectory: true)
             )
-            try preserveInstalledMalibuApp(into: releaseBackup)
             try fsyncTree(releaseBackup)
             let releaseSHA = try releaseTreeSHA256(releaseBackup)
             guard (60...1_200).contains(readinessTimeoutSeconds) else {
@@ -839,7 +825,6 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
                 )
             }
             try restoreExternalLocalMembersIfPresent(from: releaseBackup)
-            try restoreMalibuAppIfPresent(from: releaseBackup)
             fsyncDirectory(targetURL.deletingLastPathComponent())
         }
         try atomicCopyNoFollow(from: backupURL, to: targetURL, mode: marker.mode)
@@ -903,8 +888,6 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         from payloadDirectory: URL,
         newBinary: URL,
         to currentBinary: URL,
-        stagedMalibuApp: URL? = nil,
-        rollbackMarker: AutoUpdatePendingMarker? = nil,
         cutoverCheckpoint: ((CompatibilitySetCutoverPhase) throws -> Void)? = nil
     ) throws {
         try validateReleasePayload(at: payloadDirectory, newBinary: newBinary)
@@ -942,13 +925,6 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
         )
         try atomicCopyNoFollow(from: newBinary, to: currentBinary, mode: 0o755)
         try cutoverCheckpoint?(.binaryActivated)
-        if try activateMalibuAppIfInstalled(
-            stagedMalibuApp,
-            from: liveDirectory,
-            rollbackMarker: rollbackMarker
-        ) {
-            try cutoverCheckpoint?(.malibuAppActivated)
-        }
     }
 
     func cooldown(target: String, failureClass: AutoUpdateFailureClass) -> (attempt: Int, until: Date)? {
@@ -1123,12 +1099,11 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
         ) where !isOwnedReleaseResource(entry)
             && entry.lastPathComponent != Self.externalBackupDirectoryName
-            && entry.lastPathComponent != Self.malibuAppBackupName
-            && entry.lastPathComponent != Self.malibuAppStateName {
+            && entry.lastPathComponent != Self.legacyMalibuAppBackupName
+            && entry.lastPathComponent != Self.legacyMalibuAppStateName {
             throw AutoUpdateMarkerError.backupCorrupt
         }
         try validateExternalLocalMemberBackupIfPresent(in: backup)
-        try validateMalibuAppBackupIfPresent(in: backup)
     }
 
     private func validateReleasePayload(at directory: URL, newBinary: URL) throws {
@@ -1270,352 +1245,6 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             finalURL: backupDirectory.appendingPathComponent(Self.externalBackupStateName),
             mode: S_IRUSR | S_IWUSR
         )
-    }
-
-    @discardableResult
-    func preflightInstalledMalibuAppReplacement() throws -> URL? {
-        guard let app = try installedMalibuAppURL() else { return nil }
-        try validateMalibuInstallTarget(app, requireWritableParent: true)
-        try validateMalibuBundle(app, requireCurrentOwner: false)
-        return app
-    }
-
-    private func preserveInstalledMalibuApp(into releaseBackup: URL) throws {
-        guard let app = try preflightInstalledMalibuAppReplacement() else { return }
-        let archive = releaseBackup.appendingPathComponent(Self.malibuAppBackupName)
-        try runProcess(
-            "/usr/bin/ditto",
-            arguments: ["-c", "-k", "--sequesterRsrc", "--keepParent", app.path, archive.path]
-        )
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: archive.path)
-        let record = MalibuAppRollbackRecord(
-            schemaVersion: 1,
-            targetPath: app.standardizedFileURL.path,
-            archiveSHA256: try Self.sha256(file: archive)
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        try atomicWrite(
-            data: try encoder.encode(record),
-            finalURL: releaseBackup.appendingPathComponent(Self.malibuAppStateName),
-            mode: S_IRUSR | S_IWUSR
-        )
-    }
-
-    private func validateMalibuAppBackupIfPresent(in releaseBackup: URL) throws {
-        _ = try validatedMalibuAppRollbackRecord(in: releaseBackup)
-    }
-
-    private func validatedMalibuAppRollbackRecord(
-        in releaseBackup: URL
-    ) throws -> MalibuAppRollbackRecord? {
-        let archive = releaseBackup.appendingPathComponent(Self.malibuAppBackupName)
-        let stateURL = releaseBackup.appendingPathComponent(Self.malibuAppStateName)
-        let archiveExists = fileManager.fileExists(atPath: archive.path)
-        let stateExists = fileManager.fileExists(atPath: stateURL.path)
-        guard archiveExists == stateExists else { throw AutoUpdateMarkerError.backupCorrupt }
-        guard stateExists else { return nil }
-
-        let data = try readRegularFileNoFollow(stateURL)
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == ["archive_sha256", "schema_version", "target_path"]
-        else { throw AutoUpdateMarkerError.backupCorrupt }
-        let record = try JSONDecoder().decode(MalibuAppRollbackRecord.self, from: data)
-        guard record.schemaVersion == 1,
-              record.archiveSHA256.range(
-                of: #"^[0-9a-f]{64}$"#,
-                options: .regularExpression
-              ) != nil,
-              malibuAppCandidates().contains(where: {
-                  $0.standardizedFileURL.path == record.targetPath
-              })
-        else { throw AutoUpdateMarkerError.backupCorrupt }
-        let archiveInfo = try regularFileStatNoFollow(archive)
-        guard (archiveInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
-              try Self.sha256(file: archive) == record.archiveSHA256
-        else { throw AutoUpdateMarkerError.backupCorrupt }
-        return record
-    }
-
-    private func restoreMalibuAppIfPresent(from releaseBackup: URL) throws {
-        guard let record = try validatedMalibuAppRollbackRecord(in: releaseBackup) else { return }
-        let target = URL(fileURLWithPath: record.targetPath, isDirectory: true)
-        try validateMalibuInstallTarget(target, requireWritableParent: true, requireExistingApp: false)
-        let extractionRoot = target.deletingLastPathComponent().appendingPathComponent(
-            ".malibu-rollback-extract-\(UUID().uuidString.lowercased())",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: extractionRoot,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
-        defer { try? fileManager.removeItem(at: extractionRoot) }
-        try runProcess(
-            "/usr/bin/ditto",
-            arguments: [
-                "-x", "-k",
-                releaseBackup.appendingPathComponent(Self.malibuAppBackupName).path,
-                extractionRoot.path,
-            ]
-        )
-        let entries = try fileManager.contentsOfDirectory(
-            at: extractionRoot,
-            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
-        )
-        guard entries.count == 1, entries[0].lastPathComponent == "Malibu.app" else {
-            throw AutoUpdateMarkerError.backupCorrupt
-        }
-        let restored = entries[0]
-        try validateMalibuBundle(restored, requireCurrentOwner: true)
-        try atomicReplaceMalibuApp(staged: restored, target: target)
-    }
-
-    @discardableResult
-    private func activateMalibuAppIfInstalled(
-        _ stagedMalibuApp: URL?,
-        from liveDirectory: URL,
-        rollbackMarker: AutoUpdatePendingMarker?
-    ) throws -> Bool {
-        guard let releaseBackupPath = rollbackMarker?.releaseBackupPath else {
-            guard stagedMalibuApp == nil else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_rollback_snapshot_missing")
-            }
-            return false
-        }
-        let releaseBackup = URL(fileURLWithPath: releaseBackupPath, isDirectory: true)
-        guard let record = try validatedMalibuAppRollbackRecord(in: releaseBackup) else {
-            guard try installedMalibuAppURL() == nil else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_raced_snapshot")
-            }
-            return false
-        }
-        guard let stagedMalibuApp else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_staged_bundle_missing")
-        }
-        let target = URL(fileURLWithPath: record.targetPath, isDirectory: true)
-        guard try installedMalibuAppURL()?.standardizedFileURL == target.standardizedFileURL else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_changed_after_snapshot")
-        }
-        try validateMalibuInstallTarget(target, requireWritableParent: true)
-        try validateMalibuBundle(
-            stagedMalibuApp,
-            requireCurrentOwner: true,
-            expectedVersion: rollbackMarker?.targetVersion,
-            expectedManifest: liveDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
-        )
-
-        let staging = target.deletingLastPathComponent().appendingPathComponent(
-            ".Malibu.app.activation-\(UUID().uuidString.lowercased())",
-            isDirectory: true
-        )
-        defer { try? fileManager.removeItem(at: staging) }
-        try runProcess("/usr/bin/ditto", arguments: [stagedMalibuApp.path, staging.path])
-        try validateMalibuBundle(
-            staging,
-            requireCurrentOwner: true,
-            expectedVersion: rollbackMarker?.targetVersion,
-            expectedManifest: liveDirectory.appendingPathComponent(CompatibilitySetManifest.fileName)
-        )
-        try atomicReplaceMalibuApp(staged: staging, target: target)
-        return true
-    }
-
-    private func installedMalibuAppURL() throws -> URL? {
-        var installed: [URL] = []
-        for candidate in malibuAppCandidates() {
-            var info = stat()
-            if lstat(candidate.path, &info) != 0 {
-                guard errno == ENOENT else {
-                    throw AutoUpdateMarkerError.openFailed(candidate.path, errno)
-                }
-                continue
-            }
-            guard (info.st_mode & S_IFMT) == S_IFDIR else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_not_directory")
-            }
-            installed.append(candidate)
-        }
-        guard installed.count <= 1 else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("multiple_malibu_installations")
-        }
-        return installed.first
-    }
-
-    private func malibuAppCandidates() -> [URL] {
-        if let malibuAppCandidateOverride {
-            return malibuAppCandidateOverride
-        }
-        let perUser = homeDirectory.appendingPathComponent("Applications/Malibu.app", isDirectory: true)
-        guard homeDirectory.standardizedFileURL
-            == FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
-        else {
-            return [perUser]
-        }
-        return [URL(fileURLWithPath: "/Applications/Malibu.app", isDirectory: true), perUser]
-    }
-
-    private func validateMalibuInstallTarget(
-        _ target: URL,
-        requireWritableParent: Bool,
-        requireExistingApp: Bool = true
-    ) throws {
-        let canonicalTarget = target.standardizedFileURL
-        guard canonicalTarget.path == target.path,
-              canonicalTarget.lastPathComponent == "Malibu.app",
-              malibuAppCandidates().contains(where: {
-                  $0.standardizedFileURL == canonicalTarget
-              })
-        else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_path_invalid")
-        }
-        let parent = canonicalTarget.deletingLastPathComponent()
-        var parentInfo = stat()
-        guard lstat(parent.path, &parentInfo) == 0,
-              (parentInfo.st_mode & S_IFMT) == S_IFDIR,
-              (parentInfo.st_mode & S_IFMT) != S_IFLNK,
-              (parentInfo.st_mode & S_IWOTH) == 0
-        else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_parent_untrusted")
-        }
-        if parent.path == "/Applications" {
-            guard parentInfo.st_uid == 0 else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("applications_owner_invalid")
-            }
-        } else {
-            guard parentInfo.st_uid == getuid(),
-                  (parentInfo.st_mode & S_IWGRP) == 0
-            else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_parent_untrusted")
-            }
-        }
-        if requireWritableParent, access(parent.path, W_OK) != 0 {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_app_requires_authorized_installer")
-        }
-        guard requireExistingApp else { return }
-        var appInfo = stat()
-        guard lstat(canonicalTarget.path, &appInfo) == 0,
-              (appInfo.st_mode & S_IFMT) == S_IFDIR,
-              (appInfo.st_mode & S_IFMT) != S_IFLNK,
-              (appInfo.st_mode & S_IWOTH) == 0
-        else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_untrusted")
-        }
-    }
-
-    private func validateMalibuBundle(
-        _ app: URL,
-        requireCurrentOwner: Bool,
-        expectedVersion: String? = nil,
-        expectedManifest: URL? = nil
-    ) throws {
-        var rootInfo = stat()
-        guard lstat(app.path, &rootInfo) == 0,
-              (rootInfo.st_mode & S_IFMT) == S_IFDIR,
-              (rootInfo.st_mode & S_IFMT) != S_IFLNK,
-              (rootInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0,
-              !requireCurrentOwner || rootInfo.st_uid == getuid()
-        else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_root_invalid")
-        }
-        let resolvedRoot = app.resolvingSymlinksInPath().standardizedFileURL.path
-        let rootPrefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
-        guard let enumerator = fileManager.enumerator(at: app, includingPropertiesForKeys: nil) else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_enumeration_failed")
-        }
-        for case let entry as URL in enumerator {
-            var info = stat()
-            guard lstat(entry.path, &info) == 0,
-                  (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
-                  !requireCurrentOwner || info.st_uid == getuid()
-            else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_entry_invalid")
-            }
-            let type = info.st_mode & S_IFMT
-            switch type {
-            case S_IFDIR:
-                break
-            case S_IFREG:
-                guard info.st_nlink == 1 else {
-                    throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_hardlink")
-                }
-            case S_IFLNK:
-                let resolved = entry.resolvingSymlinksInPath().standardizedFileURL.path
-                guard resolved.hasPrefix(rootPrefix) else {
-                    throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_symlink_escape")
-                }
-            default:
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_entry_type")
-            }
-        }
-
-        let infoURL = app.appendingPathComponent("Contents/Info.plist")
-        guard let info = try PropertyListSerialization.propertyList(
-            from: Data(contentsOf: infoURL),
-            format: nil
-        ) as? [String: Any],
-              info["CFBundleIdentifier"] as? String == "tech.malibu.app"
-        else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_identity_invalid")
-        }
-        if let expectedVersion {
-            guard info["CFBundleShortVersionString"] as? String == expectedVersion else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_bundle_version_mismatch")
-            }
-        }
-        if let expectedManifest {
-            let embedded = app.appendingPathComponent(
-                "Contents/Resources/\(CompatibilitySetManifest.fileName)"
-            )
-            guard try Data(contentsOf: embedded) == Data(contentsOf: expectedManifest) else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_manifest_mismatch")
-            }
-        }
-    }
-
-    private func atomicReplaceMalibuApp(staged: URL, target: URL) throws {
-        try fsyncTree(staged)
-        let parent = target.deletingLastPathComponent()
-        var targetInfo = stat()
-        if lstat(target.path, &targetInfo) == 0 {
-            guard (targetInfo.st_mode & S_IFMT) == S_IFDIR else {
-                throw AutoUpdateMarkerError.trustedRootInvalid("malibu_install_not_directory")
-            }
-            if renamex_np(staged.path, target.path, UInt32(RENAME_SWAP)) != 0 {
-                throw AutoUpdateMarkerError.writeFailed(target.path, errno)
-            }
-            fsyncDirectory(parent)
-            do {
-                try fileManager.removeItem(at: staged)
-            } catch {
-                throw AutoUpdateMarkerError.writeFailed(staged.path, EIO)
-            }
-        } else {
-            guard errno == ENOENT else {
-                throw AutoUpdateMarkerError.openFailed(target.path, errno)
-            }
-            if rename(staged.path, target.path) != 0 {
-                throw AutoUpdateMarkerError.writeFailed(target.path, errno)
-            }
-        }
-        fsyncDirectory(parent)
-    }
-
-    private func runProcess(_ executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_archive_process_failed")
-        }
-        guard process.terminationStatus == 0 else {
-            throw AutoUpdateMarkerError.trustedRootInvalid("malibu_archive_process_failed")
-        }
     }
 
     private func validateExternalLocalMemberBackupIfPresent(in releaseBackup: URL) throws {

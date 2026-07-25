@@ -235,11 +235,15 @@ if (
 appcast_position = prepare.find('release_assets+=("$appcast_asset")')
 if appcast_position < 0 or appcast_position > provenance_position:
     raise SystemExit("v1.8.39 appcast must enter signed provenance and checksums")
-if 'if [ "$tag" = v1.8.39 ]' not in prepare or 'legacy appcast must exist only for v1.8.39' not in prepare:
-    raise SystemExit("release assets do not fail closed outside the one-time bridge tag")
+if 'if [ "$tag" = v1.8.39 ]' not in prepare:
+    raise SystemExit("one-time v1.8.39 Malibu bridge is not explicitly scoped")
+artifact_argument_body = prepare.split("artifact_index_arguments=(", 1)[1].split("\n          )", 1)[0]
+if "malibu_app=" in artifact_argument_body:
+    raise SystemExit("provider artifact index still requires Malibu")
+if 'artifact_index_arguments+=(--artifact "malibu_app=$app_dmg_asset")' not in prepare:
+    raise SystemExit("legacy v1.8.39 Malibu evidence is not explicitly conditional")
 for requirement in (
     "provider_cli=$tar_asset",
-    "malibu_app=$app_dmg_asset",
     "coordinator=$coordinator_asset",
     "coordinator_cli=$coordinator_cli_asset",
     "gateway=$gateway_asset",

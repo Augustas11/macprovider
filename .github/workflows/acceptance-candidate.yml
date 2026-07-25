@@ -91,12 +91,6 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
           bash control/scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
 
-      - name: Verify candidate dependency pins
-        shell: bash
-        env:
-          CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
-        run: bash candidate/scripts/verify-app-build-inputs.sh "$CANDIDATE_COMMIT"
-
       - name: Setup Go for candidate Pearl binaries
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
@@ -140,10 +134,6 @@ jobs:
           grep -Fq "$TAG" "$RUNNER_TEMP/coordinator-strings.txt"
           grep -Fq "$TAG" "$RUNNER_TEMP/gateway-strings.txt"
 
-      - name: Install main-reviewed XcodeGen artifact
-        shell: bash
-        run: bash control/scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
-
       - name: Build candidate CLI compatibility set
         shell: bash
         env:
@@ -154,31 +144,6 @@ jobs:
           cd candidate/phase3-binary/dist
           MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY" \
             ./package.sh "$TAG"
-
-      - name: Build candidate Malibu.app
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd candidate/phase3-binary/app
-          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
-          package_resolution_args=(archive)
-          if [ -f Package.resolved ]; then
-            resolved_dir="Malibu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
-            mkdir -p "$resolved_dir"
-            cp Package.resolved "$resolved_dir/Package.resolved"
-            package_resolution_args+=(-onlyUsePackageVersionsFromResolvedFile)
-          fi
-          xcodebuild \
-            -project Malibu.xcodeproj \
-            -scheme Malibu \
-            -configuration Release \
-            -destination "generic/platform=macOS" \
-            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
-            "${package_resolution_args[@]}" \
-            ARCHS=arm64 \
-            CODE_SIGNING_ALLOWED=NO
-          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
-            "$RUNNER_TEMP/Malibu.app"
 
       - name: Capture exact unsigned acceptance inputs
         shell: bash
@@ -193,7 +158,6 @@ jobs:
           destination="$RUNNER_TEMP/unsigned-acceptance-inputs"
           mkdir "$destination"
           cp "candidate/phase3-binary/dist/phase3-binary-m4-${TAG}.tar.gz" "$destination/"
-          tar -czf "$destination/Malibu.app.tar.gz" -C "$RUNNER_TEMP" Malibu.app
           cp "$RUNNER_TEMP/release-toolchain.json" \
             "$RUNNER_TEMP/coordinator-linux-amd64" \
             "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
@@ -207,7 +171,6 @@ jobs:
             --control-commit "$CONTROL_COMMIT" \
             --provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
             --asset "phase3-binary-m4-${TAG}.tar.gz=$destination/phase3-binary-m4-${TAG}.tar.gz" \
-            --asset "Malibu.app.tar.gz=$destination/Malibu.app.tar.gz" \
             --asset "release-toolchain.json=$destination/release-toolchain.json" \
             --asset "coordinator-linux-amd64=$destination/coordinator-linux-amd64" \
             --asset "coordinator-cli-linux-amd64=$destination/coordinator-cli-linux-amd64" \

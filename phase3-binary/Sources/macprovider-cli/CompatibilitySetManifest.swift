@@ -8,13 +8,21 @@ struct CompatibilitySetRollbackPlan: Equatable, Sendable {
     static let supportedActivationCheckpoints = CompatibilitySetCutoverPhase.allCases.map(\.rawValue)
     static let supportedRollbackOrder = [
         "release_resources", "catalog", "updater_rollback", "watchdog", "launchd",
+        "provider_cli",
+    ]
+    static let legacyActivationCheckpoints = supportedActivationCheckpoints + ["malibu_app_activated"]
+    static let legacyRollbackOrder = [
+        "release_resources", "catalog", "updater_rollback", "watchdog", "launchd",
         "malibu_app", "provider_cli",
     ]
 
     let activationCheckpoints: [String]
     let rollbackOrder: [String]
 
-    static func loadValidated(from url: URL) throws -> CompatibilitySetRollbackPlan {
+    static func loadValidated(
+        from url: URL,
+        legacyMalibu: Bool = false
+    ) throws -> CompatibilitySetRollbackPlan {
         let data = try CompatibilitySetManifest.readTrustedRegularFile(url)
         do {
             try AutotuneStrictJSON.rejectDuplicateKeys(data)
@@ -35,7 +43,7 @@ struct CompatibilitySetRollbackPlan: Equatable, Sendable {
         else {
             throw UpdateError.compatibilityManifestInvalid("updater_rollback_plan_fields")
         }
-        guard data == (try canonicalSupportedData()) else {
+        guard data == (try canonicalSupportedData(legacyMalibu: legacyMalibu)) else {
             throw UpdateError.compatibilityManifestInvalid("updater_rollback_plan_noncanonical_or_unsupported")
         }
         return CompatibilitySetRollbackPlan(
@@ -44,12 +52,12 @@ struct CompatibilitySetRollbackPlan: Equatable, Sendable {
         )
     }
 
-    static func canonicalSupportedData() throws -> Data {
+    static func canonicalSupportedData(legacyMalibu: Bool = false) throws -> Data {
         var data = try JSONSerialization.data(withJSONObject: [
-            "activation_checkpoints": supportedActivationCheckpoints,
+            "activation_checkpoints": legacyMalibu ? legacyActivationCheckpoints : supportedActivationCheckpoints,
             "metadata_version": 1,
             "protocol": protocolVersion,
-            "rollback_order": supportedRollbackOrder,
+            "rollback_order": legacyMalibu ? legacyRollbackOrder : supportedRollbackOrder,
             "rollback_scope": "all_activated_local_members",
             "schema_version": schemaVersion,
         ], options: [.sortedKeys, .withoutEscapingSlashes])
@@ -72,10 +80,20 @@ struct CompatibilityArtifactIndex: Equatable, Sendable {
         "coordinator",
         "coordinator_cli",
         "gateway",
-        "malibu_app",
         "pearl_metadata",
         "pearl_metadata_signature",
         "provider_cli",
+    ]
+    static let legacyOptionalRoles = ["malibu_app"]
+    static let legacyMalibuTag = "v1.8.39"
+    static let legacyMalibuCommit = "71eb927a56011f00143b2989cb2bc455b86d4d7c"
+    static let legacyMalibuReleaseIdentities: Set<String> = [
+        "\(legacyMalibuTag)@\(legacyMalibuCommit)",
+        "v1.8.40@18638472fe3e885f3534eeac29ab89b4c7ffdd7a",
+    ]
+    static let legacyMalibuVersionsByReleaseIdentity = [
+        "\(legacyMalibuTag)@\(legacyMalibuCommit)": "1.8.39",
+        "v1.8.40@18638472fe3e885f3534eeac29ab89b4c7ffdd7a": "1.8.40",
     ]
 
     struct Artifact: Equatable, Sendable {
@@ -135,8 +153,13 @@ struct CompatibilityArtifactIndex: Equatable, Sendable {
 
         guard let rawArtifacts = object["artifacts"] as? [String: Any],
               Set(rawArtifacts.keys) == Set(requiredRoles)
+                || Set(rawArtifacts.keys) == Set(requiredRoles + legacyOptionalRoles)
         else {
             throw UpdateError.compatibilityArtifactIndexInvalid("artifact_roles")
+        }
+        if rawArtifacts["malibu_app"] != nil,
+           !legacyMalibuReleaseIdentities.contains("\(tag)@\(commit)") {
+            throw UpdateError.compatibilityArtifactIndexInvalid("legacy_malibu_release_identity")
         }
         let expectedNames = expectedArtifactNames(tag: tag)
         let checksumEntries = try parseChecksums(checksumsText)
@@ -148,7 +171,7 @@ struct CompatibilityArtifactIndex: Equatable, Sendable {
         let releaseNames = Set(releaseAssetNames)
         var artifacts: [String: Artifact] = [:]
         var seenNames = Set<String>()
-        for role in requiredRoles {
+        for role in requiredRoles + legacyOptionalRoles where rawArtifacts[role] != nil {
             guard let row = rawArtifacts[role] as? [String: Any],
                   Set(row.keys) == Set(["name", "sha256"]),
                   let name = row["name"] as? String,
@@ -217,6 +240,10 @@ struct CompatibilitySetManifest: Equatable, Sendable {
     static let localArtifactDirectoryName = "compatibility-set-local"
     static let maximumBytes = 1_048_576
     static let localActivationMembers = [
+        "catalog", "launchd", "provider_cli", "release_resources",
+        "updater_rollback", "watchdog",
+    ]
+    static let legacyLocalActivationMembers = [
         "catalog", "launchd", "malibu_app", "provider_cli", "release_resources",
         "updater_rollback", "watchdog",
     ]
@@ -338,21 +365,45 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         guard let components = signed["components"] as? [String: Any] else {
             throw UpdateError.compatibilityManifestInvalid("components")
         }
-        try requireExactKeys(
-            components,
-            ["catalog", "coordinator_admission", "launchd", "malibu_app", "provider_cli", "updater_rollback", "watchdog"],
-            "components"
-        )
+        let componentKeys = Set(components.keys)
+        let independentKeys = Set([
+            "catalog", "coordinator_admission", "launchd", "provider_cli",
+            "updater_rollback", "watchdog",
+        ])
+        guard componentKeys == independentKeys
+            || componentKeys == independentKeys.union(["malibu_app"])
+        else {
+            throw UpdateError.compatibilityManifestInvalid("components_fields")
+        }
+        let hasLegacyMalibu = components["malibu_app"] != nil
+        if hasLegacyMalibu,
+           !CompatibilityArtifactIndex.legacyMalibuReleaseIdentities.contains("\(tag)@\(commit)") {
+            throw UpdateError.compatibilityManifestInvalid("legacy_malibu_release_identity")
+        }
         let catalog = try validateCatalog(components["catalog"], payloadDirectory: payloadDirectory)
-        try validateMalibu(components["malibu_app"], version: version)
+        if let legacyMalibu = components["malibu_app"] {
+            try validateLegacyMalibuEvidence(
+                legacyMalibu,
+                expectedVersion: CompatibilityArtifactIndex.legacyMalibuVersionsByReleaseIdentity[
+                    "\(tag)@\(commit)"
+                ]!
+            )
+        }
         try validateCLI(components["provider_cli"], version: version)
         try validateLaunchd(components["launchd"], payloadDirectory: payloadDirectory)
         try validateWatchdog(components["watchdog"], payloadDirectory: payloadDirectory)
         try validateAdmission(components["coordinator_admission"], version: version)
-        try validateUpdater(components["updater_rollback"], payloadDirectory: payloadDirectory)
+        try validateUpdater(
+            components["updater_rollback"],
+            payloadDirectory: payloadDirectory,
+            legacyMalibu: hasLegacyMalibu
+        )
         try validateLocalArtifactDirectory(payloadDirectory)
 
-        let transaction = try validateTransaction(signed["transaction"])
+        let transaction = try validateTransaction(
+            signed["transaction"],
+            localMembers: hasLegacyMalibu ? legacyLocalActivationMembers : localActivationMembers
+        )
         return CompatibilitySetManifest(
             compatibilitySetID: compatibilitySetID,
             envelopeSHA256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
@@ -398,12 +449,18 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         return (releaseID, policyVersion)
     }
 
-    private static func validateMalibu(_ raw: Any?, version: String) throws {
+    /// Accepts the historical provider-release Malibu row as non-authoritative
+    /// evidence only. Malibu is not a provider activation member and its
+    /// marketing version is intentionally unrelated to the provider version.
+    private static func validateLegacyMalibuEvidence(
+        _ raw: Any?,
+        expectedVersion: String
+    ) throws {
         guard let value = raw as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("malibu") }
         try requireExactKeys(value, ["activation", "bundle_id", "compatibility_handoff", "minimum_status_reader", "version"], "malibu")
         try requireString(value["activation"], equals: "cli_owned_if_installed", "malibu_activation")
         try requireString(value["bundle_id"], equals: "tech.malibu.app", "malibu_bundle")
-        try requireString(value["version"], equals: version, "malibu_version")
+        try requireString(value["version"], equals: expectedVersion, "malibu_version")
         try requireInteger(value["minimum_status_reader"], in: 1...1, "minimum_status_reader")
         guard let handoff = value["compatibility_handoff"] as? [String: Any] else {
             throw UpdateError.compatibilityManifestInvalid("malibu_handoff")
@@ -488,7 +545,11 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         else { throw UpdateError.compatibilityManifestInvalid("admission_rollout") }
     }
 
-    private static func validateUpdater(_ raw: Any?, payloadDirectory: URL) throws {
+    private static func validateUpdater(
+        _ raw: Any?,
+        payloadDirectory: URL,
+        legacyMalibu: Bool
+    ) throws {
         guard let value = raw as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("updater") }
         try requireExactKeys(value, ["activation", "metadata", "metadata_version", "protocol"], "updater")
         try requireString(value["activation"], equals: "local", "updater_activation")
@@ -503,11 +564,15 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         _ = try CompatibilitySetRollbackPlan.loadValidated(
             from: payloadDirectory.appendingPathComponent(
                 "compatibility-set-local/updater-rollback.json"
-            )
+            ),
+            legacyMalibu: legacyMalibu
         )
     }
 
-    private static func validateTransaction(_ raw: Any?) throws -> (leaseSeconds: Int, readinessSeconds: Int) {
+    private static func validateTransaction(
+        _ raw: Any?,
+        localMembers: [String]
+    ) throws -> (leaseSeconds: Int, readinessSeconds: Int) {
         guard let value = raw as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("transaction") }
         try requireExactKeys(value, ["activation", "autoupdate_scope", "maintenance_lease", "membership", "preflight", "readiness_proof", "rollback"], "transaction")
         try requireString(value["activation"], equals: "crash_recoverable_local_activation_group", "activation")
@@ -516,7 +581,7 @@ struct CompatibilitySetManifest: Equatable, Sendable {
             throw UpdateError.compatibilityManifestInvalid("membership")
         }
         try requireExactKeys(membership, ["local_activation_group", "preserved_state_invariants", "required_external_gates"], "membership")
-        guard membership["local_activation_group"] as? [String] == localActivationMembers,
+        guard membership["local_activation_group"] as? [String] == localMembers,
               membership["required_external_gates"] as? [String] == requiredExternalGates,
               membership["preserved_state_invariants"] as? [String] == preservedStateInvariants
         else { throw UpdateError.compatibilityManifestInvalid("membership_classification") }
@@ -537,7 +602,7 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         guard let rollback = value["rollback"] as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("rollback") }
         try requireExactKeys(rollback, ["members", "mode"], "rollback")
         try requireString(rollback["mode"], equals: "local_activation_group", "rollback_mode")
-        guard rollback["members"] as? [String] == localActivationMembers else {
+        guard rollback["members"] as? [String] == localMembers else {
             throw UpdateError.compatibilityManifestInvalid("rollback_members")
         }
         return (leaseSeconds, readinessSeconds)

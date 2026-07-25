@@ -416,8 +416,8 @@ if [ "$(cat "$HOME_DIR/Library/LaunchAgents/live.streamvc.macprovider.plist")" !
   echo "AC-19 FAIL: external compatibility-set members were not restored" >&2
   exit 1
 fi
-if [ "$(cat "$HOME_DIR/Applications/Malibu.app/Contents/MacOS/Malibu")" != $'old-app' ]; then
-  echo "AC-19 FAIL: Malibu.app was not restored with the prior compatibility set" >&2
+if [ "$(cat "$HOME_DIR/Applications/Malibu.app/Contents/MacOS/Malibu")" != $'new-app' ]; then
+  echo "AC-19 FAIL: provider rollback mutated independently managed Malibu.app" >&2
   exit 1
 fi
 if [ -e "$STATE_ROOT/pending.json" ] || [ -e "$BACKUP" ] || \

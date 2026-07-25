@@ -4,14 +4,9 @@
   "additionalProperties": false,
   "properties": {
     "activation_checkpoints": {
-      "const": [
-        "owned_resources_removed",
-        "owned_resources_activated",
-        "watchdog_script_activated",
-        "provider_plist_activated",
-        "watchdog_plist_activated",
-        "binary_activated",
-        "malibu_app_activated"
+      "oneOf": [
+        {"const": ["owned_resources_removed", "owned_resources_activated", "watchdog_script_activated", "provider_plist_activated", "watchdog_plist_activated", "binary_activated"]},
+        {"const": ["owned_resources_removed", "owned_resources_activated", "watchdog_script_activated", "provider_plist_activated", "watchdog_plist_activated", "binary_activated", "malibu_app_activated"]}
       ]
     },
     "metadata_version": {
@@ -21,14 +16,9 @@
       "const": "macprovider.compatibility-set-transaction.v1"
     },
     "rollback_order": {
-      "const": [
-        "release_resources",
-        "catalog",
-        "updater_rollback",
-        "watchdog",
-        "launchd",
-        "malibu_app",
-        "provider_cli"
+      "oneOf": [
+        {"const": ["release_resources", "catalog", "updater_rollback", "watchdog", "launchd", "provider_cli"]},
+        {"const": ["release_resources", "catalog", "updater_rollback", "watchdog", "launchd", "malibu_app", "provider_cli"]}
       ]
     },
     "rollback_scope": {

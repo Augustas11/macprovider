@@ -53,23 +53,26 @@ repo.
 
 | Path | What it updates |
 |---|---|
-| **CLI compatibility-set update** | One signed transaction containing Malibu.app, provider CLI, launchd, watchdog, catalog/keyring, coordinator admission identity, and rollback metadata |
+| **Provider compatibility-set update** | Provider CLI, launchd, watchdog, catalog/keyring, coordinator admission identity, and provider rollback metadata only |
+| **Malibu app-only installer** | Malibu.app plus its signed envelope/index and independently authorized app rollback state only |
 
-Malibu has no independent updater. `auto_update_enabled: false` therefore gates
-the complete compatibility set rather than only the provider binary.
+Malibu and the provider have separate signed release and rollback boundaries.
+`auto_update_enabled: false` gates scheduled provider updates only; it neither
+authorizes nor suppresses a separately approved Malibu app installation.
 
 ### Historical download host
 
 Pearl VPS nginx static host. DNS: `download.malibu.tech` **A** → `159.223.165.194`.
 
-The former Pearl appcast/`latest.dmg` publication is retired. GitHub's immutable
-release plus the signed compatibility artifact index is the sole update source.
+The former Pearl appcast/`latest.dmg` publication is retired. Provider releases use
+their immutable GitHub release plus provider compatibility artifact index; Malibu uses
+its separate immutable `malibu-v*` release envelope/index and authenticated installer.
 
 ### SPEC-025 phases vs this file
 
 | SPEC-025 §11 | Status |
 |---|---|
 | P2 signing / `.dmg` | Done |
-| P3 Sparkle | Superseded by issue #585 CLI-owned compatibility-set update |
+| P3 Sparkle | Superseded by issue #585 signed app-only installer transaction |
 | P4 landing page | **Partial** — download endpoint live; `malibu.tech/host` HTML redesign + troubleshoot page not started |
 | P5+ WalletConnect, Homebrew | Backlog |

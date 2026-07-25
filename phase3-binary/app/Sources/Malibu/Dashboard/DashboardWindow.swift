@@ -5,10 +5,16 @@ import SwiftUI
 enum DashboardWindow {
     static func make(
         agent: MalibuAgent,
+        signedProviderVersion: String?,
+        onRetryMigration: @escaping () -> Void,
+        onRepairProvider: @escaping () -> Void,
         onExportDiagnostics: @escaping () -> Void
     ) -> NSWindow {
         let hosting = NSHostingController(rootView: DashboardView(
             agent: agent,
+            signedProviderVersion: signedProviderVersion,
+            onRetryMigration: onRetryMigration,
+            onRepairProvider: onRepairProvider,
             onExportDiagnostics: onExportDiagnostics
         ))
         let window = NSWindow(contentViewController: hosting)
@@ -23,6 +29,9 @@ enum DashboardWindow {
 
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
+    let signedProviderVersion: String?
+    let onRetryMigration: () -> Void
+    let onRepairProvider: () -> Void
     let onExportDiagnostics: () -> Void
 
     var body: some View {
@@ -148,6 +157,24 @@ private struct DashboardView: View {
                         Text(status)
                             .font(.caption)
                             .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
+                    }
+                    if agent.snapshot.migrationRepairObservationOnly
+                        || agent.snapshot.releaseAuthorityBlocked {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(agent.snapshot.lastError ?? "Provider repair is required before Malibu can control or describe network service.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                            if agent.snapshot.migrationRepairObservationOnly {
+                                Button("Retry migration") { onRetryMigration() }
+                            }
+                            if agent.snapshot.releaseAuthorityBlocked,
+                               let signedProviderVersion {
+                                Button("Repair signed provider CLI v\(signedProviderVersion)") {
+                                    onRepairProvider()
+                                }
+                            }
+                        }
                     }
                     Button(agent.snapshot.cliUpdateInProgress ? "Updating compatibility set…" : "Update compatibility set") {
                         Task { await agent.updateCLINow() }

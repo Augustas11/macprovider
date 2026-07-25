@@ -11,6 +11,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         await controller.launch()
 
         XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.pinnedInstallVersions, ["1.8.40"])
         XCTAssertEqual(harness.cliImportRuns, 1)
         XCTAssertEqual(harness.monitorRuns, 1)
         XCTAssertEqual(harness.loginItemRegistrations, 1)
@@ -197,6 +198,30 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
+    func testHealthyExistingInstallEntersObservationOnlyModeAfterMigrationFailure() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.migrationObservationAvailable = true
+        harness.cliImportErrors = [ProviderConfig.SaveError.importKeychainVerificationFailed]
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertEqual(harness.migrationObservationRuns, 1)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(
+            controller.stage,
+            .migrationRepairRequired(
+                model: harness.configModel,
+                message: "The imported provider token could not be verified in Keychain."
+            )
+        )
+    }
+
     func testLaunchMonitorFailureSurfacesProviderStartFailure() async {
         let harness = Harness()
         harness.monitorHealthy = false
@@ -238,18 +263,129 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
+    func testReleaseAuthorityFailureAfterInstallPreventsCredentialAndProviderMutation() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(
+            dependencies: harness.dependencies(),
+            authorizeInstalledProvider: {
+                throw MalibuReleaseRuntimeAuthorization.Error.providerDigestMismatch
+            }
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.cliImportRuns, 0)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "installedProviderAuthority")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(
+                message,
+                "The installed provider CLI does not match the signed Malibu release authority."
+            )
+        } else {
+            XCTFail("expected installedProviderAuthority failure")
+        }
+    }
+
+    func testBootstrapAuthorityFailurePreventsInstallerMutation() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(
+            dependencies: harness.dependencies(),
+            authorizeBootstrapTarget: {
+                throw MalibuReleaseRuntimeAuthorization.Error.releaseContract("bootstrap expired")
+            }
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(harness.cliImportRuns, 0)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        if case let .failed(stage, retryable, _) = controller.stage {
+            XCTAssertEqual(stage, "releaseAuthority")
+            XCTAssertTrue(retryable)
+        } else {
+            XCTFail("expected pre-install releaseAuthority failure")
+        }
+    }
+
+    func testExistingInstallReleaseAuthorityFailurePreventsImportAndAttachment() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        let controller = LaunchProviderController(
+            dependencies: harness.dependencies(),
+            authorizeInstalledProvider: {
+                throw MalibuReleaseRuntimeAuthorization.Error.compatibilitySetMismatch
+            }
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(harness.cliImportRuns, 0)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        if case let .failed(stage, _, _) = controller.stage {
+            XCTAssertEqual(stage, "installedProviderAuthority")
+        } else {
+            XCTFail("expected installedProviderAuthority failure")
+        }
+    }
+
+    func testRetryRepairsInvalidHealthyProviderWithSignedPinnedCLI() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
+        var authorizationAttempts = 0
+        let controller = LaunchProviderController(
+            dependencies: harness.dependencies(),
+            authorizeBootstrapTarget: { "1.8.40" },
+            authorizeInstalledProvider: {
+                authorizationAttempts += 1
+                if authorizationAttempts == 1 {
+                    throw MalibuReleaseRuntimeAuthorization.Error.compatibilitySetMismatch
+                }
+            }
+        )
+
+        await controller.launch()
+        if case let .failed(stage, retryable, _) = controller.stage {
+            XCTAssertEqual(stage, "installedProviderAuthority")
+            XCTAssertTrue(retryable)
+        } else {
+            XCTFail("expected installed-provider authority failure")
+        }
+
+        await controller.retry()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.pinnedInstallVersions, ["1.8.40"])
+        XCTAssertEqual(authorizationAttempts, 2)
+        XCTAssertEqual(harness.releaseAuthorityClears, 1)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
     private final class Harness {
         var localInstallSucceeded = false
         var localInstallSucceededAfterInstall = false
         var markLocalInstallSucceededAfterInstall = true
         var cliInstallRuns = 0
+        var pinnedInstallVersions: [String] = []
         var cliImportRuns = 0
         var monitorRuns = 0
         var loginItemRegistrations = 0
         var startAgentRuns = 0
+        var migrationObservationRuns = 0
         var importRetryWaits = 0
+        var releaseAuthorityClears = 0
         var monitorHealthy = true
         var attachHealthy = true
+        var migrationObservationAvailable = false
         var appIdentityConfigured = false
         var providerStartFailureMessage: String?
         var cliInstallError: Error?
@@ -265,8 +401,9 @@ final class LaunchProviderControllerTests: XCTestCase {
                 registerLoginItem: {
                     self.loginItemRegistrations += 1
                 },
-                runCLIInstall: { onLogLine in
+                runCLIInstall: { pinnedVersion, onLogLine in
                     self.cliInstallRuns += 1
+                    self.pinnedInstallVersions.append(pinnedVersion)
                     if let error = self.cliInstallError { throw error }
                     self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
                     onLogLine("install.sh finished")
@@ -286,11 +423,18 @@ final class LaunchProviderControllerTests: XCTestCase {
                     self.startAgentRuns += 1
                     return self.attachHealthy
                 },
+                observeInstalledProviderDuringMigrationRepair: {
+                    self.migrationObservationRuns += 1
+                    return self.migrationObservationAvailable
+                },
                 readConfigModel: { self.configModel },
                 providerStartFailure: { self.providerStartFailureMessage },
                 appIdentityConfigured: { self.appIdentityConfigured },
                 waitBeforeImportRetry: {
                     self.importRetryWaits += 1
+                },
+                clearProviderReleaseAuthorityBlock: {
+                    self.releaseAuthorityClears += 1
                 }
             )
         }

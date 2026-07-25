@@ -46,8 +46,38 @@ final class MalibuAgent: ObservableObject {
     private var credentialRepairTask: Task<Void, Never>?
     private var admissionIdentityRecoveryTask: Task<Void, Never>?
     private let latestReleaseTTL: TimeInterval = 3600
+    private let authorizeProviderMutation: @MainActor () throws -> Void
 
-    init() {
+    struct MigrationRepairObservationDependencies: Sendable {
+        var configExists: @MainActor @Sendable () -> Bool
+        var providerID: @MainActor @Sendable () -> String?
+        var httpPort: @MainActor @Sendable () -> Int?
+        var launchdEvidenceExists: @MainActor @Sendable () -> Bool
+        var launchdServiceOwnsListener: @MainActor @Sendable (Int) -> Bool
+        var fetchHealth: @Sendable (Int) async -> InstalledProviderMonitor.HealthSnapshot?
+        var pollIntervalNanoseconds: UInt64 = 15_000_000_000
+
+        static let live = MigrationRepairObservationDependencies(
+            configExists: {
+                FileManager.default.isReadableFile(atPath: ProviderPaths.current.configFile.path)
+            },
+            providerID: { ProviderConfig.readProviderID() },
+            httpPort: { ProviderConfig.readHTTPPort() },
+            launchdEvidenceExists: {
+                guard let pid = InstalledProviderMonitor.launchdServicePID() else { return false }
+                return ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid: pid_t(pid))
+            },
+            launchdServiceOwnsListener: { port in
+                InstalledProviderMonitor.launchdServiceOwnsListener(port: port)
+            },
+            fetchHealth: { port in
+                await InstalledProviderMonitor.fetchHealth(port: port)
+            }
+        )
+    }
+
+    init(authorizeProviderMutation: @escaping @MainActor () throws -> Void = {}) {
+        self.authorizeProviderMutation = authorizeProviderMutation
         thermalMonitor.$state
             .sink { [weak self] state in
                 self?.snapshot.thermalState = state
@@ -58,8 +88,49 @@ final class MalibuAgent: ObservableObject {
 
     // MARK: - Lifecycle
 
+    func blockProviderAccessForReleaseAuthority(_ reason: String) async {
+        healthPollTask?.cancel()
+        healthPollTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        metricsPoller?.cancel()
+        metricsPoller = nil
+        eventStreamTask?.cancel()
+        eventStreamTask = nil
+        await control?.close()
+        control = nil
+        monitorsLaunchdProvider = false
+        providerStartFailure = reason
+        snapshot.releaseAuthorityBlocked = true
+        snapshot.state = .error
+        snapshot.lastError = reason
+    }
+
+    /// Called only after the exact installed provider tuple has passed release
+    /// authorization again. Preserve unrelated snapshot state, but retire the
+    /// authority-block error that prevented attachment to the repaired CLI.
+    func clearProviderReleaseAuthorityBlock() {
+        guard snapshot.releaseAuthorityBlocked else { return }
+        snapshot.releaseAuthorityBlocked = false
+        providerStartFailure = nil
+        if snapshot.state == .error {
+            snapshot.state = .idle
+            snapshot.lastError = nil
+        }
+    }
+
     func start() async {
         guard !isShuttingDown else { return }
+        guard !snapshot.releaseAuthorityBlocked else { return }
+
+        if snapshot.migrationRepairObservationOnly {
+            healthPollTask?.cancel()
+            healthPollTask = nil
+            monitorsLaunchdProvider = false
+            let thermalState = thermalMonitor.state
+            snapshot = .empty
+            snapshot.thermalState = thermalState
+        }
 
         guard ProviderConfig.readProviderID() != nil else {
             snapshot.state = .error
@@ -110,6 +181,8 @@ final class MalibuAgent: ObservableObject {
     // Do not flip state until the CLI persists and acknowledges the lifecycle
     // transition. Malibu requests the transaction but never owns pause state.
     func pause() async {
+        guard await providerMutationIsAuthorized() else { return }
+        guard !snapshot.migrationRepairObservationOnly else { return }
         guard let control else {
             snapshot.lastError = "Provider control is unavailable. Malibu will retry the local connection."
             return
@@ -123,6 +196,8 @@ final class MalibuAgent: ObservableObject {
     }
 
     func resume() async {
+        guard await providerMutationIsAuthorized() else { return }
+        guard !snapshot.migrationRepairObservationOnly else { return }
         guard let control else {
             snapshot.lastError = "Provider control is unavailable. Malibu will retry the local connection."
             return
@@ -135,6 +210,8 @@ final class MalibuAgent: ObservableObject {
     }
 
     func updateCLINow() async {
+        guard await providerMutationIsAuthorized() else { return }
+        guard !snapshot.migrationRepairObservationOnly else { return }
         guard !snapshot.cliUpdateInProgress else { return }
         guard AgentSnapshotPresenter.updateAvailable(snapshot) else { return }
         cliUpdateTask?.cancel()
@@ -167,7 +244,9 @@ final class MalibuAgent: ObservableObject {
     }
 
     func repairProviderCredential() async {
+        guard await providerMutationIsAuthorized() else { return }
         guard !isShuttingDown,
+              !snapshot.migrationRepairObservationOnly,
               AgentSnapshotPresenter.canRepairCredential(snapshot),
               let expectedProviderID = snapshot.localProviderID,
               ProviderConfig.readProviderID() == expectedProviderID else { return }
@@ -206,7 +285,9 @@ final class MalibuAgent: ObservableObject {
     }
 
     func repairAdmissionIdentity() async {
+        guard await providerMutationIsAuthorized() else { return }
         guard !isShuttingDown,
+              !snapshot.migrationRepairObservationOnly,
               AgentSnapshotPresenter.canRepairAdmissionIdentity(snapshot) else { return }
         let expectedProviderID = snapshot.localProviderID
         if let configError = AgentSnapshotPresenter.admissionIdentityRecoveryConfigError(
@@ -301,7 +382,99 @@ final class MalibuAgent: ObservableObject {
         snapshot.thermalState = thermalMonitor.state
     }
 
+    private func providerMutationIsAuthorized() async -> Bool {
+        guard !snapshot.releaseAuthorityBlocked else { return false }
+        do {
+            try authorizeProviderMutation()
+            return true
+        } catch {
+            await blockProviderAccessForReleaseAuthority(error.localizedDescription)
+            return false
+        }
+    }
+
     // MARK: - Private
+
+    /// Observe only the loopback health endpoint after legacy migration fails.
+    /// This deliberately does not read `/v1/status`, resolve credential
+    /// custody, connect the control socket, tail logs, register markers, or
+    /// start/stop/update the provider. Local readiness proves only that a model
+    /// process is responding; coordinator and buyer-serving state remain
+    /// unknown until migration succeeds and normal monitoring starts.
+    @discardableResult
+    func observeInstalledProviderDuringMigrationRepair(
+        dependencies: MigrationRepairObservationDependencies = .live,
+        failureReason: String? = nil
+    ) async -> Bool {
+        guard !isShuttingDown,
+              child == nil,
+              control == nil,
+              metricsPoller == nil,
+              eventStreamTask == nil,
+              reconnectTask == nil,
+              healthPollTask == nil,
+              cliUpdateTask == nil,
+              credentialRepairTask == nil,
+              admissionIdentityRecoveryTask == nil,
+              providerLogTail == nil,
+              !monitorsLaunchdProvider,
+              dependencies.configExists(),
+              let providerID = dependencies.providerID(),
+              !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let port = dependencies.httpPort(),
+              (1...65_535).contains(port),
+              dependencies.launchdEvidenceExists(),
+              dependencies.launchdServiceOwnsListener(port),
+              let health = await dependencies.fetchHealth(port),
+              health.ready else {
+            return false
+        }
+
+        let thermalState = thermalMonitor.state
+        snapshot = .empty
+        snapshot.thermalState = thermalState
+        snapshot.migrationRepairObservationOnly = true
+        snapshot.state = .reconnecting
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.coordinatorConnected = nil
+        let trimmedFailure = failureReason?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedFailure, !trimmedFailure.isEmpty {
+            snapshot.lastError =
+                "\(trimmedFailure) Provider is responding locally, but coordinator connection and buyer-serving status remain unknown until migration is repaired."
+        } else {
+            snapshot.lastError =
+                "Coordinator connection and buyer-serving status unknown until migration is repaired."
+        }
+        applyMigrationRepairHealthSnapshot(health)
+        monitorsLaunchdProvider = true
+        startMigrationRepairHealthPolling(
+            port: port,
+            launchdEvidenceExists: dependencies.launchdEvidenceExists,
+            launchdServiceOwnsListener: dependencies.launchdServiceOwnsListener,
+            fetchHealth: dependencies.fetchHealth,
+            pollIntervalNanoseconds: dependencies.pollIntervalNanoseconds
+        )
+        return true
+    }
+
+    /// Preserve a migration failure when the existing provider cannot satisfy
+    /// the minimum observation evidence gates. The provider is not declared
+    /// stopped: its local and buyer-serving state remain unknown, and every
+    /// provider mutation remains disabled until migration repair succeeds.
+    func recordUnverifiedMigrationRepairFailure(_ reason: String) {
+        let thermalState = thermalMonitor.state
+        snapshot = .empty
+        snapshot.thermalState = thermalState
+        snapshot.migrationRepairObservationOnly = true
+        snapshot.state = .error
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.coordinatorConnected = nil
+        let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        let failure = trimmedReason.isEmpty ? "Provider config migration failed." : trimmedReason
+        snapshot.lastError =
+            "\(failure) Local provider could not be verified; migration repair is still required."
+        monitorsLaunchdProvider = false
+    }
 
     /// Attach to an existing launchd-managed provider (CLI install track).
     /// Returns true when local /v1/health is reachable on the configured port.
@@ -309,6 +482,7 @@ final class MalibuAgent: ObservableObject {
     func monitorInstalledProviderIfPresent(
         timeout: TimeInterval = MalibuOnboardingTimeouts.firstServingFrameSec
     ) async -> Bool {
+        guard !snapshot.migrationRepairObservationOnly else { return false }
         guard let port = ProviderConfig.readHTTPPort(),
               ProviderConfig.readProviderID() != nil else {
             return false
@@ -537,6 +711,44 @@ final class MalibuAgent: ObservableObject {
         return health.ready
     }
 
+    private func applyMigrationRepairHealthSnapshot(
+        _ health: InstalledProviderMonitor.HealthSnapshot
+    ) {
+        if let model = health.model, !model.isEmpty {
+            snapshot.currentModelID = model
+        }
+        snapshot.requestsServedAllTime = health.requestsTotal
+        snapshot.requestsServedToday = health.requestsToday
+        snapshot.inputTokensToday = health.inputTokensToday
+        snapshot.outputTokensToday = health.outputTokensToday
+        snapshot.inputTokensAllTime = health.inputTokensAllTime
+        snapshot.outputTokensAllTime = health.outputTokensAllTime
+        snapshot.uptimeSec = health.uptimeSeconds
+        snapshot.restartCount = health.restartCount
+    }
+
+    private func clearMigrationRepairAttributedProviderSnapshot() {
+        snapshot.currentModelID = nil
+        snapshot.requestsServedAllTime = nil
+        snapshot.requestsServedToday = nil
+        snapshot.inputTokensToday = nil
+        snapshot.outputTokensToday = nil
+        snapshot.inputTokensAllTime = nil
+        snapshot.outputTokensAllTime = nil
+        snapshot.uptimeSec = nil
+        snapshot.restartCount = nil
+    }
+
+    private func markMigrationRepairOwnershipUnavailable() {
+        clearMigrationRepairAttributedProviderSnapshot()
+        snapshot.state = .error
+        snapshot.networkState = "buyer_serving_unknown"
+        snapshot.coordinatorConnected = nil
+        snapshot.lastError =
+            "Local provider ownership could not be verified; migration repair is still required."
+        monitorsLaunchdProvider = false
+    }
+
     /// Serving requires the CLI's coordinator-authoritative buyer-serving
     /// state. A WebSocket connection proves transport only, not admission.
     private func reconcileNetworkState(localReady: Bool) {
@@ -656,6 +868,53 @@ final class MalibuAgent: ObservableObject {
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+
+    private func startMigrationRepairHealthPolling(
+        port: Int,
+        launchdEvidenceExists: @escaping @MainActor @Sendable () -> Bool,
+        launchdServiceOwnsListener: @escaping @MainActor @Sendable (Int) -> Bool,
+        fetchHealth: @escaping @Sendable (Int) async -> InstalledProviderMonitor.HealthSnapshot?,
+        pollIntervalNanoseconds: UInt64
+    ) {
+        healthPollTask?.cancel()
+        let migrationFailureMessage = snapshot.lastError
+        healthPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self, self.snapshot.migrationRepairObservationOnly else { return }
+                guard launchdEvidenceExists(), launchdServiceOwnsListener(port) else {
+                    self.markMigrationRepairOwnershipUnavailable()
+                    return
+                }
+                let health = await fetchHealth(port)
+                guard launchdEvidenceExists(), launchdServiceOwnsListener(port) else {
+                    self.markMigrationRepairOwnershipUnavailable()
+                    return
+                }
+                if let health, health.ready {
+                    self.applyMigrationRepairHealthSnapshot(health)
+                    self.snapshot.state = .reconnecting
+                    self.snapshot.networkState = "buyer_serving_unknown"
+                    self.snapshot.coordinatorConnected = nil
+                    self.snapshot.lastError = migrationFailureMessage
+                        ?? "Coordinator connection and buyer-serving status unknown until migration is repaired."
+                } else {
+                    self.snapshot.state = .reconnecting
+                    self.snapshot.networkState = "buyer_serving_unknown"
+                    self.snapshot.coordinatorConnected = nil
+                    let healthFailure =
+                        "Local provider health is unavailable; migration repair is still required."
+                    self.snapshot.lastError = migrationFailureMessage.map {
+                        "\($0) \(healthFailure)"
+                    } ?? healthFailure
                 }
             }
         }

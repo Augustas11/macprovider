@@ -5,22 +5,25 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_file="$repo_root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 app_project_file="$repo_root/phase3-binary/app/project.yml"
 release_builds_file="$repo_root/phase3-binary/app/release-builds.tsv"
-expected_version="${1:-}"
-expected_version="${expected_version#v}"
+expected_cli_version=""
+expected_app_version=""
+case "${1:-}" in
+  malibu-v*) expected_app_version="${1#malibu-v}" ;;
+  v*|[0-9]*) expected_cli_version="${1#v}" ;;
+  "") ;;
+  *)
+    echo "release tag must be v<CLI SemVer> or malibu-v<app SemVer>" >&2
+    exit 1
+    ;;
+esac
+if [[ -n "${2:-}" ]]; then
+  expected_app_version="${2#malibu-v}"
+fi
 
 if [[ ! -f "$source_file" ]]; then
   echo "missing CLI version source: $source_file" >&2
   exit 1
 fi
-if [[ ! -f "$app_project_file" ]]; then
-  echo "missing Malibu app project: $app_project_file" >&2
-  exit 1
-fi
-if [[ ! -f "$release_builds_file" ]]; then
-  echo "missing Malibu release-build ledger: $release_builds_file" >&2
-  exit 1
-fi
-
 binary_definition_count="$(awk '/^[[:space:]]*static let binaryVersion[[:space:]]*=/ { count++ } END { print count + 0 }' "$source_file")"
 if [[ "$binary_definition_count" -ne 1 ]]; then
   echo "CoordinatorClient.swift must contain exactly one binaryVersion definition (found $binary_definition_count)" >&2
@@ -39,42 +42,57 @@ if [[ ! "$binary_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   exit 1
 fi
 
-if [[ -n "$expected_version" && "$expected_version" != "$binary_version" ]]; then
-  echo "release tag v$expected_version does not match CLI binary version $binary_version" >&2
+if [[ -n "$expected_cli_version" && "$expected_cli_version" != "$binary_version" ]]; then
+  echo "release tag v$expected_cli_version does not match CLI binary version $binary_version" >&2
   exit 1
 fi
 
-app_version_definition_count="$(awk '/^[[:space:]]*MARKETING_VERSION[[:space:]]*:/ { count++ } END { print count + 0 }' "$app_project_file")"
-if [[ "$app_version_definition_count" -ne 1 ]]; then
-  echo "project.yml must contain exactly one MARKETING_VERSION definition (found $app_version_definition_count)" >&2
-  exit 1
-fi
-app_version_lines="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION[[:space:]]*:[[:space:]]*"([^"]+)".*$/\1/p' "$app_project_file")"
-app_version_count="$(printf '%s\n' "$app_version_lines" | awk 'NF { count++ } END { print count + 0 }')"
-if [[ "$app_version_count" -ne 1 ]]; then
-  echo "project.yml MARKETING_VERSION must be one quoted value" >&2
-  exit 1
-fi
-app_version="$app_version_lines"
-if [[ "$app_version" != "$binary_version" ]]; then
-  echo "Malibu app marketing version is $app_version; expected $binary_version" >&2
-  exit 1
-fi
+app_summary="Malibu was not part of this provider-only check"
+if [[ -n "$expected_app_version" ]]; then
+  if [[ ! -f "$app_project_file" ]]; then
+    echo "missing Malibu app project: $app_project_file" >&2
+    exit 1
+  fi
+  if [[ ! -f "$release_builds_file" ]]; then
+    echo "missing Malibu release-build ledger: $release_builds_file" >&2
+    exit 1
+  fi
 
-app_build_definition_count="$(awk '/^[[:space:]]*CURRENT_PROJECT_VERSION[[:space:]]*:/ { count++ } END { print count + 0 }' "$app_project_file")"
-if [[ "$app_build_definition_count" -ne 1 ]]; then
-  echo "project.yml must contain exactly one numeric CURRENT_PROJECT_VERSION definition (found $app_build_definition_count)" >&2
-  exit 1
-fi
-app_build_lines="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION[[:space:]]*:[[:space:]]*"?([0-9]+)"?.*$/\1/p' "$app_project_file")"
-app_build_count="$(printf '%s\n' "$app_build_lines" | awk 'NF { count++ } END { print count + 0 }')"
-if [[ "$app_build_count" -ne 1 ]]; then
-  echo "project.yml CURRENT_PROJECT_VERSION must be one numeric value" >&2
-  exit 1
-fi
-app_build="$app_build_lines"
+  app_version_definition_count="$(awk '/^[[:space:]]*MARKETING_VERSION[[:space:]]*:/ { count++ } END { print count + 0 }' "$app_project_file")"
+  if [[ "$app_version_definition_count" -ne 1 ]]; then
+    echo "project.yml must contain exactly one MARKETING_VERSION definition (found $app_version_definition_count)" >&2
+    exit 1
+  fi
+  app_version_lines="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION[[:space:]]*:[[:space:]]*"([^"]+)".*$/\1/p' "$app_project_file")"
+  app_version_count="$(printf '%s\n' "$app_version_lines" | awk 'NF { count++ } END { print count + 0 }')"
+  if [[ "$app_version_count" -ne 1 ]]; then
+    echo "project.yml MARKETING_VERSION must be one quoted value" >&2
+    exit 1
+  fi
+  app_version="$app_version_lines"
+  if [[ ! "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Malibu app marketing version is not semver: $app_version" >&2
+    exit 1
+  fi
+  if [[ "$expected_app_version" != "$app_version" ]]; then
+    echo "Malibu release tag malibu-v$expected_app_version does not match app marketing version $app_version" >&2
+    exit 1
+  fi
 
-python3 - "$release_builds_file" "$binary_version" "$app_build" <<'PY'
+  app_build_definition_count="$(awk '/^[[:space:]]*CURRENT_PROJECT_VERSION[[:space:]]*:/ { count++ } END { print count + 0 }' "$app_project_file")"
+  if [[ "$app_build_definition_count" -ne 1 ]]; then
+    echo "project.yml must contain exactly one numeric CURRENT_PROJECT_VERSION definition (found $app_build_definition_count)" >&2
+    exit 1
+  fi
+  app_build_lines="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION[[:space:]]*:[[:space:]]*"?([0-9]+)"?.*$/\1/p' "$app_project_file")"
+  app_build_count="$(printf '%s\n' "$app_build_lines" | awk 'NF { count++ } END { print count + 0 }')"
+  if [[ "$app_build_count" -ne 1 ]]; then
+    echo "project.yml CURRENT_PROJECT_VERSION must be one numeric value" >&2
+    exit 1
+  fi
+  app_build="$app_build_lines"
+
+  python3 - "$release_builds_file" "$app_version" "$app_build" <<'PY'
 import re
 import sys
 
@@ -116,6 +134,8 @@ if str(matches[0][2]) != expected_build:
         f"{expected_version} build {matches[0][2]}"
     )
 PY
+  app_summary="Malibu independently validates at $app_version build $app_build"
+fi
 
 config_files=(
   "$repo_root/phase4-coordinator/dist/coordinator.yaml"
@@ -148,4 +168,4 @@ for config_file in "${config_files[@]}"; do
   fi
 done
 
-echo "CLI, Malibu app, and coordinator advertised versions are aligned at $binary_version"
+echo "CLI and coordinator advertised versions are aligned at $binary_version; $app_summary"

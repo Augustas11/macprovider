@@ -2,6 +2,39 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Augustas11/macprovider/schemas/compatibility-artifact-index-v1.schema.json",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "artifacts": { "required": ["malibu_app"] }
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "commit": { "const": "71eb927a56011f00143b2989cb2bc455b86d4d7c" },
+              "compatibility_set_id": {
+                "const": "Augustas11/macprovider:v1.8.39@71eb927a56011f00143b2989cb2bc455b86d4d7c"
+              },
+              "repository": { "const": "Augustas11/macprovider" },
+              "tag": { "const": "v1.8.39" }
+            }
+          },
+          {
+            "properties": {
+              "commit": { "const": "18638472fe3e885f3534eeac29ab89b4c7ffdd7a" },
+              "compatibility_set_id": {
+                "const": "Augustas11/macprovider:v1.8.40@18638472fe3e885f3534eeac29ab89b4c7ffdd7a"
+              },
+              "repository": { "const": "Augustas11/macprovider" },
+              "tag": { "const": "v1.8.40" }
+            }
+          }
+        ]
+      }
+    }
+  ],
   "properties": {
     "artifacts": {
       "additionalProperties": false,
@@ -25,7 +58,7 @@
         "catalog_candidates", "catalog_candidates_signature", "catalog_demand",
         "catalog_demand_signature", "catalog_manifest", "catalog_trusted_keys",
         "compatibility_manifest", "coordinator", "coordinator_cli", "gateway",
-        "malibu_app", "pearl_metadata", "pearl_metadata_signature", "provider_cli"
+        "pearl_metadata", "pearl_metadata_signature", "provider_cli"
       ],
       "type": "object"
     },

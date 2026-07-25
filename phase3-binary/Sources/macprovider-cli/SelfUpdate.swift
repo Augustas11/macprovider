@@ -42,7 +42,6 @@ struct SelfUpdate {
     private let markerStore: AutoUpdateMarkerStore
     private let lifecycleStateStore: ProviderLifecycleStateStore
     private let lifecycleLeaseStore: ProviderLifecycleLeaseStore
-    private let malibuBundleStager: ((URL, URL, CompatibilitySetManifest, URL) throws -> URL)?
     private let stagedCLIValidator: ((URL) throws -> Void)?
 
     init(
@@ -58,7 +57,6 @@ struct SelfUpdate {
         providerID: String? = nil,
         lifecycleStateStore: ProviderLifecycleStateStore = ProviderLifecycleStateStore(),
         lifecycleLeaseStore: ProviderLifecycleLeaseStore = ProviderLifecycleLeaseStore(),
-        malibuBundleStager: ((URL, URL, CompatibilitySetManifest, URL) throws -> URL)? = nil,
         stagedCLIValidator: ((URL) throws -> Void)? = nil
     ) {
         self.currentVersion = currentVersion
@@ -73,7 +71,6 @@ struct SelfUpdate {
         self.providerID = providerID
         self.lifecycleStateStore = lifecycleStateStore
         self.lifecycleLeaseStore = lifecycleLeaseStore
-        self.malibuBundleStager = malibuBundleStager
         self.stagedCLIValidator = stagedCLIValidator
     }
 
@@ -97,7 +94,6 @@ struct SelfUpdate {
         try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
-            stagedMalibuApp: prepared.stagedMalibuApp,
             targetVersion: latest,
             compatibilityManifest: prepared.compatibilityManifest
         )
@@ -113,7 +109,6 @@ struct SelfUpdate {
         try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
-            stagedMalibuApp: prepared.stagedMalibuApp,
             targetVersion: target,
             compatibilityManifest: prepared.compatibilityManifest
         )
@@ -144,7 +139,6 @@ struct SelfUpdate {
         try requireFreshCoordinatorCompatibilityAdmission(prepared.compatibilityManifest)
         try await applyValidatedUpdate(
             newBinary: prepared.newBinary,
-            stagedMalibuApp: prepared.stagedMalibuApp,
             targetVersion: target,
             compatibilityManifest: prepared.compatibilityManifest
         )
@@ -162,9 +156,7 @@ struct SelfUpdate {
     func prepareValidatedUpdate(from release: GitHubRelease) async throws -> PreparedSelfUpdate {
         let targetVersion = try Self.validateReleaseTag(release.tagName)
         let canonicalTarballName = "macprovider-cli-\(release.tagName)-darwin-arm64.tar.gz"
-        let canonicalMalibuDMGName = "Malibu-\(release.tagName).dmg"
         guard let tarball = release.assets.first(where: { $0.name == canonicalTarballName }),
-              let malibuDMG = release.assets.first(where: { $0.name == canonicalMalibuDMGName }),
               let artifactIndex = release.assets.first(where: { $0.name == CompatibilityArtifactIndex.fileName }),
               let checksums = release.assets.first(where: { $0.name == "checksums.txt" }),
               let checksumsSignature = release.assets.first(where: { $0.name == "checksums.txt.sig" })
@@ -178,13 +170,11 @@ struct SelfUpdate {
 
         do {
             try validateDownloadURL(tarball.browserDownloadURL)
-            try validateDownloadURL(malibuDMG.browserDownloadURL)
             try validateDownloadURL(artifactIndex.browserDownloadURL)
             try validateDownloadURL(checksums.browserDownloadURL)
             try validateDownloadURL(checksumsSignature.browserDownloadURL)
 
             let tarballURL = tempDir.appendingPathComponent(tarball.name)
-            let malibuDMGURL = tempDir.appendingPathComponent(malibuDMG.name)
             let artifactIndexURL = tempDir.appendingPathComponent(artifactIndex.name)
             let checksumsURL = tempDir.appendingPathComponent(checksums.name)
             let checksumsSignatureURL = tempDir.appendingPathComponent(checksumsSignature.name)
@@ -193,7 +183,6 @@ struct SelfUpdate {
             try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
             let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
             let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
-            let expectedMalibuSHA = try Self.expectedSHA256(for: malibuDMG.name, in: checksumsText)
             let expectedArtifactIndexSHA = try Self.expectedSHA256(for: artifactIndex.name, in: checksumsText)
             try await download(from: artifactIndex.browserDownloadURL, to: artifactIndexURL)
             let actualArtifactIndexSHA = try Self.sha256(file: artifactIndexURL)
@@ -204,16 +193,13 @@ struct SelfUpdate {
                 )
             }
             try await download(from: tarball.browserDownloadURL, to: tarballURL)
-            try await download(from: malibuDMG.browserDownloadURL, to: malibuDMGURL)
             return try prepareValidatedUpdateAssets(
                 assetNames: release.assets.map(\.name),
                 tempDir: tempDir,
                 tarballURL: tarballURL,
-                malibuDMGURL: malibuDMGURL,
                 artifactIndexURL: artifactIndexURL,
                 checksumsText: checksumsText,
                 expectedTarballSHA: expectedSHA,
-                expectedMalibuSHA: expectedMalibuSHA,
                 signedPolicy: release.signedPolicy,
                 targetVersion: targetVersion
             )
@@ -234,10 +220,8 @@ struct SelfUpdate {
         let targetVersion = try Self.validateReleaseTag(tag)
         let assetNames = try Self.validatedAcceptanceAssetNames(in: directory)
         let tarballName = "macprovider-cli-\(tag)-darwin-arm64.tar.gz"
-        let malibuDMGName = "Malibu-\(tag).dmg"
         let requiredNames = [
             tarballName,
-            malibuDMGName,
             CompatibilityArtifactIndex.fileName,
             "checksums.txt",
             AcceptanceCandidateMetadata.fileName,
@@ -264,7 +248,6 @@ struct SelfUpdate {
                 )
             }
             let tarballURL = tempDir.appendingPathComponent(tarballName)
-            let malibuDMGURL = tempDir.appendingPathComponent(malibuDMGName)
             let artifactIndexURL = tempDir.appendingPathComponent(CompatibilityArtifactIndex.fileName)
             let checksumsURL = tempDir.appendingPathComponent("checksums.txt")
             let metadataURL = tempDir.appendingPathComponent(AcceptanceCandidateMetadata.fileName)
@@ -303,11 +286,9 @@ struct SelfUpdate {
                 assetNames: assetNames,
                 tempDir: tempDir,
                 tarballURL: tarballURL,
-                malibuDMGURL: malibuDMGURL,
                 artifactIndexURL: artifactIndexURL,
                 checksumsText: checksumsText,
                 expectedTarballSHA: Self.expectedSHA256(for: tarballName, in: checksumsText),
-                expectedMalibuSHA: Self.expectedSHA256(for: malibuDMGName, in: checksumsText),
                 signedPolicy: nil,
                 targetVersion: targetVersion,
                 expectedCompatibilitySetID: acceptanceMetadata.compatibilitySetID
@@ -322,11 +303,9 @@ struct SelfUpdate {
         assetNames: [String],
         tempDir: URL,
         tarballURL: URL,
-        malibuDMGURL: URL,
         artifactIndexURL: URL,
         checksumsText: String,
         expectedTarballSHA: String,
-        expectedMalibuSHA: String,
         signedPolicy: GitHubSignedPolicy?,
         targetVersion: String,
         expectedCompatibilitySetID: String? = nil
@@ -335,10 +314,6 @@ struct SelfUpdate {
         let actualSHA = try Self.sha256(file: tarballURL)
         guard actualSHA.lowercased() == expectedTarballSHA.lowercased() else {
             throw UpdateError.checksumMismatch(expected: expectedTarballSHA, actual: actualSHA)
-        }
-        let actualMalibuSHA = try Self.sha256(file: malibuDMGURL)
-        guard actualMalibuSHA.lowercased() == expectedMalibuSHA.lowercased() else {
-            throw UpdateError.checksumMismatch(expected: expectedMalibuSHA, actual: actualMalibuSHA)
         }
 
         let extractDir = tempDir.appendingPathComponent("extract", isDirectory: true)
@@ -377,20 +352,9 @@ struct SelfUpdate {
             arguments: Self.stagedCLIPreflightArguments
         )
         try Self.requireStagedBinaryVersion(stagedVersionOutput, targetVersion: targetVersion)
-        let stagedMalibuApp = if let malibuBundleStager {
-            try malibuBundleStager(malibuDMGURL, tempDir, compatibilityManifest, newBinary)
-        } else {
-            try stageValidatedMalibuApp(
-                from: malibuDMGURL,
-                in: tempDir,
-                compatibilityManifest: compatibilityManifest,
-                newBinary: newBinary
-            )
-        }
         return PreparedSelfUpdate(
             tempDir: tempDir,
             newBinary: newBinary,
-            stagedMalibuApp: stagedMalibuApp,
             signedPolicy: signedPolicy,
             compatibilityManifest: compatibilityManifest
         )
@@ -399,7 +363,6 @@ struct SelfUpdate {
     func applyValidatedUpdateForTest(newBinary: URL) async throws {
         try await applyValidatedUpdate(
             newBinary: newBinary,
-            stagedMalibuApp: nil,
             targetVersion: "1.2.1",
             compatibilityManifest: nil
         )
@@ -531,7 +494,6 @@ struct SelfUpdate {
 
     private func applyValidatedUpdate(
         newBinary: URL,
-        stagedMalibuApp: URL?,
         targetVersion: String,
         compatibilityManifest: CompatibilitySetManifest?
     ) async throws {
@@ -539,10 +501,6 @@ struct SelfUpdate {
         var maintenanceLease: ProviderLifecycleLeaseRecord?
         var startupHandoffPrepared = false
         if replaceBinary == nil {
-            if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
-               stagedMalibuApp == nil {
-                throw UpdateError.missingReleaseResource("signed Malibu.app")
-            }
             maintenanceLease = try lifecycleLeaseStore.acquire(
                 kind: .maintenance,
                 operationID: lifecycleOperationID,
@@ -600,9 +558,7 @@ struct SelfUpdate {
                 try markerStore.activateReleasePayload(
                     from: newBinary.deletingLastPathComponent(),
                     newBinary: newBinary,
-                    to: current,
-                    stagedMalibuApp: stagedMalibuApp,
-                    rollbackMarker: pendingMarker
+                    to: current
                 )
             }
         } catch {
@@ -930,80 +886,6 @@ struct SelfUpdate {
         "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
-    private func stageValidatedMalibuApp(
-        from dmg: URL,
-        in tempDirectory: URL,
-        compatibilityManifest: CompatibilitySetManifest,
-        newBinary: URL
-    ) throws -> URL {
-        let mountPoint = tempDirectory.appendingPathComponent("malibu-dmg", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: mountPoint,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
-        try runProcess(
-            "/usr/bin/hdiutil",
-            arguments: ["attach", "-readonly", "-nobrowse", "-mountpoint", mountPoint.path, dmg.path]
-        )
-        defer {
-            try? runProcess(
-                "/usr/bin/hdiutil",
-                arguments: ["detach", "-force", mountPoint.path],
-                allowFailure: true
-            )
-        }
-
-        let source = mountPoint.appendingPathComponent("Malibu.app", isDirectory: true)
-        var sourceInfo = stat()
-        guard lstat(source.path, &sourceInfo) == 0,
-              (sourceInfo.st_mode & S_IFMT) == S_IFDIR,
-              (sourceInfo.st_mode & S_IFMT) != S_IFLNK
-        else {
-            throw UpdateError.malibuBundleInvalid("dmg_missing_bundle")
-        }
-        let staged = tempDirectory.appendingPathComponent("Malibu.app", isDirectory: true)
-        try runProcess("/usr/bin/ditto", arguments: [source.path, staged.path])
-        try Self.validateStagedMalibuBundle(
-            staged,
-            compatibilityManifest: compatibilityManifest,
-            newBinary: newBinary
-        )
-        try validateMalibuCodeIdentity(staged)
-        try runProcess("/usr/bin/codesign", arguments: ["--verify", "--strict", "--deep", staged.path])
-        try runProcess("/usr/bin/xcrun", arguments: ["stapler", "validate", staged.path])
-        try runProcess("/usr/sbin/spctl", arguments: ["-a", "-t", "exec", staged.path])
-        return staged
-    }
-
-    private func validateMalibuCodeIdentity(_ app: URL) throws {
-        let teamID: String
-        do {
-            teamID = try currentSigningTeamID()
-        } catch {
-            throw UpdateError.malibuBundleInvalid("running_cli_team_id_unavailable")
-        }
-
-        var staticCode: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(app as CFURL, [], &staticCode) == errSecSuccess,
-              let staticCode
-        else {
-            throw UpdateError.malibuBundleInvalid("code_object_unavailable")
-        }
-        let requirementText = "identifier \"tech.malibu.app\" and anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\""
-        var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(requirementText as CFString, [], &requirement) == errSecSuccess,
-              let requirement,
-              SecStaticCodeCheckValidity(
-                staticCode,
-                SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
-                requirement
-              ) == errSecSuccess
-        else {
-            throw UpdateError.malibuBundleInvalid("signature_or_team_id_mismatch")
-        }
-    }
-
     private func validateStagedCLIIdentity(_ binary: URL) throws {
         let teamID: String
         do {
@@ -1045,7 +927,11 @@ struct SelfUpdate {
             throw UpdateError.stagedCLIIdentityInvalid("running_cli_static_identity_unavailable")
         }
         var signingInfo: CFDictionary?
-        guard SecCodeCopySigningInformation(currentStaticCode, [], &signingInfo) == errSecSuccess,
+        guard SecCodeCopySigningInformation(
+                  currentStaticCode,
+                  SelfUpdate.signingInformationFlags,
+                  &signingInfo
+              ) == errSecSuccess,
               let info = signingInfo as? [String: Any],
               let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String,
               teamID.range(of: #"^[A-Z0-9]{10}$"#, options: .regularExpression) != nil
@@ -1055,84 +941,9 @@ struct SelfUpdate {
         return teamID
     }
 
-    static func validateStagedMalibuBundleForTest(
-        _ app: URL,
-        compatibilityManifest: CompatibilitySetManifest,
-        newBinary: URL
-    ) throws {
-        try validateStagedMalibuBundle(
-            app,
-            compatibilityManifest: compatibilityManifest,
-            newBinary: newBinary
-        )
-    }
-
-    private static func validateStagedMalibuBundle(
-        _ app: URL,
-        compatibilityManifest: CompatibilitySetManifest,
-        newBinary: URL
-    ) throws {
-        var rootInfo = stat()
-        guard lstat(app.path, &rootInfo) == 0,
-              (rootInfo.st_mode & S_IFMT) == S_IFDIR,
-              (rootInfo.st_mode & S_IFMT) != S_IFLNK,
-              rootInfo.st_uid == getuid(),
-              (rootInfo.st_mode & (S_IWGRP | S_IWOTH)) == 0
-        else {
-            throw UpdateError.malibuBundleInvalid("bundle_root_invalid")
-        }
-        let resolvedRoot = app.resolvingSymlinksInPath().standardizedFileURL.path
-        let rootPrefix = resolvedRoot.hasSuffix("/") ? resolvedRoot : resolvedRoot + "/"
-        guard let enumerator = FileManager.default.enumerator(at: app, includingPropertiesForKeys: nil) else {
-            throw UpdateError.malibuBundleInvalid("bundle_enumeration_failed")
-        }
-        for case let entry as URL in enumerator {
-            var info = stat()
-            guard lstat(entry.path, &info) == 0,
-                  info.st_uid == getuid(),
-                  (info.st_mode & (S_IWGRP | S_IWOTH)) == 0
-            else {
-                throw UpdateError.malibuBundleInvalid("bundle_entry_invalid")
-            }
-            switch info.st_mode & S_IFMT {
-            case S_IFDIR:
-                break
-            case S_IFREG:
-                guard info.st_nlink == 1 else {
-                    throw UpdateError.malibuBundleInvalid("bundle_hardlink")
-                }
-            case S_IFLNK:
-                guard entry.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(rootPrefix) else {
-                    throw UpdateError.malibuBundleInvalid("bundle_symlink_escape")
-                }
-            default:
-                throw UpdateError.malibuBundleInvalid("bundle_entry_type")
-            }
-        }
-
-        let infoURL = app.appendingPathComponent("Contents/Info.plist")
-        guard let info = try PropertyListSerialization.propertyList(
-            from: Data(contentsOf: infoURL),
-            format: nil
-        ) as? [String: Any],
-              info["CFBundleIdentifier"] as? String == "tech.malibu.app",
-              info["CFBundleShortVersionString"] as? String == compatibilityManifest.version
-        else {
-            throw UpdateError.malibuBundleInvalid("bundle_identity_or_version_mismatch")
-        }
-        let embeddedManifest = app.appendingPathComponent(
-            "Contents/Resources/\(CompatibilitySetManifest.fileName)"
-        )
-        let payloadManifest = newBinary.deletingLastPathComponent()
-            .appendingPathComponent(CompatibilitySetManifest.fileName)
-        guard try Data(contentsOf: embeddedManifest) == Data(contentsOf: payloadManifest) else {
-            throw UpdateError.malibuBundleInvalid("embedded_manifest_mismatch")
-        }
-        let embeddedCLI = app.appendingPathComponent("Contents/MacOS/macprovider-cli")
-        guard try sha256(file: embeddedCLI) == sha256(file: newBinary) else {
-            throw UpdateError.malibuBundleInvalid("embedded_cli_mismatch")
-        }
-    }
+    /// Team ID is optional in the default signing dictionary. Request the complete
+    /// signing-information dictionary before enforcing the designated requirement.
+    static let signingInformationFlags = SecCSFlags(rawValue: kSecCSSigningInformation)
 
     private func validateDownloadURL(_ url: URL) throws {
         guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
@@ -1612,7 +1423,6 @@ struct ProviderReleasePayloadTransaction {
 struct PreparedSelfUpdate {
     let tempDir: URL
     let newBinary: URL
-    let stagedMalibuApp: URL?
     let signedPolicy: GitHubSignedPolicy?
     let compatibilityManifest: CompatibilitySetManifest
 
@@ -1683,7 +1493,6 @@ enum UpdateError: Error, CustomStringConvertible {
     case unsafeArchiveEntry(String)
     case insufficientDiskSpace(required: Int64, available: Int64)
     case missingReleaseResource(String)
-    case malibuBundleInvalid(String)
     case compatibilityManifestInvalid(String)
     case compatibilityManifestVersionMismatch(expected: String, actual: String)
     case compatibilityArtifactIndexInvalid(String)
@@ -1704,7 +1513,7 @@ enum UpdateError: Error, CustomStringConvertible {
         case .releaseNotFound:
             return "GitHub release tag not found"
         case .missingAsset:
-            return "Release is missing the canonical tag-bound darwin-arm64 tarball, Malibu DMG, compatibility artifact index, checksums.txt, or checksums.txt.sig"
+            return "Release is missing the canonical tag-bound darwin-arm64 tarball, compatibility artifact index, checksums.txt, or checksums.txt.sig"
         case .invalidReleaseVersion(let version):
             return "Release tag is not strict semantic version: \(version)"
         case let .stagedVersionMismatch(expected, actual):
@@ -1737,8 +1546,6 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Insufficient disk space: required \(required), available \(available)"
         case .missingReleaseResource(let resource):
             return "Release payload is missing required resource: \(resource)"
-        case .malibuBundleInvalid(let reason):
-            return "Signed Malibu bundle validation failed: \(reason)"
         case .compatibilityManifestInvalid(let reason):
             return "Signed compatibility-set manifest is invalid: \(reason)"
         case let .compatibilityManifestVersionMismatch(expected, actual):

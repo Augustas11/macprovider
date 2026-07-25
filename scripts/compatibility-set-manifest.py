@@ -28,6 +28,10 @@ SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 KEY_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+LEGACY_MALIBU_RELEASES = {
+    ("v1.8.39", "71eb927a56011f00143b2989cb2bc455b86d4d7c"): "1.8.39",
+    ("v1.8.40", "18638472fe3e885f3534eeac29ab89b4c7ffdd7a"): "1.8.40",
+}
 CATALOG_FILES = (
     "release.json",
     "trusted-keys.json",
@@ -46,11 +50,14 @@ LOCAL_ARTIFACT_FILES = {
 ROLLBACK_MEMBERS = (
     "catalog",
     "launchd",
-    "malibu_app",
     "provider_cli",
     "release_resources",
     "updater_rollback",
     "watchdog",
+)
+LEGACY_ROLLBACK_MEMBERS = (
+    "catalog", "launchd", "malibu_app", "provider_cli", "release_resources",
+    "updater_rollback", "watchdog",
 )
 REQUIRED_EXTERNAL_GATES = ("coordinator_admission",)
 PRESERVED_STATE_INVARIANTS = ("credentials", "identity", "operator_config")
@@ -62,16 +69,19 @@ ACTIVATION_CHECKPOINTS = (
     "provider_plist_activated",
     "watchdog_plist_activated",
     "binary_activated",
-    "malibu_app_activated",
 )
+LEGACY_ACTIVATION_CHECKPOINTS = ACTIVATION_CHECKPOINTS + ("malibu_app_activated",)
 ROLLBACK_ORDER = (
     "release_resources",
     "catalog",
     "updater_rollback",
     "watchdog",
     "launchd",
-    "malibu_app",
     "provider_cli",
+)
+LEGACY_ROLLBACK_ORDER = (
+    "release_resources", "catalog", "updater_rollback", "watchdog", "launchd",
+    "malibu_app", "provider_cli",
 )
 
 
@@ -230,7 +240,7 @@ def validate_artifact(value: object, expected_path: str, label: str) -> dict:
     return value
 
 
-def validate_rollback_plan(data: bytes) -> dict:
+def validate_rollback_plan(data: bytes, *, legacy_malibu: bool = False) -> dict:
     value = strict_json(data, "updater rollback plan")
     exact_keys(
         value,
@@ -245,10 +255,10 @@ def validate_rollback_plan(data: bytes) -> dict:
         "updater rollback plan",
     )
     expected = {
-        "activation_checkpoints": list(ACTIVATION_CHECKPOINTS),
+        "activation_checkpoints": list(LEGACY_ACTIVATION_CHECKPOINTS if legacy_malibu else ACTIVATION_CHECKPOINTS),
         "metadata_version": 1,
         "protocol": "macprovider.compatibility-set-transaction.v1",
-        "rollback_order": list(ROLLBACK_ORDER),
+        "rollback_order": list(LEGACY_ROLLBACK_ORDER if legacy_malibu else ROLLBACK_ORDER),
         "rollback_scope": "all_activated_local_members",
         "schema_version": ROLLBACK_PLAN_SCHEMA,
     }
@@ -294,33 +304,41 @@ def validate_payload(value: object) -> dict:
     components = value["components"]
     if not isinstance(components, dict):
         fail("signed.components: must be an object")
-    exact_keys(
-        components,
-        {"catalog", "coordinator_admission", "launchd", "malibu_app", "provider_cli", "updater_rollback", "watchdog"},
-        "signed.components",
-    )
+    independent_components = {
+        "catalog", "coordinator_admission", "launchd", "provider_cli",
+        "updater_rollback", "watchdog",
+    }
+    if set(components) not in (independent_components, independent_components | {"malibu_app"}):
+        fail("signed.components: fields differ from supported independent or legacy contract")
     validate_catalog(components["catalog"])
 
-    malibu = components["malibu_app"]
-    if not isinstance(malibu, dict):
-        fail("components.malibu_app: must be an object")
-    exact_keys(
-        malibu,
-        {"activation", "bundle_id", "compatibility_handoff", "minimum_status_reader", "version"},
-        "components.malibu_app",
-    )
-    if malibu["bundle_id"] != "tech.malibu.app":
-        fail("components.malibu_app.bundle_id: unsupported value")
-    if malibu["activation"] != "cli_owned_if_installed" or malibu["compatibility_handoff"] != {
-        "delivery": "signed_dmg_transaction_member",
-        "embedded_manifest_path": "Contents/Resources/compatibility-set.json",
-        "provider_mutation": "forbidden",
-        "reader_compatibility": "backward_compatible",
-    }:
-        fail("components.malibu_app: unsupported artifact handoff")
-    if string(malibu["version"], "components.malibu_app.version", SEMVER) != version:
-        fail("components.malibu_app.version: must equal release version")
-    integer(malibu["minimum_status_reader"], "components.malibu_app.minimum_status_reader", 1, 1)
+    # Historical manifests may carry a Malibu row. It is parsed only as
+    # non-authoritative release evidence: it is not activated or rolled back by
+    # the provider and its marketing version is independent of the CLI version.
+    if "malibu_app" in components:
+        if (tag, commit) not in LEGACY_MALIBU_RELEASES:
+            fail("components.malibu_app: allowed only for an immutable legacy release")
+        malibu = components["malibu_app"]
+        if not isinstance(malibu, dict):
+            fail("components.malibu_app: must be an object")
+        exact_keys(
+            malibu,
+            {"activation", "bundle_id", "compatibility_handoff", "minimum_status_reader", "version"},
+            "components.malibu_app",
+        )
+        if malibu["bundle_id"] != "tech.malibu.app":
+            fail("components.malibu_app.bundle_id: unsupported value")
+        if malibu["activation"] != "cli_owned_if_installed" or malibu["compatibility_handoff"] != {
+            "delivery": "signed_dmg_transaction_member",
+            "embedded_manifest_path": "Contents/Resources/compatibility-set.json",
+            "provider_mutation": "forbidden",
+            "reader_compatibility": "backward_compatible",
+        }:
+            fail("components.malibu_app: unsupported legacy artifact handoff")
+        malibu_version = string(malibu["version"], "components.malibu_app.version", SEMVER)
+        if malibu_version != LEGACY_MALIBU_RELEASES[(tag, commit)]:
+            fail("components.malibu_app.version: differs from immutable historical evidence")
+        integer(malibu["minimum_status_reader"], "components.malibu_app.minimum_status_reader", 1, 1)
 
     cli = components["provider_cli"]
     if not isinstance(cli, dict):
@@ -401,12 +419,13 @@ def validate_payload(value: object) -> dict:
     )
     if transaction["activation"] != "crash_recoverable_local_activation_group" or transaction["autoupdate_scope"] != "compatibility_cohort":
         fail("signed.transaction: unsupported activation or autoupdate scope")
+    transaction_members = LEGACY_ROLLBACK_MEMBERS if "malibu_app" in components else ROLLBACK_MEMBERS
     membership = transaction["membership"]
     if not isinstance(membership, dict):
         fail("signed.transaction.membership: must be an object")
     exact_keys(membership, {"local_activation_group", "preserved_state_invariants", "required_external_gates"}, "signed.transaction.membership")
     if (
-        membership["local_activation_group"] != list(ROLLBACK_MEMBERS)
+        membership["local_activation_group"] != list(transaction_members)
         or membership["required_external_gates"] != list(REQUIRED_EXTERNAL_GATES)
         or membership["preserved_state_invariants"] != list(PRESERVED_STATE_INVARIANTS)
     ):
@@ -431,7 +450,7 @@ def validate_payload(value: object) -> dict:
     if not isinstance(rollback, dict):
         fail("signed.transaction.rollback: must be an object")
     exact_keys(rollback, {"members", "mode"}, "signed.transaction.rollback")
-    if rollback["mode"] != "local_activation_group" or rollback["members"] != list(ROLLBACK_MEMBERS):
+    if rollback["mode"] != "local_activation_group" or rollback["members"] != list(transaction_members):
         fail("signed.transaction.rollback: must cover the canonical ordered member set")
     return value
 
@@ -462,7 +481,7 @@ def validate_payload_artifacts(payload: dict, payload_directory: pathlib.Path) -
         if actual != descriptor["sha256"]:
             fail(f"payload artifact digest mismatch: {descriptor['path']}")
         if descriptor["path"] == "compatibility-set-local/updater-rollback.json":
-            validate_rollback_plan(artifact_data)
+            validate_rollback_plan(artifact_data, legacy_malibu="malibu_app" in components)
     for name, expected in components["catalog"]["files"].items():
         actual = hashlib.sha256(read_regular(payload_directory / "catalog-release" / name, f"payload catalog {name}")).hexdigest()
         if actual != expected:
@@ -595,18 +614,6 @@ def build_manifest(args: argparse.Namespace) -> dict:
                 "install_contract": local_artifact(local_directory, "install_contract"),
                 "label": "live.streamvc.macprovider",
                 "plist_template": local_artifact(local_directory, "provider_plist_template"),
-            },
-            "malibu_app": {
-                "activation": "cli_owned_if_installed",
-                "bundle_id": "tech.malibu.app",
-                "compatibility_handoff": {
-                    "delivery": "signed_dmg_transaction_member",
-                    "embedded_manifest_path": "Contents/Resources/compatibility-set.json",
-                    "provider_mutation": "forbidden",
-                    "reader_compatibility": "backward_compatible",
-                },
-                "minimum_status_reader": 1,
-                "version": version,
             },
             "provider_cli": {
                 "activation": "local",

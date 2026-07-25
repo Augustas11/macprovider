@@ -11,6 +11,7 @@ final class MenuBarController {
         case checkForUpdates
         case updateCLI
         case exportDiagnostics
+        case applySignedRollback
         case quitAndUninstall
     }
 
@@ -106,11 +107,18 @@ final class MenuBarController {
         menu.addItem(action("Open Dashboard", key: "d") { self.onAction(.openDashboard) })
         menu.addItem(action("Set up…", key: "o") { self.onAction(.openOnboarding) })
         menu.addItem(action("Export Diagnostics…", key: "") { self.onAction(.exportDiagnostics) })
+        menu.addItem(action("Apply Signed Malibu Rollback…", key: "") { self.onAction(.applySignedRollback) })
         menu.addItem(.separator())
-        menu.addItem(action("Pause", key: "") { self.onAction(.pause) })
-        menu.addItem(action("Resume", key: "") { self.onAction(.resume) })
+        let pauseItem = action("Pause", key: "") { self.onAction(.pause) }
+        pauseItem.identifier = .pauseAction
+        menu.addItem(pauseItem)
+        let resumeItem = action("Resume", key: "") { self.onAction(.resume) }
+        resumeItem.identifier = .resumeAction
+        menu.addItem(resumeItem)
         menu.addItem(.separator())
-        menu.addItem(action("Quit and Uninstall…", key: "") { self.onAction(.quitAndUninstall) })
+        let uninstallItem = action("Quit and Uninstall…", key: "") { self.onAction(.quitAndUninstall) }
+        uninstallItem.identifier = .uninstallAction
+        menu.addItem(uninstallItem)
         menu.addItem(action("Quit", key: "q") { NSApp.terminate(nil) })
         return menu
     }
@@ -172,9 +180,19 @@ final class MenuBarController {
                     ? "Updating compatibility set…"
                     : "Update compatibility set…"
             } else {
-                updateItem.title = "Compatibility set is current"
+                if snapshot.migrationRepairObservationOnly {
+                    updateItem.title = "Compatibility not inspected — repair migration"
+                } else if snapshot.releaseAuthorityBlocked {
+                    updateItem.title = "Compatibility not verified — repair provider"
+                } else {
+                    updateItem.title = "Compatibility set is current"
+                }
             }
         }
+        let mutationActionsAllowed = AgentSnapshotPresenter.providerMutationActionsAllowed(snapshot)
+        menu.item(withIdentifier: .pauseAction)?.isEnabled = mutationActionsAllowed
+        menu.item(withIdentifier: .resumeAction)?.isEnabled = mutationActionsAllowed
+        menu.item(withIdentifier: .uninstallAction)?.isEnabled = mutationActionsAllowed
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),
            let item = menu.item(withIdentifier: .backlogRow) {
             item.title = backlog
@@ -215,6 +233,9 @@ private extension NSUserInterfaceItemIdentifier {
     static let updateAction = NSUserInterfaceItemIdentifier("malibu.menubar.update")
     static let backlogRow = NSUserInterfaceItemIdentifier("malibu.menubar.backlog")
     static let dismissBacklogBadge = NSUserInterfaceItemIdentifier("malibu.menubar.dismissBacklogBadge")
+    static let pauseAction = NSUserInterfaceItemIdentifier("malibu.menubar.pause")
+    static let resumeAction = NSUserInterfaceItemIdentifier("malibu.menubar.resume")
+    static let uninstallAction = NSUserInterfaceItemIdentifier("malibu.menubar.uninstall")
 }
 
 private extension NSMenu {

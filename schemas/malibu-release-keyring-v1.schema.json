@@ -1,0 +1,27 @@
+{
+  "$id": "https://download.malibu.tech/schemas/malibu-release-keyring-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "generation": {"minimum": 1, "type": "integer"},
+    "keys": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm": {"const": "ecdsa-p256-sha256"},
+          "key_id": {"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "type": "string"},
+          "public_key_path": {"minLength": 1, "type": "string"},
+          "public_key_spki_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "status": {"enum": ["active", "retiring"]}
+        },
+        "required": ["algorithm", "key_id", "public_key_path", "public_key_spki_sha256", "status"],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {"const": "malibu-release-keyring.v1"}
+  },
+  "required": ["generation", "keys", "schema_version"],
+  "type": "object"
+}

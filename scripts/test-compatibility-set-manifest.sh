@@ -56,6 +56,30 @@ python3 "$tool" validate \
 cp "$manifest" "$payload/compatibility-set.json"
 python3 "$tool" validate --input "$manifest" --payload-directory "$payload"
 
+historical="$root/schemas/fixtures/compatibility-set-v1.8.40.json"
+test "$(shasum -a 256 "$historical" | awk '{print $1}')" = \
+  fe17e7a3cca392edea185c304970ef6d6fb9f06ff65aa6cffed6c7d9325a161c
+python3 "$tool" validate \
+  --input "$historical" --require-signature \
+  --public-key "$root/ops/pearl-updater/release-signing-public.pem" \
+  --expected-tag v1.8.40 \
+  --expected-commit 18638472fe3e885f3534eeac29ab89b4c7ffdd7a
+
+python3 - "$historical" "$work/altered-historical.json" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+value["signed"]["components"]["malibu_app"]["version"] = "9.1.0"
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+if python3 "$tool" validate --input "$work/altered-historical.json" \
+  >"$work/altered-historical.out" 2>&1; then
+  fail "immutable historical manifest accepted altered Malibu evidence"
+fi
+grep -q 'differs from immutable historical evidence' "$work/altered-historical.out"
+
 python3 - "$schema" "$rollback_schema" "$manifest" "$local_artifacts" <<'PY'
 import hashlib
 import json
@@ -70,24 +94,25 @@ assert set(schema["required"]) == {"schema_version", "signatures", "signed"}
 assert manifest["signatures"] == []
 assert manifest["signed"]["transaction"]["activation"] == "crash_recoverable_local_activation_group"
 assert manifest["signed"]["transaction"]["membership"] == {
-    "local_activation_group": ["catalog", "launchd", "malibu_app", "provider_cli", "release_resources", "updater_rollback", "watchdog"],
+    "local_activation_group": ["catalog", "launchd", "provider_cli", "release_resources", "updater_rollback", "watchdog"],
     "required_external_gates": ["coordinator_admission"],
     "preserved_state_invariants": ["credentials", "identity", "operator_config"],
 }
 assert manifest["signed"]["artifact_binding"]["embedded_container_hashes"] == "excluded_to_avoid_self_reference"
-assert rollback_schema["properties"]["rollback_order"]["const"] == [
-    "release_resources", "catalog", "updater_rollback", "watchdog", "launchd", "malibu_app", "provider_cli"
+current_rollback_order = rollback_schema["properties"]["rollback_order"]["oneOf"][0]["const"]
+assert current_rollback_order == [
+    "release_resources", "catalog", "updater_rollback", "watchdog", "launchd", "provider_cli"
 ]
 local = pathlib.Path(sys.argv[4])
 rollback_plan = json.loads((local / "updater-rollback.json").read_text(encoding="utf-8"))
-assert rollback_plan["activation_checkpoints"][-2:] == ["binary_activated", "malibu_app_activated"]
-assert rollback_plan["rollback_order"] == rollback_schema["properties"]["rollback_order"]["const"]
+assert rollback_plan["activation_checkpoints"][-1:] == ["binary_activated"]
+assert rollback_plan["rollback_order"] == current_rollback_order
 assert manifest["signed"]["components"]["launchd"]["install_contract"]["sha256"] == hashlib.sha256((local / "install.sh").read_bytes()).hexdigest()
 assert manifest["signed"]["components"]["watchdog"]["script"]["sha256"] == hashlib.sha256((local / "watchdog.sh").read_bytes()).hexdigest()
 assert manifest["signed"]["components"]["coordinator_admission"]["activation"] == "required_remote_gate"
 assert manifest["signed"]["components"]["coordinator_admission"]["handshake"] == "accepted_set_echo_v1"
 assert manifest["signed"]["components"]["coordinator_admission"]["scope"] == "remote_coordinator_policy"
-assert manifest["signed"]["components"]["malibu_app"]["activation"] == "cli_owned_if_installed"
+assert "malibu_app" not in manifest["signed"]["components"]
 serialized = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 for forbidden in ("tar_sha256", "pkg_sha256", "dmg_sha256", "app_sha256", "cli_sha256"):
     assert forbidden not in serialized

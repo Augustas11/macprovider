@@ -1,0 +1,176 @@
+{
+  "$defs": {
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,255}$", "type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "required": ["name", "sha256"],
+      "type": "object"
+    },
+    "protocolVersions": {
+      "items": {"pattern": "^v[1-9][0-9]*$", "type": "string"},
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "semver": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "type": "string"},
+    "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "signature": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"const": "ecdsa-p256-sha256"},
+        "key_id": {"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "type": "string"},
+        "signature": {"minLength": 1, "pattern": "^[A-Za-z0-9_-]+$", "type": "string"}
+      },
+      "required": ["algorithm", "key_id", "signature"],
+      "type": "object"
+    },
+    "timestamp": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "type": "string"
+    }
+  },
+  "$id": "https://download.malibu.tech/schemas/malibu-release-envelope-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "malibu-release-envelope.v1"},
+    "signature": {"$ref": "#/$defs/signature"},
+    "signed": {
+      "additionalProperties": false,
+      "properties": {
+        "app": {
+          "additionalProperties": false,
+          "properties": {
+            "build": {"minimum": 1, "type": "integer"},
+            "bundle_id": {"const": "tech.malibu.app"},
+            "designated_requirement": {"minLength": 1, "type": "string"},
+            "entry_count": {"minimum": 1, "type": "integer"},
+            "marketing_version": {"$ref": "#/$defs/semver"},
+            "release_tag": {"pattern": "^malibu-v[0-9]+\\.[0-9]+\\.[0-9]+$", "type": "string"},
+            "root_mode": {"maximum": 4095, "minimum": 1, "type": "integer"},
+            "source_commit": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+            "team_id": {"const": "YF7XNRJUG4"},
+            "tree_sha256": {"$ref": "#/$defs/sha256"}
+          },
+          "required": ["build", "bundle_id", "designated_requirement", "entry_count", "marketing_version", "release_tag", "root_mode", "source_commit", "team_id", "tree_sha256"],
+          "type": "object"
+        },
+        "artifacts": {
+          "additionalProperties": false,
+          "properties": {
+            "bundled_provider_cli": {
+              "additionalProperties": false,
+              "properties": {
+                "sha256": {"$ref": "#/$defs/sha256"},
+                "version": {"const": "1.8.40"}
+              },
+              "required": ["sha256", "version"],
+              "type": "object"
+            },
+            "dmg": {"$ref": "#/$defs/artifact"}
+          },
+          "required": ["bundled_provider_cli", "dmg"],
+          "type": "object"
+        },
+        "envelope_generation": {"minimum": 1, "type": "integer"},
+        "legacy_bootstrap": {
+          "additionalProperties": false,
+          "properties": {
+            "allowed_source_cohorts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "app_build": {"minimum": 1, "type": "integer"},
+                  "app_entry_count": {"minimum": 1, "type": "integer"},
+                  "app_root_mode": {"maximum": 4095, "minimum": 1, "type": "integer"},
+                  "app_tree_sha256": {"$ref": "#/$defs/sha256"},
+                  "app_version": {"$ref": "#/$defs/semver"},
+                  "cli_version": {"$ref": "#/$defs/semver"}
+                },
+                "required": ["app_build", "app_entry_count", "app_root_mode", "app_tree_sha256", "app_version", "cli_version"],
+                "type": "object"
+              },
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "backend_handoff_required": {"const": true},
+            "caller_selected_target": {"const": false},
+            "expires_at": {"$ref": "#/$defs/timestamp"},
+            "no_downgrade": {"const": true},
+            "target_cli_version": {"const": "1.8.40"},
+            "target_manifest_sha256": {"const": "fe17e7a3cca392edea185c304970ef6d6fb9f06ff65aa6cffed6c7d9325a161c"}
+          },
+          "required": ["allowed_source_cohorts", "backend_handoff_required", "caller_selected_target", "expires_at", "no_downgrade", "target_cli_version", "target_manifest_sha256"],
+          "type": "object"
+        },
+        "publication": {
+          "additionalProperties": false,
+          "properties": {"published_at": {"$ref": "#/$defs/timestamp"}},
+          "required": ["published_at"],
+          "type": "object"
+        },
+        "runtime_posture": {
+          "additionalProperties": false,
+          "properties": {
+            "hardened_runtime": {"const": true},
+            "notarized": {"const": true},
+            "stapled": {"const": true}
+          },
+          "required": ["hardened_runtime", "notarized", "stapled"],
+          "type": "object"
+        },
+        "supported_provider": {
+          "additionalProperties": false,
+          "properties": {
+            "capabilities": {
+              "additionalProperties": false,
+              "properties": {
+                "admission_recovery": {"$ref": "#/$defs/protocolVersions"},
+                "control_socket": {"$ref": "#/$defs/protocolVersions"},
+                "credential_handoff": {"$ref": "#/$defs/protocolVersions"},
+                "local_status_reader": {"$ref": "#/$defs/protocolVersions"}
+              },
+              "required": ["admission_recovery", "control_socket", "credential_handoff", "local_status_reader"],
+              "type": "object"
+            },
+            "compatibility_sets": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {"const": "Augustas11/macprovider:v1.8.40@18638472fe3e885f3534eeac29ab89b4c7ffdd7a"},
+                  "manifest_sha256": {"const": "fe17e7a3cca392edea185c304970ef6d6fb9f06ff65aa6cffed6c7d9325a161c"},
+                  "provider_cli": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "designated_identifier": {"const": "live.streamvc.macprovider.cli"},
+                      "team_id": {"const": "YF7XNRJUG4"},
+                      "version": {"const": "1.8.40"}
+                    },
+                    "required": ["designated_identifier", "team_id", "version"],
+                    "type": "object"
+                  }
+                },
+                "required": ["id", "manifest_sha256", "provider_cli"],
+                "type": "object"
+              },
+              "maxItems": 1,
+              "minItems": 1,
+              "type": "array"
+            },
+            "provider_mutation": {"const": "forbidden"}
+          },
+          "required": ["capabilities", "compatibility_sets", "provider_mutation"],
+          "type": "object"
+        }
+      },
+      "required": ["app", "artifacts", "envelope_generation", "legacy_bootstrap", "publication", "runtime_posture", "supported_provider"],
+      "type": "object"
+    }
+  },
+  "required": ["schema_version", "signature", "signed"],
+  "type": "object"
+}

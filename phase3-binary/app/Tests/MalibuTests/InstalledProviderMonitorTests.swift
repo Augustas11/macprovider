@@ -316,6 +316,29 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertNil(InstalledProviderMonitor.parseLaunchdServicePID("pid = 4321\npid = 9999"))
     }
 
+    func testListenerEvidenceBindsExactLaunchdPIDAndLoopbackPort() {
+        XCTAssertTrue(InstalledProviderMonitor.parseListenerEvidence(
+            "p4321\nn127.0.0.1:61919\n",
+            expectedPID: 4321,
+            expectedPort: 61_919
+        ))
+        XCTAssertFalse(InstalledProviderMonitor.parseListenerEvidence(
+            "p9999\nn127.0.0.1:61919\n",
+            expectedPID: 4321,
+            expectedPort: 61_919
+        ))
+        XCTAssertFalse(InstalledProviderMonitor.parseListenerEvidence(
+            "p4321\nn*:61919\n",
+            expectedPID: 4321,
+            expectedPort: 61_919
+        ))
+        XCTAssertFalse(InstalledProviderMonitor.parseListenerEvidence(
+            "p4321\nn127.0.0.1:61920\n",
+            expectedPID: 4321,
+            expectedPort: 61_919
+        ))
+    }
+
     func testStatusSnapshotKeepsOlderCLIReadableWithoutTrustFields() throws {
         let json = """
         {

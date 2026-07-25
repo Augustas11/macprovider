@@ -161,6 +161,19 @@ class PearlUpdaterTests(unittest.TestCase):
             capture_output=True,
         )
 
+    def test_release_tags_ignore_malibu_namespace_and_select_latest_provider_release(self):
+        rows = [
+            {"tag_name": "malibu-v1.8.41", "draft": False, "prerelease": False},
+            {"tag_name": "v1.8.40", "draft": False, "prerelease": False},
+            {"tag_name": "v1.8.39", "draft": False, "prerelease": False},
+        ]
+
+        def write_release_list(_url, destination):
+            destination.write_text(json.dumps(rows), encoding="utf-8")
+
+        with mock.patch.object(self.updater, "download", side_effect=write_release_list):
+            self.assertEqual(self.updater.release_tags(), ["v1.8.40", "v1.8.39"])
+
     def make_bundle(
         self,
         version: str = "1.8.27",

@@ -586,16 +586,9 @@ final class AutoUpdateTests: XCTestCase {
             let installedMalibu = applications.appendingPathComponent("Malibu.app", isDirectory: true)
             try writeMalibuAppFixture(
                 at: installedMalibu,
-                version: "1.6.0",
+                version: "1.8.41",
                 compatibilityManifest: "old-compatibility-set",
                 marker: "old-app"
-            )
-            let stagedMalibu = fixture.url.appendingPathComponent("staged/Malibu.app", isDirectory: true)
-            try writeMalibuAppFixture(
-                at: stagedMalibu,
-                version: "1.7.0",
-                compatibilityManifest: "new-compatibility-set",
-                marker: "new-app"
             )
 
             let launchAgents = fixture.url.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
@@ -622,8 +615,6 @@ final class AutoUpdateTests: XCTestCase {
                     from: payload,
                     newBinary: newBinary,
                     to: liveBinary,
-                    stagedMalibuApp: stagedMalibu,
-                    rollbackMarker: marker,
                     cutoverCheckpoint: { checkpoint in
                         if checkpoint == phase {
                             throw SimulatedCutoverInterruption.stop
@@ -631,6 +622,9 @@ final class AutoUpdateTests: XCTestCase {
                     }
                 ),
                 "phase \(phase.rawValue)"
+            )
+            try Data("independent-app-update".utf8).write(
+                to: installedMalibu.appendingPathComponent("Contents/Resources/test-marker")
             )
             let restartedStore = AutoUpdateMarkerStore(homeDirectory: fixture.url)
             let persistedMarker = try XCTUnwrap(restartedStore.readPending(), "phase \(phase.rawValue)")
@@ -649,7 +643,7 @@ final class AutoUpdateTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: watchdogPlist), oldWatchdogPlist, "phase \(phase.rawValue)")
             XCTAssertEqual(
                 try String(contentsOf: installedMalibu.appendingPathComponent("Contents/Resources/test-marker")),
-                "old-app",
+                "independent-app-update",
                 "phase \(phase.rawValue)"
             )
             XCTAssertFalse(FileManager.default.fileExists(atPath: restartedStore.pendingURL.path), "phase \(phase.rawValue)")
@@ -874,6 +868,86 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
     }
 
+    func testDisabledAutoupdateDoesNotMutateInstalledVersionForNewerRecommendation() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let binary = fixture.url.appendingPathComponent("macprovider-cli")
+        try Data("immutable-v1.8.40".utf8).write(to: binary)
+        var config = AppConfig.defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path)
+        config.autoUpdateEnabled = false
+        let drains = LockedInvocationCounter()
+        let restarts = LockedInvocationCounter()
+        await AutoUpdateEventStore.shared.clear()
+
+        let updater = AutoUpdater(
+            config: config,
+            currentVersion: "1.8.40",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            releasesAPIURL: "https://example.invalid/releases",
+            markerStore: store,
+            trustProvider: { Self.eligibleAutoupdateTrustState },
+            drain: { _ in drains.record(); return true },
+            sendReady: {},
+            restartLaunchd: { restarts.record() },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        await updater.handleCoordinatorRecommendation("1.8.41")
+
+        XCTAssertEqual(try String(contentsOf: binary, encoding: .utf8), "immutable-v1.8.40")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.root.path))
+        XCTAssertEqual(drains.value, 0)
+        XCTAssertEqual(restarts.value, 0)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["outcome"] as? String, AutoUpdateOutcome.skipped.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "autoupdate_disabled")
+    }
+
+    func testSameVersionRecommendationDoesNotMutateInstalledVersion() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let binary = fixture.url.appendingPathComponent("macprovider-cli")
+        try Data("immutable-v1.8.40".utf8).write(to: binary)
+        let drains = LockedInvocationCounter()
+        let restarts = LockedInvocationCounter()
+        await AutoUpdateEventStore.shared.clear()
+
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.8.40",
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            releasesAPIURL: "https://example.invalid/releases",
+            markerStore: store,
+            trustProvider: { Self.eligibleAutoupdateTrustState },
+            drain: { _ in drains.record(); return true },
+            sendReady: {},
+            restartLaunchd: { restarts.record() },
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        await updater.handleCoordinatorRecommendation("v1.8.40")
+
+        XCTAssertEqual(try String(contentsOf: binary, encoding: .utf8), "immutable-v1.8.40")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.root.path))
+        XCTAssertEqual(drains.value, 0)
+        XCTAssertEqual(restarts.value, 0)
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["outcome"] as? String, AutoUpdateOutcome.noop.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "target_not_newer")
+    }
+
     func testTrustLossBetweenAuthAndSwapAbortsAutoupdate() async throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -945,6 +1019,20 @@ final class AutoUpdateTests: XCTestCase {
         let event = await AutoUpdateEventStore.shared.lastWireObject()
         XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.trustStateLost.rawValue)
         XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
+    }
+
+    private static var eligibleAutoupdateTrustState: AutoUpdateTrustState {
+        AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "pinned",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: true,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true
+        )
     }
 
     func testRestartFailureRollbackRestoresBinaryAndClearsPendingState() async throws {

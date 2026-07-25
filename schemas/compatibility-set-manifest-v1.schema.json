@@ -106,6 +106,75 @@
   "$id": "https://streamvc.live/schemas/compatibility-set-manifest-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "signed": {
+            "properties": {
+              "components": { "required": ["malibu_app"] }
+            }
+          }
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "signed": {
+                "properties": {
+                  "compatibility_set_id": {
+                    "const": "Augustas11/macprovider:v1.8.39@71eb927a56011f00143b2989cb2bc455b86d4d7c"
+                  },
+                  "components": {
+                    "properties": {
+                      "malibu_app": {
+                        "properties": { "version": { "const": "1.8.39" } }
+                      }
+                    }
+                  },
+                  "release": {
+                    "properties": {
+                      "commit": { "const": "71eb927a56011f00143b2989cb2bc455b86d4d7c" },
+                      "repository": { "const": "Augustas11/macprovider" },
+                      "tag": { "const": "v1.8.39" },
+                      "version": { "const": "1.8.39" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "signed": {
+                "properties": {
+                  "compatibility_set_id": {
+                    "const": "Augustas11/macprovider:v1.8.40@18638472fe3e885f3534eeac29ab89b4c7ffdd7a"
+                  },
+                  "components": {
+                    "properties": {
+                      "malibu_app": {
+                        "properties": { "version": { "const": "1.8.40" } }
+                      }
+                    }
+                  },
+                  "release": {
+                    "properties": {
+                      "commit": { "const": "18638472fe3e885f3534eeac29ab89b4c7ffdd7a" },
+                      "repository": { "const": "Augustas11/macprovider" },
+                      "tag": { "const": "v1.8.40" },
+                      "version": { "const": "1.8.40" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
   "properties": {
     "schema_version": {
       "const": "macprovider.compatibility-set-envelope.v1"
@@ -395,7 +464,6 @@
             "catalog",
             "coordinator_admission",
             "launchd",
-            "malibu_app",
             "provider_cli",
             "updater_rollback",
             "watchdog"
@@ -461,25 +529,10 @@
               "type": "object"
             },
             "membership": {
-              "const": {
-                "local_activation_group": [
-                  "catalog",
-                  "launchd",
-                  "malibu_app",
-                  "provider_cli",
-                  "release_resources",
-                  "updater_rollback",
-                  "watchdog"
-                ],
-                "required_external_gates": [
-                  "coordinator_admission"
-                ],
-                "preserved_state_invariants": [
-                  "credentials",
-                  "identity",
-                  "operator_config"
-                ]
-              }
+              "oneOf": [
+                {"const": {"local_activation_group": ["catalog", "launchd", "provider_cli", "release_resources", "updater_rollback", "watchdog"], "required_external_gates": ["coordinator_admission"], "preserved_state_invariants": ["credentials", "identity", "operator_config"]}},
+                {"const": {"local_activation_group": ["catalog", "launchd", "malibu_app", "provider_cli", "release_resources", "updater_rollback", "watchdog"], "required_external_gates": ["coordinator_admission"], "preserved_state_invariants": ["credentials", "identity", "operator_config"]}}
+              ]
             },
             "preflight": {
               "const": {
@@ -514,18 +567,10 @@
               "type": "object"
             },
             "rollback": {
-              "const": {
-                "members": [
-                  "catalog",
-                  "launchd",
-                  "malibu_app",
-                  "provider_cli",
-                  "release_resources",
-                  "updater_rollback",
-                  "watchdog"
-                ],
-                "mode": "local_activation_group"
-              }
+              "oneOf": [
+                {"const": {"members": ["catalog", "launchd", "provider_cli", "release_resources", "updater_rollback", "watchdog"], "mode": "local_activation_group"}},
+                {"const": {"members": ["catalog", "launchd", "malibu_app", "provider_cli", "release_resources", "updater_rollback", "watchdog"], "mode": "local_activation_group"}}
+              ]
             }
           },
           "required": [

@@ -13,10 +13,16 @@ struct MalibuApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let agent = MalibuAgent()
+    private let agent = MalibuAgent(authorizeProviderMutation: {
+        try MalibuReleaseRuntimeAuthorization.authorizeLive(
+            requireInstalledProvider: true
+        )
+    })
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
+    private var releaseAuthorityValidated = false
+    private var authorizedProviderVersion: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Log both installed versions so support can identify a partially
@@ -89,17 +95,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handle(_ action: MenuBarController.Action) {
         switch action {
         case .openDashboard: presentDashboard()
-        case .openOnboarding: presentOnboarding()
-        case .pause: Task { await agent.pause() }
-        case .resume: Task { await agent.resume() }
-        case .checkForUpdates, .updateCLI: Task { await agent.updateCLINow() }
+        case .openOnboarding:
+            guard releaseAuthorityValidated else { return }
+            presentOnboarding()
+        case .pause:
+            guard releaseAuthorityValidated else { return }
+            guard AgentSnapshotPresenter.providerMutationActionsAllowed(agent.snapshot) else { return }
+            Task { await agent.pause() }
+        case .resume:
+            guard releaseAuthorityValidated else { return }
+            guard AgentSnapshotPresenter.providerMutationActionsAllowed(agent.snapshot) else { return }
+            Task { await agent.resume() }
+        case .checkForUpdates, .updateCLI:
+            guard releaseAuthorityValidated else { return }
+            guard AgentSnapshotPresenter.providerMutationActionsAllowed(agent.snapshot) else { return }
+            Task { await agent.updateCLINow() }
         case .exportDiagnostics: exportDiagnostics()
+        case .applySignedRollback:
+            applySignedRollback()
         case .quitAndUninstall:
+            guard authorizeReleaseMutation(requireInstalledProvider: true) else { return }
+            guard AgentSnapshotPresenter.providerMutationActionsAllowed(agent.snapshot) else { return }
             guard uninstallTask == nil else { return }
             guard confirmUninstall() else { return }
             uninstallTask = Task { @MainActor [weak self] in
                 await self?.performUninstall()
             }
+        }
+    }
+
+    private func authorizeReleaseMutation(requireInstalledProvider: Bool) -> Bool {
+        guard releaseAuthorityValidated else { return false }
+        do {
+            try MalibuReleaseRuntimeAuthorization.authorizeLive(
+                requireInstalledProvider: requireInstalledProvider
+            )
+            return true
+        } catch {
+            if requireInstalledProvider,
+               (try? MalibuReleaseRuntimeAuthorization.authorizeLive(
+                   requireInstalledProvider: false
+               )) != nil {
+                releaseAuthorityValidated = true
+            } else {
+                releaseAuthorityValidated = false
+            }
+            Task { @MainActor [weak self] in
+                await self?.agent.blockProviderAccessForReleaseAuthority(
+                    error.localizedDescription
+                )
+            }
+            return false
         }
     }
 
@@ -123,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onboardingWindow = OnboardingWindow.make(agent: agent) { [weak self] in
                 self?.onboardingWindow?.close()
                 self?.onboardingWindow = nil
+                self?.presentDashboard()
             }
         }
         onboardingWindow?.makeKeyAndOrderFront(nil)
@@ -130,6 +177,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleStartup() async {
+        do {
+            let receipt = try MalibuReleaseRuntimeAuthorization.authorizeLive(
+                requireInstalledProvider: false
+            )
+            releaseAuthorityValidated = true
+            authorizedProviderVersion = receipt.envelope.providerCLIVersion
+        } catch {
+            releaseAuthorityValidated = false
+            await agent.blockProviderAccessForReleaseAuthority(error.localizedDescription)
+            presentDashboard()
+            return
+        }
+        if MalibuReleaseRuntimeAuthorization.installedProviderEvidenceExists() {
+            do {
+                try MalibuReleaseRuntimeAuthorization.authorizeLive(
+                    requireInstalledProvider: true
+                )
+            } catch {
+                await agent.blockProviderAccessForReleaseAuthority(error.localizedDescription)
+                presentOnboarding()
+                return
+            }
+        }
         let route = await StartupState.detect().route()
         await handleStartupRoute(route)
     }
@@ -151,7 +221,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 await handleStartupRoute(result.route)
             } catch {
-                presentMigrationError(error)
+                if !(await agent.observeInstalledProviderDuringMigrationRepair(
+                    failureReason: error.localizedDescription
+                )) {
+                    agent.recordUnverifiedMigrationRepairFailure(error.localizedDescription)
+                }
+                presentDashboard()
             }
         }
     }
@@ -181,23 +256,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
-    private func presentMigrationError(_ error: Error) {
-        let alert = NSAlert()
-        alert.messageText = "Could not migrate provider config"
-        alert.informativeText = error.localizedDescription
-        alert.alertStyle = .warning
-        alert.runModal()
-    }
-
     private func presentDashboard() {
         if dashboardWindow == nil {
             dashboardWindow = DashboardWindow.make(
                 agent: agent,
+                signedProviderVersion: authorizedProviderVersion,
+                onRetryMigration: { [weak self] in self?.retryMigration() },
+                onRepairProvider: { [weak self] in self?.presentOnboarding() },
                 onExportDiagnostics: { [weak self] in self?.exportDiagnostics() }
             )
         }
         dashboardWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func retryMigration() {
+        guard releaseAuthorityValidated else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try MalibuReleaseRuntimeAuthorization.authorizeLive(
+                    requireInstalledProvider: true
+                )
+            } catch {
+                await self.agent.blockProviderAccessForReleaseAuthority(
+                    error.localizedDescription
+                )
+                self.presentOnboarding()
+                return
+            }
+            do {
+                let result = try await StartupState.applyMigrationDecision(.importExisting)
+                await self.handleStartupRoute(result.route)
+            } catch {
+                if !(await self.agent.observeInstalledProviderDuringMigrationRepair(
+                    failureReason: error.localizedDescription
+                )) {
+                    self.agent.recordUnverifiedMigrationRepairFailure(error.localizedDescription)
+                }
+                self.presentDashboard()
+            }
+        }
+    }
+
+    private func applySignedRollback() {
+        let panel = NSOpenPanel()
+        panel.message = "Choose the signed Malibu rollback authorization issued by release security."
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let authorization = panel.url else { return }
+        Task { @MainActor in
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try MalibuReleaseRuntimeAuthorization.applyLiveRollback(
+                        authorizationURL: authorization
+                    )
+                }.value
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                configuration.createsNewApplicationInstance = true
+                NSWorkspace.shared.openApplication(
+                    at: Bundle.main.bundleURL,
+                    configuration: configuration
+                ) { _, error in
+                    Task { @MainActor in
+                        if let error {
+                            NSLog("[malibu] rollback relaunch failed: %@", error.localizedDescription)
+                            let alert = NSAlert()
+                            alert.messageText = "Malibu rolled back but could not relaunch"
+                            alert.informativeText =
+                                "The previous Malibu app is installed. Quit this process, then open Malibu again. \(error.localizedDescription)"
+                            alert.alertStyle = .warning
+                            alert.runModal()
+                            return
+                        }
+                        NSApp.terminate(nil)
+                    }
+                }
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Signed Malibu rollback did not complete"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
     }
 
     private func exportDiagnostics() {

@@ -127,7 +127,6 @@ role_names = {
     "coordinator": "coordinator-linux-amd64",
     "coordinator_cli": "coordinator-cli-linux-amd64",
     "gateway": "gateway-linux-amd64",
-    "malibu_app": f"Malibu-{tag}.dmg",
     "pearl_metadata": "pearl-release.json",
     "pearl_metadata_signature": "pearl-release.json.sig",
     "provider_cli": f"macprovider-cli-{tag}-darwin-arm64.tar.gz",
@@ -286,7 +285,7 @@ if verify_with_index "$work/index-variants/missing-role/compatibility-artifact-i
   >"$work/missing-role.out" 2>&1; then
   fail "acceptance verifier accepted an artifact index with a missing role"
 fi
-grep -q 'exact required roles' "$work/missing-role.out"
+grep -q 'artifact mappings do not contain the independent or legacy role set' "$work/missing-role.out"
 
 if verify_with_index "$work/index-variants/relabelled-role/compatibility-artifact-index.json" \
   >"$work/relabelled-role.out" 2>&1; then

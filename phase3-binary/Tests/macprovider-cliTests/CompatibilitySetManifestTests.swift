@@ -22,7 +22,6 @@ final class CompatibilitySetManifestTests: XCTestCase {
             "provider_plist_activated",
             "watchdog_plist_activated",
             "binary_activated",
-            "malibu_app_activated",
         ])
         XCTAssertEqual(
             plan.rollbackOrder,
@@ -50,8 +49,60 @@ final class CompatibilitySetManifestTests: XCTestCase {
             CompatibilitySetManifest.requiredExternalGates,
             ["coordinator_admission"]
         )
-        XCTAssertTrue(CompatibilitySetManifest.localActivationMembers.contains("malibu_app"))
+        XCTAssertFalse(CompatibilitySetManifest.localActivationMembers.contains("malibu_app"))
         XCTAssertFalse(CompatibilitySetManifest.localActivationMembers.contains("coordinator_admission"))
+    }
+
+    func testLegacyMalibuEvidenceRemainsFrozenHistoricalData() throws {
+        let fixture = try CompatibilityManifestFixture(
+            version: "1.8.39",
+            commit: "71eb927a56011f00143b2989cb2bc455b86d4d7c"
+        )
+        try fixture.writeManifest(legacyMalibuVersion: "1.8.39")
+
+        XCTAssertNoThrow(
+            try CompatibilitySetManifest.loadValidated(
+                from: fixture.root,
+                expectedVersion: fixture.version,
+                publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+            )
+        )
+        XCTAssertFalse(CompatibilitySetManifest.localActivationMembers.contains("malibu_app"))
+        XCTAssertFalse(CompatibilitySetRollbackPlan.supportedRollbackOrder.contains("malibu_app"))
+    }
+
+    func testPublic1840LegacyMalibuEvidenceRemainsReadable() throws {
+        let fixture = try CompatibilityManifestFixture(
+            version: "1.8.40",
+            commit: "18638472fe3e885f3534eeac29ab89b4c7ffdd7a"
+        )
+        try fixture.writeManifest(legacyMalibuVersion: "1.8.40")
+
+        XCTAssertNoThrow(
+            try CompatibilitySetManifest.loadValidated(
+                from: fixture.root,
+                expectedVersion: fixture.version,
+                publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+            )
+        )
+    }
+
+    func testLegacyMalibuEvidenceIsRejectedOutsideFrozenBridge() throws {
+        let fixture = try CompatibilityManifestFixture()
+        try fixture.writeManifest(legacyMalibuVersion: "1.8.39")
+
+        XCTAssertThrowsError(
+            try CompatibilitySetManifest.loadValidated(
+                from: fixture.root,
+                expectedVersion: fixture.version,
+                publicKeyPEM: fixture.privateKey.publicKey.pemRepresentation
+            )
+        ) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.compatibilityManifestInvalid("legacy_malibu_release_identity").description
+            )
+        }
     }
 
     func testCatalogMutationIsRejectedAfterSignatureVerification() throws {
@@ -207,13 +258,18 @@ private final class CompatibilityManifestFixture {
 
     let root: URL
     let privateKey: P256.Signing.PrivateKey
-    let version = "1.9.0"
-    let commit = "0123456789abcdef0123456789abcdef01234567"
+    let version: String
+    let commit: String
     var compatibilitySetID: String {
         "Augustas11/macprovider:v\(version)@\(commit)"
     }
 
-    init() throws {
+    init(
+        version: String = "1.9.0",
+        commit: String = "0123456789abcdef0123456789abcdef01234567"
+    ) throws {
+        self.version = version
+        self.commit = commit
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("compatibility-manifest-tests-\(UUID().uuidString)", isDirectory: true)
         privateKey = P256.Signing.PrivateKey()
@@ -255,8 +311,16 @@ private final class CompatibilityManifestFixture {
         try? FileManager.default.removeItem(at: root)
     }
 
-    func writeManifest() throws {
+    func writeManifest(legacyMalibuVersion: String? = nil) throws {
         let catalog = root.appendingPathComponent("catalog-release", isDirectory: true)
+        if legacyMalibuVersion != nil {
+            try CompatibilitySetRollbackPlan.canonicalSupportedData(legacyMalibu: true).write(
+                to: root.appendingPathComponent("compatibility-set-local/updater-rollback.json")
+            )
+        }
+        let localMembers = legacyMalibuVersion == nil
+            ? CompatibilitySetManifest.localActivationMembers
+            : CompatibilitySetManifest.legacyLocalActivationMembers
         var catalogDigests: [String: Any] = [:]
         for name in Self.catalogNames {
             let bytes = try Data(contentsOf: catalog.appendingPathComponent(name))
@@ -269,6 +333,69 @@ private final class CompatibilityManifestFixture {
             return [
                 "path": "compatibility-set-local/\(name)",
                 "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            ]
+        }
+        var components: [String: Any] = [
+            "catalog": [
+                "activation": "local",
+                "schema_version": "macprovider.autotune-release.v1",
+                "release_id": "published-test-release",
+                "policy_version": "catalog-policy-v1",
+                "files": catalogDigests,
+            ],
+            "provider_cli": [
+                "activation": "local",
+                "designated_identifier": "live.streamvc.macprovider.cli",
+                "platform": "darwin-arm64",
+                "status_contract": "macprovider.local-status.v1",
+                "version": version,
+            ],
+            "launchd": [
+                "activation": "local",
+                "contract": "macprovider.launch-agent.v1",
+                "install_contract": try artifact("install.sh"),
+                "label": "live.streamvc.macprovider",
+                "plist_template": try artifact("provider-launch-agent.plist.template"),
+            ],
+            "watchdog": [
+                "activation": "local",
+                "contract": "macprovider.exact-service-pid-watchdog.v1",
+                "monitored_label": "live.streamvc.macprovider",
+                "plist_template": try artifact("watchdog-launch-agent.plist.template"),
+                "script": try artifact("watchdog.sh"),
+                "service_label": "live.streamvc.macprovider-watchdog",
+            ],
+            "coordinator_admission": [
+                "activation": "required_remote_gate",
+                "handshake": "accepted_set_echo_v1",
+                "policy_version": "provider-admission.v1",
+                "scope": "remote_coordinator_policy",
+                "version": version,
+                "rollout": [
+                    "bridge_duration_seconds": 86_400,
+                    "enforce_provider_admission": false,
+                    "mode": "bridge_required",
+                ],
+            ],
+            "updater_rollback": [
+                "activation": "local",
+                "metadata": try artifact("updater-rollback.json"),
+                "metadata_version": 1,
+                "protocol": "macprovider.compatibility-set-transaction.v1",
+            ],
+        ]
+        if let legacyMalibuVersion {
+            components["malibu_app"] = [
+                "activation": "cli_owned_if_installed",
+                "bundle_id": "tech.malibu.app",
+                "compatibility_handoff": [
+                    "delivery": "signed_dmg_transaction_member",
+                    "embedded_manifest_path": "Contents/Resources/compatibility-set.json",
+                    "provider_mutation": "forbidden",
+                    "reader_compatibility": "backward_compatible",
+                ],
+                "minimum_status_reader": 1,
+                "version": legacyMalibuVersion,
             ]
         }
         let signed: [String: Any] = [
@@ -284,67 +411,7 @@ private final class CompatibilityManifestFixture {
                 "mode": "signed_release_checksums",
                 "embedded_container_hashes": "excluded_to_avoid_self_reference",
             ],
-            "components": [
-                "catalog": [
-                    "activation": "local",
-                    "schema_version": "macprovider.autotune-release.v1",
-                    "release_id": "published-test-release",
-                    "policy_version": "catalog-policy-v1",
-                    "files": catalogDigests,
-                ],
-                "malibu_app": [
-                    "activation": "cli_owned_if_installed",
-                    "bundle_id": "tech.malibu.app",
-                    "compatibility_handoff": [
-                        "delivery": "signed_dmg_transaction_member",
-                        "embedded_manifest_path": "Contents/Resources/compatibility-set.json",
-                        "provider_mutation": "forbidden",
-                        "reader_compatibility": "backward_compatible",
-                    ],
-                    "minimum_status_reader": 1,
-                    "version": version,
-                ],
-                "provider_cli": [
-                    "activation": "local",
-                    "designated_identifier": "live.streamvc.macprovider.cli",
-                    "platform": "darwin-arm64",
-                    "status_contract": "macprovider.local-status.v1",
-                    "version": version,
-                ],
-                "launchd": [
-                    "activation": "local",
-                    "contract": "macprovider.launch-agent.v1",
-                    "install_contract": try artifact("install.sh"),
-                    "label": "live.streamvc.macprovider",
-                    "plist_template": try artifact("provider-launch-agent.plist.template"),
-                ],
-                "watchdog": [
-                    "activation": "local",
-                    "contract": "macprovider.exact-service-pid-watchdog.v1",
-                    "monitored_label": "live.streamvc.macprovider",
-                    "plist_template": try artifact("watchdog-launch-agent.plist.template"),
-                    "script": try artifact("watchdog.sh"),
-                    "service_label": "live.streamvc.macprovider-watchdog",
-                ],
-                "coordinator_admission": [
-                    "activation": "required_remote_gate",
-                    "handshake": "accepted_set_echo_v1",
-                    "policy_version": "provider-admission.v1",
-                    "scope": "remote_coordinator_policy",
-                    "version": version,
-                    "rollout": [
-                        "bridge_duration_seconds": 86_400,
-                        "enforce_provider_admission": false,
-                        "mode": "bridge_required",
-                    ],
-                ],
-                "updater_rollback": [
-                    "activation": "local",
-                    "metadata": try artifact("updater-rollback.json"),
-                    "metadata_version": 1,
-                    "protocol": "macprovider.compatibility-set-transaction.v1",
-                ],
-            ],
+            "components": components,
             "transaction": [
                 "activation": "crash_recoverable_local_activation_group",
                 "autoupdate_scope": "compatibility_cohort",
@@ -353,7 +420,7 @@ private final class CompatibilityManifestFixture {
                     "protocol": "macprovider.maintenance-lease.v1",
                 ],
                 "membership": [
-                    "local_activation_group": CompatibilitySetManifest.localActivationMembers,
+                    "local_activation_group": localMembers,
                     "required_external_gates": CompatibilitySetManifest.requiredExternalGates,
                     "preserved_state_invariants": CompatibilitySetManifest.preservedStateInvariants,
                 ],
@@ -368,7 +435,7 @@ private final class CompatibilityManifestFixture {
                     "timeout_seconds": 1_200,
                 ],
                 "rollback": [
-                    "members": CompatibilitySetManifest.localActivationMembers,
+                    "members": localMembers,
                     "mode": "local_activation_group",
                 ],
             ],

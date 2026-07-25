@@ -1,6 +1,16 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.14 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.15 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.15 (2026-07-16, independently versioned Malibu recovery).**
+Malibu marketing/build versions no longer match or derive from the provider CLI
+version. SPEC-034 replaces equality with a separately signed app envelope, explicit
+provider-set/capability allowlist, separate signed discovery, and anti-replay state.
+Malibu 1.8.41 build 41 may observe immutable CLI v1.8.40; its app-only transaction
+cannot replace that CLI or become a second provider lifecycle authority. This narrowly
+supersedes v0.13's ban on independent App publication while preserving credential,
+admission, launchd, provider-update, rollback, and uninstall ownership boundaries.
+Generic GitHub latest, `latest.dmg`, and appcasts remain non-authoritative.
 
 **Change log v0.14 (2026-07-15, issue #585 bootstrap trust continuity).**
 Stable Malibu 1.8.39 is the only CLI-owned build whose signed app bundle retains
@@ -321,28 +331,34 @@ time (60–240 s for the first model) in the background.
   owned by the launchd **provider service** `live.streamvc.macprovider` (`KeepAlive`)
   that `install.sh` set up — a separate mechanism from the app login item, §8.)
 
-### 3.3 Updates — CLI-owned signed compatibility set
+### 3.3 Updates — independent signed transactions
 
-- The release artifact index binds one exact version of Malibu.app, macprovider-cli,
-  launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
-  and rollback schema. Every compatibility-set member is hash-bound and release-role
-  checked before mutation.
+- The provider release artifact index binds the provider CLI, launchd definitions,
+  watchdog, catalog/resources, coordinator admission metadata, and rollback schema.
+  Malibu is not a required provider artifact, activation checkpoint, or rollback
+  member. Historical provider manifests may retain a Malibu row only as ignored,
+  non-authoritative evidence; its version is never compared with the provider version.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
-  dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
+  dashboard invoke `macprovider-cli update`; that transaction cannot download, replace,
+  activate, or restore Malibu.app.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
   second update authority. Stable v1.8.39 alone retains the frozen 1.8.32
   `SUPublicEDKey` in its signed target bundle because Sparkle 2.6.4 requires key
   continuity after extraction; without Sparkle code or a feed, this public key cannot
   initiate an update. Later builds must omit it.
-- The updater acquires the maintenance lease, persists a phase journal and exact typed
-  rollback plan, stages and validates the target, drains buyer work, installs the whole
-  set, restarts launchd, and commits only after the coordinator admits that exact set
-  and the provider proves buyer-serving readiness. Failure restores the prior exact set,
-  including Malibu.app and launchd/watchdog resources, and retains the rollback material
-  until prior-set admission and buyer-serving readiness are proven.
-- `auto_update_enabled: false` suppresses scheduled mutation of every set member. It
-  does not disable the explicit user action. Model caches remain outside the set unless
-  a signed target explicitly declares a compatible model/catalog migration.
+- The provider updater acquires the maintenance lease, persists a phase journal and
+  exact typed rollback plan, stages and validates the target, drains buyer work,
+  installs only provider-owned members, restarts launchd, and commits only after the
+  coordinator admits that exact set and the provider proves buyer-serving readiness.
+  Failure restores only the prior provider-owned set.
+- Malibu uses the separately signed, Developer-ID-Installer-authenticated app-only
+  transaction in SPEC-034. Its journal, anti-replay floors, rollback grant, sidecars,
+  and app swap are independent of provider state. It may validate an exact supported
+  provider tuple but cannot mutate that tuple.
+- `auto_update_enabled: false` suppresses scheduled provider-set mutation. It does not
+  authorize or suppress a separately approved Malibu installation. Model caches remain
+  outside both app transactions and provider release metadata unless the provider
+  explicitly declares a compatible model/catalog migration.
 
 ### 3.4 Uninstall
 

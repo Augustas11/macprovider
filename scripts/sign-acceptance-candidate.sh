@@ -40,7 +40,7 @@ case "$provider_admission_policy" in
   *) die "invalid provider admission policy" ;;
 esac
 
-for command in python3 security codesign xcrun ditto hdiutil tar shasum spctl base64 "$openssl_bin"; do
+for command in python3 security codesign xcrun ditto tar shasum base64 "$openssl_bin"; do
   command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"
 done
 for path in "$metadata" "$compatibility" "$artifact_index" "$keychain_helper" "$acceptance_public_key"; do
@@ -61,7 +61,6 @@ for secret in \
 done
 
 cli_unsigned="$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
-app_unsigned="$unsigned_dir/Malibu.app.tar.gz"
 toolchain="$unsigned_dir/release-toolchain.json"
 coordinator="$unsigned_dir/coordinator-linux-amd64"
 coordinator_cli="$unsigned_dir/coordinator-cli-linux-amd64"
@@ -69,7 +68,6 @@ gateway="$unsigned_dir/gateway-linux-amd64"
 unsigned_manifest="$unsigned_dir/unsigned-acceptance-manifest.json"
 unsigned_assets=(
   --asset "phase3-binary-m4-${tag}.tar.gz=$cli_unsigned"
-  --asset "Malibu.app.tar.gz=$app_unsigned"
   --asset "release-toolchain.json=$toolchain"
   --asset "coordinator-linux-amd64=$coordinator"
   --asset "coordinator-cli-linux-amd64=$coordinator_cli"
@@ -125,23 +123,14 @@ cmp "$signing_tmp/release-public.pem" "$release_public_key" ||
   die "release private key does not match the committed compatibility public key"
 
 python3 "$metadata" validate-archive --input "$cli_unsigned" --forbid-links
-python3 "$metadata" validate-archive --input "$app_unsigned"
 cli_work="$signing_tmp/cli"
-app_work="$signing_tmp/app"
-mkdir "$cli_work" "$app_work"
+mkdir "$cli_work"
 tar -xzf "$cli_unsigned" -C "$cli_work"
-tar -xzf "$app_unsigned" -C "$app_work"
 [[ -x "$cli_work/macprovider-cli" && ! -L "$cli_work/macprovider-cli" ]] || die "candidate CLI is absent or unsafe"
 [[ -f "$cli_work/compatibility-set.json" && ! -L "$cli_work/compatibility-set.json" ]] ||
   die "PR589 compatibility-set manifest is absent"
 [[ -d "$cli_work/compatibility-set-local" && ! -L "$cli_work/compatibility-set-local" ]] ||
   die "PR589 local compatibility set is absent"
-app_root_count="$(find "$app_work" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')"
-[[ "$app_root_count" == 1 && -d "$app_work/Malibu.app" ]] ||
-  die "Malibu archive must contain exactly one Malibu.app root"
-app="$app_work/Malibu.app"
-[[ -d "$app/Contents/MacOS" && -d "$app/Contents/Resources" ]] || die "Malibu.app structure is invalid"
-
 python3 "$metadata" validate-provider-payload --directory "$cli_work"
 python3 "$compatibility" validate \
   --input "$cli_work/compatibility-set.json" \
@@ -199,32 +188,8 @@ cli_notary="$signing_tmp/macprovider-cli-notary.zip"
   --wait
 rm -f "$cli_notary"
 
-install -m 0755 "$cli_work/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
-install -m 0644 "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
-cmp "$cli_work/compatibility-set.json" "$app/Contents/Resources/compatibility-set.json"
-codesign --force --deep \
-  --options runtime \
-  --timestamp \
-  --entitlements "$root/phase3-binary/app/Malibu.entitlements" \
-  --keychain "$keychain" \
-  --sign "$signing_identity" \
-  "$app"
-codesign --verify --strict --verbose=2 --deep "$app"
-app_notary="$signing_tmp/Malibu-notary.zip"
-/usr/bin/ditto -c -k --keepParent "$app" "$app_notary"
-"$root/scripts/notarytool-submit-with-retry.sh" "$app_notary" \
-  --apple-id "$APPLE_NOTARY_APPLE_ID" \
-  --password "$APPLE_NOTARY_PASSWORD" \
-  --team-id "$APPLE_NOTARY_TEAM_ID" \
-  --wait
-rm -f "$app_notary"
-xcrun stapler staple "$app"
-xcrun stapler validate "$app"
-spctl -a -vvv -t exec "$app"
-
 mkdir "$output_dir"
 provider_asset="$output_dir/macprovider-cli-${tag}-darwin-arm64.tar.gz"
-malibu_asset="$output_dir/Malibu-${tag}.dmg"
 provider_archive_members=(
   macprovider-cli
   mlx.metallib
@@ -243,20 +208,6 @@ done
 [[ "$provider_bundle_count" -gt 0 ]] || die "signed provider payload lacks a SwiftPM resource bundle"
 tar -czf "$provider_asset" -C "$cli_work" "${provider_archive_members[@]}"
 python3 "$metadata" validate-archive --input "$provider_asset" --forbid-links
-dmg_stage="$signing_tmp/dmg"
-mkdir "$dmg_stage"
-cp -R "$app" "$dmg_stage/Malibu.app"
-ln -s /Applications "$dmg_stage/Applications"
-hdiutil create -volname Malibu -srcfolder "$dmg_stage" -ov -format UDZO "$malibu_asset"
-codesign --sign "$signing_identity" --keychain "$keychain" --timestamp "$malibu_asset"
-"$root/scripts/notarytool-submit-with-retry.sh" "$malibu_asset" \
-  --apple-id "$APPLE_NOTARY_APPLE_ID" \
-  --password "$APPLE_NOTARY_PASSWORD" \
-  --team-id "$APPLE_NOTARY_TEAM_ID" \
-  --wait
-xcrun stapler staple "$malibu_asset"
-xcrun stapler validate "$malibu_asset"
-
 install -m 0755 "$coordinator" "$output_dir/coordinator-linux-amd64"
 install -m 0755 "$coordinator_cli" "$output_dir/coordinator-cli-linux-amd64"
 install -m 0755 "$gateway" "$output_dir/gateway-linux-amd64"
@@ -283,7 +234,6 @@ python3 "$metadata" build-pearl \
 
 artifact_arguments=(
   --artifact "provider_cli=$provider_asset"
-  --artifact "malibu_app=$malibu_asset"
   --artifact "coordinator=$output_dir/coordinator-linux-amd64"
   --artifact "coordinator_cli=$output_dir/coordinator-cli-linux-amd64"
   --artifact "gateway=$output_dir/gateway-linux-amd64"
@@ -314,7 +264,6 @@ python3 "$artifact_index" validate \
 
 release_assets=(
   "$provider_asset"
-  "$malibu_asset"
   "$output_dir/release-toolchain.json"
   "$output_dir/coordinator-linux-amd64"
   "$output_dir/coordinator-cli-linux-amd64"

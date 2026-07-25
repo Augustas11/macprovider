@@ -233,11 +233,12 @@ report "case1-pinned-url" \
 report "case1-validation-chain-called" 1 "$VALIDATE_CALLED"
 
 ################################################################
-# Case 2 — unset pin skips prerelease v1.8.0 and chooses latest stable.
+# Case 2 — unset pin skips prerelease and non-provider release namespaces.
 ################################################################
 reset_mocks
+MOCK_RELEASES_JSON='[{"tag_name":"v1.8.0","prerelease":true},{"tag_name":"malibu-v1.8.41","prerelease":false},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
 tag="$(resolve_release_tag)"
-report "case2-latest-skips-prerelease" "v1.7.11" "$tag"
+report "case2-latest-skips-prerelease-and-malibu-namespace" "v1.7.11" "$tag"
 
 reset_mocks
 MOCK_RELEASES_JSON='[{"prerelease":true,"tag_name":"v1.8.0"},{"prerelease":false,"tag_name":"v1.7.11"}]'

@@ -837,7 +837,6 @@ def validate_restore_inputs(marker):
         external_backup = os.path.join(release_backup, "external-local-members")
         if os.path.exists(external_backup):
             validate_external_local_backup(external_backup)
-        validate_malibu_app_backup(release_backup)
     return backup, target, release_backup
 
 def release_tree_sha256(root_path):
@@ -927,112 +926,6 @@ def restore_external_local_members(release_backup):
                 raise RuntimeError("external_restore_target_invalid")
             os.unlink(target)
 
-def validate_malibu_app_backup(release_backup):
-    archive = os.path.join(release_backup, "Malibu.app.zip")
-    state_path = os.path.join(release_backup, "malibu-app-state.json")
-    archive_exists = os.path.exists(archive)
-    state_exists = os.path.exists(state_path)
-    if archive_exists != state_exists:
-        raise RuntimeError("malibu_backup_incomplete")
-    if not state_exists:
-        return None
-    archive_st = reject_path(archive)
-    state_st = reject_path(state_path)
-    if not stat.S_ISREG(archive_st.st_mode) or not stat.S_ISREG(state_st.st_mode):
-        raise RuntimeError("malibu_backup_not_regular")
-    fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        raw = os.read(fd, 65537)
-    finally:
-        os.close(fd)
-    if len(raw) > 65536:
-        raise RuntimeError("malibu_backup_state_oversized")
-    try:
-        record = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("malibu_backup_state_invalid") from exc
-    if set(record) != {"archive_sha256", "schema_version", "target_path"} or record["schema_version"] != 1:
-        raise RuntimeError("malibu_backup_state_invalid")
-    target = record.get("target_path")
-    candidates = {
-        "/Applications/Malibu.app",
-        os.path.normpath(os.path.join(os.path.expanduser("~"), "Applications/Malibu.app")),
-    }
-    if target not in candidates or os.path.normpath(target) != target:
-        raise RuntimeError("malibu_backup_target_invalid")
-    digest = record.get("archive_sha256")
-    if not isinstance(digest, str) or not re.match(r"^[0-9a-f]{64}$", digest) or sha256(archive) != digest:
-        raise RuntimeError("malibu_backup_sha256_mismatch")
-    return record
-
-def validate_extracted_malibu_app(app):
-    app_st = reject_path(app)
-    if not stat.S_ISDIR(app_st.st_mode) or os.path.basename(app) != "Malibu.app":
-        raise RuntimeError("malibu_restored_bundle_invalid")
-    for current, directory_names, file_names in os.walk(app, topdown=True, followlinks=False):
-        reject_path(current)
-        for name in directory_names + file_names:
-            reject_path(os.path.join(current, name))
-    info_plist = os.path.join(app, "Contents", "Info.plist")
-    info_st = reject_path(info_plist)
-    if not stat.S_ISREG(info_st.st_mode):
-        raise RuntimeError("malibu_restored_bundle_invalid")
-
-def restore_malibu_app_if_present(release_backup):
-    record = validate_malibu_app_backup(release_backup)
-    if record is None:
-        return
-    target = record["target_path"]
-    parent = os.path.dirname(target)
-    parent_st = reject_path(parent)
-    if not stat.S_ISDIR(parent_st.st_mode) or not os.access(parent, os.W_OK):
-        raise RuntimeError("malibu_restore_parent_unwritable")
-    extraction = os.path.join(parent, f".malibu-rollback-extract-{uuid.uuid4()}")
-    displaced = os.path.join(parent, f".Malibu.app.rollback-displaced-{uuid.uuid4()}")
-    os.mkdir(extraction, 0o700)
-    target_displaced = False
-    try:
-        ditto = os.environ.get("MACPROVIDER_DITTO", "/usr/bin/ditto")
-        result = subprocess.run(
-            [ditto, "-x", "-k", os.path.join(release_backup, "Malibu.app.zip"), extraction],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError("malibu_backup_extract_failed")
-        entries = os.listdir(extraction)
-        if entries != ["Malibu.app"]:
-            raise RuntimeError("malibu_backup_archive_shape_invalid")
-        restored = os.path.join(extraction, "Malibu.app")
-        validate_extracted_malibu_app(restored)
-        if os.path.exists(target):
-            reject_path(target)
-            os.replace(target, displaced)
-            target_displaced = True
-        try:
-            os.replace(restored, target)
-        except Exception:
-            if target_displaced and not os.path.exists(target):
-                os.replace(displaced, target)
-                target_displaced = False
-            raise
-        parent_fd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-        if target_displaced:
-            shutil.rmtree(displaced)
-            target_displaced = False
-    finally:
-        shutil.rmtree(extraction, ignore_errors=True)
-        if target_displaced and not os.path.exists(target) and os.path.exists(displaced):
-            os.replace(displaced, target)
-        elif os.path.exists(displaced):
-            shutil.rmtree(displaced, ignore_errors=True)
-
 def copy_release_resources(source, destination):
     for name in os.listdir(source):
         if name in {"external-local-members", "Malibu.app.zip", "malibu-app-state.json"}:
@@ -1120,7 +1013,6 @@ def restore(marker, failure_class):
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         restore_external_local_members(release_backup)
-        restore_malibu_app_if_present(release_backup)
     atomic_copy_binary(backup, target, int(marker["mode"]))
     dir_fd = os.open(os.path.dirname(target), os.O_RDONLY)
     try:

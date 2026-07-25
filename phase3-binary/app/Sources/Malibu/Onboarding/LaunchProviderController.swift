@@ -17,6 +17,7 @@ final class LaunchProviderController: ObservableObject {
         case startingAgent
         case importingProviderCredential
         case live(model: String, tier: TrustTier)
+        case migrationRepairRequired(model: String, message: String)
         case failed(stage: String, retryable: Bool, message: String)
     }
 
@@ -24,30 +25,39 @@ final class LaunchProviderController: ObservableObject {
     @Published private(set) var installLogLines: [String] = []
     @Published private(set) var installProgressHint: String?
     @Published private(set) var installStartedAt: Date?
+    @Published private(set) var signedProviderVersion: String?
 
     private var installProgressTask: Task<Void, Never>?
     private let dependencies: Dependencies
+    private let authorizeBootstrapTarget: @MainActor () throws -> String
+    private let authorizeInstalledProvider: @MainActor () throws -> Void
 
     struct Dependencies {
         var localInstallSucceeded: @MainActor () async -> Bool
         var registerLoginItem: @MainActor () async throws -> Void
         var runCLIInstall: @MainActor (
+            _ pinnedVersion: String,
             @escaping @Sendable @MainActor (String) -> Void
         ) async throws -> Void
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
         var waitForInstalledProviderHealth: @MainActor () async -> Bool
         var attachInstalledProviderAfterInstall: @MainActor () async -> Bool
+        var observeInstalledProviderDuringMigrationRepair: @MainActor () async -> Bool
         var readConfigModel: () -> String?
         var providerStartFailure: @MainActor () -> String?
         var appIdentityConfigured: @MainActor () async -> Bool
         var waitBeforeImportRetry: @MainActor () async throws -> Void
+        var clearProviderReleaseAuthorityBlock: @MainActor () -> Void
 
         static func live(agent: MalibuAgent?) -> Dependencies {
             Dependencies(
                 localInstallSucceeded: { await CLIInstallRunner.localInstallSucceeded() },
                 registerLoginItem: { try AppLoginItem.register() },
-                runCLIInstall: { onLogLine in
-                    try await CLIInstallRunner.run(onLogLine: onLogLine)
+                runCLIInstall: { pinnedVersion, onLogLine in
+                    try await CLIInstallRunner.run(
+                        pinnedVersion: pinnedVersion,
+                        onLogLine: onLogLine
+                    )
                 },
                 importCLIConfigAfterInstall: {
                     try await ProviderConfig.importExistingCLIConfig()
@@ -62,6 +72,9 @@ final class LaunchProviderController: ObservableObject {
                         timeout: MalibuOnboardingTimeouts.firstServingFrameSec
                     ) ?? false
                 },
+                observeInstalledProviderDuringMigrationRepair: {
+                    await agent?.observeInstalledProviderDuringMigrationRepair() ?? false
+                },
                 readConfigModel: { ProviderConfig.readModel() },
                 providerStartFailure: { agent?.providerStartFailure },
                 appIdentityConfigured: { await ProviderConfig.isConfigured },
@@ -69,17 +82,49 @@ final class LaunchProviderController: ObservableObject {
                     try await Task.sleep(
                         nanoseconds: UInt64(MalibuOnboardingTimeouts.providerTokenImportRetryIntervalSec * 1_000_000_000)
                     )
+                },
+                clearProviderReleaseAuthorityBlock: {
+                    agent?.clearProviderReleaseAuthorityBlock()
                 }
             )
         }
     }
 
-    init(agent: MalibuAgent? = nil, dependencies: Dependencies? = nil) {
+    init(
+        agent: MalibuAgent? = nil,
+        dependencies: Dependencies? = nil,
+        authorizeBootstrapTarget: (@MainActor () throws -> String)? = nil,
+        authorizeInstalledProvider: (@MainActor () throws -> Void)? = nil
+    ) {
         self.dependencies = dependencies ?? .live(agent: agent)
+        if let authorizeBootstrapTarget {
+            self.authorizeBootstrapTarget = authorizeBootstrapTarget
+        } else if dependencies == nil {
+            self.authorizeBootstrapTarget = {
+                try MalibuReleaseRuntimeAuthorization.authorizeLegacyBootstrapTarget()
+            }
+        } else {
+            self.authorizeBootstrapTarget = { "1.8.40" }
+        }
+        if let authorizeInstalledProvider {
+            self.authorizeInstalledProvider = authorizeInstalledProvider
+        } else if dependencies == nil {
+            self.authorizeInstalledProvider = {
+                try MalibuReleaseRuntimeAuthorization.authorizeLive(
+                    requireInstalledProvider: true
+                )
+            }
+        } else {
+            // Hermetic controller tests supply all dependencies. Runtime
+            // authorization itself has a dedicated signed-fixture test suite.
+            self.authorizeInstalledProvider = {}
+        }
     }
 
     func launch() async {
+        refreshSignedProviderVersion()
         if await dependencies.localInstallSucceeded() {
+            guard authorizeInstalledProviderOrFail() else { return }
             await finalizeExistingInstall(
                 logLine: "Background provider is already running locally. Connecting Malibu to it."
             )
@@ -89,7 +134,17 @@ final class LaunchProviderController: ObservableObject {
     }
 
     func retry() async {
-        guard case .failed(_, let retryable, _) = stage, retryable else { return }
+        switch stage {
+        case .failed(stage: "installedProviderAuthority", let retryable, _) where retryable:
+            await launchViaCLIInstall()
+            return
+        case .failed(_, let retryable, _) where retryable:
+            break
+        case .migrationRepairRequired:
+            break
+        default:
+            return
+        }
         await launch()
     }
 
@@ -102,13 +157,18 @@ final class LaunchProviderController: ObservableObject {
     }
 
     func refreshFromExistingInstall() async {
+        refreshSignedProviderVersion()
         switch stage {
-        case .idle, .failed(stage: "cliInstall", _, _), .failed(stage: "identityImport", _, _):
+        case .idle,
+             .migrationRepairRequired,
+             .failed(stage: "cliInstall", _, _),
+             .failed(stage: "identityImport", _, _):
             break
         default:
             return
         }
         guard await dependencies.localInstallSucceeded() else { return }
+        guard authorizeInstalledProviderOrFail() else { return }
         await finalizeExistingInstall(logLine: "Background provider is already running locally.")
     }
 
@@ -118,13 +178,26 @@ final class LaunchProviderController: ObservableObject {
         do {
             stage = .runningCLIInstall
             installLogLines = []
-            try await dependencies.runCLIInstall { [weak self] line in
+            let pinnedVersion: String
+            do {
+                pinnedVersion = try authorizeBootstrapTarget()
+                signedProviderVersion = pinnedVersion
+            } catch {
+                stage = .failed(
+                    stage: "releaseAuthority",
+                    retryable: true,
+                    message: error.localizedDescription
+                )
+                return
+            }
+            try await dependencies.runCLIInstall(pinnedVersion) { [weak self] line in
                 guard let self else { return }
                 self.installLogLines.append(line)
                 if self.installLogLines.count > 200 {
                     self.installLogLines.removeFirst(self.installLogLines.count - 200)
                 }
             }
+            guard authorizeInstalledProviderOrFail() else { return }
             var importError: Error?
             do {
                 try await dependencies.importCLIConfigAfterInstall()
@@ -133,7 +206,7 @@ final class LaunchProviderController: ObservableObject {
                     importError = error
                     installLogLines.append(deferredImportMessage(for: error))
                 } else {
-                    stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                    await enterMigrationRepairObservationOrFail(error)
                     return
                 }
             }
@@ -155,7 +228,7 @@ final class LaunchProviderController: ObservableObject {
             try await dependencies.importCLIConfigAfterInstall()
         } catch {
             guard isRetriableImportError(error) else {
-                stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                await enterMigrationRepairObservationOrFail(error)
                 return
             }
             importError = error
@@ -177,7 +250,7 @@ final class LaunchProviderController: ObservableObject {
                 do {
                     try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
                 } catch {
-                    stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                    await enterMigrationRepairObservationOrFail(error)
                     return
                 }
             }
@@ -224,12 +297,47 @@ final class LaunchProviderController: ObservableObject {
         throw providerIdentityImportUnavailableError(underlying: lastError)
     }
 
+    private func enterMigrationRepairObservationOrFail(_ error: Error) async {
+        if await dependencies.observeInstalledProviderDuringMigrationRepair() {
+            stage = .migrationRepairRequired(
+                model: dependencies.readConfigModel() ?? "installed model",
+                message: error.localizedDescription
+            )
+        } else {
+            stage = .failed(
+                stage: "identityImport",
+                retryable: true,
+                message: error.localizedDescription
+            )
+        }
+    }
+
     private func launchdMonitorUnavailableError(message: String) -> NSError {
         NSError(
             domain: "Malibu.LaunchProviderController",
             code: 3,
             userInfo: [NSLocalizedDescriptionKey: message]
         )
+    }
+
+    private func authorizeInstalledProviderOrFail() -> Bool {
+        do {
+            try authorizeInstalledProvider()
+            dependencies.clearProviderReleaseAuthorityBlock()
+            return true
+        } catch {
+            stage = .failed(
+                stage: "installedProviderAuthority",
+                retryable: true,
+                message: error.localizedDescription
+            )
+            return false
+        }
+    }
+
+    private func refreshSignedProviderVersion() {
+        guard signedProviderVersion == nil else { return }
+        signedProviderVersion = try? authorizeBootstrapTarget()
     }
 
     private func isMissingProviderToken(_ error: Error) -> Bool {

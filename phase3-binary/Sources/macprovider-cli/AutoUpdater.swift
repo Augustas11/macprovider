@@ -189,17 +189,6 @@ struct AutoUpdater: Sendable {
                 )
                 return
             }
-            if try markerStore.preflightInstalledMalibuAppReplacement() != nil,
-               prepared.stagedMalibuApp == nil {
-                await fail(
-                    updateID: updateID,
-                    target: target,
-                    phase: .eligibility,
-                    failure: .other,
-                    reason: "signed_malibu_bundle_missing"
-                )
-                return
-            }
             maintenanceLease = try lifecycleLeaseStore.acquire(
                 kind: .maintenance,
                 operationID: "autoupdate:\(updateID)",
@@ -312,9 +301,7 @@ struct AutoUpdater: Sendable {
             try markerStore.activateReleasePayload(
                 from: prepared.newBinary.deletingLastPathComponent(),
                 newBinary: prepared.newBinary,
-                to: current,
-                stagedMalibuApp: prepared.stagedMalibuApp,
-                rollbackMarker: marker
+                to: current
             )
             tracker.committedSwap = true
         } catch {

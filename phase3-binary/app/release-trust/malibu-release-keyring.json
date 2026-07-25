@@ -1,0 +1,1 @@
+{"generation":1,"keys":[{"algorithm":"ecdsa-p256-sha256","key_id":"macprovider-release-p256-v1","public_key_path":"release-signing-public.pem","public_key_spki_sha256":"2cd6171cea8cd7964c12292e3443078c2b3d0cdcc20ae600fe8261090392c7f8","status":"active"}],"schema_version":"malibu-release-keyring.v1"}

@@ -37,7 +37,48 @@ final class CompatibilityArtifactIndexTests: XCTestCase {
         }
     }
 
-    private func makeFixture(overrides: [String: String] = [:]) throws -> (
+    func testLegacyMalibuArtifactIsOptionalEvidence() throws {
+        let providerOnly = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: providerOnly.root) }
+        XCTAssertNil(
+            try CompatibilityArtifactIndex.loadValidated(
+                from: providerOnly.index,
+                compatibilityManifest: providerOnly.manifest,
+                checksumsText: providerOnly.checksums,
+                releaseAssetNames: providerOnly.releaseAssetNames
+            ).artifacts["malibu_app"]
+        )
+
+        let legacy = try makeFixture(includeLegacyMalibu: true)
+        defer { try? FileManager.default.removeItem(at: legacy.root) }
+        XCTAssertEqual(
+            try CompatibilityArtifactIndex.loadValidated(
+                from: legacy.index,
+                compatibilityManifest: legacy.manifest,
+                checksumsText: legacy.checksums,
+                releaseAssetNames: legacy.releaseAssetNames
+            ).artifacts["malibu_app"]?.name,
+            "Malibu-v1.8.39.dmg"
+        )
+
+        let public1840 = try makeFixture(includeLegacyMalibu: true, usePublic1840Identity: true)
+        defer { try? FileManager.default.removeItem(at: public1840.root) }
+        XCTAssertEqual(
+            try CompatibilityArtifactIndex.loadValidated(
+                from: public1840.index,
+                compatibilityManifest: public1840.manifest,
+                checksumsText: public1840.checksums,
+                releaseAssetNames: public1840.releaseAssetNames
+            ).artifacts["malibu_app"]?.name,
+            "Malibu-v1.8.40.dmg"
+        )
+    }
+
+    private func makeFixture(
+        overrides: [String: String] = [:],
+        includeLegacyMalibu: Bool = false,
+        usePublic1840Identity: Bool = false
+    ) throws -> (
         root: URL,
         index: URL,
         manifest: CompatibilitySetManifest,
@@ -47,14 +88,20 @@ final class CompatibilityArtifactIndexTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("compatibility-artifact-index-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        let tag = "v1.8.33"
-        let commit = String(repeating: "a", count: 40)
+        let tag = usePublic1840Identity
+            ? "v1.8.40"
+            : (includeLegacyMalibu ? CompatibilityArtifactIndex.legacyMalibuTag : "v1.8.33")
+        let commit = usePublic1840Identity
+            ? "18638472fe3e885f3534eeac29ab89b4c7ffdd7a"
+            : (includeLegacyMalibu
+                ? CompatibilityArtifactIndex.legacyMalibuCommit
+                : String(repeating: "a", count: 40))
         let setID = "Augustas11/macprovider:\(tag)@\(commit)"
         let manifestSHA = String(repeating: "b", count: 64)
         let manifest = CompatibilitySetManifest(
             compatibilitySetID: setID,
             envelopeSHA256: manifestSHA,
-            version: "1.8.33",
+            version: usePublic1840Identity ? "1.8.40" : (includeLegacyMalibu ? "1.8.39" : "1.8.33"),
             catalogReleaseID: "catalog-test",
             catalogPolicyVersion: "1",
             maintenanceLeaseSeconds: 600,
@@ -78,7 +125,9 @@ final class CompatibilityArtifactIndexTests: XCTestCase {
         ]
         var artifacts: [String: Any] = [:]
         var checksums: [String] = []
-        for role in CompatibilityArtifactIndex.requiredRoles {
+        let roles = CompatibilityArtifactIndex.requiredRoles
+            + (includeLegacyMalibu ? CompatibilityArtifactIndex.legacyOptionalRoles : [])
+        for role in roles {
             let digest = role == "compatibility_manifest"
                 ? manifestSHA
                 : String(repeating: String(role.utf8.reduce(0) { $0 + Int($1) } % 10), count: 64)

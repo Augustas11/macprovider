@@ -1,14 +1,6 @@
 import Foundation
 
 enum CLIUpdateRunner {
-    // Legacy repair pins exactly the CLI version this app shipped as. The
-    // 1.8.40 arming is a cohort-bound recovery exception (Decision Entry 160)
-    // for the stranded 1.8.30/1.8.32/1.8.39 test cohort. Later releases MUST
-    // leave this constant unchanged — the exact-match interlock in
-    // `strategy(...)` then disarms the bridge automatically — unless a new
-    // decision entry authorizes re-arming with release-specific proof.
-    static let legacyBootstrapTarget = "1.8.40"
-
     enum Strategy: Equatable {
         case installedCompatibilityCLI
         case pinnedInstaller(version: String)
@@ -17,7 +9,8 @@ enum CLIUpdateRunner {
     enum Error: Swift.Error, LocalizedError {
         case cliNotFound
         case invalidInstalledVersion(String?)
-        case legacyBootstrapUnavailable(appVersion: String?)
+        case legacyBootstrapUnavailable(providerTargetVersion: String?)
+        case legacyBootstrapSourceDenied
         case legacyBootstrapWouldDowngrade(installedVersion: String)
         case nonZeroExit(Int32)
         case rollbackRestored(Int32)
@@ -31,10 +24,12 @@ enum CLIUpdateRunner {
                 return "macprovider-cli was not found at the expected install path."
             case let .invalidInstalledVersion(version):
                 return "Installed provider CLI version is invalid: \(version ?? "unknown")."
-            case let .legacyBootstrapUnavailable(appVersion):
-                return "This legacy provider requires Malibu v\(legacyBootstrapTarget) to install the complete compatibility set (running \(appVersion.map { "v\($0)" } ?? "an unknown app version"))."
+            case let .legacyBootstrapUnavailable(providerTargetVersion):
+                return "The signed Malibu release authority does not provide a valid provider CLI repair target (\(providerTargetVersion.map { "v\($0)" } ?? "missing"))."
+            case .legacyBootstrapSourceDenied:
+                return "This app/provider source is outside the signed legacy repair cohort or the repair bridge has expired."
             case let .legacyBootstrapWouldDowngrade(installedVersion):
-                return "Malibu v\(legacyBootstrapTarget) will not downgrade provider CLI v\(installedVersion)."
+                return "Malibu will not downgrade provider CLI v\(installedVersion)."
             case let .nonZeroExit(code):
                 return "CLI update failed (exit \(code))."
             case let .rollbackRestored(code):
@@ -74,7 +69,10 @@ enum CLIUpdateRunner {
     static func strategy(
         installedVersion: String?,
         compatibilitySetID: String?,
-        bundledAppVersion: String?
+        authorizedProviderVersion: String?,
+        legacySourceAppVersion: String? = nil,
+        legacyBootstrap: MalibuLegacyBootstrapPolicy? = nil,
+        now: Date = Date()
     ) throws -> Strategy {
         guard let installedVersion,
               let normalizedInstalled = ProviderCLIVersion.strictNormalize(installedVersion) else {
@@ -91,14 +89,24 @@ enum CLIUpdateRunner {
             return .installedCompatibilityCLI
         }
 
-        guard ProviderCLIVersion.compare(normalizedInstalled, legacyBootstrapTarget) != .descending else {
+        guard let authorizedProviderVersion,
+              let target = ProviderCLIVersion.strictNormalize(authorizedProviderVersion) else {
+            throw Error.legacyBootstrapUnavailable(
+                providerTargetVersion: authorizedProviderVersion
+            )
+        }
+        guard ProviderCLIVersion.compare(normalizedInstalled, target) != .descending else {
             throw Error.legacyBootstrapWouldDowngrade(installedVersion: normalizedInstalled)
         }
-        guard let bundledAppVersion,
-              ProviderCLIVersion.strictNormalize(bundledAppVersion) == legacyBootstrapTarget else {
-            throw Error.legacyBootstrapUnavailable(appVersion: bundledAppVersion)
+        guard let legacyBootstrap,
+              legacyBootstrap.authorizes(
+                appVersion: legacySourceAppVersion,
+                cliVersion: normalizedInstalled,
+                now: now
+              ) else {
+            throw Error.legacyBootstrapSourceDenied
         }
-        return .pinnedInstaller(version: "v\(legacyBootstrapTarget)")
+        return .pinnedInstaller(version: "v\(target)")
     }
 
     static func run(
@@ -106,13 +114,15 @@ enum CLIUpdateRunner {
         compatibilitySetID: String?,
         onLogLine: @escaping @Sendable @MainActor (String) -> Void
     ) async throws {
-        let appVersion = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String
+        let authority = try MalibuReleaseRuntimeAuthorization.authorizeLive(
+            requireInstalledProvider: true
+        )
         let selectedStrategy = try strategy(
             installedVersion: installedVersion,
             compatibilitySetID: compatibilitySetID,
-            bundledAppVersion: appVersion
+            authorizedProviderVersion: authority.envelope.providerCLIVersion,
+            legacySourceAppVersion: authority.legacySourceAppVersion,
+            legacyBootstrap: authority.envelope.legacyBootstrap
         )
         try await runStrategyForTest(
             strategy: selectedStrategy,

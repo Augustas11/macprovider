@@ -9,7 +9,7 @@ verify_published="$root/scripts/verify-published-release.py"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-provenance.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
-tag=v1.2.3
+tag=v1.8.39
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf 'cli archive\n' > "$work/phase3-binary-m4-${tag}.tar.gz"
 printf 'dmg payload\n' > "$work/Malibu-${tag}.dmg"
@@ -99,6 +99,60 @@ python3 "$capture" --notes-file "$work/release-notes.md" \
   "$work/release.json" "$work/release-provenance.json" \
   "$work/publication-manifest.json" "${local_assets[@]}"
 
+# Every provider release after the exact v1.8.39 bridge is provider-only.
+provider_work="$work/provider-only"
+provider_tag=v1.8.40
+mkdir "$provider_work"
+cp "$work/release-toolchain.json" "$work/release-notes.md" "$provider_work/"
+printf 'provider archive\n' > "$provider_work/phase3-binary-m4-${provider_tag}.tar.gz"
+printf 'provider artifact index\n' > "$provider_work/compatibility-artifact-index.json"
+python3 "$build" "$provider_tag" "$commit" Augustas11/macprovider false \
+  "$provider_work/release-toolchain.json" "$provider_work/release-provenance.json" \
+  "$provider_work/phase3-binary-m4-${provider_tag}.tar.gz" \
+  "$provider_work/compatibility-artifact-index.json"
+(
+  cd "$provider_work"
+  shasum -a 256 "phase3-binary-m4-${provider_tag}.tar.gz" \
+    compatibility-artifact-index.json release-provenance.json > checksums.txt
+)
+printf 'captured signature bytes\n' > "$provider_work/checksums.txt.sig"
+python3 - "$provider_work" "$provider_tag" "$commit" <<'PY'
+import hashlib, json, pathlib, sys
+root, tag, commit = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+names = [
+    f"phase3-binary-m4-{tag}.tar.gz", "compatibility-artifact-index.json",
+    "release-provenance.json", "checksums.txt", "checksums.txt.sig",
+]
+assets = [
+    {"id": index + 700, "name": name, "digest": f"sha256:{hashlib.sha256((root / name).read_bytes()).hexdigest()}"}
+    for index, name in enumerate(names)
+]
+(root / "release.json").write_text(json.dumps({
+    "id": 601, "tag_name": tag, "target_commitish": commit, "draft": False,
+    "immutable": True, "prerelease": False, "name": f"macprovider-cli {tag}",
+    "body": "reviewed release notes\n", "assets": assets,
+}), encoding="utf-8")
+PY
+provider_assets=(
+  "$provider_work/phase3-binary-m4-${provider_tag}.tar.gz"
+  "$provider_work/compatibility-artifact-index.json"
+  "$provider_work/release-provenance.json"
+  "$provider_work/checksums.txt"
+  "$provider_work/checksums.txt.sig"
+)
+python3 "$capture" --notes-file "$provider_work/release-notes.md" \
+  "$provider_work/release.json" "$provider_work/release-provenance.json" \
+  "$provider_work/publication-manifest.json" "${provider_assets[@]}"
+python3 - "$provider_work/publication-manifest.json" <<'PY'
+import hashlib, json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert not any(name == "appcast.xml" or name.startswith("Malibu-") for name in manifest["assets"])
+content = json.dumps({
+    "compatibility_artifact_index_sha256": manifest["assets"]["compatibility-artifact-index.json"]["sha256"],
+}, sort_keys=True, separators=(",", ":")).encode()
+assert manifest["publication_id"] == hashlib.sha256(content).hexdigest()
+PY
+
 python3 - "$work/release.json" "$work/release-draft.json" <<'PY'
 import json, pathlib, sys
 data = json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -171,10 +225,10 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert manifest["release_id"] == 401
 assert manifest["prerelease"] is False
-assert manifest["title"] == "macprovider-cli v1.2.3"
+assert manifest["title"] == "macprovider-cli v1.8.39"
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["body_sha256"])
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["publication_id"])
-assert manifest["assets"]["Malibu-v1.2.3.dmg"]["id"] == 502
+assert manifest["assets"]["Malibu-v1.8.39.dmg"]["id"] == 502
 assert manifest["assets"]["appcast.xml"]["id"] == 503
 assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 504
 assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 505
@@ -182,7 +236,7 @@ assert manifest["assets"]["pearl-release.json.sig"]["id"] == 509
 expected_publication = hashlib.sha256(json.dumps({
     "appcast_sha256": manifest["assets"]["appcast.xml"]["sha256"],
     "compatibility_artifact_index_sha256": manifest["assets"]["compatibility-artifact-index.json"]["sha256"],
-    "dmg_sha256": manifest["assets"]["Malibu-v1.2.3.dmg"]["sha256"],
+    "dmg_sha256": manifest["assets"]["Malibu-v1.8.39.dmg"]["sha256"],
 }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 assert manifest["publication_id"] == expected_publication
 PY

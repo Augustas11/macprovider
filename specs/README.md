@@ -33,8 +33,8 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-022 | Verified model settlement | v0.1.5 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.6 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.1 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
-| SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.14 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
-| SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.24 | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
+| SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.15 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
+| SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.25 | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1 | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | MLX Speculative Decoding for Provider Serve | 0.2-draft | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
@@ -42,6 +42,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.1 | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
 | SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.1 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
+| SPEC-034 | Independently versioned Malibu releases | v0.1 | [SPEC-034-malibu-independent-release.md](SPEC-034-malibu-independent-release.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

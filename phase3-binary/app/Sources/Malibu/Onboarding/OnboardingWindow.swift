@@ -44,7 +44,7 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
-            Text("Launch Provider installs and configures the macprovider CLI on this Mac.")
+            Text(providerSetupTitle)
             Text("Malibu monitors the background provider and shows earnings here — setup runs via the same installer as the terminal path.")
                 .foregroundStyle(.secondary)
 
@@ -64,9 +64,20 @@ private struct OnboardingRootView: View {
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
+            stageRow(
+                title: agent.snapshot.releaseAuthorityBlocked
+                    ? "Installed provider needs validation"
+                    : "Ready to validate and launch",
+                detail: agent.snapshot.releaseAuthorityBlocked
+                    ? (agent.snapshot.lastError ?? "The installed provider must pass signed release validation before Malibu can use it.")
+                    : "Validates or repairs the signed provider CLI, then starts its background service."
+            ) {
                 VStack(alignment: .leading, spacing: 8) {
-                    launchButton(title: "Launch Provider")
+                    launchButton(
+                        title: agent.snapshot.releaseAuthorityBlocked
+                            ? "Validate and repair provider"
+                            : "Launch Provider"
+                    )
                     Text("No wallet needed to start — add one anytime after.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -142,10 +153,22 @@ private struct OnboardingRootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(MalibuBrand.coral)
             }
-        case let .failed(_, retryable, message):
-            stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
+        case let .migrationRepairRequired(model, message):
+            stageRow(
+                title: "Running locally — migration repair required",
+                detail: "\(model) is responding locally. Coordinator connection and buyer-serving status are unknown. \(message)"
+            ) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Malibu is observing local health only. It will not control, update, or claim custody of this provider until migration succeeds.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    launchButton(title: "Retry migration")
+                }
+            }
+        case let .failed(stage, retryable, message):
+            stageRow(title: failureTitle(stage: stage, retryable: retryable), detail: failureDetail(stage: stage, message: message)) {
                 if retryable {
-                    launchButton(title: "Retry")
+                    launchButton(title: retryButtonTitle(stage: stage))
                 }
             }
         }
@@ -189,6 +212,47 @@ private struct OnboardingRootView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(MalibuBrand.coral)
+    }
+
+    private var providerSetupTitle: String {
+        if let version = controller.signedProviderVersion {
+            return "Launch Provider installs and configures the signed provider CLI v\(version) on this Mac."
+        }
+        return "Launch Provider validates the signed release target, then installs and configures the provider CLI on this Mac."
+    }
+
+    private func failureTitle(stage: String, retryable: Bool) -> String {
+        guard retryable else { return "Setup failed" }
+        switch stage {
+        case "installedProviderAuthority": return "Installed provider needs signed repair"
+        case "releaseAuthority": return "Malibu release authority unavailable"
+        case "identityImport": return "Provider identity migration needs retry"
+        default: return "Provider install needs retry"
+        }
+    }
+
+    private func failureDetail(stage: String, message: String) -> String {
+        guard stage == "installedProviderAuthority", let version = controller.signedProviderVersion else {
+            return message
+        }
+        return "\(message) Repair reinstalls only the signed CLI v\(version), then revalidates it before credential migration or provider control."
+    }
+
+    private func retryButtonTitle(stage: String) -> String {
+        switch stage {
+        case "installedProviderAuthority":
+            if let version = controller.signedProviderVersion {
+                return "Repair signed provider CLI v\(version)"
+            }
+            return "Repair signed provider CLI"
+        case "identityImport": return "Retry migration"
+        case "releaseAuthority": return "Retry release validation"
+        default:
+            if let version = controller.signedProviderVersion {
+                return "Retry signed CLI v\(version) install"
+            }
+            return "Retry provider install"
+        }
     }
 
     private func formattedElapsed(since start: Date) -> String {

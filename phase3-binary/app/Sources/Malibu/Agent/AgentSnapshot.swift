@@ -58,6 +58,16 @@ struct AgentSnapshot: Equatable {
     var trustCriteriaRequired: Int?
     var thermalState: MalibuThermalState?
     var lastError: String?
+    /// True only while Malibu is reading local health after a legacy config
+    /// migration failure. This mode is deliberately non-authoritative: it must
+    /// not expose provider mutation actions, claim credential custody, or infer
+    /// coordinator/buyer-serving readiness from local health.
+    var migrationRepairObservationOnly: Bool = false
+    /// Set when installer-staged signed release metadata does not authorize the
+    /// running app/provider tuple. This is a hard local safety boundary: every
+    /// provider mutation control remains disabled until a signed reinstall
+    /// restores valid sidecars.
+    var releaseAuthorityBlocked: Bool = false
 
     var cliVersion: String?
     var compatibilitySetID: String?
@@ -329,10 +339,12 @@ struct AgentSnapshot: Equatable {
 
 enum AgentSnapshotPresenter {
     private static func isActive(_ s: AgentSnapshot) -> Bool {
-        s.state == .serving || s.state == .paused || isLocalOnly(s)
+        !s.migrationRepairObservationOnly
+            && (s.state == .serving || s.state == .paused || isLocalOnly(s))
     }
 
     static func isNetworkReady(_ s: AgentSnapshot) -> Bool {
+        guard !s.migrationRepairObservationOnly else { return false }
         guard s.state == .serving else { return false }
         return s.isLocalStatusObservationCurrent() && s.networkState == "buyer_serving"
     }
@@ -347,6 +359,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func short(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly { return "Repair" }
         switch s.state {
         case .idle: return s.lifecycleState == "uninstalled" ? "Uninstalled" : "Stopped"
         case .starting: return "Starting"
@@ -368,6 +381,11 @@ enum AgentSnapshotPresenter {
     }
 
     static func dashboardHeadline(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return s.state == .error
+                ? "Provider not verified — migration repair required"
+                : "Running locally — migration repair required"
+        }
         switch s.state {
         case .idle:         return authoritativeLifecycleLabel(s) ?? "Provider stopped"
         case .starting:     return authoritativeLifecycleLabel(s) ?? "Starting provider…"
@@ -381,6 +399,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
+        if s.migrationRepairObservationOnly {
+            return s.lastError ?? "Coordinator connection and buyer-serving status unknown"
+        }
         switch s.state {
         case .serving where !isNetworkReady(s):
             return "Coordinator connected · buyer-serving status unknown"
@@ -402,6 +423,11 @@ enum AgentSnapshotPresenter {
     }
 
     static func stateLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return s.state == .error
+                ? "Provider not verified — migration repair required"
+                : "Running locally — migration repair required"
+        }
         switch s.state {
         case .idle:         return authoritativeLifecycleLabel(s) ?? "Provider stopped"
         case .starting:     return authoritativeLifecycleLabel(s) ?? "Starting provider…"
@@ -424,6 +450,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func earningsLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return "Today: unavailable until migration is repaired"
+        }
         switch (s.earningsUsdcToday, s.malibuAccruedToday) {
         case (nil, nil):
             if isActive(s) {
@@ -450,6 +479,10 @@ enum AgentSnapshotPresenter {
     }
 
     static func modelLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            if let model = s.currentModelID { return model }
+            return s.state == .error ? "Not verified" : "Local provider observed"
+        }
         if let model = s.currentModelID { return model }
         if isNetworkReady(s) { return "Connected" }
         if isLocalOnly(s) { return "Local only" }
@@ -457,6 +490,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func credentialLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return "Unknown — migration repair required"
+        }
         guard s.isCredentialStatusCurrent() else {
             return "Credential status expired · checking again"
         }
@@ -499,12 +535,16 @@ enum AgentSnapshotPresenter {
     }
 
     static func canRepairCredential(_ s: AgentSnapshot) -> Bool {
-        s.isCredentialStatusCurrent()
+        !s.migrationRepairObservationOnly
+            && s.isCredentialStatusCurrent()
             && s.credentialRecoveryAction == "repair_from_protected_source"
             && !s.credentialRepairInProgress
     }
 
     static func admissionIdentityLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return "Unknown — migration repair required"
+        }
         if s.admissionIdentityRecoveryJournalState == "approval_required" {
             let candidate = abbreviatedDigest(
                 s.admissionIdentityPendingPublicKeySHA256 ?? s.admissionIdentityPublicKeySHA256
@@ -543,7 +583,8 @@ enum AgentSnapshotPresenter {
     }
 
     static func canRepairAdmissionIdentity(_ s: AgentSnapshot) -> Bool {
-        guard !s.admissionIdentityRecoveryInProgress else { return false }
+        guard !s.migrationRepairObservationOnly,
+              !s.admissionIdentityRecoveryInProgress else { return false }
         if ["approval_required", "committed_cleanup"]
             .contains(s.admissionIdentityRecoveryJournalState) {
             return true
@@ -584,6 +625,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func statusContractLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return "Not inspected — migration repair required"
+        }
         if s.localStatusContractCompatible == false {
             return "Incompatible · update Malibu"
         }
@@ -714,6 +758,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func compatibilitySetLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return "Not inspected — migration repair required"
+        }
         guard let identifier = s.compatibilitySetID else {
             return "Legacy release · compatibility set not reported"
         }
@@ -769,6 +816,9 @@ enum AgentSnapshotPresenter {
     }
 
     static func trustLine(_ s: AgentSnapshot) -> String {
+        if s.migrationRepairObservationOnly {
+            return "Unknown — migration repair required"
+        }
         let tier = s.trustTier.rawValue.capitalized
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
@@ -851,7 +901,12 @@ enum AgentSnapshotPresenter {
     }
 
     static func updateAvailable(_ s: AgentSnapshot) -> Bool {
-        updateTargetVersion(s) != nil || compatibilityRepairAvailable(s)
+        !s.migrationRepairObservationOnly
+            && (updateTargetVersion(s) != nil || compatibilityRepairAvailable(s))
+    }
+
+    static func providerMutationActionsAllowed(_ s: AgentSnapshot) -> Bool {
+        !s.migrationRepairObservationOnly && !s.releaseAuthorityBlocked
     }
 
     /// A binary-only legacy update can report the latest CLI version while
@@ -880,6 +935,11 @@ enum AgentSnapshotPresenter {
 
     static func cliVersionLine(_ s: AgentSnapshot) -> String {
         guard let current = s.cliVersion else {
+            if s.migrationRepairObservationOnly {
+                return s.state == .error
+                    ? "Not verified — migration repair required"
+                    : "Version unknown — local provider observed"
+            }
             return isActive(s) ? "Version unknown" : "Not running"
         }
         var parts = ["v\(current)"]

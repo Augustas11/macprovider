@@ -16,7 +16,7 @@ struct ProviderLifecycleEventSnapshot: Equatable {
 enum InstalledProviderMonitor {
     static let supportedContractReaderVersion = 1
 
-    struct HealthSnapshot: Equatable {
+    struct HealthSnapshot: Equatable, Sendable {
         let ready: Bool
         let model: String?
         let requestsTotal: Int?
@@ -132,6 +132,64 @@ enum InstalledProviderMonitor {
             parsedPID = pid
         }
         return parsedPID
+    }
+
+    static func launchdServiceOwnsListener(
+        port: Int,
+        uid: uid_t = getuid(),
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
+        lsofURL: URL = URL(fileURLWithPath: "/usr/sbin/lsof"),
+        liveCodeMatches: (pid_t) -> Bool = ProviderCredentialHandoffRunner.validatedInstalledProcessMatches(pid:)
+    ) -> Bool {
+        guard (1...65_535).contains(port),
+              let pid = launchdServicePID(uid: uid, launchctlURL: launchctlURL),
+              liveCodeMatches(pid_t(pid)) else {
+            return false
+        }
+        let process = Process()
+        let stdout = Pipe()
+        process.executableURL = lsofURL
+        process.arguments = [
+            "-nP", "-a", "-p", String(pid), "-iTCP:\(port)", "-sTCP:LISTEN", "-FnP",
+        ]
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0, data.count <= 64 * 1024 else { return false }
+            return parseListenerEvidence(
+                String(decoding: data, as: UTF8.self),
+                expectedPID: pid,
+                expectedPort: port
+            )
+        } catch {
+            return false
+        }
+    }
+
+    static func parseListenerEvidence(
+        _ output: String,
+        expectedPID: Int,
+        expectedPort: Int
+    ) -> Bool {
+        var sawPID = false
+        var sawLoopbackListener = false
+        for line in output.split(separator: "\n") {
+            if line == "p\(expectedPID)" {
+                sawPID = true
+                continue
+            }
+            guard line.first == "n" else { continue }
+            let endpoint = line.dropFirst()
+            if endpoint == "127.0.0.1:\(expectedPort)"
+                || endpoint == "[::1]:\(expectedPort)"
+                || endpoint == "localhost:\(expectedPort)" {
+                sawLoopbackListener = true
+            }
+        }
+        return sawPID && sawLoopbackListener
     }
 
     static func serviceIdentityMatches(
