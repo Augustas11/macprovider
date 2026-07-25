@@ -37,10 +37,40 @@ to smtp.gmail.com is open on Pearl. Until the password is filled in, the monitor
 runs journal-only.
 
 ## What it alerts on (transition-based)
-- pool `ready == 0` (idle / no buyer capacity) — CRITICAL
-- SPEC-023 autotune feeds (`/v1/autotune-candidates`, `.sig`, `/v1/demand-rank`, `.sig`) unreachable from Pearl — CRITICAL
-- a provider → `unavailable` (breaker re-trip / `warmup_failed` / removed) — WARN
-- a provider → `degraded` (breaker trip / warm-up hold) — WARN
-- a provider dropped from the pool — WARN
-- coordinator `/healthz` or gateway `/v1/status` unreachable — CRITICAL
-- recoveries — INFO
+
+Each alert carries a **kind**, which decides whether it is emailed. Journald
+receives all of them either way.
+
+| Kind | Alerts | Emailed by default |
+| --- | --- | --- |
+| `pool` | pool `ready == 0` (CRITICAL) / pool recovered (INFO) | no |
+| `provider` | provider → `unavailable` / → `degraded` / dropped from pool (WARN), recovered (INFO) | no |
+| `gateway_status` | gateway self-reports `idle` / `degraded` / `down` (WARN) | no |
+| `service` | coordinator `/healthz` or gateway `/v1/status` unreachable (CRITICAL), `/poolz` read failed (WARN), recovery (INFO) | **yes** |
+| `static_feed` | SPEC-023 autotune feeds (`/v1/autotune-candidates`, `.sig`, `/v1/demand-rank`, `.sig`) unreachable from Pearl (CRITICAL), recovery (INFO) | **yes** |
+
+## Email volume control (`EMAIL_MUTED_KINDS`)
+
+On a small fleet a single Mac going in and out of the pool produces
+`provider` + `pool` + `gateway_status` transitions every few minutes — 237
+emails in one week on Pearl, none of them operator-actionable. Those three
+kinds are therefore **journal-only by default**; the kinds that mean the
+Pearl-side services themselves are down still page.
+
+Override in `/etc/macprovider/monitor.env`:
+
+```
+EMAIL_MUTED_KINDS=provider,pool,gateway_status   # the default
+EMAIL_MUTED_KINDS=all                            # email off entirely
+EMAIL_MUTED_KINDS=none                           # email everything (pre-mute behaviour)
+```
+
+Unknown kind names are logged and ignored rather than silently changing
+routing. Muting affects **delivery only** — muted alerts still count as
+alerting transitions for the state machine, and
+
+```sh
+journalctl -u macprovider-monitor -S -24h | grep -E '\[(CRITICAL|WARN)\]'
+```
+
+remains the complete record.

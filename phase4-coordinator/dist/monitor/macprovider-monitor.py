@@ -13,10 +13,21 @@ Alerts go to stdout (captured by journald) ALWAYS, and to email if
 /etc/macprovider/monitor.env provides Gmail submission creds. Run on a
 systemd timer (see macprovider-monitor.timer), e.g. every 3 minutes.
 
+Every alert carries a KIND (see ALERT_KINDS). Kinds listed in
+EMAIL_MUTED_KINDS stay journal-only instead of being emailed: on a small
+fleet, single-provider churn (drop / breaker / pool-idle) transitions
+dominate the mail volume without carrying operator-actionable signal,
+while the rare service-down kinds do. Muting is a mail-routing decision
+only — journald still records every alert, and the state machine still
+treats muted alerts as alerting transitions.
+
 Config (/etc/macprovider/monitor.env, optional, KEY=VALUE lines):
   ALERT_EMAIL=augstar@gmail.com
   GMAIL_USER=augstar@gmail.com
   GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx   # 16-char Google app password (2FA)
+  EMAIL_MUTED_KINDS=provider,pool,gateway_status   # optional; this is the
+      # default. "all" mutes every kind (journal-only); "none" (or an empty
+      # value) emails every kind, the pre-mute behaviour.
 """
 
 import json
@@ -44,6 +55,25 @@ STATIC_FEEDS = (
 TIMEOUT = 8
 HOST = socket.gethostname()
 
+# Alert kinds. Every alert is tagged with exactly one of these so email
+# routing can be decided per class instead of per severity (a single-mac
+# fleet makes "pool has 0 ready providers" CRITICAL-but-routine).
+KIND_PROVIDER = "provider"            # per-provider state transitions / drops
+KIND_POOL = "pool"                    # pool ready-count emptied / recovered
+KIND_GATEWAY_STATUS = "gateway_status"  # gateway self-reported idle/degraded/down
+KIND_SERVICE = "service"              # coordinator/gateway endpoint unreachable
+KIND_STATIC_FEED = "static_feed"      # SPEC-023 signed static feeds
+ALERT_KINDS = (
+    KIND_PROVIDER,
+    KIND_POOL,
+    KIND_GATEWAY_STATUS,
+    KIND_SERVICE,
+    KIND_STATIC_FEED,
+)
+# Provider churn on a small fleet is journal-only by default; the kinds that
+# mean "the Pearl-side services themselves are down" still page by email.
+DEFAULT_EMAIL_MUTED_KINDS = (KIND_PROVIDER, KIND_POOL, KIND_GATEWAY_STATUS)
+
 
 def load_env(path):
     env = {}
@@ -58,6 +88,36 @@ def load_env(path):
     except FileNotFoundError:
         pass
     return env
+
+
+def muted_kinds(env):
+    """Resolve the set of alert kinds that must NOT be emailed.
+
+    Absent key -> DEFAULT_EMAIL_MUTED_KINDS. "all" -> every kind (email off
+    entirely). "none" or an empty value -> nothing muted (pre-mute
+    behaviour). Unknown names are reported to journald and ignored, so a
+    typo cannot silently unmute a page or mute one.
+    """
+    raw = env.get("EMAIL_MUTED_KINDS")
+    if raw is None:
+        return set(DEFAULT_EMAIL_MUTED_KINDS)
+    names = [n.strip().lower() for n in raw.split(",")]
+    names = [n for n in names if n]
+    if not names or names == ["none"]:
+        return set()
+    if "all" in names:
+        return set(ALERT_KINDS)
+    muted = set()
+    for name in names:
+        if name in ALERT_KINDS:
+            muted.add(name)
+        else:
+            print(
+                f"[WARN] ignoring unknown EMAIL_MUTED_KINDS entry {name!r} "
+                f"(known kinds: {', '.join(ALERT_KINDS)})",
+                flush=True,
+            )
+    return muted
 
 
 def operator_key():
@@ -106,7 +166,7 @@ def save_state(state):
 
 def main():
     env = load_env(ENV_FILE)
-    alerts = []  # (severity, message)
+    alerts = []  # (severity, kind, message)
 
     # --- coordinator health + pool ---
     coord_up = True
@@ -116,7 +176,7 @@ def main():
         ready = h.get("pool_ready", 0)
     except Exception as e:  # noqa: BLE001
         coord_up = False
-        alerts.append(("CRITICAL", f"coordinator /healthz unreachable: {e}"))
+        alerts.append(("CRITICAL", KIND_SERVICE, f"coordinator /healthz unreachable: {e}"))
         ready = None
 
     if coord_up:
@@ -126,7 +186,7 @@ def main():
                 pool[p["provider_id"]] = p.get("state", "?")
             ready = pz.get("summary", {}).get("ready", ready)
         except Exception as e:  # noqa: BLE001
-            alerts.append(("WARN", f"/poolz read failed: {e}"))
+            alerts.append(("WARN", KIND_SERVICE, f"/poolz read failed: {e}"))
 
     # --- gateway status ---
     gw_up = True
@@ -136,7 +196,7 @@ def main():
         gw_status = s.get("status")
     except Exception as e:  # noqa: BLE001
         gw_up = False
-        alerts.append(("CRITICAL", f"gateway /v1/status unreachable: {e}"))
+        alerts.append(("CRITICAL", KIND_SERVICE, f"gateway /v1/status unreachable: {e}"))
 
     # --- SPEC-023 signed static feeds (public nginx surface) ---
     static_ok = True
@@ -158,9 +218,9 @@ def main():
 
     # pool emptied (idle)
     if coord_up and ready == 0 and prev_ready != 0:
-        alerts.append(("CRITICAL", "pool has 0 ready providers (idle) — no buyer capacity"))
+        alerts.append(("CRITICAL", KIND_POOL, "pool has 0 ready providers (idle) — no buyer capacity"))
     elif coord_up and ready and prev_ready == 0:
-        alerts.append(("INFO", f"pool recovered: {ready} ready provider(s)"))
+        alerts.append(("INFO", KIND_POOL, f"pool recovered: {ready} ready provider(s)"))
 
     # per-provider state transitions (breaker / warm-up-gate / disconnect)
     for pid, st in pool.items():
@@ -168,33 +228,43 @@ def main():
         if was == st:
             continue
         if st == "unavailable":
-            alerts.append(("WARN", f"provider {pid} -> unavailable (breaker re-trip / warmup_failed / removed)"))
+            alerts.append(("WARN", KIND_PROVIDER, f"provider {pid} -> unavailable (breaker re-trip / warmup_failed / removed)"))
         elif st == "degraded":
-            alerts.append(("WARN", f"provider {pid} -> degraded (breaker trip / warm-up hold / recovery)"))
+            alerts.append(("WARN", KIND_PROVIDER, f"provider {pid} -> degraded (breaker trip / warm-up hold / recovery)"))
         elif st == "ready" and was in ("degraded", "unavailable"):
-            alerts.append(("INFO", f"provider {pid} recovered -> ready"))
+            alerts.append(("INFO", KIND_PROVIDER, f"provider {pid} recovered -> ready"))
     for pid, was in prev_pool.items():
         if pid not in pool and was != "unavailable":
-            alerts.append(("WARN", f"provider {pid} dropped from pool (was {was})"))
+            alerts.append(("WARN", KIND_PROVIDER, f"provider {pid} dropped from pool (was {was})"))
 
     # service up/down transitions
     if not coord_up and prev_coord_up:
         pass  # already alerted above
     elif coord_up and not prev_coord_up:
-        alerts.append(("INFO", "coordinator recovered"))
+        alerts.append(("INFO", KIND_SERVICE, "coordinator recovered"))
     if gw_up and gw_status != prev_gw_status and gw_status in ("idle", "degraded", "down"):
-        alerts.append(("WARN", f"gateway status -> {gw_status}"))
+        alerts.append(("WARN", KIND_GATEWAY_STATUS, f"gateway status -> {gw_status}"))
     if not static_ok and prev_static_ok:
-        alerts.append(("CRITICAL", "SPEC-023 static feeds unreachable: " + "; ".join(static_failures)))
+        alerts.append(("CRITICAL", KIND_STATIC_FEED, "SPEC-023 static feeds unreachable: " + "; ".join(static_failures)))
     elif static_ok and not prev_static_ok:
-        alerts.append(("INFO", "SPEC-023 static feeds recovered"))
+        alerts.append(("INFO", KIND_STATIC_FEED, "SPEC-023 static feeds recovered"))
 
     # --- emit alerts ---
-    for sev, msg in alerts:
-        print(f"[{sev}] {msg}", flush=True)
+    # journald gets every alert regardless of email routing.
+    for sev, kind, msg in alerts:
+        print(f"[{sev}] ({kind}) {msg}", flush=True)
+    muted = muted_kinds(env)
+    emailable = [a for a in alerts if a[1] not in muted]
+    suppressed = len(alerts) - len(emailable)
+    if suppressed:
+        print(
+            f"[INFO] {suppressed} alert(s) journal-only "
+            f"(EMAIL_MUTED_KINDS: {','.join(sorted(muted))})",
+            flush=True,
+        )
     delivery = None
-    if alerts:
-        delivery = send_email(env, alerts)
+    if emailable:
+        delivery = send_email(env, emailable)
 
     # Persist only when EITHER (a) the new state is non-alerting (transitions
     # to healthy save unconditionally), OR (b) at least one non-journald
@@ -210,7 +280,9 @@ def main():
         "gw_status": gw_status,
         "static_ok": static_ok,
     }
-    alerting = any(sev in ("CRITICAL", "WARN") for sev, _ in alerts)
+    # Muted alerts still count as alerting transitions: muting changes where
+    # an alert is delivered, not whether the condition happened.
+    alerting = any(sev in ("CRITICAL", "WARN") for sev, _, _ in alerts)
     # `delivery is not False` keeps the strong "SMTP failed -> don't seal"
     # guarantee while letting journal-only mode (delivery is None) advance
     # state normally. Without an external delivery path journald IS the
@@ -226,7 +298,7 @@ def main():
 
 
 def send_email(env, alerts):
-    """Attempt to deliver alerts.
+    """Attempt to deliver the non-muted alerts.
 
     Returns True on successful delivery, False if delivery was attempted
     and failed, and None if no non-journald recipient is configured (the
@@ -238,12 +310,15 @@ def send_email(env, alerts):
     if not (user and pw and to):
         print("[INFO] email not configured (set GMAIL_* in /etc/macprovider/monitor.env) — journal-only", flush=True)
         return None
-    worst = "CRITICAL" if any(s == "CRITICAL" for s, _ in alerts) else "WARN"
-    body = "\n".join(f"[{s}] {m}" for s, m in alerts)
+    # Muting makes INFO-only mail (e.g. a lone "coordinator recovered")
+    # common, so the subject must be able to say INFO instead of WARN.
+    severities = {s for s, _, _ in alerts}
+    worst = next(s for s in ("CRITICAL", "WARN", "INFO") if s in severities)
+    body = "\n".join(f"[{s}] ({k}) {m}" for s, k, m in alerts)
     msg = EmailMessage()
     msg["From"] = user
     msg["To"] = to
-    msg["Subject"] = f"[macprovider {worst}] {HOST}: {alerts[0][1][:60]}"
+    msg["Subject"] = f"[macprovider {worst}] {HOST}: {alerts[0][2][:60]}"
     msg.set_content(f"macprovider monitor on {HOST}\n\n{body}\n")
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=TIMEOUT) as smtp:
