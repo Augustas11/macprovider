@@ -210,6 +210,7 @@ struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
             return BenchmarkPayload(
                 modelKey: benchmark.modelKey,
                 modelID: benchmark.modelID,
+                modelArtifactPath: benchmark.modelArtifactPath.isEmpty ? nil : benchmark.modelArtifactPath,
                 sustainedTPS: benchmark.sustainedTPS,
                 ttftMS: benchmark.ttftMS,
                 swapDetected: benchmark.swapDetected,
@@ -303,6 +304,9 @@ private extension BenchmarkPayload {
             "binary_version": .string(binaryVersion),
             "hardware_identity_hash": .string(hardwareIdentityHash),
         ]
+        if let modelArtifactPath, !modelArtifactPath.isEmpty {
+            object["model_artifact_path"] = .string(modelArtifactPath)
+        }
         if let benchmarkID {
             object["benchmark_id"] = .string(benchmarkID)
         }
@@ -336,6 +340,9 @@ struct HardwarePayload: Codable, Equatable {
 struct BenchmarkPayload: Codable, Equatable {
     var modelKey: String
     var modelID: String
+    /// Resolved local load path actually probed (#745 AC-4). Optional for
+    /// forward-compatible decoding of older evidence documents.
+    var modelArtifactPath: String?
     var sustainedTPS: Double
     var ttftMS: Int
     var swapDetected: Bool
@@ -351,6 +358,7 @@ struct BenchmarkPayload: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case modelKey = "model_key"
         case modelID = "model_id"
+        case modelArtifactPath = "model_artifact_path"
         case sustainedTPS = "sustained_tps"
         case ttftMS = "ttft_ms"
         case swapDetected = "swap_detected"

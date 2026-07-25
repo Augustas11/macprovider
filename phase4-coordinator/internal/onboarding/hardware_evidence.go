@@ -62,6 +62,8 @@ type HardwareEvidenceHardware struct {
 type HardwareEvidenceBenchmark struct {
 	ModelKey                string  `json:"model_key"`
 	ModelID                 string  `json:"model_id"`
+	// ModelArtifactPath is the resolved local load path actually probed (#745 AC-4).
+	ModelArtifactPath       string  `json:"model_artifact_path,omitempty"`
 	SustainedTPS            float64 `json:"sustained_tps"`
 	TTFTMS                  int     `json:"ttft_ms"`
 	SwapDetected            bool    `json:"swap_detected"`

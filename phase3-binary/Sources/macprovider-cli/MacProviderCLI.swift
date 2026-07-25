@@ -207,7 +207,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Local HTTP port to bind. Overrides MACPROVIDER_PORT and config file port.")
     var port: Int?
 
-    @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model.")
+    @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model. When this disagrees with config model_artifact_path, the CLI model wins and the configured artifact binding is cleared (#745).")
     var model: String?
 
     @Option(help: "Optional speculative decoding draft model identifier or local path. Overrides MACPROVIDER_DRAFT_MODEL and config key draft_model.")
@@ -2042,7 +2042,7 @@ struct SelfTestCommand: AsyncParsableCommand {
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG. Defaults to ~/.config/macprovider/config.yaml.")
     var config: String?
 
-    @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model.")
+    @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model. When this disagrees with config model_artifact_path, the CLI model wins and the configured artifact binding is cleared (#745).")
     var model: String?
 
     static func modelLoadPath(for resolved: AppConfig) -> String? {
