@@ -1,6 +1,15 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.21 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.22 · Owner: augstar · Target: 2026 Q3
+
+**Change log v0.22 (2026-07-25, landing page download authority).** §10 pins the
+public **Download for Mac** button to the immutable versioned GitHub release asset
+for the accepted release, matching §6 step 11 and the v0.13 removal of `latest.dmg`
+authority. §10 previously still specified `https://download.malibu.tech/latest.dmg`,
+a retired mutable endpoint; the shipped page combined that stale button with a
+version and SHA-256 fetched live from the GitHub API, so it advertised the current
+release's digest while serving v1.8.53 bytes. The tag, digest, and link MUST now all
+resolve from one pinned accepted release. P4 in §11 is reconciled to match.
 
 **Change log v0.21 (2026-07-19, fragment capability negotiation).** Malibu
 requires `referral_fragment_links_v1` in addition to the referral status/action
@@ -866,7 +875,13 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 
 ## 10. Landing page changes (`malibu.tech/host/`)
 
-- Above the fold: big coral **Download for Mac** button → `https://download.malibu.tech/latest.dmg`. Same button also emits the SHA-256 next to it for the paranoid.
+- Above the fold: big coral **Download for Mac** button → the immutable versioned
+  GitHub release asset for the accepted release
+  (`https://github.com/Augustas11/macprovider/releases/download/<tag>/Malibu-<tag>.dmg`),
+  never a mutable `latest.dmg`. Same button also emits the SHA-256 next to it for the
+  paranoid; the tag and digest MUST come from the same pinned accepted release the
+  button links, so the page can never advertise a digest it does not serve
+  (reconciled v0.22 — see §6 step 11).
 - Below the button: disclosure toggle "**Prefer terminal?**" → reveals current `curl -fsSL https://get.streamvc.live/install.sh | bash` block. Devs keep their flow; the surface area for non-devs is a single button.
 - Step section rewritten: "Download → Open → Earn." **There is no GitHub sign-in
   (reconciled v0.2):** onboarding is browserless — one **Launch Provider** click runs
@@ -891,7 +906,7 @@ model (run `install.sh`, monitor over HTTP). See §3.1 and §5 for the shipped f
 | **P1 — Onboarding** (1 wk) | `malibu://` URL scheme; portal deep-link flow; wallet paste; hardware autotune call; `SMAppService.register()`; dashboard read-only. | 5 friendly testers install by drag-drop and start earning without CLI. |
 | **P2 — `.app`/`.dmg` signing** (0.5 wk) | **Extend** existing `release.yml` "Sign + notarize binary" step with the App-track substeps in §6.2. Verify entitlements + hardened runtime. No new secrets except `SPARKLE_EDDSA_PRIVATE_KEY`. | Gatekeeper accepts `.dmg` on a fresh macOS 14 install (no `xattr -d`); `stapler validate` passes. |
 | **P3 — Sparkle + updates** (0.5 wk) | Appcast, EdDSA signing key, delta patches, phased rollout. | Live `v0.1 → v0.2` update on 5 test Macs, one via delta patch. |
-| **P4 — Landing page swap** (0.5 wk) | Redesigned `host/index.html`, `download.malibu.tech` endpoint, SHA-256 sidecar, troubleshoot page. | 50/50 A/B against current curl page for 1 wk on `malibu.tech/host`. |
+| **P4 — Landing page swap** (0.5 wk) | Redesigned `host/index.html` pinned to the immutable release asset (the `download.malibu.tech` endpoint is retired, superseded v0.22), SHA-256 sidecar, troubleshoot page. | 50/50 A/B against current curl page for 1 wk on `malibu.tech/host`. |
 | **P5 — WalletConnect** (1 wk) | Alongside paste flow; opens Rainbow / MetaMask / Coinbase Wallet via deep link; nonce signature bound to provider_id server-side. | 3 wallets verified round-trip. |
 | **P6 — Homebrew Cask** (0.5 wk) | `brew install --cask malibu` pulls the same signed `.dmg`. | `brew audit --cask malibu` clean, install / uninstall round-trip. |
 
