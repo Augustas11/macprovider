@@ -92,4 +92,13 @@ files (`git diff <base> -- <files...>`). Do **not** diff against
 `origin/main` when `main` already contains an earlier part of the same
 fix.
 
+## 8. Release verification — don't trust workflow green alone
+
+For provider CLI releases that ship Malibu.app plus the standalone tarball,
+verify byte identity between both embedded `macprovider-cli` binaries after
+final signing/packaging, and verify the updater path from the previous stable
+version. Do not treat candidate green, matching `--version`, or Gatekeeper
+success as production proof. See `CLAUDE.md` and
+`docs/runbooks/provider-cli-release-verification.md`.
+
 For the canonical, full version of every rule above, see `CLAUDE.md`.

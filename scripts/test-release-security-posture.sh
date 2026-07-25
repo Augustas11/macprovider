@@ -604,13 +604,15 @@ compatibility_copy = app_sign.find(
 )
 anchor_prepare = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py prepare")
 anchor_verify = app_sign.find("prepare-malibu-bootstrap-trust-anchor.py verify")
-app_codesign = app_sign.find("codesign --force --deep")
+app_codesign = app_sign.find("codesign --force \\")
 if min(first_bundle_write, compatibility_copy, anchor_prepare, anchor_verify, app_codesign) < 0 or not (
     anchor_prepare < first_bundle_write < compatibility_copy < anchor_verify < app_codesign
 ):
     raise SystemExit(
         "Malibu app must be preflighted before bundle writes and reverified before codesign"
     )
+if "codesign --force --deep" in app_sign:
+    raise SystemExit("Malibu app signing must not recursively re-sign the embedded provider CLI")
 if app_sign.count("prepare-malibu-bootstrap-trust-anchor.py prepare") != 1:
     raise SystemExit("Malibu signing must prepare the one-time trust anchor exactly once")
 if app_sign.count("prepare-malibu-bootstrap-trust-anchor.py verify") != 1:
@@ -622,6 +624,9 @@ for requirement in (
     "scripts/dist/malibu-v1.8.32-sparkle-public-key",
     '/usr/bin/otool -L "$APP/Contents/MacOS/Malibu"',
     "Malibu bridge must not link a Sparkle runtime",
+    "source_cli_sha256",
+    "bundled_cli_sha256",
+    "Malibu embedded CLI sha256 differs from standalone CLI",
 ):
     if requirement not in app_sign:
         raise SystemExit(f"Malibu signing omits trust-continuity guard: {requirement}")
@@ -648,6 +653,9 @@ for requirement in (
     "malibu-v1.8.32-sparkle-public-key",
     '/usr/bin/otool -L "$app_path/Contents/MacOS/Malibu"',
     "Malibu must not link a Sparkle runtime",
+    "verify_embedded_cli_identity",
+    "choose exactly one CLI identity mode",
+    "Malibu embedded CLI sha256 differs from expected CLI",
 ):
     if requirement not in malibu_artifact_verifier:
         raise SystemExit(f"final Malibu artifact verification omits: {requirement}")

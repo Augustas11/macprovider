@@ -116,6 +116,7 @@ bash "$repo_root/scripts/test-coordinator-advertised-version.sh" "$tag"
 python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
   "$tag" "$dmg" "$appcast" \
   "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
-bash "$repo_root/scripts/verify-malibu-release-artifacts.sh" "$dmg"
+bash "$repo_root/scripts/verify-malibu-release-artifacts.sh" \
+  "$dmg" --legacy-app-only-no-provider-tarball
 
 printf '[verify-malibu-publication-set] ok: release %s (%s)\n' "$tag" "$commit"

@@ -12,7 +12,7 @@ INSTALL_SH="${INSTALL_SH:-$REPO_ROOT/phase3-binary/dist/install.sh}"
 CHECKER="${CHECKER:-$REPO_ROOT/scripts/check-tier2-provider-artifact.sh}"
 CURL_BIN="${CURL_BIN:-curl}"
 OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
-DITTO_BIN="${DITTO_BIN:-/usr/bin/ditto}"
+HDIUTIL_BIN="${HDIUTIL_BIN:-hdiutil}"
 PROVIDER_VERSION_OVERRIDE="${PROVIDER_VERSION:-}"
 KEEP_DOWNLOADS="${KEEP_DOWNLOADS:-0}"
 DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-1}"
@@ -32,7 +32,8 @@ Downloads a macprovider-cli GitHub Release asset set, verifies the signed
 checksum manifest using the installer public key, verifies the release tarball
 checksum, then runs scripts/check-tier2-provider-artifact.sh against the
 downloaded tarball. When the release also contains Malibu.app, this verifies
-the app zip checksum, code signature, stapled ticket, and Gatekeeper
+the app DMG checksum, code signature, stapled ticket, Gatekeeper, and bundled
+CLI byte identity against the standalone provider tarball.
 assessment. This script is read-only against GitHub and does not mutate local
 release state unless KEEP_DOWNLOADS=1 is set.
 
@@ -41,7 +42,7 @@ Environment:
   RELEASE_TAG                         default: v1.2.6
   INSTALL_SH                          default: phase3-binary/dist/install.sh
   CHECKER                             default: scripts/check-tier2-provider-artifact.sh
-  DITTO_BIN                           default: /usr/bin/ditto
+  HDIUTIL_BIN                         default: hdiutil
   MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM optional public key override
   PROVIDER_VERSION                    default: RELEASE_TAG without leading v
   KEEP_DOWNLOADS=1                    keep downloaded artifacts and print path
@@ -300,7 +301,11 @@ PY
 
 tmpdir=""
 temp_parent=""
+app_mount_dir=""
 cleanup() {
+  if [ -n "$app_mount_dir" ] && [ -d "$app_mount_dir" ]; then
+    "$HDIUTIL_BIN" detach "$app_mount_dir" -quiet >/dev/null 2>&1 || true
+  fi
   if [ -n "$tmpdir" ] && [ "$KEEP_DOWNLOADS" != "1" ]; then
     case "$tmpdir" in
       "$temp_parent"/tier2-provider-release.*) rm -rf "$tmpdir" ;;
@@ -364,7 +369,7 @@ download_file() {
 
 asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.tar.gz"
 pkg_asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.pkg"
-app_asset="Malibu-${RELEASE_TAG}.zip"
+app_asset="Malibu-${RELEASE_TAG}.dmg"
 base="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}"
 
 temp_parent="${TMPDIR:-/tmp}"
@@ -374,8 +379,7 @@ tmpdir="$(mktemp -d "$temp_parent/tier2-provider-release.XXXXXX")"
 
 tarball_path="$tmpdir/$asset"
 pkg_path="$tmpdir/$pkg_asset"
-app_zip_path="$tmpdir/$app_asset"
-app_extract_dir="$tmpdir/malibu-app"
+app_dmg_path="$tmpdir/$app_asset"
 checksums_path="$tmpdir/checksums.txt"
 checksums_sig_path="$tmpdir/checksums.txt.sig"
 public_key_path="$tmpdir/release-signing-public.pem"
@@ -462,34 +466,44 @@ fi
 
 app_expected_sha="$(checksum_for_asset "$checksums_path" "$app_asset")"
 if [ -n "$app_expected_sha" ]; then
-  download_file "$base/$app_asset" "$app_zip_path" "$app_asset"
-  app_actual_sha="$(sha256_file "$app_zip_path")"
-  [ "$app_actual_sha" = "$app_expected_sha" ] || die "Malibu.app zip sha256 mismatch: got $app_actual_sha want $app_expected_sha"
-  log "Malibu.app zip sha256 verified: $app_actual_sha"
+  download_file "$base/$app_asset" "$app_dmg_path" "$app_asset"
+  app_actual_sha="$(sha256_file "$app_dmg_path")"
+  [ "$app_actual_sha" = "$app_expected_sha" ] || die "Malibu.app DMG sha256 mismatch: got $app_actual_sha want $app_expected_sha"
+  log "Malibu.app DMG sha256 verified: $app_actual_sha"
 
-  require_command "$DITTO_BIN"
-  require_command python3
+  require_command "$HDIUTIL_BIN"
   require_command codesign
   require_command spctl
   require_command xcrun
-  validate_malibu_app_zip "$app_zip_path" || die "Malibu.app zip layout validation failed"
-  mkdir -p "$app_extract_dir"
-  "$DITTO_BIN" -x -k "$app_zip_path" "$app_extract_dir" || die "failed to extract $app_asset"
-  app_path="$app_extract_dir/Malibu.app"
-  [ -d "$app_path" ] || die "$app_asset did not contain Malibu.app"
+  app_mount_dir="$tmpdir/malibu-dmg"
+  mkdir -p "$app_mount_dir"
+  "$HDIUTIL_BIN" attach -nobrowse -mountpoint "$app_mount_dir" "$app_dmg_path" >/dev/null ||
+    die "failed to mount $app_asset"
+  app_path="$app_mount_dir/Malibu.app"
+  [ -d "$app_path" ] || die "$app_asset does not contain Malibu.app"
   [ -x "$app_path/Contents/MacOS/macprovider-cli" ] || die "Malibu.app lacks executable bundled macprovider-cli"
+  app_tar_payload_dir="$tmpdir/app-tar-payload"
+  mkdir -p "$app_tar_payload_dir"
+  tar -xzf "$tarball_path" -C "$app_tar_payload_dir" macprovider-cli || die "provider tarball lacks macprovider-cli"
+  app_tar_binary_sha="$(sha256_file "$app_tar_payload_dir/macprovider-cli")"
+  app_binary_sha="$(sha256_file "$app_path/Contents/MacOS/macprovider-cli")"
+  [ "$app_binary_sha" = "$app_tar_binary_sha" ] ||
+    die "Malibu.app bundled binary sha256 differs from tarball binary"
+  log "Malibu.app bundled binary matches tarball binary: $app_binary_sha"
   if [ ! -f "$app_path/Contents/MacOS/mlx.metallib" ] && \
      [ ! -f "$app_path/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
     die "Malibu.app lacks adjacent MLX Metal resources for bundled macprovider-cli"
   fi
   codesign --verify --strict --deep --verbose=2 "$app_path" || die "Malibu.app code signature verification failed"
   log "Malibu.app code signature verified"
-  xcrun stapler validate "$app_path" || die "Malibu.app stapler validation failed"
-  log "Malibu.app stapler validation passed"
-  spctl -a -vvv -t exec "$app_path" || die "Malibu.app failed Gatekeeper assessment"
+  xcrun stapler validate "$app_dmg_path" || die "Malibu.app DMG stapler validation failed"
+  log "Malibu.app DMG stapler validation passed"
+  spctl -a -vvv -t open "$app_dmg_path" || spctl -a -vvv -t exec "$app_path" || die "Malibu.app failed Gatekeeper assessment"
   log "Malibu.app Gatekeeper assessment passed"
+  "$HDIUTIL_BIN" detach "$app_mount_dir" -quiet >/dev/null 2>&1 || true
+  app_mount_dir=""
 else
-  log "no Malibu.app entry in checksums.txt; app-track release absent"
+  log "no Malibu.app DMG entry in checksums.txt; app-track release absent"
 fi
 
 PROVIDER_ARTIFACT="$tarball_path" \
