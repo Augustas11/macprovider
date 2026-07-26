@@ -18,9 +18,11 @@ Implements **SPEC-037 v0.1.0** (merged #702): an encrypted, provider-namespaced 
 | R2 | 1 C / 8 H | purge hot-only + suspension-window gaps; write budget/streaming cosmetic |
 | R3 | 2 C / 4 H | purge-fence failure-path fail-open + no fence ownership — **recurrence signalled a wrong model** |
 | Redesign | — | root-cause: durable admission state + serialized owned fences + true aggregate budgets + off-actor promotion admission |
-| R4 | **certified** | see per-lane verdicts below |
+| R4 | 2 C / 2 H / 3 M / 1 L | off-actor-promotion TOCTOU (architect CRITICAL / adversarial MEDIUM — bounded, non-persistent) + rotation-journal ordering; all fixed |
+| Rebase | onto latest main (main +33) | resolved 2 semantic conflicts on the streaming/cold-tier path (speculative-before-begin vs origin harmony) |
+| **R5** | **PASS all 5 lanes — 0 C/H/M** | 3 LOW/2 INFO carried (below); adversarial (which found the R4 TOCTOU) certified it closed + cleared the rebase resolution on all counterexamples |
 
-The R3 recurrence (each round closed the prior CRITICAL and opened a new one in the same purge-fence subsystem) triggered a deliberate concurrency+durability redesign rather than another incremental patch; R4 certifies it.
+The R3 recurrence (each round closed the prior CRITICAL and opened a new one in the same purge-fence subsystem) triggered a deliberate concurrency+durability redesign rather than another incremental patch. R4 found two more suspension-window races (bounded, same class); the R4 fix closed the class (writes are synchronous-on-actor → no TOCTOU; every purge/promotion await is durable-before or recheck-after) and **R5 certified all five lanes at 0 C/H/M**.
 
 ### Verification
 - `swift build --package-path phase3-binary` green (debug + release; `#if DEBUG` test-injection hooks excluded from release).
@@ -35,7 +37,12 @@ The KVS-01a benchmark **evidence** arm requires a controllable >32 GB lab Mac (s
 - [x] KV suites: KVDiskCacheStore/Format/Tier/ConversationColdTier/ConversationCache/ControlSocket/KVBuildIdentityDrift/KVTokenizerIdentity — 0 failures
 - [x] `bash -n` + `node --check` on the KVS-01a harness
 - [x] `git diff --check`
-- [x] Five-lane BUILD audit loop (3 codex + adversarial + product) — R4 certification at 0 C/H/M (LOW/INFO carried below)
+- [x] Five-lane BUILD audit loop (3 codex + adversarial verificator + product critic), R1→R5 — **R5 certified 0 C/H/M across all lanes**
+
+### Carried LOW/INFO (documented, non-blocking)
+- LOW (security R5): a few pre-store snapshot refusals (unsupported cache class, geometry/size-cap, write-footprint overflow) return nil before reaching the `disk_write_skipped` sink — telemetry-detail completeness, fail-safe (still a miss/skip).
+- LOW (code R5): manifest counters capped at `Int32.max` — a >2.1B counter fails closed as corrupt (fail-safe; astronomically unlikely).
+- INFO: KVS-01a live campaign + live-MLX round-trip need a lab Mac (see residual).
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
