@@ -141,7 +141,7 @@
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
-      "issue": "https://github.com/Augustas11/macprovider/issues/608"
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
     {
       "id": "operator-pushed-warm-swap",
@@ -197,7 +197,7 @@
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
       "owner": "@Augustas11",
-      "issue": "https://github.com/Augustas11/macprovider/issues/612"
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
     {
       "id": "provider-portal",
@@ -285,7 +285,7 @@
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
-      "issue": "https://github.com/Augustas11/macprovider/issues/610"
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
     {
       "id": "malibu-emission-ledger",
@@ -325,7 +325,7 @@
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
-      "issue": "https://github.com/Augustas11/macprovider/issues/612"
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
     {
       "id": "prefix-cache-billing-isolation",
@@ -351,7 +351,7 @@
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
-      "issue": "https://github.com/Augustas11/macprovider/issues/611"
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
     {
       "id": "browserless-onboarding",
