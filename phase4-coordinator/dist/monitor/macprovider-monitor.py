@@ -27,9 +27,10 @@ Config (/etc/macprovider/monitor.env, optional, KEY=VALUE lines):
   ALERT_EMAIL=augstar@gmail.com
   GMAIL_USER=augstar@gmail.com
   GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx   # 16-char Google app password (2FA)
-  EMAIL_MUTED_KINDS=provider,pool,gateway_status   # optional; this is the
-      # default. "all" mutes every kind (journal-only); "none" (or an empty
-      # value) emails every kind, the pre-mute behaviour.
+  EMAIL_MUTED_KINDS=provider,provider_liveness,pool,gateway_status
+      # optional; this is the default. "all" mutes every kind
+      # (journal-only); "none" (or an empty value) emails every kind,
+      # the pre-mute behaviour.
   PROVIDER_DIAGNOSTICS_WINDOW_MINUTES=15           # optional #535 window
   PROVIDER_DIAGNOSTICS_MIN_FAILURES=3              # optional burst threshold
   EXPECTED_PROVIDER_IDS=augustass-macbook-air,air5 # optional missing-auth watch
@@ -70,7 +71,8 @@ PROVIDER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
 # routing can be decided per class instead of per severity (a single-mac
 # fleet makes "pool has 0 ready providers" CRITICAL-but-routine).
 KIND_PROVIDER = "provider"            # per-provider state transitions / drops
-KIND_PROVIDER_DIAGNOSTICS = "provider_diagnostics"  # #535 auth/warmup/liveness bursts
+KIND_PROVIDER_DIAGNOSTICS = "provider_diagnostics"  # #535 auth/warmup/config bursts
+KIND_PROVIDER_LIVENESS = "provider_liveness"  # heartbeat/reconnect churn
 KIND_POOL = "pool"                    # pool ready-count emptied / recovered
 KIND_GATEWAY_STATUS = "gateway_status"  # gateway self-reported idle/degraded/down
 KIND_SERVICE = "service"              # coordinator/gateway endpoint unreachable
@@ -78,14 +80,21 @@ KIND_STATIC_FEED = "static_feed"      # SPEC-023 signed static feeds
 ALERT_KINDS = (
     KIND_PROVIDER,
     KIND_PROVIDER_DIAGNOSTICS,
+    KIND_PROVIDER_LIVENESS,
     KIND_POOL,
     KIND_GATEWAY_STATUS,
     KIND_SERVICE,
     KIND_STATIC_FEED,
 )
-# Provider churn on a small fleet is journal-only by default; the kinds that
-# mean "the Pearl-side services themselves are down" still page by email.
-DEFAULT_EMAIL_MUTED_KINDS = (KIND_PROVIDER, KIND_POOL, KIND_GATEWAY_STATUS)
+# Provider churn and liveness noise on a small fleet are journal-only by
+# default; the kinds that mean "the Pearl-side services themselves are down"
+# still page by email.
+DEFAULT_EMAIL_MUTED_KINDS = (
+    KIND_PROVIDER,
+    KIND_PROVIDER_LIVENESS,
+    KIND_POOL,
+    KIND_GATEWAY_STATUS,
+)
 
 
 def load_env(path):
@@ -317,6 +326,7 @@ def provider_diagnostic_alerts(env, state, admin_provider_list, events_by_provid
                 "version_unsupported",
                 f"{subject} {verb} version_unsupported in the last {window_minutes}m",
                 cursor,
+                KIND_PROVIDER_DIAGNOSTICS,
             ))
         for reason in sorted(repeated_reasons):
             count = reason_counts.get(reason, 0)
@@ -329,6 +339,7 @@ def provider_diagnostic_alerts(env, state, admin_provider_list, events_by_provid
                     reason,
                     f"{subject} {verb} {count} {reason} failures in the last {window_minutes}m",
                     cursor,
+                    KIND_PROVIDER_LIVENESS if reason in reconnect_reasons else KIND_PROVIDER_DIAGNOSTICS,
                 ))
         reconnect_count = sum(reason_counts.get(reason, 0) for reason in reconnect_reasons)
         reconnect_reasons_at_threshold = [
@@ -343,6 +354,7 @@ def provider_diagnostic_alerts(env, state, admin_provider_list, events_by_provid
                 "reconnect_loop",
                 f"{subject} {verb} {reconnect_count} reconnect/liveness failures in the last {window_minutes}m",
                 cursor,
+                KIND_PROVIDER_LIVENESS,
             ))
 
         if provider_id in expected:
@@ -356,14 +368,15 @@ def provider_diagnostic_alerts(env, state, admin_provider_list, events_by_provid
                     "expected_provider_missing_auth",
                     f"expected provider {provider_id} has no successful auth/session in the last {expected_window_minutes}m",
                     newest_id,
+                    KIND_PROVIDER_DIAGNOSTICS,
                 ))
 
-        for key, message, cursor in provider_alerts:
+        for key, message, cursor, kind in provider_alerts:
             dedupe_key = diagnostic_dedupe_key(provider_id, key, cursor)
             next_state[provider_id][key] = dedupe_key
             if dedupe_base.get(key) == dedupe_key:
                 continue
-            alerts.append(("WARN", KIND_PROVIDER_DIAGNOSTICS, message))
+            alerts.append(("WARN", kind, message))
 
     state["provider_diagnostics"] = next_state
     return alerts

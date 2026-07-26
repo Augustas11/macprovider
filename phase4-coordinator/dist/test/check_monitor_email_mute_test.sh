@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Contract test for the monitor's per-kind email routing.
 #
-# Provider churn on a small fleet must stay journal-only by default while
-# service-down alerts still page, every alert site must carry a known kind,
-# and journald must keep receiving everything regardless of routing.
+# Provider churn and liveness diagnostics on a small fleet must stay journal-only
+# by default while service-down alerts still page, every alert site must carry
+# a known kind, and journald must keep receiving everything regardless of routing.
 set -euo pipefail
 
 DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,9 +18,9 @@ muted_kinds = m["muted_kinds"]
 send_email = m["send_email"]
 KINDS = m["ALERT_KINDS"]
 
-# --- default: provider churn muted, service/static-feed/diagnostics still emailed ---
+# --- default: provider churn/liveness muted, service/static-feed/diagnostics still emailed ---
 default = muted_kinds({})
-assert default == {"provider", "pool", "gateway_status"}, default
+assert default == {"provider", "provider_liveness", "pool", "gateway_status"}, default
 assert "service" not in default
 assert "static_feed" not in default
 assert "provider_diagnostics" not in default
@@ -46,7 +46,7 @@ assert used <= declared, used - declared
 # Untagged 2-tuple alert sites would silently bypass routing.
 assert not re.search(r'alerts\.append\(\("[A-Z]+", f?"', src), "untagged alert site"
 
-print("PASS: monitor email routing mutes provider churn and pages on service loss")
+print("PASS: monitor email routing mutes provider liveness noise and pages on service loss")
 PY
 
 # --- #535 diagnostics: repeated failures alert once per newest event cursor ---
@@ -138,7 +138,7 @@ events = [
 ]
 alerts = provider_diagnostic_alerts({}, state, admin, {"mp-a": events}, now=now)
 assert alerts == [
-    ("WARN", "provider_diagnostics", "provider mp-a has 3 heartbeat_stale failures in the last 15m")
+    ("WARN", "provider_liveness", "provider mp-a has 3 heartbeat_stale failures in the last 15m")
 ], alerts
 state = {}
 events = [
@@ -148,7 +148,7 @@ events = [
 ]
 alerts = provider_diagnostic_alerts({}, state, admin, {"mp-a": events}, now=now)
 assert alerts == [
-    ("WARN", "provider_diagnostics", "provider mp-a has 3 reconnect/liveness failures in the last 15m")
+    ("WARN", "provider_liveness", "provider mp-a has 3 reconnect/liveness failures in the last 15m")
 ], alerts
 
 # Expected providers are optional; when configured, no recent auth/session is a warning.
@@ -326,6 +326,41 @@ sent = run(
 )
 diagnostic_sent = [alert for alert in sent if alert[1] == "provider_diagnostics"]
 assert diagnostic_sent == [], diagnostic_sent
+
+sent = run(
+    {},
+    {
+        "OPERATOR_KEY": "test-operator",
+        "PROVIDER_DIAGNOSTICS_WINDOW_MINUTES": "1440",
+    },
+    admin_provider_list={"providers": [{"provider_id": "mp-a", "presence": "offline"}]},
+    provider_events={"mp-a": [
+        {**anon_events[0], "id": 63, "provider_id": "mp-a", "kind": "heartbeat_stale", "failure_reason": "heartbeat_stale"},
+        {**anon_events[1], "id": 62, "provider_id": "mp-a", "kind": "heartbeat_stale", "failure_reason": "heartbeat_stale"},
+        {**anon_events[2], "id": 61, "provider_id": "mp-a", "kind": "heartbeat_stale", "failure_reason": "heartbeat_stale"},
+    ]},
+)
+liveness_sent = [alert for alert in sent if alert[1] == "provider_liveness"]
+assert liveness_sent == [], liveness_sent
+
+sent = run(
+    {},
+    {
+        "EMAIL_MUTED_KINDS": "none",
+        "OPERATOR_KEY": "test-operator",
+        "PROVIDER_DIAGNOSTICS_WINDOW_MINUTES": "1440",
+    },
+    admin_provider_list={"providers": [{"provider_id": "mp-b", "presence": "offline"}]},
+    provider_events={"mp-b": [
+        {**anon_events[0], "id": 73, "provider_id": "mp-b", "kind": "heartbeat_stale", "failure_reason": "heartbeat_stale"},
+        {**anon_events[1], "id": 72, "provider_id": "mp-b", "kind": "heartbeat_stale", "failure_reason": "heartbeat_stale"},
+        {**anon_events[2], "id": 71, "provider_id": "mp-b", "kind": "heartbeat_stale", "failure_reason": "heartbeat_stale"},
+    ]},
+)
+liveness_sent = [alert for alert in sent if alert[1] == "provider_liveness"]
+assert liveness_sent == [
+    ("WARN", "provider_liveness", "provider mp-b has 3 heartbeat_stale failures in the last 1440m")
+], liveness_sent
 
 print("PASS: end-to-end — provider drop is journal-only, coordinator outage still emails")
 PY
