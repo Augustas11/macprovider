@@ -205,7 +205,7 @@ type Server struct {
 	// warn-log per conversation_key to defend against hostile-gateway
 	// log flooding. Issue #266 T1 operational-hygiene item.
 	stickyMismatchLimiter *stickyMismatchLimiter
-	internalAuthKey       string
+	operatorKey           string
 	gatewayServiceToken   string
 	requireGatewayContext bool
 	tier2Mu               sync.RWMutex
@@ -448,19 +448,22 @@ func (s *Server) tier2Config() config.Tier2Config {
 	return s.tier2
 }
 
-func WithInternalAuthKey(key string) Option {
+// WithOperatorKey sets the human-operator credential used by buyer-plane
+// endpoints that expose privileged deployment evidence. It is deliberately
+// separate from gatewayServiceToken and is never accepted by /internal/*.
+func WithOperatorKey(key string) Option {
 	return func(s *Server) {
-		s.internalAuthKey = strings.TrimSpace(key)
+		s.operatorKey = strings.TrimSpace(key)
 	}
 }
 
-// WithGatewayServiceToken sets the secondary credential accepted on
-// `/internal/*` paths (M3-2 / SECU-4 / codex PR #73 HIGH-1). When
-// non-empty, the gateway can call `/internal/routing` and
-// `/internal/sticky` with either this token OR the operator key. The
-// audit-log line emits `key=service_token|operator_key` so the operator
-// can watch the cutover and rotate operator_key once gateway-origin
-// calls stop reporting key=operator_key.
+// WithGatewayServiceToken sets the credential required on `/internal/*`
+// paths (M3-2 / SECU-4 / codex PR #73 HIGH-1). After PR #172 merges,
+// this is the SOLE accepted credential on `/internal/routing` and
+// `/internal/sticky`; the merge gate remains tracked in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md.
+// The audit-log line continues to emit `key=service_token` for
+// continuity with the operator's existing journald grep watchers.
 //
 // IMPORTANT: this credential is intentionally NOT accepted on any
 // `/admin/*` or `/poolz` endpoint. That class of route is human-admin
@@ -1051,7 +1054,7 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Missing assigned_id for readiness evidence")
 		return
 	}
-	if includeDeploymentEvidence && !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+	if includeDeploymentEvidence && !auth.OperatorOnlyBearerMatches(r.Header, s.operatorKey) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Deployment pool evidence requires coordinator authorization")
 		return
 	}
@@ -6089,17 +6092,12 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 }
 
 // internalBearerAuthorized guards the `/internal/routing` and
-// `/internal/sticky` paths the gateway calls upstream. It accepts
-// EITHER the operator key OR the gateway service token (M3-2 / SECU-4
-// dual-credential bridge per the codex PR #73 fix). BOTH candidates are
-// evaluated before branching to close the short-circuit timing oracle
-// the audit flagged as MEDIUM. The audit-log line carries which class
-// matched so the operator can watch the cutover.
-//
-// TODO(m3-2-cleanup): remove the operator-key fallback in a dedicated
-// PR once live audit logs show zero gateway-origin
-// `key=operator_key` for 30 days post-OperatorKey-rotation. Tracked in
-// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md.
+// `/internal/sticky` paths the gateway calls upstream. It accepts ONLY
+// the gateway_service_token (M3-2 / SECU-4 / codex PR #73 HIGH-1). The
+// legacy operator_key fallback is removed by PR #87 item 3 after the
+// 30-day clean-cutover gate documented in the M3-2 tracker. The audit-log
+// line continues to emit `event=internal_bearer_accepted key=service_token`
+// for continuity with the operator's existing journald watchers.
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {
 	return s.internalBearerAuthorizedRemote(headers, "")
 }
@@ -6114,7 +6112,7 @@ func (s *Server) internalBearerAuthorizedRemote(headers http.Header, remoteAddr 
 }
 
 func (s *Server) internalBearerAuthorizedFull(headers http.Header, remoteAddr, path string) bool {
-	kind := auth.GatewayInternalBearerMatches(headers, s.internalAuthKey, s.gatewayServiceToken)
+	kind := auth.GatewayInternalBearerMatches(headers, s.gatewayServiceToken)
 	if kind == auth.BearerKindNone {
 		return false
 	}

@@ -287,7 +287,7 @@ func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {
 		case "/v1/models":
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
 		case "/internal/routing":
-			if got := r.Header.Get("Authorization"); got != "Bearer operator-key" {
+			if got := r.Header.Get("Authorization"); got != "Bearer service-token" {
 				t.Fatalf("operator auth = %q", got)
 			}
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":true,"ttl_seconds":1800}}`), nil
@@ -390,7 +390,7 @@ func TestModelsDisclosureUsesTier2MetadataWhenNoHashRows(t *testing.T) {
 		case "/v1/models":
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
 		case "/internal/routing":
-			if got := r.Header.Get("Authorization"); got != "Bearer operator-key" {
+			if got := r.Header.Get("Authorization"); got != "Bearer service-token" {
 				t.Fatalf("operator auth = %q", got)
 			}
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
@@ -3340,7 +3340,7 @@ func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T)
 	if got := captured.Get("X-MacProvider-Internal-Source"); got != "" {
 		t.Fatalf("internal source forwarded = %q", got)
 	}
-	if got := captured.Get("Authorization"); got != "Bearer operator-key" {
+	if got := captured.Get("Authorization"); got != "Bearer service-token" {
 		t.Fatalf("coordinator authorization = %q", got)
 	}
 	if countAuditEvents(t, dbPath, "internal_header_injection_stripped") != 1 {
@@ -3453,7 +3453,7 @@ func TestStickyDeleteRequiresBearerAndAuthorizesCoordinator(t *testing.T) {
 	if got := captured.URL.Scheme + "://" + captured.URL.Host; got != "http://operator.test" {
 		t.Fatalf("coordinator sticky URL host = %q", got)
 	}
-	if got := captured.Header.Get("Authorization"); got != "Bearer operator-key" {
+	if got := captured.Header.Get("Authorization"); got != "Bearer service-token" {
 		t.Fatalf("coordinator authorization = %q", got)
 	}
 }
@@ -6367,6 +6367,9 @@ func newTestHarnessConfig(t *testing.T, oauth auth.OAuthProvider, mutate func(*c
 	cfg.Auth.OAuth.GitHub.ClientID = "client-id"
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	cfg.Coordinator.OperatorKey = "operator-key"
+	// Post PR #87 item 3: service_token is REQUIRED for /internal/* upstream
+	// calls and the gateway sends it via UpstreamCoordinatorBearer().
+	cfg.Coordinator.ServiceToken = "service-token"
 	cfg.Explorer.Enabled = true
 	cfg.Proxy.TrustedCIDRs = []string{"127.0.0.0/8", "::1/128", "192.0.2.0/24"}
 	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
@@ -6619,6 +6622,7 @@ coordinator:
   buyer_url: http://coordinator.test
   operator_url: http://operator.test
   operator_key: operator-key
+  service_token: service-token
   poolz_poll_interval_s: 10
 storage:
   driver: sqlite

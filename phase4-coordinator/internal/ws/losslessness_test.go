@@ -376,6 +376,7 @@ func TestLosslessnessStateTransitionsAndGridReadiness(t *testing.T) {
 func TestLosslessnessConfigDefaultsDisabledAndValidateBounds(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
 	if cfg.Pool.LosslessnessProbe.Enabled {
 		t.Fatal("losslessness probe must default disabled")
 	}

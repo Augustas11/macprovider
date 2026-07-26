@@ -30,7 +30,8 @@
 #                    must reconnect after restart and pass authenticated
 #                    compatibility admission through /v1/pool/check before commit.
 #   CATALOG_CANARY_AUTH_TOKEN required for production deploys. Use the
-#                    coordinator operator key or gateway service token.
+#                    coordinator operator key; service tokens are not
+#                    accepted by operator-only deployment evidence.
 #   CATALOG_CANARY_SSH_TARGET required for production deploys. SSH target for
 #                    the operator-controlled canary Mac (for example user@host).
 #   CATALOG_CANARY_SSH_KEY default: ~/.ssh/macprovider_canary_ed25519
@@ -43,7 +44,14 @@
 #                    the gateway config installed on Pearl.
 #   GATEWAY_REMOTE_CONFIG  installed gateway config path on Pearl.
 #                    Default: /opt/macprovider/gateway.yaml.
-#   SKIP_C2_CHECK    default: 0   skip C2 cross-check (development only)
+#   C2C_COORD_OPERATOR_KEY_SHA256, C2C_COORD_SERVICE_TOKEN_SHA256,
+#   C2C_GATEWAY_SERVICE_TOKEN_SHA256, C2C_GATEWAY_OPERATOR_KEY_SHA256
+#                    required by --dry-run-local when either config uses
+#                    env:NAME credentials. Compute each SHA-256 independently
+#                    from its respective runtime EnvironmentFile; never pass
+#                    raw credential values. Production computes these proofs
+#                    on Pearl and returns only the digests.
+#   SKIP_C2_CHECK    default: 0   skip C2 timer/header assertions only (development only)
 #   ALLOW_CONFIG_DRIFT default: 0 push local coordinator.yaml over live one
 #   SKIP_TCP_TUNING default: 0    skip Pearl TCP sysctl install/apply step
 #   MODEL_HASH_LEGACY_UNTIL is read from /etc/macprovider/coordinator.env
@@ -536,7 +544,11 @@ yaml_tier2_value() {
 # query e.g. `stats.enabled` in addition to `tier2.catalog_path`. Same
 # scoping rule: read keys until the next top-level block.
 yaml_block_value() {
-  local block="$1" key="$2"
+  yaml_file_block_value "$CONFIG" "$1" "$2"
+}
+
+yaml_file_block_value() {
+  local file="$1" block="$2" key="$3"
   awk -v block="$block" -v key="$key" '
     BEGIN { in_block=0 }
     {
@@ -555,7 +567,7 @@ yaml_block_value() {
         exit
       }
     }
-  ' "$CONFIG"
+  ' "$file"
 }
 
 # R5 ARCH M1 — early coherence check: if the operator set
@@ -836,8 +848,13 @@ log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Pearl, not a local sample or developer config. Local validation is available
 # only through --dry-run-local and exits before any SSH mutation.
 CHECK_SCRIPT="$DIST_DIR/check-deploy-config.sh"
+C2C_PROOF_SCRIPT="$DIST_DIR/lib/c2c_runtime_proof.py"
 if [ ! -x "$CHECK_SCRIPT" ]; then
   echo "aborting deploy: check-deploy-config.sh missing or not executable: $CHECK_SCRIPT" >&2
+  exit 5
+fi
+if [ ! -r "$C2C_PROOF_SCRIPT" ]; then
+  echo "aborting deploy: runtime credential proof helper missing or unreadable: $C2C_PROOF_SCRIPT" >&2
   exit 5
 fi
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
@@ -849,17 +866,19 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
     echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml>." >&2
     exit 5
   fi
-  bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_CONFIG" || {
+  C2C_COORD_OPERATOR_KEY_SHA256="${C2C_COORD_OPERATOR_KEY_SHA256:-}" \
+  C2C_COORD_SERVICE_TOKEN_SHA256="${C2C_COORD_SERVICE_TOKEN_SHA256:-}" \
+  C2C_GATEWAY_SERVICE_TOKEN_SHA256="${C2C_GATEWAY_SERVICE_TOKEN_SHA256:-}" \
+  C2C_GATEWAY_OPERATOR_KEY_SHA256="${C2C_GATEWAY_OPERATOR_KEY_SHA256:-}" \
+    bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_CONFIG" || {
     echo "aborting deploy dry-run: config-drift check failed" >&2; exit 5;
   }
   echo "  local dry-run C2 check passed"
   exit 0
-elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
-  echo "  SKIP_C2_CHECK=1 set — running coordinator-only check (C2 gate intentionally skipped)" >&2
-  SKIP_C2_CHECK=1 bash "$CHECK_SCRIPT" "$CONFIG" || {
-    echo "aborting deploy: config-drift check failed" >&2; exit 5;
-  }
 else
+  if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+    echo "  SKIP_C2_CHECK=1 set — skipping timer/header assertions only; credential proof remains mandatory" >&2
+  fi
   GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
     echo "aborting deploy: mktemp failed for installed gateway config copy" >&2; exit 5;
   }
@@ -869,6 +888,7 @@ else
   }
   GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
   echo "  validating installed Pearl gateway config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
+
   # The deadline is not a secret, but it is operator-owned runtime state. Read
   # it as data from the same EnvironmentFile systemd uses; do not source the
   # file. The deploy gate validates syntax and freshness before any upload.
@@ -881,7 +901,45 @@ else
     echo "aborting deploy: could not parse MODEL_HASH_LEGACY_UNTIL from Pearl coordinator.env" >&2
     exit 5
   }
-  env MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
+
+  # PR #172 C2c: the coordinator will restart and consume coordinator.env,
+  # while the gateway keeps its current process environment. Prove that exact
+  # next-state pairing on Pearl and compare only digests locally; never copy or
+  # print bearer material. The helper also requires the peer's env file and
+  # process to match, so a later peer restart cannot change the proven state.
+  # Current-peer credentials must use env:NAME; inline YAML cannot be read
+  # authoritatively from an already-running process.
+  _c2c_env_name() {
+    local raw="$1"
+    case "$raw" in
+      env:*)
+        raw="${raw#env:}"
+        if ! printf '%s' "$raw" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+          echo "aborting deploy: malformed env:NAME in service-token pairing field" >&2
+          return 1
+        fi
+        printf '%s' "$raw"
+        ;;
+      *) printf '%s' - ;;
+    esac
+  }
+  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$CONFIG" auth operator_key)")" || exit 5
+  _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$CONFIG" auth gateway_service_token)")" || exit 5
+  _gateway_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator service_token)")" || exit 5
+  _gateway_op_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator operator_key)")" || exit 5
+  _c2c_proofs="$($SSH python3 - coordinator-deploy "$_coord_op_name" "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
+    echo "aborting deploy: could not prove coordinator/gateway credential pairing on Pearl" >&2
+    exit 5
+  }
+  read -r C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
+$_c2c_proofs
+EOF
+  C2C_COORD_OPERATOR_KEY_SHA256="$C2C_COORD_OPERATOR_KEY_SHA256" \
+  C2C_COORD_SERVICE_TOKEN_SHA256="$C2C_COORD_SERVICE_TOKEN_SHA256" \
+  C2C_GATEWAY_SERVICE_TOKEN_SHA256="$C2C_GATEWAY_SERVICE_TOKEN_SHA256" \
+  C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
+  MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
+  SKIP_C2_CHECK="${SKIP_C2_CHECK:-0}" \
     bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting deploy: config-drift check failed" >&2; exit 5;
   }

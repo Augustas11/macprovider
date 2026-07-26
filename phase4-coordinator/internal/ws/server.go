@@ -82,10 +82,10 @@ type Server struct {
 	// enabled; Pearl production keeps canary disabled under #584. Guarded by
 	// canaryCorrMu. canaryBankGeneration is an interim monotonic bank/config
 	// generation (FR-CAN26 full hot-reload generation remains a Gap).
-	canaryCorrMu         sync.Mutex
-	canaryCorrByModel    map[string]*liveCorrelationEpoch
-	canarySharedDispatch map[string]sharedCanaryDispatch
-	canaryBankGeneration uint64
+	canaryCorrMu                  sync.Mutex
+	canaryCorrByModel             map[string]*liveCorrelationEpoch
+	canarySharedDispatch          map[string]sharedCanaryDispatch
+	canaryBankGeneration          uint64
 	losslessnessPending           sync.Map
 	losslessnessNonceIndex        sync.Map
 	losslessnessDigestIndex       sync.Map
@@ -4905,15 +4905,9 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 //
 // Empty operator_key still means DENY (M1-5 / SECU-5 preserved). The
 // service-to-service `/internal/*` paths under buyer.Server use the
-// auth.GatewayInternalBearerMatches helper instead, which accepts
-// either credential class and emits its own audit-log line.
-//
-// TODO(m3-2-cleanup): the buyer-side gateway-internal bridge still
-// accepts the OperatorKey fallback. Tracked for removal in
-// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md once live audit
-// logs show zero gateway-origin `key=operator_key` for 30 days post-
-// rotation. Until then, removing the fallback would break the cutover
-// for operators who still pin the legacy single credential.
+// auth.GatewayInternalBearerMatches helper instead, which accepts the
+// gateway_service_token ONLY after PR #87 item 3. Operator-only endpoints
+// here keep the operator_key.
 func (s *Server) authorizedOperator(r *http.Request) bool {
 	if !auth.OperatorOnlyBearerMatches(r.Header, s.cfg.Auth.OperatorKey) {
 		return false

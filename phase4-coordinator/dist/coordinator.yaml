@@ -76,8 +76,8 @@ auth:
   # Operator bearer token for /poolz and /admin/*.
   # Resolved from /etc/macprovider/coordinator.env on Pearl; do not inline.
   operator_key: env:OPERATOR_KEY
-  # Optional gateway-to-coordinator service credential; resolved from the same
-  # env file so the gateway can avoid using the operator admin key.
+  # Required gateway-to-coordinator service credential; resolved from the same
+  # env file and distinct from all operator credentials.
   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   # Public provider websocket admission must fail closed. Existing providers
   # must carry a top-level provider_token persisted by the macprovider binary.

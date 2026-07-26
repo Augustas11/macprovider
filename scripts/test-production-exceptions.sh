@@ -139,14 +139,18 @@ grep -qE 'gate --mode=deploy' \
   phase4-coordinator/dist/check-deploy-config.sh \
   || fail "check-deploy-config.sh does not invoke the exception deploy gate"
 
-# Gateway deploy must invoke the exception gate before SKIP_C2_CHECK.
+# Gateway deploy must invoke the exception gate before any SKIP_C2_CHECK notice,
+# and SKIP_C2_CHECK must not branch around runtime credential proof/config gate.
 grep -qF 'check-production-exceptions.py' \
   phase5-gateway/dist/deploy-pearl-vps.sh \
   || fail "gateway deploy does not reference the exception checker"
 exc_line="$(grep -nF 'check-production-exceptions.py' phase5-gateway/dist/deploy-pearl-vps.sh | head -n1 | cut -d: -f1)"
-skip_line="$(grep -nF 'elif [ "${SKIP_C2_CHECK:-0}" = "1" ]' phase5-gateway/dist/deploy-pearl-vps.sh | head -n1 | cut -d: -f1)"
-[ -n "$exc_line" ] && [ -n "$skip_line" ] && [ "$exc_line" -lt "$skip_line" ] ||
-  fail "gateway exception gate must precede SKIP_C2_CHECK branch (exc=$exc_line skip=$skip_line)"
+skip_line="$(grep -nF 'SKIP_C2_CHECK=1 set' phase5-gateway/dist/deploy-pearl-vps.sh | head -n1 | cut -d: -f1)"
+proof_line="$(grep -nF '_c2c_proofs=' phase5-gateway/dist/deploy-pearl-vps.sh | head -n1 | cut -d: -f1)"
+check_line="$(grep -nF 'bash "$CHECK_SCRIPT" "$COORD_REMOTE_CONFIG_TMP" "$GATEWAY_REMOTE_CONFIG_TMP"' phase5-gateway/dist/deploy-pearl-vps.sh | head -n1 | cut -d: -f1)"
+[ -n "$exc_line" ] && [ -n "$skip_line" ] && [ -n "$proof_line" ] && [ -n "$check_line" ] &&
+  [ "$exc_line" -lt "$skip_line" ] && [ "$skip_line" -lt "$proof_line" ] && [ "$proof_line" -lt "$check_line" ] ||
+  fail "gateway exception/skip/proof/check ordering invalid (exc=$exc_line skip=$skip_line proof=$proof_line check=$check_line)"
 
 # Stable promotion workflow must invoke the reusable promote gate helper.
 grep -qF 'scripts/gate-production-exceptions-promote.sh' \

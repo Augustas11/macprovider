@@ -194,28 +194,26 @@ func BearerTokenMatchesHeader(headers http.Header, expected string) bool {
 }
 
 // InternalBearerKind identifies WHICH credential class matched in
-// GatewayInternalBearerMatches. The audit-log call sites use this to
-// emit `event=internal_bearer_accepted key=<kind>` so the operator can
-// watch the M3-2 cutover for gateway-origin calls still landing under
-// operator_key. The zero value (BearerKindNone) means no match.
+// GatewayInternalBearerMatches. After the M3-2 legacy-fallback removal
+// (PR #87 item 3, after its tracked cutover gate) the only non-None value
+// is BearerKindServiceToken; the previous BearerKindOperatorKey existed
+// solely to label the M3-2 fallback path on the audit-log line so the
+// operator could watch the cutover, and the path is now gone. The enum
+// stays so call sites that emit `event=internal_bearer_accepted key=<kind>`
+// keep the established log shape.
 type InternalBearerKind int
 
 const (
 	BearerKindNone InternalBearerKind = iota
 	BearerKindServiceToken
-	BearerKindOperatorKey
 )
 
 // String matches the JSON shape the operator filters on in journald.
 func (k InternalBearerKind) String() string {
-	switch k {
-	case BearerKindServiceToken:
+	if k == BearerKindServiceToken {
 		return "service_token"
-	case BearerKindOperatorKey:
-		return "operator_key"
-	default:
-		return ""
 	}
+	return ""
 }
 
 // OperatorOnlyBearerMatches returns true when the request carries a
@@ -232,36 +230,23 @@ func OperatorOnlyBearerMatches(headers http.Header, operatorKey string) bool {
 	return BearerTokenMatchesHeader(headers, operatorKey)
 }
 
-// GatewayInternalBearerMatches returns the matched credential kind when
-// the request's Bearer token matches EITHER the gateway service token
-// OR the operator key. This is the credential class for
-// SERVICE-TO-SERVICE endpoints (`/internal/routing`, `/internal/sticky`)
-// that the gateway calls upstream.
+// GatewayInternalBearerMatches returns BearerKindServiceToken when the
+// request's Bearer token matches the gateway_service_token, else
+// BearerKindNone. This is the credential class for SERVICE-TO-SERVICE
+// endpoints (`/internal/routing`, `/internal/sticky`) that the gateway
+// calls upstream.
 //
-// BOTH candidates are evaluated BEFORE branching to close the
-// short-circuit timing oracle the codex security audit on PR #73
-// flagged as MEDIUM: an attacker could otherwise distinguish "service
-// token matched" vs "operator key matched" by measuring response
-// timing. Each candidate is constant-time compared via
-// BearerTokenMatchesHeader and only counted when non-empty so an empty
-// gateway_service_token can't widen the auth surface.
-//
-// Returns BearerKindServiceToken when service_token matches (preferred),
-// BearerKindOperatorKey when operator_key matches (legacy fallback),
-// BearerKindNone otherwise. service_token takes precedence so the
-// audit-log line reports the credential the gateway is supposed to be
-// using post-cutover.
-func GatewayInternalBearerMatches(headers http.Header, operatorKey, serviceToken string) InternalBearerKind {
-	serviceMatch := serviceToken != "" && BearerTokenMatchesHeader(headers, serviceToken)
-	operatorMatch := operatorKey != "" && BearerTokenMatchesHeader(headers, operatorKey)
-	switch {
-	case serviceMatch:
+// History: PR #73 (M3-2 / SECU-4) introduced a dual-credential bridge
+// here that also accepted the legacy operator_key as a backward-compat
+// fallback so the cutover could roll out without an atomic flip. The
+// fallback is removed by PR #87 item 3 after the 30-day clean-cutover
+// gate in the M3-2 tracker. Empty serviceToken still means
+// DENY (M1-5 / SECU-5 preserved).
+func GatewayInternalBearerMatches(headers http.Header, serviceToken string) InternalBearerKind {
+	if serviceToken != "" && BearerTokenMatchesHeader(headers, serviceToken) {
 		return BearerKindServiceToken
-	case operatorMatch:
-		return BearerKindOperatorKey
-	default:
-		return BearerKindNone
 	}
+	return BearerKindNone
 }
 
 func OpenStore(path string) (*Store, error) {

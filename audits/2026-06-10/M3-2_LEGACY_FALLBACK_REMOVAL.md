@@ -1,5 +1,25 @@
 # M3-2: legacy OperatorKey fallback removal (post-cutover)
 
+**Status (2026-07-13): PREPARED, NOT MERGED.** Draft PR #172 (issue #87
+item 3, branch `fix/m3-2-legacy-fallback-removal-v2`) contains the removal,
+but the mandatory window starts at the 2026-06-26 OperatorKey rotation.
+The earliest valid merge date is therefore **2026-07-26**, after a final
+30-day log check and a new `beta/DECISION_CRITERIA.md` entry. Until then,
+the dual-credential bridge remains the production contract.
+
+The prepared implementation makes `gateway_service_token` the sole
+credential on `/internal/*`, keeps operator-only deployment evidence on
+the operator credential, and preserves the audit-log shape
+(`event=internal_bearer_accepted key=service_token`).
+
+Remaining pre-merge evidence:
+
+- Re-run the full post-rotation log query on or after 2026-07-26.
+- Restore `/etc/macprovider/pearl-updater.catalog-canary-token` as a
+  root-owned operator credential and prove updater deployment evidence.
+- Append the required `beta/DECISION_CRITERIA.md` entry.
+- Obtain review and green required checks on draft PR #172.
+
 Tracked removal task for the dual-credential bridge added in PR #73
 (M3-2 / SECU-4) and scoped down by its codex security audit fixup
 (HIGH-1, HIGH-2, MED, LOW).

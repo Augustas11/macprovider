@@ -67,6 +67,31 @@ func TestValidateRejectsHeaderTimeoutBelowRequestBudget(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsWhitespaceEquivalentServiceToken pins the audit-r2
+// whitespace-bypass fix: the coordinator's BearerTokenMatchesHeader trims
+// both sides before matching, so "X" and "X " collapse on the wire.
+// Validate must reject the collision instead of a strict == that misses it.
+func TestValidateRejectsWhitespaceEquivalentServiceToken(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		op, svc string
+	}{
+		{"trailing space", "operator-key", "operator-key "},
+		{"leading space", "operator-key", " operator-key"},
+		{"trailing newline", "operator-key", "operator-key\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Coordinator.OperatorKey = tc.op
+			cfg.Coordinator.ServiceToken = tc.svc
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "must differ from coordinator.operator_key") {
+				t.Fatalf("Validate err=%v want distinctness rejection", err)
+			}
+		})
+	}
+}
+
 // Validate must accept the canonical case where the two timeouts are equal.
 func TestValidateAcceptsEqualHeaderAndRequestTimeout(t *testing.T) {
 	cfg := validTestConfig() // both default to 300
@@ -197,6 +222,9 @@ func TestProxyTrustedCIDRValidation(t *testing.T) {
 func validTestConfig() Config {
 	cfg := Default()
 	cfg.Coordinator.OperatorKey = "operator-key"
+	// Post-PR #87 item 3: service_token is required for /internal/*
+	// upstream calls; Validate() now rejects empty.
+	cfg.Coordinator.ServiceToken = "service-token"
 	cfg.Auth.KeyHashSecret = "key-hash-secret"
 	cfg.Auth.Demo.SigningSecret = "demo-secret"
 	cfg.Auth.OAuth.GitHub.ClientID = "client-id"

@@ -35,8 +35,8 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 		if strings.Contains(got, "mp_") {
 			t.Fatalf("forwarded buyer auth header (mp_ key leaked)=%q", got)
 		}
-		if got != "Bearer operator-key" {
-			t.Fatalf("forwarded Authorization=%q, want %q", got, "Bearer operator-key")
+		if got != "Bearer service-token" {
+			t.Fatalf("forwarded Authorization=%q, want %q", got, "Bearer service-token")
 		}
 		forwardedRequestID = r.Header.Get("X-Request-ID")
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{

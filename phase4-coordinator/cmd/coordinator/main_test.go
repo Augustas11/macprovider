@@ -880,6 +880,7 @@ func reloadTestServers(cfg config.Config) (config.Config, *pool.Registry, *provi
 
 func reloadTestServersWithLogger(cfg config.Config, logger zerolog.Logger) (config.Config, *pool.Registry, *providerws.Server, *buyer.Server) {
 	cfg.Auth.OperatorKey = "0123456789abcdefABCDEFghijklmnop"
+	cfg.Auth.GatewayServiceToken = "fedcba9876543210FEDCBAzyxwvutsrq"
 	cfg.Pool.WarmupGateEnabled = false
 	registry := pool.NewRegistry(nil)
 	wsServer := providerws.NewServer(cfg, registry, logger)
@@ -888,7 +889,7 @@ func reloadTestServersWithLogger(cfg config.Config, logger zerolog.Logger) (conf
 		logger,
 		time.Unix(1716768000, 0),
 		buyer.WithTier2Config(cfg.Tier2),
-		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 	)
 	return cfg, registry, wsServer, buyerServer
 }
@@ -914,7 +915,7 @@ func fetchReloadTier2Metadata(t *testing.T, server *buyer.Server) struct {
 } {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
-	req.Header.Set("Authorization", "Bearer 0123456789abcdefABCDEFghijklmnop")
+	req.Header.Set("Authorization", "Bearer fedcba9876543210FEDCBAzyxwvutsrq")
 	rr := httptest.NewRecorder()
 	server.InternalHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {

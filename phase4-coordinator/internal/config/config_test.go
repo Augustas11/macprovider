@@ -14,9 +14,15 @@ import (
 
 const testAutotunePublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
 
-func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
+func validTestConfig() Config {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
+	return cfg
+}
+
+func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
+	cfg := validTestConfig()
 	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
 	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
 
@@ -34,14 +40,13 @@ func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 }
 
 func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
-	cfg := Default()
+	cfg := validTestConfig()
 	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.EnableSocialInviteBonus {
 		t.Fatal("referral launch policy must default off")
 	}
 	if cfg.Referrals.JoinBaseURL != "https://malibu.tech/j" {
 		t.Fatalf("default join_base_url=%q, want canonical public origin", cfg.Referrals.JoinBaseURL)
 	}
-	cfg.Auth.OperatorKey = "operator-key"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("disabled referral defaults should validate: %v", err)
 	}
@@ -59,8 +64,7 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 }
 
 func TestReferralJoinLinksRequireAdmissionAndPublicValidation(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Referrals.EnableJoinLinks = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires require_for_registration") {
 		t.Fatalf("join without admission error=%v", err)
@@ -80,8 +84,7 @@ func TestReferralJoinLinksRequireAdmissionAndPublicValidation(t *testing.T) {
 }
 
 func TestReferralSocialBonusRequiresDarkStackAndConfiguredDwell(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Referrals.EnableSocialInviteBonus = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires referral admission, public validation, and join links") {
 		t.Fatalf("social without server stack error=%v", err)
@@ -134,16 +137,14 @@ func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *t
 		"https://ACCESS.example.test/waitlist",
 		"https://access.example.test",
 	} {
-		cfg := Default()
-		cfg.Auth.OperatorKey = "operator-key"
+		cfg := validTestConfig()
 		cfg.Referrals.RequestAccessURL = raw
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_access_url") {
 			t.Fatalf("request_access_url=%q error=%v", raw, err)
 		}
 	}
 
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Referrals.RequestAccessURL = "https://access.example.test/waitlist?campaign=prebeta"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid request access URL: %v", err)
@@ -164,8 +165,7 @@ func TestAutotuneFeedsRejectInvalidPublicKeys(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Default()
-			cfg.Auth.OperatorKey = "operator-key"
+			cfg := validTestConfig()
 			cfg.AutotuneFeeds.PublicKeys = map[string]string{tc.keyID: tc.encoded}
 			err := cfg.Validate()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -207,8 +207,7 @@ func TestAutotuneProviderAdmissionBridgeDeadlineValidation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Default()
-			cfg.Auth.OperatorKey = "operator-key"
+			cfg := validTestConfig()
 			cfg.AutotuneFeeds.EnforceProviderAdmission = false
 			cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = tc.deadline
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -217,8 +216,7 @@ func TestAutotuneProviderAdmissionBridgeDeadlineValidation(t *testing.T) {
 		})
 	}
 
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.AutotuneFeeds.EnforceProviderAdmission = false
 	cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = now.Add(time.Hour).Format(time.RFC3339)
 	if err := cfg.Validate(); err != nil {
@@ -234,8 +232,7 @@ func TestAutotuneProviderAdmissionBridgeDeadlineValidation(t *testing.T) {
 }
 
 func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Routing.ModelClasses = map[string]ModelClassConfig{
 		"alias": {Members: []string{"model-a"}, Models: []string{"model-b"}, Objective: "fast"},
 	}
@@ -243,6 +240,50 @@ func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "must not set both members and models") {
 		t.Fatalf("Validate error=%v", err)
+	}
+}
+
+// TestValidateRejectsWhitespaceEquivalentServiceToken pins the audit-r2
+// fix for the whitespace-bypass MEDIUM: auth.BearerTokenMatchesHeader
+// trims both sides before matching, so "X" and "X " or "X\n" collapse
+// to the same value on the wire. Validate must reject that collision
+// instead of relying on a strict == that misses it.
+func TestValidateRejectsWhitespaceEquivalentServiceToken(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		op, svc string
+	}{
+		{"trailing space", "operator-key", "operator-key "},
+		{"leading space", "operator-key", " operator-key"},
+		{"trailing newline", "operator-key", "operator-key\n"},
+		{"both padded", "  operator-key", "operator-key  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.OperatorKey = tc.op
+			cfg.Auth.GatewayServiceToken = tc.svc
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "must differ from auth.operator_key") {
+				t.Fatalf("Validate err=%v want distinctness rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsBlankServiceToken(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = " \t\n "
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "gateway_service_token must be set") {
+		t.Fatalf("Validate err=%v want blank-token rejection", err)
+	}
+}
+
+func TestValidateRejectsServiceTokenMatchingNamedOperatorKey(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Auth.OperatorKeys = map[string]string{"alice": " gateway-service-token "}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth.operator_keys.alice") {
+		t.Fatalf("Validate err=%v want named-operator collision rejection", err)
 	}
 }
 
@@ -264,8 +305,7 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 }
 
 func TestCredentialBootstrapIdentityRetentionMustExceedTokenTTL(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Auth.CredentialBootstrapIdentityRetentionS = cfg.Auth.CredentialBootstrapTokenTTLS
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "identity_retention_s must exceed") {
 		t.Fatalf("Validate error=%v", err)
@@ -285,7 +325,7 @@ func TestLoadRejectsWeakOperatorKeys(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := loadConfigFromYAML(t, "auth:\n  operator_key: "+tc.key+"\n")
+			_, err := loadConfigFromYAML(t, "auth:\n  operator_key: "+tc.key+"\n  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA\n")
 			if err == nil {
 				t.Fatal("Load accepted weak operator key")
 			}
@@ -300,6 +340,7 @@ func TestLoadAcceptsStrongOperatorKey(t *testing.T) {
 	cfg := writeMinimalConfig(t, `
 auth:
   operator_key: 0123456789abcdefABCDEFghijklmnop
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
 `)
 	if cfg.Auth.OperatorKey != "0123456789abcdefABCDEFghijklmnop" {
 		t.Fatalf("OperatorKey=%q", cfg.Auth.OperatorKey)
@@ -322,9 +363,10 @@ func TestLoadRejectsWeakNamedOperatorKeys(t *testing.T) {
 			_, err := loadConfigFromYAML(t, `
 auth:
   operator_key: 0123456789abcdefABCDEFghijklmnop
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
   operator_keys:
     alice: `+tc.key+`
-    bob: fedcba9876543210PONMLKJIHGFEDCBA
+    bob: ZXCVbnm1234567890qwertyASDFGHJKL
 `)
 			if err == nil {
 				t.Fatal("Load accepted weak named operator key")
@@ -337,8 +379,7 @@ auth:
 }
 
 func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Pool.CanaryEnabled = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canary_challenges") {
 		t.Fatalf("enabled canary without challenges validation err=%v", err)
@@ -373,8 +414,7 @@ func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
 }
 
 func TestCanaryColdStartGraceValidation(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Pool.CanaryColdStartGraceS = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canary_cold_start_grace_s") {
 		t.Fatalf("negative cold-start grace validation err=%v", err)
@@ -390,8 +430,7 @@ func TestCanaryColdStartGraceValidation(t *testing.T) {
 }
 
 func TestCanaryLatencyEnforcementValidation(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 
 	// Default (empty) normalizes to observe and validates.
 	if cfg.Pool.CanaryLatencyEnforcement != "" {
@@ -419,8 +458,7 @@ func TestCanaryLatencyEnforcementValidation(t *testing.T) {
 }
 
 func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	if cfg.WS.HandshakeTimeoutS != 10 || cfg.WS.WriteTimeoutS != 10 ||
 		cfg.WS.MaxFrameBytes != 4<<20 || cfg.WS.MaxUnauthenticatedConn != 64 ||
 		cfg.WS.MaxUnauthenticatedConnPerIP != 4 {
@@ -435,8 +473,7 @@ func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 		t.Fatalf("zero frame cap validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.WS.MaxFrameBytes = 65 << 20
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_frame_bytes") {
 		t.Fatalf("oversize frame cap validation err=%v", err)
@@ -444,8 +481,7 @@ func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 }
 
 func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	if cfg.Rewards.GlobalMultiplier != 1.0 || cfg.Rewards.ProviderShare != 0.90 {
 		t.Fatalf("unexpected rewards defaults: %+v", cfg.Rewards)
 	}
@@ -475,78 +511,67 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("provider share validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Settlement.RecoveryGraceSeconds = 901
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "recovery_grace_seconds") {
 		t.Fatalf("settlement recovery grace above verified receipt cap should fail; err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Settlement.PendingDeadlineSeconds = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "pending_deadline_seconds") {
 		t.Fatalf("settlement pending deadline below floor should fail; err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Settlement.PendingDeadlineSeconds = 901
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "pending_deadline_seconds") {
 		t.Fatalf("settlement pending deadline above cap should fail; err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Settlement.VerifiedModelSettlementMode = "shadow"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "verified_model_settlement_mode") {
 		t.Fatalf("settlement verified model mode validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Storage.RequestLogRetentionDays = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_log_retention_days") {
 		t.Fatalf("request log retention validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Storage.AuditLogRetentionDays = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_retention_days") {
 		t.Fatalf("audit log retention=0 validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Storage.AuditLogRetentionDays = 89
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "compliance floor") {
 		t.Fatalf("audit log retention=89 (below 90-day floor) should fail; err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Storage.AuditLogRetentionDays = 90
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("audit log retention=90 should pass validation: %v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Storage.RequestLogRetentionDays = 3
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "nightly_reconcile_window_days") {
 		t.Fatalf("request log retention reconcile validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	delete(cfg.Rewards.RateCard, "default")
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rate_card") {
 		t.Fatalf("default rate-card validation err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Rewards.RateCard["default"] = RateCardEntry{
 		PromptCreditsPerMtok:         500000,
 		PromptCacheHitCreditsPerMtok: 600000,
@@ -601,21 +626,18 @@ func TestCoordinatorYAMLExamplesIncludePromptCacheHitRate(t *testing.T) {
 }
 
 func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default Tier2 config should validate: %v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.CatalogPath = "/tmp/catalog.json"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "catalog_public_key") {
 		t.Fatalf("catalog without public key err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.RequireHashVerified = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_hash_verified") {
 		t.Fatalf("require_hash_verified without catalog err=%v", err)
@@ -623,6 +645,7 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
 	cfg.Tier2.ModelHashLegacyUntil = "tomorrow"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "model_hash_legacy_until") {
 		t.Fatalf("invalid model hash legacy deadline err=%v", err)
@@ -630,34 +653,31 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
 	cfg.Tier2.ModelHashLegacyUntil = "2026-07-19T00:00:00Z"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("RFC3339 model hash legacy deadline should validate: %v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.EncryptedLegAEAD = "unknown"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "encrypted_leg_aead") {
 		t.Fatalf("unsupported AEAD err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.RequireEncryptedLeg = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("phase 2 encrypted leg enforcement should validate with default A256GCM: %v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.RequireAttestation = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_attestation") {
 		t.Fatalf("attestation without roots err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.RequireAttestation = true
 	cfg.Tier2.AttestationRoots = []string{"mock-root"}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_attestation") {
@@ -669,8 +689,7 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 		t.Fatalf("mock attestation root should not validate with require_attestation: %v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.BehavioralSafetyEnabled = true
 	cfg.Tier2.EncodingValidationEnabled = true
 	cfg.Tier2.ResponseTimeAnomalyEnabled = true
@@ -678,15 +697,13 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 		t.Fatalf("phase 3 behavioral safety flags should validate: %v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.OutputSizeCapBytes = -1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "output_size_cap_bytes") {
 		t.Fatalf("negative output size cap err=%v", err)
 	}
 
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg = validTestConfig()
 	cfg.Tier2.ResponseTimeAnomalyFactor = 1.0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "response_time_anomaly_factor") {
 		t.Fatalf("response anomaly factor err=%v", err)
@@ -737,8 +754,7 @@ func TestDefaultProxyConfigTrustsLoopbackOnly(t *testing.T) {
 }
 
 func TestTrustedProxyPrefixesRejectsDefaultRouteIPv4(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Proxy.TrustedProxies = []string{"0.0.0.0/0"}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "default-route prefix") {
 		t.Fatalf("Validate(0.0.0.0/0) err=%v, want default-route rejection (every caller would be header-trusted)", err)
@@ -746,8 +762,7 @@ func TestTrustedProxyPrefixesRejectsDefaultRouteIPv4(t *testing.T) {
 }
 
 func TestTrustedProxyPrefixesRejectsDefaultRouteIPv6(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Proxy.TrustedProxies = []string{"::/0"}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "default-route prefix") {
 		t.Fatalf("Validate(::/0) err=%v, want default-route rejection", err)
@@ -755,8 +770,7 @@ func TestTrustedProxyPrefixesRejectsDefaultRouteIPv6(t *testing.T) {
 }
 
 func TestTrustedProxyPrefixesRejectsMalformedCIDR(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Proxy.TrustedProxies = []string{"not-a-cidr"}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "proxy.trusted_proxies") {
 		t.Fatalf("Validate(not-a-cidr) err=%v, want parse-error rejection", err)
@@ -764,8 +778,7 @@ func TestTrustedProxyPrefixesRejectsMalformedCIDR(t *testing.T) {
 }
 
 func TestTrustedProxyPrefixesEmptyAllowed(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Proxy.TrustedProxies = nil // strictest posture
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("empty trusted_proxies Validate err=%v, want nil (empty list is strictest posture, valid)", err)
@@ -794,8 +807,7 @@ func TestDefaultStatsConfigTrustsLoopbackOnly(t *testing.T) {
 
 func TestStatsTrustedProxyValidation(t *testing.T) {
 	mkCfg := func(trusted []string, trustDirect bool) Config {
-		cfg := Default()
-		cfg.Auth.OperatorKey = "operator-key"
+		cfg := validTestConfig()
 		cfg.Listen.BindAddress = "127.0.0.1"
 		cfg.Stats.Enabled = true
 		cfg.Stats.ReaderDSN = "postgres://r@/x"
@@ -833,8 +845,7 @@ func TestOnboardingDefaultsProductionDisabled(t *testing.T) {
 }
 
 func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Onboarding.AppTrackRegisterEnabled = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.postgres_dsn") {
 		t.Fatalf("enabled without postgres_dsn err=%v", err)
@@ -892,8 +903,7 @@ func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
 }
 
 func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Onboarding.AppTrackRegisterEnabled = true
 	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AuthPolicyRequestDSN = "postgres://provider_auth_policy_requester@127.0.0.1/db?sslmode=disable"
@@ -911,7 +921,7 @@ func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
 }
 
 func TestCLIOnlyOperatorKeysAllowPartialConfigurationWhileRoutesFailClosed(t *testing.T) {
-	cfg := Default()
+	cfg := validTestConfig()
 	cfg.Auth.OperatorKey = "legacy-operator"
 	cfg.Onboarding.AppTrackRegisterEnabled = false
 	cfg.Auth.OperatorKeys = map[string]string{"alice": "same-secret", "bob": "same-secret"}
@@ -931,8 +941,7 @@ func TestCLIOnlyOperatorKeysAllowPartialConfigurationWhileRoutesFailClosed(t *te
 }
 
 func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Onboarding.CoordinatorDomain = "https://Coordinator.streamvc.live/"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bare lowercase host") {
 		t.Fatalf("domain validation err=%v", err)
@@ -984,7 +993,7 @@ func TestLoadWithOverlayMergesPoolCanaryBlock(t *testing.T) {
 	dir := t.TempDir()
 	basePath := filepath.Join(dir, "base.yaml")
 	overlayPath := filepath.Join(dir, "overlay.yaml")
-	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\npool:\n  canary_enabled: false\n"), 0o644); err != nil {
+	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\n  gateway_service_token: test-gateway-token-with-32-byte-minimum-length\npool:\n  canary_enabled: false\n"), 0o644); err != nil {
 		t.Fatalf("write base: %v", err)
 	}
 	overlay := strings.TrimSpace(`
@@ -1014,7 +1023,7 @@ func TestLoadWithOverlayMalibuEmissionBlock(t *testing.T) {
 	dir := t.TempDir()
 	basePath := filepath.Join(dir, "base.yaml")
 	overlayPath := filepath.Join(dir, "malibu.yaml")
-	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\n"), 0o644); err != nil {
+	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\n  gateway_service_token: test-gateway-token-with-32-byte-minimum-length\n"), 0o644); err != nil {
 		t.Fatalf("write base: %v", err)
 	}
 	overlay := strings.TrimSpace(`

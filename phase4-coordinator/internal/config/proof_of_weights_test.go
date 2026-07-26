@@ -10,6 +10,7 @@ import (
 func TestValidateProofOfWeightsRequiresFeedsAndOnboarding(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.Auth.GatewayServiceToken = "test-gateway-service-token"
 	cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 	cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "autotune.autotune_candidates_path") {
@@ -51,6 +52,7 @@ func TestValidateProofOfWeightsHelloGateRejectsTTLBelowVerifierLimit(t *testing.
 	// admission window, so admission stays blocked despite every action succeeding.
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.Auth.GatewayServiceToken = "test-gateway-service-token"
 	cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 	proofOfWeightsOnboardingBaseline(&cfg)
 
@@ -74,6 +76,7 @@ func TestValidateProofOfWeightsHelloGateRejectsTTLBelowVerifierLimit(t *testing.
 func TestValidateProofOfWeightsTelemetryDriftRequiresCanaryWhenWindowSet(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.Auth.GatewayServiceToken = "test-gateway-service-token"
 	cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
 	cfg.ProofOfWeights.TelemetryDrift.Enabled = true
 	cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow = 10

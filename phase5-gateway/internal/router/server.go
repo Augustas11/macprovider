@@ -401,8 +401,8 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 	// coordinator audit_events / request_log diagnostics — NOT the
 	// gateway usage_events join used by /v1/chat/completions.
 	upReq.Header.Set("X-Request-ID", requestID(r))
-	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
-	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
+	// M3-2 / SECU-4 post-cutover: /internal/sticky uses the
+	// service-token-only upstream bearer.
 	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	resp, err := s.client.Do(upReq)
 	if err != nil {

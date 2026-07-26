@@ -379,9 +379,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// coordinator rejecting every non-sticky chat with 400
 		// invalid_request, the upstream Authorization bearer is hoisted
 		// alongside the account header — same pair the sticky path
-		// already sends. M3-2 / SECU-4: prefer ServiceToken when set;
-		// falls back to OperatorKey so a not-yet-upgraded coordinator
-		// keeps accepting us. ISS-211 R1 security audit HIGH.
+		// already sends. M3-2 / SECU-4 post-cutover: the upstream
+		// bearer is service-token-only. ISS-211 R1 security audit HIGH.
 		if subject.AccountID != "" {
 			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)

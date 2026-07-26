@@ -413,33 +413,30 @@ func TestInternalBearerServiceTokenAccepted(t *testing.T) {
 	}
 }
 
-// TestInternalBearerOperatorKeyFallbackAccepted pins the M3-2 / SECU-4
-// dual-credential bridge: the coordinator MUST still accept the legacy
-// operator_key on /internal/* during the cutover. This is the codex
-// security audit's required-fallback behavior (PR #73). Coordinator
-// configured with both operator_key and gateway_service_token; gateway
-// sends the operator key.
+// TestInternalBearerOperatorKeyRejectedPostCutover pins the M3-2 / SECU-4
+// post-cutover contract (PR #87 item 3, after its tracked gate): the coordinator
+// MUST reject the legacy operator_key on /internal/* — the dual-credential
+// bridge is gone, gateway_service_token is the only accepted credential.
 //
-// Without this scenario, a regression that flipped
-// GatewayInternalBearerMatches to "service-token only" would silently
-// break every not-yet-upgraded operator's gateway. That's the exact
-// transition-state failure mode the audit cited.
-func TestInternalBearerOperatorKeyFallbackAccepted(t *testing.T) {
+// This test inverts the pre-cutover TestInternalBearerOperatorKeyFallbackAccepted:
+// a regression that re-introduced the operator_key fallback would silently
+// re-open the cutover-defeating dual-credential path the audit was closing.
+func TestInternalBearerOperatorKeyRejectedPostCutover(t *testing.T) {
 	s := newScenario(t, scenarioOpts{skipProvider: true})
 
 	req, err := http.NewRequest(http.MethodGet, s.coordProvURL+"/internal/routing", nil)
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	// Operator key — the legacy half of the dual-credential bridge.
+	// Operator key — formerly the legacy fallback, now REJECTED post-cutover.
 	req.Header.Set("Authorization", "Bearer "+s.operatorKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("operator-key /internal/routing got status=%d want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("operator-key /internal/routing got status=%d want 401 (post-cutover reject)", resp.StatusCode)
 	}
 }
 
@@ -601,58 +598,18 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 	}
 }
 
-// TestGatewayOperatorKeyFallbackEndToEnd pins the M3-2 / SECU-4
-// transition state: a gateway configured with NO coordinator.service_token
-// falls back to operator_key on its upstream /internal/* calls, AND
-// the coordinator accepts it via the operator_key branch of
-// GatewayInternalBearerMatches. This is the gap that the security
-// auditor flagged on iteration 1: the prior fallback scenario only
-// proved coordinator-side acceptance via a direct curl, not the
-// gateway's actual fallback behavior under sticky-routed traffic.
-//
-// Without this scenario, a regression that broke
-// UpstreamCoordinatorBearer's fallback would silently fail every
-// not-yet-cutover-completed operator's gateway — exactly the failure
-// mode the M3-2 dual-credential bridge was designed to prevent.
-func TestGatewayOperatorKeyFallbackEndToEnd(t *testing.T) {
-	emptyServiceToken := ""
-	s := newScenario(t, scenarioOpts{
-		seedAccount:         true,
-		stickyEnabled:       true,
-		gatewayServiceToken: &emptyServiceToken,
-		captureCoordLogs:    true,
-	})
-
-	headers := map[string]string{
-		"X-MacProvider-Conversation": "conv-operator-fallback",
-	}
-	status, _, body := s.chatRequest(headers, `{
-		"model":"llama-3.2-3b-instruct",
-		"max_tokens":32,
-		"messages":[{"role":"user","content":"hi"}]
-	}`)
-	if status != http.StatusOK {
-		t.Fatalf("fallback chat status=%d body=%s", status, string(body))
-	}
-
-	// Audit-log assertion (M3-2 cutover-watch contract): the coordinator
-	// MUST have emitted at least one `event=internal_bearer_accepted
-	// key=operator_key` line for an /internal/* path during this run.
-	// This is exactly the line the operator greps for in OPS.md to
-	// watch the cutover (see audits/2026-06-10/MILESTONE_3_PHASE23_HANDOFF.md
-	// item 5). A regression that mislabeled the credential class (or
-	// stopped emitting the line entirely) would silently break cutover
-	// monitoring; this assertion catches it.
-	deadline := time.Now().Add(3 * time.Second)
-	line := s.coordLogBuf.awaitContains(deadline,
-		`"event":"internal_bearer_accepted"`,
-		`"key":"operator_key"`,
-	)
-	if line == "" {
-		t.Fatalf("expected internal_bearer_accepted key=operator_key log line; got none. captured lines: %v",
-			s.coordLogBuf.snapshot())
-	}
-}
+// (Removed by PR #87 item 3 after its tracked cutover gate.)
+// TestGatewayOperatorKeyFallbackEndToEnd previously pinned the gateway
+// upstream falling back to operator_key when coordinator.service_token
+// was empty. With the legacy fallback removed:
+//   - phase5-gateway/internal/config/config.go Validate() now REJECTS an
+//     empty coordinator.service_token (the gateway can't even boot).
+//   - phase4-coordinator/internal/auth/tokens.go GatewayInternalBearerMatches
+//     only accepts gateway_service_token (the operator_key fallback path
+//     is gone).
+// The post-cutover reject contract is locked in by
+// TestInternalBearerOperatorKeyRejectedPostCutover above; the service-token
+// success path stays covered by TestServiceTokenAuditLogClass below.
 
 // TestServiceTokenAuditLogClass pins the symmetric audit-log assertion
 // for the service_token branch: when both credentials are configured
