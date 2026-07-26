@@ -530,7 +530,7 @@ actor InferenceRelay {
                         toolCalls: completion.toolCalls,
                         finishReason: completion.finishReason,
                         promptTokens: Int64(completion.promptTokens),
-                        completionTokens: Int64(completion.completionTokens),
+                        completionTokens: Int64(completion.generatedCompletionTokens),
                         terminalState: terminalState,
                         terminalStateUnixMS: terminalStateTSUnixMS ?? issuedAt,
                         issuedAtUnixMS: issuedAt
@@ -546,7 +546,7 @@ actor InferenceRelay {
                     outputToolCalls: completion.toolCalls,
                     finishReason: completion.finishReason,
                     ttftMs: ttftMs,
-                    tokensOut: Int64(completion.completionTokens),
+                    tokensOut: Int64(completion.generatedCompletionTokens),
                     unixTsSeconds: unixTsSeconds,
                     modelHash: resolvedModelHash
                 )

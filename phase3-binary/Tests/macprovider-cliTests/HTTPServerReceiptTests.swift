@@ -68,6 +68,40 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
     }
 
+    func testHTTPReceiptTokensOutUsesGeneratedTokensNotVisibleUsage() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completion: CompletionResult(
+                content: "",
+                finishReason: "tool_calls",
+                promptTokens: 1,
+                completionTokens: 0,
+                generatedCompletionTokens: 7,
+                ttftMilliseconds: 7,
+                toolCalls: [
+                    ToolCall(
+                        id: "call_fixture",
+                        functionName: "lookup",
+                        arguments: #"{"query":"weather"}"#
+                    ),
+                ]
+            )
+        )
+
+        let header = try XCTUnwrap(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let parsed = try parseReceiptHeader(header)
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(parsed.tuple["tokens_out"] as? Int, 7)
+        XCTAssertTrue(response.body.contains(#""completion_tokens":0"#), response.body)
+        XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
     func testHTTPNonStreamingHandlerWritesV04SettlementReceiptWithWarmSwapDisabled() async throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
