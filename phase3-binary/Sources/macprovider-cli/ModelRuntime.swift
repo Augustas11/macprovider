@@ -2117,6 +2117,50 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    // MARK: - FR-KVP8 hot-tier (RAM) purge/status — independent of disk-tier enablement
+
+    /// Purge a single hot (RAM) conversation entry, cancelling any queued cold-tier
+    /// persist and fencing outstanding leases. Works regardless of whether the disk
+    /// tier is enabled — a running serve owns its ConversationCache and must be able
+    /// to remove hot-tier residency so it never keeps serving a purged prefix from
+    /// RAM (FR-KVP8). Returns whether the hot tier held live state for the key.
+    func purgeHotConversation(conversationKey: String) async -> Bool {
+        await conversationCache.purgeHot(conversationKey: conversationKey)
+    }
+
+    /// Purge every hot (RAM) conversation entry, invalidating outstanding leases.
+    /// Independent of disk-tier enablement (FR-KVP8).
+    func purgeAllHotConversations() async {
+        await conversationCache.purgeAllHot()
+    }
+
+    /// A snapshot of the hot (RAM) conversation cache residency for `kv-cache status`.
+    func hotConversationStats() async -> (entries: Int, tokens: Int) {
+        await conversationCache.snapshotStats()
+    }
+
+    #if DEBUG
+    /// Test-only: seed a hot conversation entry (no completion needed) so the
+    /// disabled-tier RAM purge/status path is exercisable end-to-end via the control
+    /// socket. Sets only the cache offset — no MLX tensor state — so it runs headless.
+    func seedHotConversationForTest(key: String, tokens: [Int32], modelID: String) async {
+        guard let lease = await conversationCache.begin(
+            conversationKey: key, incomingTokens: tokens, modelID: modelID, kvBits: nil) else { return }
+        let cache = KVCacheSimple(); cache.offset = tokens.count
+        await conversationCache.commit(lease, cache: ConversationCacheLayers([cache]), fullTokens: tokens)
+    }
+
+    /// Test-only: begin() a hot lookup and report the cached-prompt-token count, so a
+    /// test can assert a post-purge begin is a cold-start miss (0). Aborts the lease.
+    func hotCachedPromptTokensForTest(key: String, tokens: [Int32], modelID: String) async -> Int {
+        guard let lease = await conversationCache.begin(
+            conversationKey: key, incomingTokens: tokens, modelID: modelID, kvBits: nil) else { return 0 }
+        let cached = lease.cachedPromptTokens
+        await conversationCache.abort(lease)
+        return cached
+    }
+    #endif
+
     /// Build the per-request cold-tier context (nil when the tier is not attached).
     /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
     /// direct-HTTP provenance; the identity core carries the live model identity.

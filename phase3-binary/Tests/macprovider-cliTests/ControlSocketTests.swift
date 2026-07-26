@@ -719,6 +719,118 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertEqual(try ControlSocketCodec.decode(try ControlSocketCodec.encode(frame)), frame)
     }
 
+    // MARK: - SPEC-037 FR-KVP8 — disabled-disk-tier RAM purge/status (Finding 2)
+
+    /// With the disk tier DISABLED (kvDiskTier == nil), a socket-routed single-key
+    /// purge must clear the serve-owned RAM (hot) entry and report purge_ok for what
+    /// it removed — NOT reply `unavailable` (which would fall back to a standalone
+    /// store that cannot touch this process's RAM, leaving a purged prefix live).
+    func testKVCachePurgeSingleClearsHotRAMWhenDiskTierDisabled() async throws {
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        let key = "conv:kvs-synth:ram-single"
+        let tokens = (0 ..< 40).map(Int32.init)
+        await runtime.seedHotConversationForTest(key: key, tokens: tokens, modelID: "ready-model")
+        // Prove residency via a non-mutating stats read (begin() would consume the entry).
+        let residentBefore = await runtime.hotConversationStats().entries
+        XCTAssertEqual(residentBefore, 1, "precondition: hot entry resident")
+
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)   // kvDiskTier == nil
+        try await server.start()
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.kvCachePurgeRequest(mode: "single", key: key))
+        let response = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+
+        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
+            return XCTFail("expected kvCachePurgeResponse, got \(response)")
+        }
+        XCTAssertEqual(status, "purge_ok")
+        XCTAssertEqual(entriesRemoved, 1, "the resident hot entry must be reported removed")
+        XCTAssertEqual(detail, "disk_tier_disabled")
+        let residentAfter = await runtime.hotConversationStats().entries
+        XCTAssertEqual(residentAfter, 0, "hot entry evicted from RAM")
+        // A subsequent begin() with a proper superset prompt (which WOULD warm-hit the
+        // 40-token entry) is now a cold-start miss — nothing is served from RAM.
+        let probe = (0 ..< 44).map(Int32.init)
+        let cachedAfter = await runtime.hotCachedPromptTokensForTest(key: key, tokens: probe, modelID: "ready-model")
+        XCTAssertEqual(cachedAfter, 0)
+    }
+
+    /// With the disk tier disabled, `--all` clears every RAM entry over the socket.
+    func testKVCachePurgeAllClearsHotRAMWhenDiskTierDisabled() async throws {
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:a", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
+        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:b", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
+        let residentBefore = await runtime.hotConversationStats().entries
+        XCTAssertEqual(residentBefore, 2)
+
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
+        try await server.start()
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.kvCachePurgeRequest(mode: "all", key: nil))
+        let response = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+
+        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
+            return XCTFail("expected kvCachePurgeResponse, got \(response)")
+        }
+        XCTAssertEqual(status, "purge_ok")
+        XCTAssertEqual(entriesRemoved, 2, "purge --all reports every hot entry removed")
+        XCTAssertEqual(detail, "disk_tier_disabled")
+        let residentAfter = await runtime.hotConversationStats().entries
+        XCTAssertEqual(residentAfter, 0)
+    }
+
+    /// With the disk tier disabled and NO resident hot entry, a single-key purge must
+    /// not claim to have removed anything it did not (entriesRemoved == 0), yet still
+    /// report purge_ok (nothing in RAM to miss — honest).
+    func testKVCachePurgeDisabledReportsZeroForAbsentHotEntry() async throws {
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
+        try await server.start()
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.kvCachePurgeRequest(mode: "single", key: "conv:kvs-synth:absent"))
+        let response = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+
+        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, _) = response else {
+            return XCTFail("expected kvCachePurgeResponse, got \(response)")
+        }
+        XCTAssertEqual(status, "purge_ok")
+        XCTAssertEqual(entriesRemoved, 0, "must not report a removal it did not perform")
+    }
+
+    /// With the disk tier disabled, `kv-cache status` reports the RAM/hot residency
+    /// with enabled=false — not `unavailable`.
+    func testKVCacheStatusReportsHotStateWhenDiskTierDisabled() async throws {
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:s", tokens: (0 ..< 12).map(Int32.init), modelID: "ready-model")
+
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
+        try await server.start()
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.kvCacheStatusRequest)
+        let response = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+
+        guard case let .kvCacheStatusResponse(payloadJSON) = response else {
+            return XCTFail("expected kvCacheStatusResponse, got \(response)")
+        }
+        XCTAssertFalse(payloadJSON.contains("\"unavailable\""), "disabled tier must not report unavailable")
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payloadJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(object["status"] as? String, "ok")
+        XCTAssertEqual(object["enabled"] as? Bool, false)
+        XCTAssertEqual(object["hot_entries"] as? Int, 1)
+    }
+
     private func makeSocketPath() throws -> URL {
         let dir = URL(fileURLWithPath: "/tmp")
             .appendingPathComponent("mpcs-\(getpid())-\(Int.random(in: 0 ... 999_999))")

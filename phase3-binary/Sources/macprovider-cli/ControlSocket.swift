@@ -1245,11 +1245,11 @@ actor ControlSocketServer {
                         .referralChallengeCancelAck(status: try await service.cancel())
                     }
                 case let .kvCachePurgeRequest(mode, key):
-                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, connection: connection)
+                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
                     await connection.close()
                     return
                 case .kvCacheStatusRequest:
-                    await handleKVCacheStatus(tier: kvDiskTier, connection: connection)
+                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
                     await connection.close()
                     return
                 default:
@@ -1277,16 +1277,34 @@ actor ControlSocketServer {
     }
 
     /// SPEC-037 stage 5 (FR-KVP8) — execute a kv-cache purge in the lock-holding
-    /// serve process. When the tier is not active here (`tier == nil`, disabled),
-    /// reply `unavailable` so the client falls back to the standalone lock path.
+    /// serve process. When the disk tier is DISABLED here (`tier == nil`), the serve
+    /// process still owns its RAM `ConversationCache`, so purge must remain functional
+    /// (FR-KVP8): clear the matching hot-tier residency — so we never keep serving a
+    /// purged prefix from RAM until TTL — and report what was removed. The disk
+    /// component is absent in this process (a standalone CLI handles disk purge when
+    /// no serve holds the namespace lock); this path never reports a hot purge it did
+    /// not perform.
     private nonisolated static func handleKVCachePurge(
-        mode: String, key: String?, tier: KVDiskTier?, connection: ControlSocketConnection
+        mode: String, key: String?, tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
     ) async {
         guard let tier else {
+            let entriesRemoved: Int
+            switch mode {
+            case "all", "all_forget":
+                // Report the hot residency actually cleared.
+                let before = await modelRuntime.hotConversationStats().entries
+                await modelRuntime.purgeAllHotConversations()
+                entriesRemoved = before
+            default:
+                let hadHot = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
+                entriesRemoved = hadHot ? 1 : 0
+            }
             try? await connection.send(.kvCachePurgeResponse(
-                status: "unavailable", entriesRemoved: 0, bytesFreed: 0, detail: "tier_not_active"))
+                status: "purge_ok", entriesRemoved: entriesRemoved, bytesFreed: 0, detail: "disk_tier_disabled"))
             return
         }
+        // Enabled: the tier's purge path already clears the wired hot-tier residency
+        // (setHotPurgeHooks) in addition to disk — unchanged behavior.
         let result: KVPurgeResult
         switch mode {
         case "all": result = await tier.purgeAll()
@@ -1304,16 +1322,33 @@ actor ControlSocketServer {
     }
 
     /// SPEC-037 stage 5 (FR-KVP12) — report the inspection surface from the
-    /// lock-holding serve process (JSON payload identical to the CLI shape).
+    /// lock-holding serve process (JSON payload identical to the CLI shape). When the
+    /// disk tier is DISABLED here (`tier == nil`), still report the serve-owned RAM
+    /// (hot) residency with `enabled=false` so status remains functional while
+    /// disabled (FR-KVP8).
     private nonisolated static func handleKVCacheStatus(
-        tier: KVDiskTier?, connection: ControlSocketConnection
+        tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
     ) async {
-        guard let tier, let inspection = await tier.status() else {
+        guard let tier else {
+            let stats = await modelRuntime.hotConversationStats()
+            let object: [String: Any] = [
+                "status": "ok",
+                "enabled": false,
+                "hot_entries": stats.entries,
+                "hot_tokens": stats.tokens,
+            ]
+            let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+            try? await connection.send(.kvCacheStatusResponse(payloadJSON: String(decoding: data, as: UTF8.self)))
+            return
+        }
+        guard let inspection = await tier.status() else {
             try? await connection.send(.kvCacheStatusResponse(payloadJSON: "{\"status\":\"unavailable\"}"))
             return
         }
         let object: [String: Any] = [
             "status": "ok",
+            "enabled": tier.config.effectiveEnabled,
+            "retention_minutes": tier.config.retentionMinutes,
             "namespace_id": inspection.namespaceID,
             "bytes_used": inspection.bytesUsed,
             "control_bytes_used": inspection.controlBytesUsed,

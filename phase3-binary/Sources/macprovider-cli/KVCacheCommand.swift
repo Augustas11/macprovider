@@ -229,6 +229,8 @@ struct KVCacheStatusCommand: AsyncParsableCommand {
         }
         KVCacheCommandSupport.emit([
             "status": "ok",
+            "enabled": tier.config.effectiveEnabled,
+            "retention_minutes": tier.config.retentionMinutes,
             "namespace_id": inspection.namespaceID,
             "bytes_used": inspection.bytesUsed,
             "control_bytes_used": inspection.controlBytesUsed,
