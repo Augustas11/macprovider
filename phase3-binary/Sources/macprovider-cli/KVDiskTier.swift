@@ -205,6 +205,8 @@ final class KVDiskTier: @unchecked Sendable {
             + " retention_minutes=\(config.retentionMinutes)(cleanup_only)"
             + " synthetic_gate=conv:kvs-synth:+direct_http"
             + " purge_command=\"macprovider-cli kv-cache purge\""
+            + " status_command=\"macprovider-cli kv-cache status\""
+            + " forget_command=\"macprovider-cli kv-cache purge --all --forget\""
             + " free_space=\(headroom)")
         if let freeBytes, freeBytes < config.minFreeBytes {
             log("event=kv_disk_cache action=warn reason=insufficient_free_space free=\(freeBytes) floor=\(config.minFreeBytes)")
