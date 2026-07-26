@@ -65,6 +65,31 @@ final class UninstallCommandTests: XCTestCase {
         XCTAssertTrue(warnings.isEmpty, "a clean KV cleanup adds no warning: \(warnings)")
     }
 
+    /// FINDING C — when the KV disk tier cannot be resolved (config unreadable /
+    /// empty provider_id) uninstall must not skip cleanup silently: it surfaces an
+    /// explicit warning that encrypted KV survival data + Keychain DEKs may remain,
+    /// while still staying best-effort (never hard-failing uninstall).
+    func testUninstallWarnsWhenKVCleanupCannotResolveConfig() async throws {
+        // Point config resolution at a path that does not exist so ConfigLoader.load
+        // throws (explicit path + missing file) and makeKVDiskTierForUninstall() → nil.
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvuninstall-missing-\(UUID().uuidString).yaml").path
+        let previous = getenv("MACPROVIDER_CONFIG").map { String(cString: $0) }
+        setenv("MACPROVIDER_CONFIG", missing, 1)
+        defer {
+            if let previous { setenv("MACPROVIDER_CONFIG", previous, 1) } else { unsetenv("MACPROVIDER_CONFIG") }
+        }
+        XCTAssertNil(UninstallCommand.makeKVDiskTierForUninstall(), "precondition: tier unresolvable")
+
+        var warnings: [String] = []
+        await UninstallCommand.purgeKVDiskCacheBestEffort(warnings: &warnings)
+
+        XCTAssertEqual(warnings.count, 1, "the skip path must surface exactly one warning: \(warnings)")
+        let warning = try XCTUnwrap(warnings.first)
+        XCTAssertTrue(warning.contains("kv-cache cleanup skipped"), "warning names the skip: \(warning)")
+        XCTAssertTrue(warning.contains("may remain"), "warning states residue may remain: \(warning)")
+    }
+
     func testStopLaunchdServicesAcceptsVerifiedAbsentJob() throws {
         var calls: [[String]] = []
 

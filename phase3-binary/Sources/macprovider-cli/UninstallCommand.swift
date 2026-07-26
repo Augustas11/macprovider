@@ -97,11 +97,20 @@ struct UninstallCommand: AsyncParsableCommand {
     }
 
     /// FR-KVP8 — resolve the installed KV disk tier and purge --all --forget it,
-    /// best-effort. Skips silently when there is no resolvable config or provider
-    /// identity (nothing to clean). Never throws — uninstall must not hard-fail on a
-    /// KV-cleanup hiccup.
+    /// best-effort. When the tier cannot be resolved (config unreadable or empty
+    /// provider_id), we cannot locate the namespace to shred, so surface an explicit
+    /// warning rather than skipping silently — any encrypted KV survival data + Keychain
+    /// DEKs from a prior enabled run may remain. Never throws — uninstall must not
+    /// hard-fail on a KV-cleanup hiccup (it is reversible and preserves identity).
     static func purgeKVDiskCacheBestEffort(warnings: inout [String]) async {
-        guard let tier = makeKVDiskTierForUninstall() else { return }
+        guard let tier = makeKVDiskTierForUninstall() else {
+            warnings.append(
+                "kv-cache cleanup skipped: could not resolve config/provider_id; encrypted KV "
+                + "survival data and Keychain DEKs may remain under the configured cache directory "
+                + "— run `macprovider-cli kv-cache purge --all --forget` after restoring config, or "
+                + "remove the cache dir manually.")
+            return
+        }
         await purgeKVDiskCache(tier, warnings: &warnings)
     }
 
