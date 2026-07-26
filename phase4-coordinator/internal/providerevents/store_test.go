@@ -68,6 +68,14 @@ func TestRedactDiagnosticStripsSecretsAndBounds(t *testing.T) {
 	if strings.Contains(gotHex, hex) {
 		t.Fatalf("64-hex token leaked: %q", gotHex)
 	}
+	urlCredential := RedactDiagnostic("dial wss://user:password@host.example/private/path?api_key=secret#fragment failed", 120)
+	if containsAny(urlCredential, "user:password", "/private", "api_key", "secret", "fragment") {
+		t.Fatalf("URL credential leaked: %q", urlCredential)
+	}
+	path := RedactDiagnostic("open /Users/alice/.macprovider/config.yaml failed", 120)
+	if containsAny(path, "/Users/alice", "config.yaml") {
+		t.Fatalf("local path leaked: %q", path)
+	}
 	if len([]rune(got)) > 40 {
 		t.Fatalf("length %d exceeds bound", len([]rune(got)))
 	}
@@ -259,6 +267,40 @@ func TestLastKnownOfflineRepresentation(t *testing.T) {
 	events, err := store.ListEvents(ctx, "augustass-macbook-air", 10)
 	if err != nil || len(events) == 0 {
 		t.Fatalf("events missing: len=%d err=%v", len(events), err)
+	}
+}
+
+func TestLastKnownStoresRedactedDiagnosticStatus(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	seen := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
+	diagAt := seen.Add(-time.Second)
+	if err := store.UpsertLastKnown(ctx, LastKnown{
+		ProviderID:    "augustass-macbook-air",
+		AssignedID:    "asg-1",
+		BinaryVersion: "1.8.65",
+		ModelID:       "qwen",
+		ModelLoaded:   true,
+		ModelHash:     strings.Repeat("a", 64),
+		State:         "ready",
+		LastSeenAt:    seen,
+		Diagnostic:    "network_offline: Authorization: Bearer mpk_should_redact wss://user:password@host/private?api_key=secret /Users/alice/config.yaml",
+		DiagnosticAt:  &diagAt,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	snap, ok, err := store.GetLastKnown(ctx, "augustass-macbook-air")
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if !snap.ModelLoaded || snap.ModelHash != strings.Repeat("a", 64) {
+		t.Fatalf("diagnostic identity missing: %#v", snap)
+	}
+	if snap.DiagnosticAt == nil || !snap.DiagnosticAt.Equal(diagAt) {
+		t.Fatalf("diagnostic_at=%v want %v", snap.DiagnosticAt, diagAt)
+	}
+	if containsAny(snap.Diagnostic, "mpk_", "Bearer mpk", "user:password", "api_key", "/Users/alice") {
+		t.Fatalf("diagnostic leaked secret: %q", snap.Diagnostic)
 	}
 }
 

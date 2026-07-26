@@ -327,6 +327,31 @@ type HeartbeatPresence struct {
 	Loading               bool
 }
 
+type DiagnosticStatus struct {
+	Type                  string          `json:"type"`
+	SchemaVersion         int             `json:"schema_version"`
+	Reason                string          `json:"reason,omitempty"`
+	ObservedAt            string          `json:"observed_at,omitempty"`
+	ProviderID            string          `json:"provider_id"`
+	AssignedID            string          `json:"assigned_id,omitempty"`
+	BinaryVersion         string          `json:"binary_version,omitempty"`
+	Status                string          `json:"status"`
+	ModelID               string          `json:"model_id"`
+	ModelLoaded           bool            `json:"model_loaded"`
+	ModelHash             string          `json:"model_hash,omitempty"`
+	ModelHashAlgorithm    string          `json:"model_hash_algorithm,omitempty"`
+	UptimeS               int             `json:"uptime_s,omitempty"`
+	RequestsTotal         int             `json:"requests_total,omitempty"`
+	RequestsInFlight      int             `json:"requests_in_flight,omitempty"`
+	ErrorsTotal           int             `json:"errors_total,omitempty"`
+	RestartCount          int             `json:"restart_count,omitempty"`
+	MemoryRSSMB           int             `json:"memory_rss_mb,omitempty"`
+	MemoryPressure        string          `json:"memory_pressure,omitempty"`
+	ThermalState          string          `json:"thermal_state,omitempty"`
+	ThermallyThrottled    bool            `json:"thermally_throttled,omitempty"`
+	LastConnectionFailure json.RawMessage `json:"last_connection_failure,omitempty"`
+}
+
 type IdlePrewarmEvent struct {
 	Type   string `json:"type"`
 	Event  string `json:"event"`
@@ -1041,6 +1066,20 @@ func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldEr
 	return nil
 }
 
+func requireBool(raw map[string]json.RawMessage, field string, out *bool) *fieldError {
+	v, ok := raw[field]
+	if !ok {
+		return &fieldError{Field: "missing " + field}
+	}
+	if string(v) == "null" {
+		return &fieldError{Field: field}
+	}
+	if err := json.Unmarshal(v, out); err != nil {
+		return &fieldError{Field: field}
+	}
+	return nil
+}
+
 func requireAuthVersion(raw map[string]json.RawMessage, out *int) *fieldError {
 	v, ok := raw["version"]
 	if !ok {
@@ -1374,6 +1413,78 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		hb.SafetyTelemetry = &telemetry
 	}
 	return hb, presence, "", nil
+}
+
+func ParseDiagnosticStatus(payload []byte) (DiagnosticStatus, string, error) {
+	if len(payload) > 8192 {
+		return DiagnosticStatus{}, "payload", fmt.Errorf("diagnostic_status exceeds 8192 bytes")
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return DiagnosticStatus{}, "json", err
+	}
+	var diag DiagnosticStatus
+	if err := requireString(raw, "type", &diag.Type); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	if diag.Type != "diagnostic_status" {
+		return DiagnosticStatus{}, "type", fmt.Errorf("expected diagnostic_status, got %q", diag.Type)
+	}
+	if err := requireInt(raw, "schema_version", &diag.SchemaVersion); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	if diag.SchemaVersion != 1 {
+		return DiagnosticStatus{}, "schema_version", fmt.Errorf("unsupported diagnostic_status schema")
+	}
+	if err := requireString(raw, "provider_id", &diag.ProviderID); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	if err := requireString(raw, "assigned_id", &diag.AssignedID); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	if err := requireString(raw, "status", &diag.Status); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	if err := requireString(raw, "model_id", &diag.ModelID); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	if len([]byte(diag.ModelID)) > maxHandshakeModelIDBytes {
+		return DiagnosticStatus{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
+	}
+	if err := requireBool(raw, "model_loaded", &diag.ModelLoaded); err != nil {
+		return DiagnosticStatus{}, err.Field, err
+	}
+	_ = json.Unmarshal(raw["binary_version"], &diag.BinaryVersion)
+	_ = json.Unmarshal(raw["reason"], &diag.Reason)
+	_ = json.Unmarshal(raw["observed_at"], &diag.ObservedAt)
+	_ = json.Unmarshal(raw["model_hash"], &diag.ModelHash)
+	_ = json.Unmarshal(raw["model_hash_algorithm"], &diag.ModelHashAlgorithm)
+	_ = json.Unmarshal(raw["uptime_s"], &diag.UptimeS)
+	_ = json.Unmarshal(raw["requests_total"], &diag.RequestsTotal)
+	_ = json.Unmarshal(raw["requests_in_flight"], &diag.RequestsInFlight)
+	_ = json.Unmarshal(raw["errors_total"], &diag.ErrorsTotal)
+	_ = json.Unmarshal(raw["restart_count"], &diag.RestartCount)
+	_ = json.Unmarshal(raw["memory_rss_mb"], &diag.MemoryRSSMB)
+	_ = json.Unmarshal(raw["memory_pressure"], &diag.MemoryPressure)
+	_ = json.Unmarshal(raw["thermal_state"], &diag.ThermalState)
+	_ = json.Unmarshal(raw["thermally_throttled"], &diag.ThermallyThrottled)
+	diag.LastConnectionFailure = raw["last_connection_failure"]
+	for field, value := range map[string]string{
+		"provider_id":          diag.ProviderID,
+		"assigned_id":          diag.AssignedID,
+		"binary_version":       diag.BinaryVersion,
+		"status":               diag.Status,
+		"model_id":             diag.ModelID,
+		"model_hash":           diag.ModelHash,
+		"model_hash_algorithm": diag.ModelHashAlgorithm,
+		"memory_pressure":      diag.MemoryPressure,
+		"thermal_state":        diag.ThermalState,
+	} {
+		if containsControlChar(value) {
+			return DiagnosticStatus{}, field, fmt.Errorf("%s contains control characters", field)
+		}
+	}
+	return diag, "", nil
 }
 
 func ParseIdlePrewarmEvent(payload []byte) (IdlePrewarmEvent, string, error) {

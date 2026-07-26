@@ -4,6 +4,69 @@ import XCTest
 @testable import macprovider_cli
 
 final class CoordinatorClientTests: XCTestCase {
+    func testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let modelHash = String(repeating: "a", count: 64)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: modelHash,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1
+        )
+        await status.setCoordinatorSession(connected: true, assignedID: "assigned-1", tier: "pinned")
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerToken: "mpk_secret_should_not_leave_status"
+        )
+
+        let payload = await client.diagnosticStatusPayloadForTest(reason: "session_accepted")
+        let encoded = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let text = String(decoding: encoded, as: UTF8.self)
+
+        XCTAssertEqual(payload["type"] as? String, "diagnostic_status")
+        XCTAssertEqual(payload["provider_id"] as? String, "provider-test")
+        XCTAssertEqual(payload["assigned_id"] as? String, "assigned-1")
+        XCTAssertEqual(payload["model_id"] as? String, "model-a")
+        XCTAssertEqual(payload["model_loaded"] as? Bool, true)
+        XCTAssertEqual(payload["model_hash"] as? String, modelHash)
+        XCTAssertTrue((payload["credential"] as? [String: Any])?["token_configured"] as? Bool == true)
+        XCTAssertFalse(text.contains("mpk_secret"), text)
+    }
+
+    func testDiagnosticStatusRedactsConnectionFailureSecrets() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        await status.setCoordinatorSession(connected: true, assignedID: "assigned-1", tier: "pinned")
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerToken: "mpk_secret_should_not_leave_status"
+        )
+        let hexSecret = String(repeating: "f", count: 64)
+        await client.recordConnectionFailureDiagnosticForTest(
+            reasonCode: "authentication_required",
+            error: CoordinatorAuthError.rejected(
+                code: "invalid_token",
+                message: "Authorization: Bearer bearer-secret provider_token=mpk_inline_secret token=\(hexSecret)"
+            )
+        )
+
+        let payload = await client.diagnosticStatusPayloadForTest(reason: "reconnect")
+        let encoded = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let text = String(decoding: encoded, as: UTF8.self)
+
+        XCTAssertTrue(text.contains("authentication_required"), text)
+        XCTAssertFalse(text.contains("bearer-secret"), text)
+        XCTAssertFalse(text.contains("mpk_inline_secret"), text)
+        XCTAssertFalse(text.contains(hexSecret), text)
+    }
+
     func testConnectionFailuresMapToStableRecoveryLifecycleStates() {
         let offline = CoordinatorClient.lifecycleClassification(
             for: URLError(.notConnectedToInternet)
@@ -126,6 +189,76 @@ final class CoordinatorClientTests: XCTestCase {
             return frame["state"] as? String
         }
         XCTAssertEqual(states, ["draining", "unavailable", "ready"])
+    }
+
+    func testAcceptedStateUpdateAlsoPublishesDiagnosticStatus() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+        ])
+        let admissionFrameCount = await recorder.frames.count
+
+        let pauseResult = await client.pauseByOperator()
+
+        XCTAssertEqual(pauseResult, .accepted)
+        let frames = await recorder.frames
+        let newFrames = Array(frames.dropFirst(admissionFrameCount))
+        guard let pauseStateIndex = newFrames.firstIndex(where: { frame in
+            frame["type"] as? String == "state_update" &&
+                frame["reason"] as? String == "operator_pause_draining"
+        }) else {
+            XCTFail("missing operator pause state_update in \(newFrames)")
+            return
+        }
+        XCTAssertGreaterThan(newFrames.count, pauseStateIndex + 1)
+        let diagnostic = newFrames[pauseStateIndex + 1]
+        XCTAssertEqual(diagnostic["type"] as? String, "diagnostic_status")
+        XCTAssertEqual(diagnostic["reason"] as? String, "operator_pause_draining")
+        XCTAssertEqual(diagnostic["assigned_id"] as? String, "assigned-v1")
+    }
+
+    func testDiagnosticStatusFailureDoesNotFailAcceptedStateUpdate() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            sendOverride: { frame in
+                await recorder.append(frame)
+                if frame["type"] as? String == "diagnostic_status" {
+                    throw CoordinatorClientTestError.sendStateUpdateFailed
+                }
+            }
+        )
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+        ])
+        let admissionFrameCount = await recorder.frames.count
+
+        let pauseResult = await client.pauseByOperator()
+
+        XCTAssertEqual(pauseResult, .accepted)
+        let frames = await recorder.frames
+        let newFrames = Array(frames.dropFirst(admissionFrameCount))
+        XCTAssertTrue(newFrames.contains { frame in
+            frame["type"] as? String == "state_update" &&
+                frame["reason"] as? String == "operator_pause_draining"
+        }, "state_update should still be sent when diagnostic_status fails: \(newFrames)")
+        XCTAssertTrue(newFrames.contains { $0["type"] as? String == "diagnostic_status" })
     }
 
     func testIdlePrewarmEventIsNotSentBeforeCoordinatorAcceptsSession() async throws {

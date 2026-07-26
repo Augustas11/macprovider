@@ -62,9 +62,13 @@ func TestAdminProvidersOfflineLastKnownAndEvents(t *testing.T) {
 		AssignedID:    "asg-1",
 		BinaryVersion: "1.8.57",
 		ModelID:       "qwen2.5-coder-14b",
+		ModelLoaded:   true,
+		ModelHash:     strings.Repeat("a", 64),
 		State:         "unavailable",
 		AuthState:     "bearer_validated",
 		LastSeenAt:    seen,
+		Diagnostic:    "network_offline: Authorization: Bearer mpk_should_redact",
+		DiagnosticAt:  &seen,
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -111,6 +115,12 @@ func TestAdminProvidersOfflineLastKnownAndEvents(t *testing.T) {
 	if body.Provider["binary_version"] != "1.8.57" || body.Provider["model_id"] != "qwen2.5-coder-14b" {
 		t.Fatalf("last-known incomplete: %#v", body.Provider)
 	}
+	if body.Provider["model_loaded"] != true || body.Provider["model_hash"] != strings.Repeat("a", 64) {
+		t.Fatalf("diagnostic model fields missing: %#v", body.Provider)
+	}
+	if containsSecret(body.Provider["diagnostic"].(string)) {
+		t.Fatalf("provider diagnostic leaked secret: %q", body.Provider["diagnostic"])
+	}
 	if len(body.Events) == 0 {
 		t.Fatal("expected recent events for offline provider")
 	}
@@ -139,6 +149,24 @@ func TestAdminProvidersOfflineLastKnownAndEvents(t *testing.T) {
 
 func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 	store := newConnectionEventStore(t)
+	ctx := context.Background()
+	diagnosticAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	if err := store.UpsertLastKnown(ctx, providerevents.LastKnown{
+		ProviderID:      "m4-anon",
+		AssignedID:      "asg-live",
+		BinaryVersion:   "stale-version",
+		ModelID:         "stale-model",
+		ModelLoaded:     false,
+		State:           "unavailable",
+		AuthState:       "stale-auth",
+		LastSeenAt:      diagnosticAt,
+		RoutingEligible: false,
+		Diagnostic:      "network_offline: redacted",
+		DiagnosticAt:    &diagnosticAt,
+	}); err != nil {
+		t.Fatalf("upsert last-known: %v", err)
+	}
+
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithConnectionEventStore(store),
 	})
@@ -186,6 +214,41 @@ func TestAdminProvidersConnectedUsesLivePool(t *testing.T) {
 	}
 	if body.Provider["binary_version"] != "1.8.57" {
 		t.Fatalf("binary_version=%v", body.Provider["binary_version"])
+	}
+	if body.Provider["model_id"] != "llama" || body.Provider["routing_eligible"] != true {
+		t.Fatalf("live fields were not authoritative: %#v", body.Provider)
+	}
+	if body.Provider["diagnostic"] != "network_offline: redacted" || body.Provider["diagnostic_at"] == nil {
+		t.Fatalf("live detail dropped diagnostic fields: %#v", body.Provider)
+	}
+
+	listReq, err := http.NewRequest(http.MethodGet, h.HTTP.URL+"/admin/providers", nil)
+	if err != nil {
+		t.Fatalf("list request: %v", err)
+	}
+	listReq.Header.Set("Authorization", "Bearer test-operator-key")
+	listResp, err := http.DefaultClient.Do(listReq)
+	if err != nil {
+		t.Fatalf("GET list: %v", err)
+	}
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("list status=%d", listResp.StatusCode)
+	}
+	var listBody struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listBody); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listBody.Providers) != 1 {
+		t.Fatalf("providers=%d want 1", len(listBody.Providers))
+	}
+	if listBody.Providers[0]["presence"] != "connected" || listBody.Providers[0]["binary_version"] != "1.8.57" {
+		t.Fatalf("list did not use live fields: %#v", listBody.Providers[0])
+	}
+	if listBody.Providers[0]["diagnostic"] != "network_offline: redacted" || listBody.Providers[0]["diagnostic_at"] == nil {
+		t.Fatalf("list dropped diagnostic fields: %#v", listBody.Providers[0])
 	}
 }
 

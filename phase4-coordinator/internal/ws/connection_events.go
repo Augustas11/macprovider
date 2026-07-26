@@ -71,6 +71,7 @@ func (s *Server) ensureConnectionEventWorker() {
 		s.connectionEventQueue = make(chan connectionEventJob, connectionEventQueueSize)
 		s.connectionEventDone = make(chan struct{})
 		s.lastKnownFlush = make(map[string]time.Time)
+		s.diagnosticLastKnownFlush = make(map[string]time.Time)
 		go s.runConnectionEventWorker()
 	})
 }
@@ -339,6 +340,29 @@ func (s *Server) rememberProviderSnapshotCoalesced(provider pool.Provider) {
 }
 
 func (s *Server) enqueueLastKnown(snap providerevents.LastKnown, force bool) {
+	s.enqueueLastKnownWithFallback(snap, force, true)
+}
+
+func (s *Server) enqueueDiagnosticLastKnown(snap providerevents.LastKnown) {
+	if s == nil {
+		return
+	}
+	s.diagnosticLastKnownFlushMu.Lock()
+	if s.diagnosticLastKnownFlush == nil {
+		s.diagnosticLastKnownFlush = make(map[string]time.Time)
+	}
+	last := s.diagnosticLastKnownFlush[snap.ProviderID]
+	now := s.now().UTC()
+	if !last.IsZero() && now.Sub(last) < lastKnownMinInterval {
+		s.diagnosticLastKnownFlushMu.Unlock()
+		return
+	}
+	s.diagnosticLastKnownFlush[snap.ProviderID] = now
+	s.diagnosticLastKnownFlushMu.Unlock()
+	s.enqueueLastKnownWithFallback(snap, true, false)
+}
+
+func (s *Server) enqueueLastKnownWithFallback(snap providerevents.LastKnown, force bool, syncFallback bool) {
 	if s == nil || s.connectionEvents == nil || strings.TrimSpace(snap.ProviderID) == "" {
 		return
 	}
@@ -368,7 +392,7 @@ func (s *Server) enqueueLastKnown(snap providerevents.LastKnown, force bool) {
 		s.connectionEventQueueMu.Unlock()
 	default:
 		s.connectionEventQueueMu.Unlock()
-		if s.connectionEvents != nil {
+		if syncFallback && s.connectionEvents != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if err := s.connectionEvents.UpsertLastKnown(ctx, snap); err != nil {
@@ -390,6 +414,8 @@ func lastKnownFromProvider(provider pool.Provider, now time.Time) providerevents
 		AssignedID:      provider.AssignedID,
 		BinaryVersion:   provider.BinaryVersion,
 		ModelID:         provider.ModelID,
+		ModelLoaded:     provider.State == pool.StateReady || provider.State == pool.StateBusy || provider.State == pool.StateDegraded,
+		ModelHash:       provider.ModelHash,
 		State:           string(provider.State),
 		AuthState:       string(provider.AuthState),
 		LastSeenAt:      now,

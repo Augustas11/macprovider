@@ -1540,7 +1540,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
             ],
             "coordinator": [
-                "url": jsonNullable(coordinatorURL),
                 "connected": snapshot.coordinatorConnected,
                 "session": jsonNullable(snapshot.coordinatorAssignedID),
                 "tier": jsonNullable(snapshot.coordinatorTier),
@@ -1563,6 +1562,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "credential": [
                 "source": credentialStatus.source.rawValue,
                 "state": credentialStatus.state.rawValue,
+                "token_configured": credentialStatus.source != .none,
+                "bootstrap_mode": false,
                 "restart_safe": credentialStatus.restartSafe,
                 "migration_pending": credentialStatus.migrationPending,
                 "recovery_action": credentialStatus.recoveryAction.rawValue,
