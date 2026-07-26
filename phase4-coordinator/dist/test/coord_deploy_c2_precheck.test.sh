@@ -28,7 +28,7 @@ fi
 grep -q 'bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP"' "$DEPLOY_SH" ||
   fail "production C2 path does not validate the installed Pearl gateway config copy"
 
-for proof in C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256; do
+for proof in C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256; do
   grep -q "$proof=\"\$$proof\"" "$DEPLOY_SH" ||
     fail "production C2 path does not pass $proof to the shared gate"
   dry_run_assignment=$(printf '%s="${%s:-}"' "$proof" "$proof")

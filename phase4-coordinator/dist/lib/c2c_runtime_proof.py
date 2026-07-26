@@ -5,24 +5,42 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 from pathlib import Path
 import re
 import subprocess
 import sys
 
 
-TOKEN = re.compile(r"[A-Za-z0-9._~-]{32,512}")
+TOKEN = re.compile(r"[0-9a-fA-F]{64}")
+PLACEHOLDER = re.compile(r"REPLACE|change-me|<required>|placeholder|xxx", re.I)
+WEAK_DENYLIST = {"changeme", "placeholder", "test", "secret", "password", "admin"}
 COORDINATOR_ENV = Path("/etc/macprovider/coordinator.env")
 GATEWAY_ENV = Path("/etc/macprovider/gateway.env")
 COORDINATOR_SERVICE = "macprovider-coordinator.service"
 GATEWAY_SERVICE = "macprovider-gateway.service"
 
 
+def entropy_bits_per_char(value: str) -> float:
+    counts = {ch: value.count(ch) for ch in set(value)}
+    total = len(value)
+    return -sum((count / total) * math.log2(count / total) for count in counts.values())
+
+
 def validate_credential(value: str | None, source: str) -> str:
     if value is None:
         raise ValueError(f"missing requested runtime credential in {source}")
+    if PLACEHOLDER.search(value):
+        raise ValueError(f"placeholder requested runtime credential in {source}")
     if not TOKEN.fullmatch(value):
-        raise ValueError(f"invalid or empty requested runtime credential in {source}")
+        raise ValueError(f"invalid requested runtime credential in {source}: expected 64-hex")
+    lowered = value.lower()
+    if lowered in WEAK_DENYLIST:
+        raise ValueError(f"weak requested runtime credential in {source}: denylisted")
+    if all(ch == "0" for ch in value):
+        raise ValueError(f"weak requested runtime credential in {source}: repeated_zero")
+    if len(set(value)) == 1 or entropy_bits_per_char(value) < 3.5:
+        raise ValueError(f"weak requested runtime credential in {source}: low_entropy")
     return value
 
 
@@ -122,7 +140,13 @@ def require_peer_file_matches_process(label: str, file_digest: str, process_dige
         raise ValueError(f"{label} differs between its EnvironmentFile and running process")
 
 
-def deployment_digests(mode: str, coord_service_name: str, gateway_service_name: str, gateway_operator_name: str) -> tuple[str, str, str]:
+def deployment_digests(
+    mode: str,
+    coord_operator_name: str,
+    coord_service_name: str,
+    gateway_service_name: str,
+    gateway_operator_name: str,
+) -> tuple[str, str, str, str]:
     if mode == "coordinator-deploy":
         # The coordinator will restart and consume coordinator.env. The gateway
         # remains running. Require its file and process to agree so a peer
@@ -146,6 +170,7 @@ def deployment_digests(mode: str, coord_service_name: str, gateway_service_name:
             "gateway operator credential", gateway_operator_file, gateway_operator_process
         )
         return (
+            credential_digest(COORDINATOR_ENV, coord_operator_name),
             credential_digest(COORDINATOR_ENV, coord_service_name),
             gateway_service_process,
             gateway_operator_process,
@@ -155,16 +180,25 @@ def deployment_digests(mode: str, coord_service_name: str, gateway_service_name:
         # remains running. Require its file and process to agree so a peer
         # restart during this deploy cannot silently change the proven state.
         require_process_env_names(
-            mode, (("coordinator auth.gateway_service_token", coord_service_name),)
+            mode,
+            (
+                ("coordinator auth.operator_key", coord_operator_name),
+                ("coordinator auth.gateway_service_token", coord_service_name),
+            ),
         )
+        coordinator_operator_file = credential_digest(COORDINATOR_ENV, coord_operator_name)
         coordinator_service_file = credential_digest(COORDINATOR_ENV, coord_service_name)
-        (coordinator_service_process,) = service_credential_digests(
-            COORDINATOR_SERVICE, (coord_service_name,)
+        coordinator_operator_process, coordinator_service_process = service_credential_digests(
+            COORDINATOR_SERVICE, (coord_operator_name, coord_service_name)
+        )
+        require_peer_file_matches_process(
+            "coordinator operator credential", coordinator_operator_file, coordinator_operator_process
         )
         require_peer_file_matches_process(
             "coordinator service credential", coordinator_service_file, coordinator_service_process
         )
         return (
+            coordinator_operator_process,
             coordinator_service_process,
             credential_digest(GATEWAY_ENV, gateway_service_name),
             credential_digest(GATEWAY_ENV, gateway_operator_name),
@@ -173,15 +207,15 @@ def deployment_digests(mode: str, coord_service_name: str, gateway_service_name:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 5:
+    if len(argv) != 6:
         print(
             "usage: c2c_runtime_proof.py <coordinator-deploy|gateway-deploy> "
-            "<coord-service-env> <gateway-service-env> <gateway-operator-env>",
+            "<coord-operator-env> <coord-service-env> <gateway-service-env> <gateway-operator-env>",
             file=sys.stderr,
         )
         return 2
     try:
-        print(*deployment_digests(argv[1], argv[2], argv[3], argv[4]))
+        print(*deployment_digests(argv[1], argv[2], argv[3], argv[4], argv[5]))
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(exc, file=sys.stderr)
         return 1

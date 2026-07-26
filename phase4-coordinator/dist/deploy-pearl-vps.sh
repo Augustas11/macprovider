@@ -44,14 +44,14 @@
 #                    the gateway config installed on Pearl.
 #   GATEWAY_REMOTE_CONFIG  installed gateway config path on Pearl.
 #                    Default: /opt/macprovider/gateway.yaml.
-#   C2C_COORD_SERVICE_TOKEN_SHA256, C2C_GATEWAY_SERVICE_TOKEN_SHA256,
-#   C2C_GATEWAY_OPERATOR_KEY_SHA256
+#   C2C_COORD_OPERATOR_KEY_SHA256, C2C_COORD_SERVICE_TOKEN_SHA256,
+#   C2C_GATEWAY_SERVICE_TOKEN_SHA256, C2C_GATEWAY_OPERATOR_KEY_SHA256
 #                    required by --dry-run-local when either config uses
 #                    env:NAME credentials. Compute each SHA-256 independently
 #                    from its respective runtime EnvironmentFile; never pass
 #                    raw credential values. Production computes these proofs
 #                    on Pearl and returns only the digests.
-#   SKIP_C2_CHECK    default: 0   skip C2 cross-check (development only)
+#   SKIP_C2_CHECK    default: 0   skip C2 timer/header assertions only (development only)
 #   ALLOW_CONFIG_DRIFT default: 0 push local coordinator.yaml over live one
 #   SKIP_TCP_TUNING default: 0    skip Pearl TCP sysctl install/apply step
 #   MODEL_HASH_LEGACY_UNTIL is read from /etc/macprovider/coordinator.env
@@ -866,6 +866,7 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
     echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml>." >&2
     exit 5
   fi
+  C2C_COORD_OPERATOR_KEY_SHA256="${C2C_COORD_OPERATOR_KEY_SHA256:-}" \
   C2C_COORD_SERVICE_TOKEN_SHA256="${C2C_COORD_SERVICE_TOKEN_SHA256:-}" \
   C2C_GATEWAY_SERVICE_TOKEN_SHA256="${C2C_GATEWAY_SERVICE_TOKEN_SHA256:-}" \
   C2C_GATEWAY_OPERATOR_KEY_SHA256="${C2C_GATEWAY_OPERATOR_KEY_SHA256:-}" \
@@ -874,12 +875,10 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   }
   echo "  local dry-run C2 check passed"
   exit 0
-elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
-  echo "  SKIP_C2_CHECK=1 set — running coordinator-only check (C2 gate intentionally skipped)" >&2
-  SKIP_C2_CHECK=1 bash "$CHECK_SCRIPT" "$CONFIG" || {
-    echo "aborting deploy: config-drift check failed" >&2; exit 5;
-  }
 else
+  if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+    echo "  SKIP_C2_CHECK=1 set — skipping timer/header assertions only; credential proof remains mandatory" >&2
+  fi
   GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
     echo "aborting deploy: mktemp failed for installed gateway config copy" >&2; exit 5;
   }
@@ -924,20 +923,23 @@ else
       *) printf '%s' - ;;
     esac
   }
+  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$CONFIG" auth operator_key)")" || exit 5
   _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$CONFIG" auth gateway_service_token)")" || exit 5
   _gateway_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator service_token)")" || exit 5
   _gateway_op_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator operator_key)")" || exit 5
-  _c2c_proofs="$($SSH python3 - coordinator-deploy "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
+  _c2c_proofs="$($SSH python3 - coordinator-deploy "$_coord_op_name" "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
     echo "aborting deploy: could not prove coordinator/gateway credential pairing on Pearl" >&2
     exit 5
   }
-  read -r C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
+  read -r C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
 $_c2c_proofs
 EOF
+  C2C_COORD_OPERATOR_KEY_SHA256="$C2C_COORD_OPERATOR_KEY_SHA256" \
   C2C_COORD_SERVICE_TOKEN_SHA256="$C2C_COORD_SERVICE_TOKEN_SHA256" \
   C2C_GATEWAY_SERVICE_TOKEN_SHA256="$C2C_GATEWAY_SERVICE_TOKEN_SHA256" \
   C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
   MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
+  SKIP_C2_CHECK="${SKIP_C2_CHECK:-0}" \
     bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting deploy: config-drift check failed" >&2; exit 5;
   }

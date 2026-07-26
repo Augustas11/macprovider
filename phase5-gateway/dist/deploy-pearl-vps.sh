@@ -42,8 +42,8 @@
 #                    coordinator deploy config.
 #   COORD_REMOTE_CONFIG  installed coordinator config path on Pearl.
 #                    Default: /opt/macprovider/coordinator.yaml.
-#   C2C_COORD_SERVICE_TOKEN_SHA256, C2C_GATEWAY_SERVICE_TOKEN_SHA256,
-#   C2C_GATEWAY_OPERATOR_KEY_SHA256
+#   C2C_COORD_OPERATOR_KEY_SHA256, C2C_COORD_SERVICE_TOKEN_SHA256,
+#   C2C_GATEWAY_SERVICE_TOKEN_SHA256, C2C_GATEWAY_OPERATOR_KEY_SHA256
 #                    required by --dry-run-local when either config uses
 #                    env:NAME credentials. Compute each SHA-256 independently
 #                    from its respective runtime EnvironmentFile; never pass
@@ -267,10 +267,12 @@ log "step 0/8: pre-deploy C2 cross-component config check"
 # or an explicit SKIP_C2_CHECK=1 override. The previous "best-effort"
 # path treated missing inputs as a warning, which weakened a deploy gate
 # the audit called out as mandatory.
-# NOTE: SKIP_C2_CHECK skips only the C2 timer relation — not the #615 gate above.
+# NOTE: SKIP_C2_CHECK skips only the C2 timer/header relation — not the #615
+# gate above and not the credential pairing/runtime proof below.
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  --dry-run-local set — validating local GATEWAY_CONFIG and exiting before deploy" >&2
   if [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
+    C2C_COORD_OPERATOR_KEY_SHA256="${C2C_COORD_OPERATOR_KEY_SHA256:-}" \
     C2C_COORD_SERVICE_TOKEN_SHA256="${C2C_COORD_SERVICE_TOKEN_SHA256:-}" \
     C2C_GATEWAY_SERVICE_TOKEN_SHA256="${C2C_GATEWAY_SERVICE_TOKEN_SHA256:-}" \
     C2C_GATEWAY_OPERATOR_KEY_SHA256="${C2C_GATEWAY_OPERATOR_KEY_SHA256:-}" \
@@ -285,9 +287,10 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  coordinator config:    $COORD_CONFIG $( [ -f "$COORD_CONFIG" ] || echo '(missing)')" >&2
   echo "  gateway config:        $GATEWAY_CONFIG $( [ -f "$GATEWAY_CONFIG" ] || echo '(missing — provide GATEWAY_CONFIG=<path>)')" >&2
   exit 5
-elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
-  echo "  SKIP_C2_CHECK=1 set — C2 cross-check skipped by operator opt-out (exception gate already ran)" >&2
 elif [ -x "$CHECK_SCRIPT" ]; then
+  if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+    echo "  SKIP_C2_CHECK=1 set — skipping timer/header assertions only; credential proof remains mandatory" >&2
+  fi
   COORD_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-installed-config.XXXXXXXX)" || {
     echo "aborting gateway deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
   }
@@ -328,19 +331,22 @@ elif [ -x "$CHECK_SCRIPT" ]; then
       *) printf '%s' - ;;
     esac
   }
+  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_REMOTE_CONFIG_TMP" auth operator_key)")" || exit 5
   _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_REMOTE_CONFIG_TMP" auth gateway_service_token)")" || exit 5
   _gateway_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator service_token)")" || exit 5
   _gateway_op_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator operator_key)")" || exit 5
-  _c2c_proofs="$($SSH python3 - gateway-deploy "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
+  _c2c_proofs="$($SSH python3 - gateway-deploy "$_coord_op_name" "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
     echo "aborting gateway deploy: could not prove coordinator/gateway credential pairing on Pearl" >&2
     exit 5
   }
-  read -r C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
+  read -r C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
 $_c2c_proofs
 EOF
+  C2C_COORD_OPERATOR_KEY_SHA256="$C2C_COORD_OPERATOR_KEY_SHA256" \
   C2C_COORD_SERVICE_TOKEN_SHA256="$C2C_COORD_SERVICE_TOKEN_SHA256" \
   C2C_GATEWAY_SERVICE_TOKEN_SHA256="$C2C_GATEWAY_SERVICE_TOKEN_SHA256" \
   C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
+  SKIP_C2_CHECK="${SKIP_C2_CHECK:-0}" \
     bash "$CHECK_SCRIPT" "$COORD_REMOTE_CONFIG_TMP" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting gateway deploy: config-drift check failed" >&2; exit 5;
   }
@@ -349,7 +355,7 @@ else
   echo "  check-deploy-config.sh: $CHECK_SCRIPT $( [ -x "$CHECK_SCRIPT" ] || echo '(missing or not executable)')" >&2
   echo "  installed coordinator config on Pearl: $COORD_REMOTE_CONFIG" >&2
   echo "  installed gateway config on Pearl: $GATEWAY_REMOTE_CONFIG" >&2
-  echo "  To deploy without the cross-check, set SKIP_C2_CHECK=1 explicitly." >&2
+  echo "  SKIP_C2_CHECK=1 can skip timer/header assertions, but credential proof still requires both configs." >&2
   echo "  Local gateway.yaml files are intentionally NOT accepted in production deploy mode." >&2
   exit 5
 fi

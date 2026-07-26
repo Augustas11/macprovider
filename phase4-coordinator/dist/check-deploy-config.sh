@@ -14,23 +14,21 @@
 # Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>
 # Exit 1 on HARD failure; 0 otherwise (WARN/note lines are non-blocking).
 #
-# M1-6 / DEVE-4: the gateway config is REQUIRED by default. The C2
-# cross-component timer relation is the single most important safety check
-# this script performs — it caught a real past production incident. Silently
-# skipping it (the previous behavior when the gateway arg was omitted) made
-# every standard coordinator deploy run a no-op C2 gate. To opt out
-# deliberately (e.g. checking a coordinator-only config in isolation), set
-# SKIP_C2_CHECK=1.
+# M1-6 / DEVE-4: the gateway config is REQUIRED. The C2 cross-component
+# timer relation caught a real past production incident, and PR #172 also made
+# this gate the deploy-time proof for gateway/coordinator credential pairing.
+# SKIP_C2_CHECK=1 may skip only timer/header assertions after both configs are
+# loaded; it must not turn this into a coordinator-only credential check.
 
 set -uo pipefail
 COORD="${1:?usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>}"
 GW="${2:-}"
 
-if [ -z "$GW" ] && [ "${SKIP_C2_CHECK:-0}" != "1" ]; then
+if [ -z "$GW" ]; then
   echo "FAIL: gateway.yaml argument missing." >&2
-  echo "  The C2 cross-component timer check requires both coordinator.yaml" >&2
-  echo "  AND gateway.yaml. To intentionally check the coordinator config" >&2
-  echo "  alone (skipping C2), set SKIP_C2_CHECK=1." >&2
+  echo "  Credential pairing proof requires both coordinator.yaml AND gateway.yaml." >&2
+  echo "  SKIP_C2_CHECK=1 skips only timer/header assertions after credential" >&2
+  echo "  proof runs; it does not allow a coordinator-only deploy gate." >&2
   echo "  Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>" >&2
   exit 1
 fi
@@ -47,7 +45,7 @@ case "$GW" in
 esac
 
 python3 - "$COORD" "$GW" <<'PY'
-import datetime, hashlib, os, re, sys
+import datetime, hashlib, math, os, re, sys
 
 coord = open(sys.argv[1]).read()
 gw = open(sys.argv[2]).read() if len(sys.argv) > 2 and sys.argv[2] else ""
@@ -167,6 +165,12 @@ def ok(m):   print(f"  ok:   {m}")
 # C2 timer check (observed 2026-06-17 on a gateway deploy to Pearl).
 ENV_REF = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 PLACEHOLDER = re.compile(r"REPLACE|change-me|<required>|placeholder|xxx", re.I)
+WEAK_DENYLIST = {"changeme", "placeholder", "test", "secret", "password", "admin"}
+
+def entropy_bits_per_char(value):
+    counts = {ch: value.count(ch) for ch in set(value)}
+    total = len(value)
+    return -sum((count / total) * math.log2(count / total) for count in counts.values())
 
 def _safe_env_name(name):
     """Render an env-var NAME safely. If the NAME is suspect (32+ chars,
@@ -242,8 +246,14 @@ def check_hex_secret(label, raw):
         hard(f"{label} is a PLACEHOLDER{src} -> would break /poolz + /admin auth")
     elif not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
         hard(f"{label} is not 64-hex (len {len(raw)}){src}; expected `openssl rand -hex 32`")
+    elif raw.lower() in WEAK_DENYLIST:
+        hard(f"{label} strength check failed: denylisted{src}; expected `openssl rand -hex 32`")
+    elif all(ch == "0" for ch in raw):
+        hard(f"{label} strength check failed: repeated_zero{src}; expected `openssl rand -hex 32`")
+    elif len(set(raw)) == 1 or entropy_bits_per_char(raw) < 3.5:
+        hard(f"{label} strength check failed: low_entropy{src}; expected `openssl rand -hex 32`")
     else:
-        ok(f"{label} present (64-hex, non-placeholder){src}")
+        ok(f"{label} present (64-hex, non-placeholder, strength-ok){src}")
 
 # --- operator_key (inline literal or env:NAME deferred to runtime) ---
 check_hex_secret("coordinator operator_key", g_section(coord, "auth", "operator_key"))
@@ -391,7 +401,7 @@ def _check_distinct(label_a, raw_a, label_b, raw_b, same_file=True):
     else:
         ok(f"C2c {label_a} vs {label_b}: distinct")
 
-def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
+def _check_pair_equal(label_a, raw_a, proof_a, label_b, raw_b, proof_b, same_file=False):
     """C2c pairing: assert two fields hold the SAME secret (gateway sends
     coordinator.service_token on the wire; coordinator accepts only its
     own auth.gateway_service_token). A mismatch boots green and 401s every
@@ -409,13 +419,12 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
            f"(same file -> same value at runtime)")
         return
     if not same_file:
-        a = _cross_file_digest(label_a, raw_a, "C2C_GATEWAY_SERVICE_TOKEN_SHA256")
-        b = _cross_file_digest(label_b, raw_b, "C2C_COORD_SERVICE_TOKEN_SHA256")
+        a = _cross_file_digest(label_a, raw_a, proof_a)
+        b = _cross_file_digest(label_b, raw_b, proof_b)
         if a is None or b is None:
             return
         if a != b:
-            hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
-                 f"coordinator rejects; every /internal/* call would 401")
+            hard(f"C2c: {label_a} != {label_b} — cross-component credential pairing is broken")
         else:
             ok(f"C2c pairing {label_a} == {label_b}: match (cross-file proof)")
         return
@@ -451,8 +460,7 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
              f"token: 401 = mismatch).")
         return
     if a != b:
-        hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
-             f"coordinator rejects; every /internal/* call would 401")
+        hard(f"C2c: {label_a} != {label_b} — cross-component credential pairing is broken")
     else:
         ok(f"C2c pairing {label_a} == {label_b}: match")
 
@@ -498,6 +506,17 @@ if gw:
         "C2C_GATEWAY_OPERATOR_KEY_SHA256",
         "coordinator auth.gateway_service_token", coord_svc,
         "C2C_COORD_SERVICE_TOKEN_SHA256")
+    # C2c operator pairing: gateway polls /poolz with its
+    # coordinator.operator_key, while coordinator /poolz remains
+    # operator-only and accepts auth.operator_key. A mismatch does not
+    # affect /internal/* service-token routing, but it breaks the gateway
+    # status/poolz path after deploy.
+    _check_pair_equal(
+        "gateway coordinator.operator_key", gw_op,
+        "C2C_GATEWAY_OPERATOR_KEY_SHA256",
+        "coordinator auth.operator_key", coord_op,
+        "C2C_COORD_OPERATOR_KEY_SHA256",
+        same_file=False)
     # C2c pairing: gateway sends coordinator.service_token on /internal/*;
     # coordinator accepts ONLY its own auth.gateway_service_token. Cross-file
     # by definition. Same env:NAME on both sides DOES NOT prove pairing
@@ -505,7 +524,9 @@ if gw:
     # values are proven by service-specific digests; unresolved proof is a
     # hard failure because pairing is the load-bearing /internal/* invariant.
     _check_pair_equal("gateway coordinator.service_token", gw_svc,
+                      "C2C_GATEWAY_SERVICE_TOKEN_SHA256",
                       "coordinator auth.gateway_service_token", coord_svc,
+                      "C2C_COORD_SERVICE_TOKEN_SHA256",
                       same_file=False)
 
 # --- require_provider_tokens ---
@@ -607,7 +628,9 @@ for k in ("warmup_gate_enabled", "breaker_failure_threshold", "breaker_window_s"
         warn(f"{k} absent -> coordinator default applies (operator did not choose it)")
 
 # --- C2 cross-component timer relation (needs gateway config) ---
-if gw:
+if gw and os.environ.get("SKIP_C2_CHECK") == "1":
+    warn("SKIP_C2_CHECK=1 — skipped C2 timer/header assertions only; credential pairing proof still ran")
+elif gw:
     gwt = g_section(gw, "timeouts", "coordinator_request_seconds")
     if gwt is None:
         hard("C2: gateway timeouts.coordinator_request_seconds is ABSENT — "

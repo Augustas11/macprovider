@@ -53,6 +53,11 @@
 #   T39-T42 — unresolved cross-file env credentials without proof               -> FAIL
 #   T43 — matching runtime hashes prove env-indirected pairing                  -> pass
 #   T44 — named operator key colliding with service token                       -> FAIL
+#   T45 — gateway/coordinator operator_key mismatch breaks /poolz               -> FAIL
+#   T46 — matching runtime hashes prove env-indirected operator pairing         -> pass
+#   T47 — SKIP_C2_CHECK skips timer/header only; credential proof still runs    -> FAIL
+#   T48 — weak repeated 64-hex credentials fail strength policy                 -> FAIL
+#   T49 — SKIP_C2_CHECK cannot omit gateway.yaml                                -> FAIL
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -151,6 +156,12 @@ run_check() {
   RC=$?
 }
 
+run_check_coord_only() {
+  local wd="$1"; shift
+  OUT="$(env "$@" bash "$CHECK_SH" "$wd/coordinator.yaml" 2>&1)"
+  RC=$?
+}
+
 assert_exit() { # $1 expected rc, $2 test name
   if [ "$RC" -eq "$1" ]; then
     PASS=$((PASS+1)); echo "  ok: $2 (exit $RC)"
@@ -194,7 +205,7 @@ test_env_ref_unset_is_deferred() {
   local wd; wd="$(mk_workdir)"
   write_gw "$wd"; write_coord "$wd" "env:OPERATOR_KEY"
   # Explicitly clear the var so the host's environment can't mask the case.
-  run_check "$wd" OPERATOR_KEY=
+  run_check "$wd" OPERATOR_KEY= C2C_COORD_OPERATOR_KEY_SHA256="$HEX64_SHA256"
   assert_exit 0 "T2 env:NAME (unset) does not false-fail"
   assert_contains "deferred to runtime via env:OPERATOR_KEY" "T2 deferred message"
   rm -rf "$wd"
@@ -203,7 +214,7 @@ test_env_ref_unset_is_deferred() {
 test_env_ref_set_valid_resolves() {
   local wd; wd="$(mk_workdir)"
   write_gw "$wd"; write_coord "$wd" "env:OPERATOR_KEY"
-  run_check "$wd" "OPERATOR_KEY=$HEX64"
+  run_check "$wd" "OPERATOR_KEY=$HEX64" C2C_COORD_OPERATOR_KEY_SHA256="$HEX64_SHA256"
   assert_exit 0 "T3 env:NAME resolves to valid hex"
   assert_contains "resolved from env:OPERATOR_KEY" "T3 resolved message"
   rm -rf "$wd"
@@ -821,6 +832,68 @@ test_c2c_named_operator_collision_fails() {
   rm -rf "$wd"
 }
 
+test_c2c_operator_pairing_inline_mismatch_fails() {
+  # Gateway /poolz uses gateway coordinator.operator_key, while coordinator
+  # /poolz accepts auth.operator_key. They must remain paired separately from
+  # the service-token pairing used for /internal/*.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64C\"" 280 "gateway_service_token: \"$HEX64B\""
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
+  run_check "$wd"
+  assert_exit 1 "T45 gateway/coordinator operator_key mismatch -> FAIL"
+  assert_contains "gateway coordinator.operator_key != coordinator auth.operator_key" "T45 operator pairing message"
+  rm -rf "$wd"
+}
+
+test_c2c_operator_pairing_env_hashes_match_passes() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "env:COORD_OP" 280 "gateway_service_token: env:COORD_SVC"
+  write_gw "$wd" 300 "env:GW_OP" "service_token: env:GW_SVC"
+  run_check "$wd" \
+    C2C_COORD_OPERATOR_KEY_SHA256="$HEX64_SHA256" \
+    C2C_COORD_SERVICE_TOKEN_SHA256="$HEX64B_SHA256" \
+    C2C_GATEWAY_OPERATOR_KEY_SHA256="$HEX64_SHA256" \
+    C2C_GATEWAY_SERVICE_TOKEN_SHA256="$HEX64B_SHA256"
+  assert_exit 0 "T46 matching operator/service runtime hashes -> pass"
+  assert_contains "gateway coordinator.operator_key == coordinator auth.operator_key: match" "T46 operator-pairing proof message"
+  rm -rf "$wd"
+}
+
+test_skip_c2_check_keeps_credential_pairing_mandatory() {
+  local wd; wd="$(mk_workdir)"
+  # Deliberately invert the timer relation; SKIP_C2_CHECK should suppress that
+  # timer/header assertion. The operator-key mismatch must still fail because
+  # credential proof is not a timer check.
+  write_coord "$wd" "\"$HEX64C\"" 400 "gateway_service_token: \"$HEX64B\""
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
+  run_check "$wd" SKIP_C2_CHECK=1
+  assert_exit 1 "T47 SKIP_C2_CHECK still enforces credential pairing -> FAIL"
+  assert_contains "skipped C2 timer/header assertions only" "T47 skip scope message"
+  assert_contains "gateway coordinator.operator_key != coordinator auth.operator_key" "T47 credential pairing still enforced"
+  assert_absent "coordinator request_timeout_s" "T47 timer assertion skipped"
+  rm -rf "$wd"
+}
+
+test_weak_64_hex_credentials_fail_strength_policy() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  write_coord "$wd" "\"$(printf 'd%.0s' {1..64})\""
+  run_check "$wd"
+  assert_exit 1 "T48 weak repeated 64-hex operator_key -> FAIL"
+  assert_contains "strength check failed: low_entropy" "T48 low-entropy message"
+  rm -rf "$wd"
+}
+
+test_skip_c2_check_cannot_omit_gateway_config() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""
+  run_check_coord_only "$wd" SKIP_C2_CHECK=1
+  assert_exit 1 "T49 SKIP_C2_CHECK without gateway.yaml -> FAIL"
+  assert_contains "Credential pairing proof requires both coordinator.yaml AND gateway.yaml" "T49 credential proof requires gateway"
+  assert_contains "does not allow a coordinator-only deploy gate" "T49 skip cannot bypass gateway config"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -872,6 +945,11 @@ test_c2c_pairing_inline_plus_env_without_proof_fails
 test_c2c_pairing_different_env_without_proof_fails
 test_cross_file_runtime_hashes_prove_pairing
 test_c2c_named_operator_collision_fails
+test_c2c_operator_pairing_inline_mismatch_fails
+test_c2c_operator_pairing_env_hashes_match_passes
+test_skip_c2_check_keeps_credential_pairing_mandatory
+test_weak_64_hex_credentials_fail_strength_policy
+test_skip_c2_check_cannot_omit_gateway_config
 
 echo
 echo "== summary =="
