@@ -1,7 +1,7 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.2.0
-Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot)
+Version: v0.3.0
+Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
 
@@ -26,10 +26,13 @@ In scope for v0.2 (this Partial):
 - Provider local JSON status over loopback-only CLI inspection.
 - Provider-originated `diagnostic_status` schema v1 over the already
   authenticated provider WebSocket.
+- Pearl-side monitor alerting over the existing operator-authenticated
+  coordinator admin endpoints.
 
 Out of scope (later Partials of #535):
 
-- `pearlctl provider inspect` and alert rules.
+- `pearlctl provider inspect`; prebeta operations MAY use Pearl DB/admin
+  endpoint inspection directly for the small cohort.
 - Separate HTTPS diagnostic beacon.
 - Buyer/gateway exposure of diagnostics.
 - Remote shell, arbitrary log/file fetch, or remote restart.
@@ -99,8 +102,23 @@ truth over provider-supplied eligibility claims, and MUST store only redacted
 operator-visible last-known data. The diagnostic snapshot MUST NOT become
 buyer-visible and MUST NOT introduce a second credential or HTTPS beacon path.
 
+**SPEC-035-R008 — Pearl monitor diagnostic alerts.** Pearl-side alerting SHOULD
+consume the existing operator-authenticated `/admin/providers*` endpoints rather
+than querying the coordinator SQLite journal directly. Alert rules MUST be
+bounded by configurable event limits and recent time windows, MUST deduplicate
+provider-scoped alerts against the latest event cursor that contributes to each
+alert condition, MUST deduplicate remotely-triggerable `_anonymous` alerts by
+active episode, and MUST avoid paging on ordinary small-cohort sleep/offline
+behavior. High-signal diagnostic alerts SHOULD cover repeated `invalid_token`,
+`invalid_auth_request`, `warmup_failed`, `heartbeat_stale`,
+reconnect/liveness failures, pre-identity failures in the capped `_anonymous`
+bucket, any `version_unsupported`, and optionally configured expected-provider
+missing-auth windows. Alerts MUST NOT expose raw tokens, Authorization values,
+raw protocol payloads, local paths, or provider diagnostics to buyer/gateway
+APIs.
+
 ## 4. Rollout
 
-v0.2 ships coordinator-side journal/admin GETs plus provider `status --json` and
-authenticated WSS `diagnostic_status` snapshots. CLI inspect wrappers, alerts,
-and any HTTPS beacon remain deferred under #535.
+v0.3 ships coordinator-side journal/admin GETs, provider `status --json`,
+authenticated WSS `diagnostic_status` snapshots, and Pearl monitor diagnostic
+alerts. CLI inspect wrappers and any HTTPS beacon remain deferred under #535.
