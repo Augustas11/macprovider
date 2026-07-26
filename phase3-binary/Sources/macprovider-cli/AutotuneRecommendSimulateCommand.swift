@@ -89,11 +89,16 @@ struct AutotuneRecommendSimulator: @unchecked Sendable {
     )
 
     func recommend(envelopeData: Data) async throws -> AutotuneRecommendResult {
+        let inlineCandidateCatalogBytes = try JSONRawTopLevelValueExtractor.value(
+            named: "candidateCatalog",
+            in: envelopeData
+        )
         let envelope = try JSONDecoder.autotuneSim.decode(AutotuneRecommendSimulateEnvelope.self, from: envelopeData)
         let request = try await envelope.request(
             fetchRateCard: fetchRateCard,
             bakedCandidateCatalogBytes: bakedCandidateCatalogBytes,
-            bakedDemandRankBytes: bakedDemandRankBytes
+            bakedDemandRankBytes: bakedDemandRankBytes,
+            inlineCandidateCatalogBytes: inlineCandidateCatalogBytes
         )
         return AutotuneRecommendEngine().recommend(request)
     }
@@ -109,6 +114,7 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
     var warnings: [AutotuneRecommendWarning]
     var generatedAt: Date
     var donorMode: Bool
+    var buyerTTFTCeilingMS: Int
 
     enum CodingKeys: String, CodingKey {
         case hardware
@@ -120,6 +126,8 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
         case warnings
         case generatedAt
         case donorMode
+        case buyerTTFTCeilingMS
+        case buyer_ttft_ceiling_ms
         case electricityUSDPerKWH
         case assumedUtilization
         case availabilityHoursPerDay
@@ -140,15 +148,28 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
         }
         generatedAt = parsedGeneratedAt
         donorMode = try c.decode(Bool.self, forKey: .donorMode)
+        buyerTTFTCeilingMS = try c.decodeEitherIfPresent(Int.self, .buyerTTFTCeilingMS, .buyer_ttft_ceiling_ms) ?? 0
+        if buyerTTFTCeilingMS < 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .buyerTTFTCeilingMS,
+                in: c,
+                debugDescription: "buyer_ttft_ceiling_ms must be >= 0"
+            )
+        }
     }
 
     func request(
         fetchRateCard: (URL) async throws -> Data,
         bakedCandidateCatalogBytes: () throws -> Data,
-        bakedDemandRankBytes: () throws -> Data
+        bakedDemandRankBytes: () throws -> Data,
+        inlineCandidateCatalogBytes: Data? = nil
     ) async throws -> AutotuneRecommendRequest {
         let rateCard = try await rateCard.resolve(fetchRateCard: fetchRateCard)
-        let catalog = try candidateCatalog.resolve(bakedBytes: bakedCandidateCatalogBytes)
+        let catalog = try candidateCatalog.resolve(
+            bakedBytes: bakedCandidateCatalogBytes,
+            candidateCatalogSHA256: candidateCatalogSHA256,
+            inlineCandidateCatalogBytes: inlineCandidateCatalogBytes
+        )
         let demand = try demandRank.resolve(bakedBytes: bakedDemandRankBytes)
         var patchedBenchmarks = benchmarks
         for key in patchedBenchmarks.keys {
@@ -165,7 +186,8 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
             benchmarks: patchedBenchmarks,
             warnings: Set(warnings),
             generatedAt: generatedAt,
-            donorMode: donorMode
+            donorMode: donorMode,
+            buyerTTFTCeilingMS: buyerTTFTCeilingMS
         )
     }
 }
@@ -233,7 +255,7 @@ enum RateCardEnvelope: Decodable {
 
 enum CandidateCatalogEnvelope: Decodable {
     case live
-    case value(CandidateCatalog)
+    case value
 
     init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
@@ -241,16 +263,251 @@ enum CandidateCatalogEnvelope: Decodable {
             self = .live
             return
         }
-        self = .value(try CandidateCatalog(from: decoder).validated())
+        _ = try c.decode(RawJSON.self)
+        self = .value
     }
 
-    func resolve(bakedBytes: () throws -> Data) throws -> CandidateCatalog {
+    func resolve(
+        bakedBytes: () throws -> Data,
+        candidateCatalogSHA256: String,
+        inlineCandidateCatalogBytes: Data? = nil
+    ) throws -> CandidateCatalog {
         switch self {
         case .live:
             return try AutotuneStaticInputs.decodeCandidateCatalog(bakedBytes())
-        case .value(let value):
-            return value
+        case .value:
+            guard let data = inlineCandidateCatalogBytes else {
+                throw AutotuneRecommendError.invalidStaticJSON("inline candidate catalog raw bytes")
+            }
+            let actualSHA256 = AutotuneStaticInputs.candidateCatalogSHA256(bytes: data)
+            guard actualSHA256 == candidateCatalogSHA256 else {
+                throw AutotuneRecommendError.invalidStaticJSON("candidate catalog sha256")
+            }
+            try AutotuneStrictJSON.validate(data, kind: .candidateCatalog)
+            return try JSONDecoder.autotuneSim.decode(CandidateCatalog.self, from: data)
+                .validated(candidateCatalogSHA256: actualSHA256)
         }
+    }
+}
+
+private struct RawJSON: Decodable {
+    init(from decoder: Decoder) throws {
+        _ = try JSONValue(from: decoder)
+    }
+}
+
+private enum JSONValue: Decodable {
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+
+    init(from decoder: Decoder) throws {
+        if let object = try? decoder.container(keyedBy: DynamicCodingKey.self) {
+            var result: [String: JSONValue] = [:]
+            for key in object.allKeys {
+                result[key.stringValue] = try object.decode(JSONValue.self, forKey: key)
+            }
+            self = .object(result)
+            return
+        }
+        if var array = try? decoder.unkeyedContainer() {
+            var result: [JSONValue] = []
+            while !array.isAtEnd {
+                result.append(try array.decode(JSONValue.self))
+            }
+            self = .array(result)
+            return
+        }
+        let scalar = try decoder.singleValueContainer()
+        if scalar.decodeNil() {
+            self = .null
+        } else if let value = try? scalar.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? scalar.decode(Double.self) {
+            self = .number(value)
+        } else {
+            self = .string(try scalar.decode(String.self))
+        }
+    }
+
+}
+
+private struct DynamicCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        self.intValue = nil
+    }
+
+    init?(intValue: Int) {
+        self.stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+private struct JSONRawTopLevelValueExtractor {
+    private let bytes: [UInt8]
+    private var index = 0
+
+    static func value(named target: String, in data: Data) throws -> Data? {
+        var scanner = JSONRawTopLevelValueExtractor(bytes: Array(data))
+        let range = try scanner.findValue(named: target)
+        guard let range else { return nil }
+        let raw = Data(scanner.bytes[range])
+        if String(data: raw.trimmingASCIIWhitespace(), encoding: .utf8) == #""@LIVE""# {
+            return nil
+        }
+        return raw
+    }
+
+    private mutating func findValue(named target: String) throws -> Range<Int>? {
+        skipWhitespace()
+        guard consume(0x7B) else { throw invalid("top-level object") }
+        skipWhitespace()
+        if consume(0x7D) { return nil }
+        while true {
+            guard index < bytes.count, bytes[index] == 0x22 else { throw invalid("object key") }
+            let key = try parseString()
+            skipWhitespace()
+            guard consume(0x3A) else { throw invalid("object colon") }
+            skipWhitespace()
+            let valueStart = index
+            try skipValue()
+            let valueEnd = index
+            if key == target {
+                return valueStart ..< valueEnd
+            }
+            skipWhitespace()
+            if consume(0x7D) { return nil }
+            guard consume(0x2C) else { throw invalid("object separator") }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func skipValue() throws {
+        guard index < bytes.count else { throw invalid("unexpected end") }
+        switch bytes[index] {
+        case 0x7B: try skipObject()
+        case 0x5B: try skipArray()
+        case 0x22: _ = try parseString()
+        case 0x74: try consumeLiteral("true")
+        case 0x66: try consumeLiteral("false")
+        case 0x6E: try consumeLiteral("null")
+        default: try skipNumber()
+        }
+    }
+
+    private mutating func skipObject() throws {
+        index += 1
+        skipWhitespace()
+        if consume(0x7D) { return }
+        while true {
+            guard index < bytes.count, bytes[index] == 0x22 else { throw invalid("object key") }
+            _ = try parseString()
+            skipWhitespace()
+            guard consume(0x3A) else { throw invalid("object colon") }
+            skipWhitespace()
+            try skipValue()
+            skipWhitespace()
+            if consume(0x7D) { return }
+            guard consume(0x2C) else { throw invalid("object separator") }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func skipArray() throws {
+        index += 1
+        skipWhitespace()
+        if consume(0x5D) { return }
+        while true {
+            try skipValue()
+            skipWhitespace()
+            if consume(0x5D) { return }
+            guard consume(0x2C) else { throw invalid("array separator") }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseString() throws -> String {
+        let start = index
+        index += 1
+        var escaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            index += 1
+            if escaped {
+                escaped = false
+                continue
+            }
+            if byte == 0x5C {
+                escaped = true
+            } else if byte == 0x22 {
+                let token = Data(bytes[start ..< index])
+                guard let decoded = try? JSONDecoder().decode(String.self, from: token) else {
+                    throw invalid("string")
+                }
+                return decoded
+            } else if byte < 0x20 {
+                throw invalid("control character")
+            }
+        }
+        throw invalid("unterminated string")
+    }
+
+    private mutating func skipNumber() throws {
+        let start = index
+        while index < bytes.count, ![0x20, 0x09, 0x0A, 0x0D, 0x2C, 0x5D, 0x7D].contains(bytes[index]) {
+            index += 1
+        }
+        guard index > start else { throw invalid("number") }
+        let token = Data(bytes[start ..< index])
+        _ = try JSONSerialization.jsonObject(with: Data("{\"n\":".utf8) + token + Data("}".utf8))
+    }
+
+    private mutating func consumeLiteral(_ literal: String) throws {
+        let raw = Array(literal.utf8)
+        guard index + raw.count <= bytes.count, Array(bytes[index ..< index + raw.count]) == raw else {
+            throw invalid("literal")
+        }
+        index += raw.count
+    }
+
+    private mutating func skipWhitespace() {
+        while index < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) {
+            index += 1
+        }
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+
+    private func invalid(_ reason: String) -> AutotuneRecommendError {
+        AutotuneRecommendError.invalidStaticJSON("recommend-simulate envelope \(reason)")
+    }
+}
+
+private extension Data {
+    func trimmingASCIIWhitespace() -> Data {
+        let whitespace: Set<UInt8> = [0x20, 0x09, 0x0A, 0x0D]
+        var start = startIndex
+        var end = endIndex
+        while start < end, whitespace.contains(self[start]) {
+            start = index(after: start)
+        }
+        while end > start {
+            let beforeEnd = index(before: end)
+            guard whitespace.contains(self[beforeEnd]) else { break }
+            end = beforeEnd
+        }
+        return self[start ..< end]
     }
 }
 

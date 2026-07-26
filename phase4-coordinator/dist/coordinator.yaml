@@ -210,6 +210,7 @@ autotune:
   enforce_provider_admission: true
   public_keys:
     streamvc-autotune-static-v4: "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+    streamvc-autotune-static-v5: "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
   demand_rank_path: "/opt/macprovider/autotune/current/demand-rank.json"
   demand_rank_sig_path: "/opt/macprovider/autotune/current/demand-rank.json.sig"
   autotune_candidates_path: "/opt/macprovider/autotune/current/autotune-candidates.json"

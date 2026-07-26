@@ -1,16 +1,23 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.7
+version: v0.8
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-25
+last-locked: 2026-07-26
 
 ## Change log
+
+- **v0.8 (2026-07-26)** — Selection-quality amendment (#744).
+  1. **Paid ranking is measured earning opportunity per second.** §4 preserves v0.6 buyer-coverage economics and makes throughput part of `raw_score`, not a tiebreaker: provider completion payout × locally measured sustained TPS × demand floor/weight × bounded supply-deficit multiplier.
+  2. **Buyer TTFT ceiling is separate from catalog drift.** `--buyer-ttft-ceiling-ms` is an operator-set paid recommendation ceiling. Values `>0` hard-veto paid rows whose measured p95 TTFT exceeds the ceiling and emit `buyer_ttft_ceiling_exceeded` when that leaves no eligible paid row. `0` disables it. This does not restore the old `--gate-ttft-ms` default; omitted `--gate-ttft-ms` on `--recommend` remains disabled.
+  3. **`bench_gate` provenance is machine-readable.** Candidate catalog `bench_gate` now carries `provenance.source` plus optional `hardware`, `measured_at`, and `notes`. Current release values remain advisory drift signals unless/until promoted from trusted post-#745 provider runs.
+  4. **Candidate JSON exposes drift.** Each candidate includes `bench_gate_provenance`, `bench_gate_drift`, and `buyer_ttft_ceiling_exceeded` so support tooling can distinguish bad catalog expectations from buyer-facing selection vetoes.
+  5. **Static signer rotation is bridged, not activated.** The v4 private key was unavailable locally for the next provenance catalog release; v5 public key is release-pinned in the trusted keyring with bridge status, while the current live feed remains signed by `streamvc-autotune-static-v4`. The first v5-signed feed is a separate activation after bridge adoption.
 
 - **v0.7 (2026-07-25)** — Swap is a paid-path hard eligibility veto (#742).
   1. **`swap_detected == true` disqualifies paid recommendation.** Swap is a locally measured fact about the provider machine (pageouts during the Stage 1 probe). It needs no catalog threshold and applies on hardware never benchmarked in advance. A swapping row MUST NOT become `recommended_model`.
   2. **§4 scoring untouched.** Ranking, demand weight, and payout-first order are unchanged; only §5 eligibility gains the swap gate.
   3. **Donor mode keeps swap advisory.** When no non-swapping paid row exists, the CLI falls to donor mode and MUST name swap in the transcript / candidate `why` / `swap_observed_under_load` warning. Donor commit still admits a swapping row when other donor gates pass.
-  4. **No 60 s TTFT feasibility default on the paid path.** `autotune --recommend` MUST NOT default its probe TTFT ceiling to 60_000 ms. Omitting `--gate-ttft-ms` on `--recommend` disables that ceiling (`0`). Classic (non-recommend) Stage 1/2 retains the SPEC-013 60_000 ms default when the flag is omitted. Absolute buyer-facing TTFT bounds are deferred to selection-quality work (#744). Catalog `bench_gate` TPS/TTFT fields remain advisory.
+  4. **No 60 s TTFT feasibility default on the paid path.** `autotune --recommend` MUST NOT default its probe TTFT ceiling to 60_000 ms. Omitting `--gate-ttft-ms` on `--recommend` disables that ceiling (`0`). Classic (non-recommend) Stage 1/2 retains the SPEC-013 60_000 ms default when the flag is omitted. Catalog `bench_gate` TPS/TTFT fields remain advisory.
 
 - **v0.6 (2026-07-10)** — Catalog recovery, trust-state separation, and buyer-coverage scoring.
   1. **One release unit.** Candidate and demand JSON, exact-byte SHA-256 digests, detached signatures, trusted verifier keyring, baked Swift payload, and release manifest are generated and verified from one canonical release directory. Candidate and demand feeds in one release share `version`, `generated_at`, and `policy_version`.
@@ -218,7 +225,13 @@ The v0.1 candidate catalog schema is:
       "min_bandwidth_tier": "C",
       "bench_gate": {
         "min_sustained_tps": 0.0,
-        "max_4k_ttft_ms": 0
+        "max_4k_ttft_ms": 0,
+        "provenance": {
+          "source": "legacy_unverified",
+          "hardware": "string",
+          "measured_at": "YYYY-MM-DD",
+          "notes": "string"
+        }
       },
       "runtime_status": "candidate",
       "notes": "string"
@@ -235,7 +248,8 @@ Field rules:
 - `model_sha256` is a lowercase hex SHA-256 digest of the canonical artifact-set manifest for the release-pinned model snapshot. After downloading by `model_revision`, the CLI MUST reject the snapshot if any filesystem entry is not a regular file or directory; symlinks, hardlinks with link count greater than one, device nodes, sockets, FIFOs, absolute paths, path escapes, and relative paths containing `..` are forbidden. The CLI then enumerates every regular file, computes each file SHA-256, sorts entries by normalized POSIX relative path, serializes each entry as `path LF size_decimal LF sha256_hex LF`, concatenates those UTF-8 entries, and SHA-256s the concatenated bytes. A mismatch fails closed before benchmark, recommendation, local donor-mode commit, or provider run.
 - SPEC-010 §3.7 owns the name `macprovider.snapshot-manifest.v1`, provider/coordinator wire fields, and comparison authority for this digest. This section defines the canonical manifest bytes only and MUST NOT be used as a second admission authority.
 - Every downloadable row (`candidate`, `listed`, or `recommendable`) MUST include both `model_revision` and `model_sha256`. If either is absent, the row is ineligible before download or benchmark, including donor mode.
-- `min_ram_gb`, `min_bandwidth_tier`, and `bench_gate` are authoritative for §5.
+- `min_ram_gb` and `min_bandwidth_tier` are authoritative for §5. `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets only; they do not veto paid or donor selection.
+- `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, or `legacy_unverified`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. During the v4->v5 bridge window, only the exact historical `published-2026-07-10-catalog-recovery-v1` rows may omit `bench_gate.provenance`; bridge clients backfill the #744 audit table for those known row keys. Newly generated catalog releases MUST include explicit provenance.
 - `runtime_status` is one of `candidate`, `listed`, `recommendable`, or `blocked`. Only `recommendable` rows may become paid defaults, and the demand-rank row must also have `recommendable: true`.
 
 The table below lists the minimum v0.1 rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
@@ -363,7 +377,7 @@ Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified befor
 
 Clients MUST keep a release-pinned verifier keyring. Key rotations require a bridge binary that embeds both old and new verifier keys before the feed signer changes. The old key remains trusted until operator telemetry establishes the retirement threshold defined by the release runbook.
 
-## 4. Formula (updated v0.6)
+## 4. Formula (updated v0.8)
 
 The v0.6 recommendation engine ranks eligible rows by expected operator earning opportunity while filling buyer-facing supply deficits:
 
@@ -390,7 +404,7 @@ recommended_model =
     3. model key ASC
 ```
 
-**Raw score uses provider completion payout credits, measured throughput, buyer-demand weight, and bounded supply deficit.** It remains independent of rate-card USD conversion volatility, while a `0.5...2.0` deficit bound prevents a noisy provider count from overwhelming operator economics.
+**Raw score uses provider completion payout credits, measured throughput, buyer-demand weight, and bounded supply deficit.** Throughput is a first-order term, not a tiebreaker. The score remains independent of rate-card USD conversion volatility, while a `0.5...2.0` deficit bound prevents a noisy provider count from overwhelming operator economics.
 
 Constants locked in v0.6:
 
@@ -439,9 +453,10 @@ A row is eligible only if every gate passes:
 - `sustained_tps >= model.bench_gate.min_sustained_tps` **[v0.2 amendment: advisory; missing emits `tps_below_gate` warning but does not veto eligibility]**.
 - `ttft_ms <= model.bench_gate.max_4k_ttft_ms` **[v0.2 amendment: advisory; missing emits `ttft_above_gate` warning but does not veto eligibility]**.
 - `swap_detected == false` **[amended v0.7 / #742: hard block for paid recommendation. When swap causes no paid row to land, emit `swap_observed_under_load`. Donor mode keeps swap advisory]**.
+- `buyer_ttft_ceiling_ms == 0 OR ttft_ms <= buyer_ttft_ceiling_ms` **[v0.8 / #744: hard block for paid recommendation only. The operator-set ceiling protects buyer UX and is independent of catalog `bench_gate.max_4k_ttft_ms`. Enabling donor mode does not bypass the paid-path ceiling; donor fallback remains local-only and may still name a compatible row separately]**.
 - `thermal_throttle_detected == false` **[unchanged from v0.1: hard block]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
-- There is no default 60_000 ms TTFT feasibility ceiling on the paid `--recommend` path. Omitting `--gate-ttft-ms` with `--recommend` disables that ceiling; absolute buyer-facing TTFT bounds are out of scope for v0.7. Classic non-recommend Stage 1/2 retains the SPEC-013 default.
+- There is no default 60_000 ms TTFT feasibility ceiling on the paid `--recommend` path. Omitting `--gate-ttft-ms` with `--recommend` disables that probe feasibility ceiling. Classic non-recommend Stage 1/2 retains the SPEC-013 default. The paid buyer-facing ceiling is the separate `--buyer-ttft-ceiling-ms` policy knob above.
 
 In v0.4, there is no paid financial gate. All eligible rows proceed to recommendation regardless of earnings projections. Real earnings are recorded only after tokens are served.
 
@@ -482,7 +497,13 @@ In v0.4, there is no paid financial gate. All eligible rows proceed to recommend
       "memory_headroom_gb": 0.0,
       "confidence": "low",
       "why": "<one-line reason>",
-      "raw_score": 0.0
+      "raw_score": 0.0,
+      "bench_gate_provenance": {
+        "source": "policy",
+        "notes": "#744 audit: gate set by operator policy to broaden eligibility."
+      },
+      "bench_gate_drift": [],
+      "buyer_ttft_ceiling_exceeded": false
     }
   ],
   "warnings": []
@@ -501,12 +522,15 @@ Schema rules:
 - `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
 - `raw_score` is rounded to 6 decimal places in JSON.
+- `bench_gate_provenance` is copied from the signed candidate catalog row for the displayed candidate. For the exact historical `published-2026-07-10-catalog-recovery-v1` bridge release only, clients derive row-specific #744 audit provenance for known rows that predate the explicit field.
+- `bench_gate_drift` is a sorted array containing `tps_below_gate` and/or `ttft_above_gate` when local measured benchmark results diverge from the advisory catalog target.
+- `buyer_ttft_ceiling_exceeded` is `true` when the candidate failed the paid-path buyer TTFT ceiling.
 - `confidence` is:
   - `high` when rate-card fetch, signed demand-rank fetch, signed candidate-catalog fetch, and current local benchmark all used live/current data.
   - `medium` when rate card, demand rank, or candidate catalog used a valid baked fallback, or the benchmark used a valid cache.
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
-- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required` to the existing warning vocabulary. Any integrity/update-required warning blocks a paid recommendation.
+- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`. Any integrity/update-required warning blocks a paid recommendation.
 
 ## 7. Per-token payout semantics
 

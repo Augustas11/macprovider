@@ -53,6 +53,8 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case tpsBelowGate = "tps_below_gate"
     /// Advisory QoS warning when measured TTFT exceeds the signed catalog target.
     case ttftAboveGate = "ttft_above_gate"
+    /// Paid-path veto when measured TTFT exceeds the buyer-facing operator ceiling.
+    case buyerTTFTCeilingExceeded = "buyer_ttft_ceiling_exceeded"
 }
 
 enum BandwidthTier: String, Codable, CaseIterable, Comparable {
@@ -468,12 +470,76 @@ struct DemandRank: Decodable, Equatable {
 
 struct CandidateCatalog: Decodable, Equatable {
     struct BenchGate: Decodable, Equatable {
+        struct Provenance: Decodable, Equatable {
+            var source: String
+            var hardware: String?
+            var measuredAt: String?
+            var notes: String?
+
+            init(source: String, hardware: String? = nil, measuredAt: String? = nil, notes: String? = nil) {
+                self.source = source
+                self.hardware = hardware
+                self.measuredAt = measuredAt
+                self.notes = notes
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case source
+                case hardware
+                case measuredAt = "measured_at"
+                case notes
+            }
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                source = try c.decode(String.self, forKey: .source)
+                hardware = try Self.decodeOptionalNonNullString(c, forKey: .hardware)
+                measuredAt = try Self.decodeOptionalNonNullString(c, forKey: .measuredAt)
+                notes = try Self.decodeOptionalNonNullString(c, forKey: .notes)
+            }
+
+            private static func decodeOptionalNonNullString(
+                _ container: KeyedDecodingContainer<CodingKeys>,
+                forKey key: CodingKeys
+            ) throws -> String? {
+                guard container.contains(key) else { return nil }
+                return try container.decode(String.self, forKey: key)
+            }
+        }
+
         var minSustainedTPS: Double
         var max4KTTFTMS: Int
+        var provenance: Provenance
+        var provenanceWasMissing: Bool
+
+        init(
+            minSustainedTPS: Double,
+            max4KTTFTMS: Int,
+            provenance: Provenance = Provenance(source: "legacy_unverified")
+        ) {
+            self.minSustainedTPS = minSustainedTPS
+            self.max4KTTFTMS = max4KTTFTMS
+            self.provenance = provenance
+            self.provenanceWasMissing = false
+        }
 
         enum CodingKeys: String, CodingKey {
             case minSustainedTPS = "min_sustained_tps"
             case max4KTTFTMS = "max_4k_ttft_ms"
+            case provenance
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            minSustainedTPS = try c.decode(Double.self, forKey: .minSustainedTPS)
+            max4KTTFTMS = try c.decode(Int.self, forKey: .max4KTTFTMS)
+            if let decoded = try c.decodeIfPresent(Provenance.self, forKey: .provenance) {
+                provenance = decoded
+                provenanceWasMissing = false
+            } else {
+                provenance = Provenance(source: "legacy_unverified", notes: "pre-v0.8 catalog bridge default")
+                provenanceWasMissing = true
+            }
         }
     }
 
@@ -677,7 +743,7 @@ struct CandidateCatalog: Decodable, Equatable {
         generatedAt = date
     }
 
-    func validated() throws -> CandidateCatalog {
+    func validated(candidateCatalogSHA256: String? = nil) throws -> CandidateCatalog {
         guard source == "operator_curated_autotune_candidate_catalog" else {
             throw AutotuneRecommendError.invalidStaticJSON("candidate catalog source")
         }
@@ -685,14 +751,32 @@ struct CandidateCatalog: Decodable, Equatable {
             throw AutotuneRecommendError.invalidStaticJSON("candidate catalog policy_version")
         }
         let allowedStatuses = Set(["candidate", "listed", "recommendable", "blocked"])
-        for (key, row) in rows {
+        var catalog = self
+        for (key, originalRow) in catalog.rows {
+            var row = originalRow
+            if row.benchGate.provenanceWasMissing {
+                guard candidateCatalogSHA256 == Self.legacyMissingProvenanceCatalogSHA256,
+                      catalog.version == Self.legacyMissingProvenanceReleaseVersion,
+                      let provenance = Self.legacyBenchGateProvenance[key]
+                else {
+                    throw AutotuneRecommendError.invalidStaticJSON("bench_gate.provenance for \(key)")
+                }
+                row.benchGate.provenance = provenance
+                row.benchGate.provenanceWasMissing = false
+                catalog.rows[key] = row
+            }
             guard allowedStatuses.contains(row.runtimeStatus) else {
                 throw AutotuneRecommendError.invalidStaticJSON("runtime_status for \(key)")
             }
             guard row.minRAMGB >= 0,
                   row.benchGate.minSustainedTPS >= 0,
                   row.benchGate.minSustainedTPS.isFinite,
-                  row.benchGate.max4KTTFTMS >= 0
+                  row.benchGate.max4KTTFTMS >= 0,
+                  Self.allowedBenchGateProvenanceSources.contains(row.benchGate.provenance.source),
+                  !row.benchGate.provenance.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  Self.nonEmptyIfPresent(row.benchGate.provenance.hardware),
+                  Self.nonEmptyIfPresent(row.benchGate.provenance.measuredAt),
+                  Self.nonEmptyIfPresent(row.benchGate.provenance.notes)
             else {
                 throw AutotuneRecommendError.invalidStaticJSON("negative gate for \(key)")
             }
@@ -706,7 +790,67 @@ struct CandidateCatalog: Decodable, Equatable {
             }
             try Self.validateWorkloadProfiles(row.workloadProfiles, rowKey: key, draftCandidates: row.draftCandidates)
         }
-        return self
+        return catalog
+    }
+
+    static let legacyMissingProvenanceReleaseVersion = "published-2026-07-10-catalog-recovery-v1"
+    static let legacyMissingProvenanceCatalogSHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
+
+    static let legacyBenchGateProvenance: [String: BenchGate.Provenance] = [
+        "qwen3-coder-30b-a3b-instruct": BenchGate.Provenance(
+            source: "measured_single_host",
+            hardware: "M5 32GB",
+            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
+        ),
+        "openai/gpt-oss-20b": BenchGate.Provenance(
+            source: "measured_single_host",
+            hardware: "M5 32GB",
+            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
+        ),
+        "google-gemma-4-26b-a4b-it": BenchGate.Provenance(
+            source: "measured_single_host",
+            hardware: "M5 32GB",
+            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
+        ),
+        "qwen3-8b": BenchGate.Provenance(
+            source: "measured_single_host",
+            hardware: "M5 32GB",
+            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
+        ),
+        "meta-llama/llama-3.1-8b-instruct": BenchGate.Provenance(
+            source: "no_throughput_bench",
+            notes: "#744 audit: gate row had no throughput benchmark."
+        ),
+        "meta-llama/llama-3.2-3b-instruct": BenchGate.Provenance(
+            source: "no_throughput_bench",
+            notes: "#744 audit: gate row had no throughput benchmark."
+        ),
+        "qwen3-32b": BenchGate.Provenance(
+            source: "never_benched",
+            notes: "#744 audit: high-memory row was never benched; values unchanged."
+        ),
+        "qwen2.5-coder-32b-instruct": BenchGate.Provenance(
+            source: "policy",
+            notes: "#744 audit: gate set by operator policy to broaden eligibility."
+        ),
+        "nvidia/nemotron-3-nano-30b-a3b": BenchGate.Provenance(
+            source: "runtime_validated_only",
+            notes: "#744 audit: runtime validated only; no trusted throughput gate."
+        ),
+    ]
+
+    static let allowedBenchGateProvenanceSources = Set([
+        "measured_single_host",
+        "runtime_validated_only",
+        "policy",
+        "no_throughput_bench",
+        "never_benched",
+        "legacy_unverified",
+    ])
+
+    static func nonEmptyIfPresent(_ value: String?) -> Bool {
+        guard let value else { return true }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     func rowIdentity(for key: String) -> String? {
@@ -1037,17 +1181,6 @@ struct RateCardProjection: Decodable, Equatable {
         if normalized != modelKey, normalized != "default", let row = rows[normalized] {
             return (normalized, row)
         }
-        // v1.7.6 Track A1: fall through to the "default" rate-card row when
-        // no specific row exists for this model. Matches the coord's
-        // `RateFor` fallback semantics (phase4-coordinator/internal/billing/
-        // formula.go), which pays the default rate for served inference on
-        // any model not explicitly listed. Prior behavior blocked probe-
-        // feasible models from recommendation just because the rate-card
-        // hadn't caught up — the classic "provider drops out after install"
-        // cliff.
-        if let row = rows["default"] {
-            return ("default", row)
-        }
         return nil
     }
 
@@ -1122,18 +1255,15 @@ struct AutotuneStaticSelection<T> {
 }
 
 struct AutotuneStaticInputs {
-    // v4 keypair rotated 2026-07-06. Only the PUBLIC key is committed —
-    // at phase3-binary/dist/static/keys/autotune-static-v4.public.base64
-    // and baked below. The private key is held off-repo by the operator
-    // (default path ~/.config/macprovider/keys/, chmod 0600); see the
-    // README in the keys directory for the full trust model. Older
-    // v1.7.10- clients that still bake the v3 pubkey `sidecarIsValid`
-    // fail on the v4 sig, fall back to their baked catalog, and stay
-    // online thanks to the SPEC-023 v0.2 soft-signal gates.
-    static let keyID = "streamvc-autotune-static-v4"
-    static let publicKeyName = "autotune_static_json_ed25519_v4"
+    // Static feed public keys are committed under phase3-binary/dist/static/keys.
+    // Private keys stay off-repo at ~/.config/macprovider/keys/ with mode 0600.
+    static let keyID = bakedCatalogSignerKeyID ?? "streamvc-autotune-static-v5"
+    static let publicKeyName = keyID == "streamvc-autotune-static-v4"
+        ? "autotune_static_json_ed25519_v4"
+        : "autotune_static_json_ed25519_v5"
     static let autotune_static_json_ed25519_v4 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
-    static let publicKeyBase64 = autotune_static_json_ed25519_v4
+    static let autotune_static_json_ed25519_v5 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
+    static let publicKeyBase64 = generatedTrustedPublicKeys[keyID] ?? autotune_static_json_ed25519_v5
     static let defaultTrustedPublicKeys = generatedTrustedPublicKeys
 
     var fetch: (URL) async throws -> Data
@@ -1364,7 +1494,8 @@ struct AutotuneStaticInputs {
 
     static func decodeCandidateCatalog(_ data: Data) throws -> CandidateCatalog {
         try AutotuneStrictJSON.validate(data, kind: .candidateCatalog)
-        return try JSONDecoder.autotune.decode(CandidateCatalog.self, from: data).validated()
+        return try JSONDecoder.autotune.decode(CandidateCatalog.self, from: data)
+            .validated(candidateCatalogSHA256: candidateCatalogSHA256(bytes: data))
     }
 
     static func decodeRateCard(_ data: Data) throws -> RateCardProjection {
@@ -1417,6 +1548,7 @@ struct AutotuneRecommendRequest {
     var warnings: Set<AutotuneRecommendWarning>
     var generatedAt: Date
     var donorMode: Bool
+    var buyerTTFTCeilingMS: Int
 }
 
 struct AutotuneCandidateScore: Equatable {
@@ -1431,6 +1563,9 @@ struct AutotuneCandidateScore: Equatable {
     var confidence: String
     var why: String
     var rawScore: Double
+    var benchGateProvenance: CandidateCatalog.BenchGate.Provenance
+    var benchGateDrift: [String]
+    var buyerTTFTCeilingExceeded: Bool
 }
 
 struct AutotuneRecommendResult: Equatable {
@@ -1542,6 +1677,15 @@ struct AutotuneRecommendEngine {
             )
             let measuredTPS = benchmark?.sustainedTPS ?? 0
             let tps = measuredTPS.isFinite ? measuredTPS : 0
+            let benchGateDrift = benchmark.map {
+                Self.advisoryBenchmarkWarnings($0, candidate: candidate)
+                    .map(\.rawValue)
+                    .sorted()
+            } ?? []
+            let buyerTTFTCeilingExceeded = Self.buyerTTFTCeilingExceeded(
+                benchmark,
+                request: request
+            )
             let rateRow = rateMatch?.row
             let promptUSD = rateRow?.usdPerMillionPromptTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
@@ -1551,7 +1695,7 @@ struct AutotuneRecommendEngine {
             let shortageScore = demand.effectiveSupplyDeficitMultiplier
             let expectedEarningsScore = payoutScore * max(tps, 0) * demandScore * shortageScore
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
-            let confidence = confidence(warnings: warnings, benchmark: benchmark)
+            let confidence = confidence(warnings: warnings, benchmark: benchmark, benchGateDrift: benchGateDrift)
             let servedModel = rateMatch.map {
                 request.rateCard.servedModelKey(modelKey: modelKey, rateCardKey: $0.key)
             } ?? modelKey
@@ -1569,9 +1713,13 @@ struct AutotuneRecommendEngine {
                     modelKey: modelKey,
                     candidate: candidate,
                     benchmark: benchmark,
-                    eligible: eligible
+                    eligible: eligible,
+                    buyerTTFTCeilingMS: request.buyerTTFTCeilingMS
                 ),
-                rawScore: expectedEarningsScore.rounded6
+                rawScore: expectedEarningsScore.rounded6,
+                benchGateProvenance: candidate.benchGate.provenance,
+                benchGateDrift: benchGateDrift,
+                buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded
             )
         }
         .sorted { a, b in
@@ -1601,6 +1749,9 @@ struct AutotuneRecommendEngine {
         } : nil
         if eligible.isEmpty {
             warnings.insert(.noEligibleModel)
+            if scored.contains(where: \.buyerTTFTCeilingExceeded) {
+                warnings.insert(.buyerTTFTCeilingExceeded)
+            }
         }
 
         let defaultModel = scored.first?.model
@@ -1675,11 +1826,22 @@ struct AutotuneRecommendEngine {
         guard let benchmark else { return false }
         // SPEC-023 v0.7 (#742): swap is a paid-path hard veto — a locally
         // measured fact that needs no catalog threshold. Signed TPS/TTFT gates
-        // remain advisory QoS warnings. Thermal throttling stays a hard block.
-        // Donor-mode keeps swap advisory (see donorModeCompatible).
+        // remain advisory QoS warnings. The buyer TTFT ceiling is separate
+        // operator policy and vetoes paid recommendations only. Thermal
+        // throttling stays a hard block. Donor-mode keeps swap advisory (see
+        // donorModeCompatible).
         return !benchmark.thermalThrottleDetected
             && !benchmark.swapDetected
+            && !Self.buyerTTFTCeilingExceeded(benchmark, request: request)
             && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
+    }
+
+    static func buyerTTFTCeilingExceeded(
+        _ benchmark: CandidateBenchmark?,
+        request: AutotuneRecommendRequest
+    ) -> Bool {
+        guard request.buyerTTFTCeilingMS > 0, let benchmark else { return false }
+        return benchmark.ttftMS > request.buyerTTFTCeilingMS
     }
 
     static func donorModeAdmitted(
@@ -1769,12 +1931,17 @@ struct AutotuneRecommendEngine {
         return request.generatedAt.timeIntervalSince(benchmark.generatedAt) <= maxBenchmarkAge
     }
 
-    private func confidence(warnings: Set<AutotuneRecommendWarning>, benchmark: CandidateBenchmark?) -> String {
+    private func confidence(
+        warnings: Set<AutotuneRecommendWarning>,
+        benchmark: CandidateBenchmark?,
+        benchGateDrift: [String]
+    ) -> String {
         if !Self.paidTrustBlockingWarnings.isDisjoint(with: warnings)
             || (warnings.contains(.rateCardFallbackUsed) && warnings.contains(.demandRankFallbackUsed))
             || warnings.contains(.hardwareTierUnknown)
             || warnings.contains(.demandRankStale)
-            || warnings.contains(.candidateCatalogStale) {
+            || warnings.contains(.candidateCatalogStale)
+            || !benchGateDrift.isEmpty {
             return "low"
         }
         if warnings.contains(.rateCardFallbackUsed) || warnings.contains(.demandRankFallbackUsed) || warnings.contains(.candidateCatalogFallbackUsed) || benchmark == nil {
@@ -1787,7 +1954,8 @@ struct AutotuneRecommendEngine {
         modelKey: String,
         candidate: CandidateCatalog.Row,
         benchmark: CandidateBenchmark?,
-        eligible: Bool
+        eligible: Bool,
+        buyerTTFTCeilingMS: Int
     ) -> String {
         if eligible {
             if let benchmark {
@@ -1803,6 +1971,9 @@ struct AutotuneRecommendEngine {
         }
         if benchmark?.swapDetected == true {
             return "\(modelKey) did not clear the swap recommendation gate (swap detected under probe load).".prefixString(140)
+        }
+        if buyerTTFTCeilingMS > 0, let benchmark, benchmark.ttftMS > buyerTTFTCeilingMS {
+            return "\(modelKey) did not clear the buyer TTFT ceiling (\(benchmark.ttftMS)ms > \(buyerTTFTCeilingMS)ms).".prefixString(140)
         }
         return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }
@@ -1825,9 +1996,24 @@ extension AutotuneRecommendResult {
     }
 
     private static func candidateJSON(_ candidate: AutotuneCandidateScore) -> String {
+        let driftJSON = candidate.benchGateDrift.map(\.jsonEscaped).joined(separator: ",")
+        return """
+        {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"prompt_rate_usd_per_million_tokens":\(candidate.promptRateUSDPerMillionTokens.jsonNumber),"completion_rate_usd_per_million_tokens":\(candidate.completionRateUSDPerMillionTokens.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped),"raw_score":\(candidate.rawScore.jsonNumber),"bench_gate_provenance":\(benchGateProvenanceJSON(candidate.benchGateProvenance)),"bench_gate_drift":[\(driftJSON)],"buyer_ttft_ceiling_exceeded":\(candidate.buyerTTFTCeilingExceeded)}
         """
-        {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"prompt_rate_usd_per_million_tokens":\(candidate.promptRateUSDPerMillionTokens.jsonNumber),"completion_rate_usd_per_million_tokens":\(candidate.completionRateUSDPerMillionTokens.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped),"raw_score":\(candidate.rawScore.jsonNumber)}
-        """
+    }
+
+    private static func benchGateProvenanceJSON(_ provenance: CandidateCatalog.BenchGate.Provenance) -> String {
+        var fields = ["\"source\":\(provenance.source.jsonEscaped)"]
+        if let hardware = provenance.hardware {
+            fields.append("\"hardware\":\(hardware.jsonEscaped)")
+        }
+        if let measuredAt = provenance.measuredAt {
+            fields.append("\"measured_at\":\(measuredAt.jsonEscaped)")
+        }
+        if let notes = provenance.notes {
+            fields.append("\"notes\":\(notes.jsonEscaped)")
+        }
+        return "{\(fields.joined(separator: ","))}"
     }
 
     private static func serveConfigJSON(_ core: RecommendationCore, donorMode: Bool) -> String {
