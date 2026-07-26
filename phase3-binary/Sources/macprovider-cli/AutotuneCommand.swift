@@ -42,10 +42,13 @@ struct AutotuneCommand: AsyncParsableCommand {
     /// Path-dependent default (#742 / AC-3):
     /// - classic Stage 1/2 (SPEC-013): omitted → 60_000 ms
     /// - paid `--recommend` (SPEC-023): omitted → disabled (0); no 60s default
-    /// Explicit `0` disables the ceiling on either path. Absolute buyer-facing
-    /// TTFT bounds land with selection-quality work (#744).
+    /// Explicit `0` disables the ceiling on either path. Buyer-facing paid
+    /// selection has a separate post-measurement ceiling below.
     @Option(name: .customLong("gate-ttft-ms"), help: "Maximum p95 TTFT in milliseconds for Stage 1/2 feasibility. 0 disables the ceiling. Classic autotune defaults to 60000 when omitted; --recommend has no TTFT default.")
     var gateTTFTMS: Int?
+
+    @Option(name: .customLong("buyer-ttft-ceiling-ms"), help: "With --recommend, maximum measured p95 TTFT in milliseconds allowed for paid recommendation selection. 0 disables the paid selection ceiling.")
+    var buyerTTFTCeilingMS = 0
 
     @Option(help: "Relative throughput tie band for TTFT tiebreak.")
     var tpsTieEpsilon = 0.02
@@ -713,6 +716,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         if let gateTTFTMS, gateTTFTMS < 0 {
             throw ValidationError("--gate-ttft-ms must be >= 0 (0 disables the TTFT feasibility ceiling)")
         }
+        guard buyerTTFTCeilingMS >= 0 else {
+            throw ValidationError("--buyer-ttft-ceiling-ms must be >= 0 (0 disables the paid selection ceiling)")
+        }
+        if buyerTTFTCeilingMS > 0 && !recommend {
+            throw ValidationError("--buyer-ttft-ceiling-ms requires --recommend")
+        }
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
         }
@@ -857,7 +866,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             benchmarks: [:],
             warnings: warnings,
             generatedAt: now,
-            donorMode: donorMode
+            donorMode: donorMode,
+            buyerTTFTCeilingMS: buyerTTFTCeilingMS
         )
         let outcomes = try await AutotuneRecommendationBenchmarker().benchmarks(
             request: request,

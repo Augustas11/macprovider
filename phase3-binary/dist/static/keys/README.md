@@ -2,8 +2,11 @@
 
 ## What's in this directory
 
-- `autotune-static-v4.public.base64` — base64 of the 32-byte raw
-  Curve25519 (Ed25519) **public** key. Also baked verbatim into
+- `autotune-static-v5.public.base64` — bridge public key staged for the
+  next static-feed signer rotation. It is trusted by bridge builds but
+  does not sign the current live feed in this PR.
+- `autotune-static-v4.public.base64` — current live static-feed public key,
+  base64 of the 32-byte raw Curve25519 (Ed25519) **public** key. Also baked verbatim into
   [`AutotuneRecommend.swift`](../../../Sources/macprovider-cli/AutotuneRecommend.swift)
   as `autotune_static_json_ed25519_v4`. Committing the public key here
   makes it easy to spot rotations in `git log`.
@@ -19,10 +22,12 @@ The signing script that consumes the private key is
 
 ## Where the private key lives
 
-The signer looks for the private key in this order:
+The signer looks for the private key in this order for the selected
+`AUTOTUNE_STATIC_KEY_ID`:
 
-1. `$AUTOTUNE_STATIC_V4_PRIVATE_KEY_PATH` — explicit env override.
-2. `$HOME/.config/macprovider/keys/autotune-static-v4.private.base64`
+1. `$AUTOTUNE_STATIC_PRIVATE_KEY_PATH` — explicit env override.
+2. `$AUTOTUNE_STATIC_V4_PRIVATE_KEY_PATH` — legacy v4 explicit env override.
+3. `$HOME/.config/macprovider/keys/autotune-static-<version>.private.base64`
    — the operator's local default. Expected `chmod 0600`.
 
 The script refuses to run if the key file is world-readable (permissions
@@ -70,6 +75,7 @@ Additional defenses in depth:
 | v2      | `streamvc-autotune-static-v2`  | 2026-07-01 | Initial SPEC-023 signed-feed release. Private key held by operator.                                                                                                                                        |
 | v3      | `streamvc-autotune-static-v3`  | 2026-07-03 | v1.7.10 rotation. Fresh keypair generated to accompany the M-Base-realistic `min_sustained_tps` catalog cuts. Private key kept off-repo per standard operational practice; only the public key ships here. |
 | v4      | `streamvc-autotune-static-v4`  | 2026-07-06 | Issue 411 rotation. The local v3 private key was unavailable, so the Nemotron feed update rotates to v4 and commits freshly signed static sidecars. Private key remains off-repo at the v4 path above. |
+| v5      | `streamvc-autotune-static-v5`  | 2026-07-26 | Issue 744 bridge key staged because the local v4 private key was unavailable for future provenance catalog signing. This PR trusts v5 as `bridge` while production continues to publish the v4-signed feed. First v5-signed feed activation is a separate rollout after bridge adoption. |
 
 ## Generating a fresh key
 

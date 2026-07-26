@@ -136,6 +136,19 @@ rejected("timezone-less generated_at", lambda: module.validate_candidate(module.
 candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
 candidate["version"] = " padded-release "
 rejected("padded candidate version", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
+candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
+rejected("publish candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate), require_provenance=True))
+candidate["version"] = "new-release"
+rejected("new release candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
+candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
+next(iter(candidate["rows"].values()))["min_ram_gb"] += 1
+rejected("mutated legacy candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
+candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
+next(iter(candidate["rows"].values()))["bench_gate"]["provenance"] = {"source": "legacy_unverified", "notes": None}
+rejected("null provenance notes", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
+candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
+next(iter(candidate["rows"].values()))["bench_gate"]["provenance"] = None
+rejected("null provenance object", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
 demand = json.loads((canonical / "demand-rank.json").read_bytes())
 demand["version"] = " padded-release "
 rejected("padded demand version", lambda: module.validate_demand(module.canonical_bytes(demand)))
@@ -203,6 +216,7 @@ expected_history = {
     "published-2026-07-06",
     "published-2026-07-06-mbase-lite",
     "published-2026-07-07-p1-gemma",
+    "published-2026-07-10-catalog-recovery-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:
@@ -378,8 +392,13 @@ with tempfile.TemporaryDirectory() as directory:
         raise SystemExit("derive-tier2 must remain disabled until snapshot-manifest scope exists")
 
     conflicted = json.loads(candidate)
+    for bridge_row in conflicted["rows"].values():
+        bridge_row["bench_gate"] = dict(bridge_row["bench_gate"])
+        bridge_row["bench_gate"]["provenance"] = {"source": "legacy_unverified", "notes": "duplicate-hash fixture"}
     first_key = next(iter(conflicted["rows"]))
     row = dict(conflicted["rows"][first_key])
+    row["bench_gate"] = dict(row["bench_gate"])
+    row["bench_gate"]["provenance"] = {"source": "legacy_unverified", "notes": "duplicate-hash fixture"}
     row["model_sha256"] = "a" * 64
     conflicted["rows"][first_key + "-dup"] = row
     try:

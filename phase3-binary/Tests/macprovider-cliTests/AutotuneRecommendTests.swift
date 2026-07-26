@@ -108,7 +108,10 @@ final class AutotuneRecommendTests: XCTestCase {
         let demandSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("demand-rank.json.sig"))
         let catalogBytes = try Data(contentsOf: staticDir.appendingPathComponent("autotune-candidates.json"))
         let catalogSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("autotune-candidates.json.sig"))
-        let publicKeyBytes = try Data(contentsOf: staticDir.appendingPathComponent("keys/autotune-static-v4.public.base64"))
+        let publicKeyFile = AutotuneStaticInputs.keyID == "streamvc-autotune-static-v4"
+            ? "keys/autotune-static-v4.public.base64"
+            : "keys/autotune-static-v5.public.base64"
+        let publicKeyBytes = try Data(contentsOf: staticDir.appendingPathComponent(publicKeyFile))
 
         XCTAssertEqual(String(decoding: publicKeyBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), AutotuneStaticInputs.publicKeyBase64)
         XCTAssertTrue(Self.sidecar(demandSigBytes, hasKeyID: AutotuneStaticInputs.keyID))
@@ -608,19 +611,13 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(equivalentPolicy.rowIdentity(for: "fixture"), identity)
     }
 
-    func testRateCardFallsThroughToDefaultForArbitraryModelKey() throws {
-        // v1.7.6 Track A1: any model without a specific rate-card row
-        // falls through to the "default" row so probe-feasible models
-        // still receive an earnings estimate. Coord's `RateFor` at
-        // phase4-coordinator/internal/billing/formula.go already pays
-        // the default rate for served inference on unmatched models —
-        // client now agrees.
+    func testRateCardDoesNotUseDefaultForArbitraryRecommendationModelKey() throws {
         let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
         {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
         """.utf8))
 
-        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct")?.key, "default")
-        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "meta-llama/llama-3.1-8b-instruct")?.key, "default")
+        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct"))
+        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "meta-llama/llama-3.1-8b-instruct"))
         XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "default")?.key, "default")
     }
 
@@ -857,6 +854,105 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
+    func testBuyerTTFTCeilingBlocksPaidRecommendationWithoutUsingCatalogGate() throws {
+        var request = try makeRequest()
+        request.buyerTTFTCeilingMS = 1_800
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        let catalogCeiling = try XCTUnwrap(request.candidateCatalog.rows[modelKey]).benchGate.max4KTTFTMS
+        XCTAssertGreaterThan(catalogCeiling, request.buyerTTFTCeilingMS)
+        benchmark.ttftMS = request.buyerTTFTCeilingMS + 1
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.buyerTTFTCeilingExceeded))
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        let scored = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey })
+        XCTAssertFalse(scored.eligible)
+        XCTAssertTrue(scored.buyerTTFTCeilingExceeded)
+        XCTAssertTrue(scored.why.contains("buyer TTFT ceiling"))
+        XCTAssertFalse(result.warnings.contains(.ttftAboveGate))
+    }
+
+    func testBuyerTTFTCeilingStillBlocksPaidRecommendationInDonorMode() throws {
+        var request = try makeRequest()
+        request.donorMode = true
+        request.buyerTTFTCeilingMS = 1_800
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.ttftMS = request.buyerTTFTCeilingMS + 1
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.buyerTTFTCeilingExceeded))
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertEqual(result.donorFallbackModel, modelKey)
+        let scored = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey })
+        XCTAssertFalse(scored.eligible)
+        XCTAssertTrue(scored.buyerTTFTCeilingExceeded)
+    }
+
+    func testBuyerTTFTCeilingSelectsNextCleanPaidCandidate() throws {
+        var request = try makeMultiCandidateRequest(modelKeys: [
+            "qwen3-coder-30b-a3b-instruct",
+            "openai/gpt-oss-20b",
+        ])
+        request.buyerTTFTCeilingMS = 1_800
+        let blockedKey = "qwen3-coder-30b-a3b-instruct"
+        var blocked = try XCTUnwrap(request.benchmarks[blockedKey])
+        blocked.ttftMS = request.buyerTTFTCeilingMS + 1
+        request.benchmarks[blockedKey] = blocked
+
+        let fallbackKey = "openai/gpt-oss-20b"
+        var fallback = try XCTUnwrap(request.benchmarks[blockedKey])
+        let fallbackRow = try XCTUnwrap(request.candidateCatalog.rows[fallbackKey])
+        fallback.modelKey = fallbackKey
+        fallback.sustainedTPS = 40
+        fallback.ttftMS = request.buyerTTFTCeilingMS
+        fallback.artifactSHA256 = try XCTUnwrap(fallbackRow.modelSHA256)
+        fallback.modelArtifactPath = "/tmp/\(fallbackKey)"
+        fallback.modelID = fallbackRow.modelID
+        request.benchmarks[fallbackKey] = fallback
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, fallbackKey)
+        XCTAssertFalse(result.warnings.contains(.buyerTTFTCeilingExceeded))
+        XCTAssertTrue(try XCTUnwrap(result.allCandidates.first { $0.catalogKey == blockedKey }).buyerTTFTCeilingExceeded)
+        XCTAssertFalse(try XCTUnwrap(result.selectedCandidate).buyerTTFTCeilingExceeded)
+    }
+
+    func testRecommendationJSONCarriesBenchGateProvenanceAndDrift() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        request.candidateCatalog.rows[modelKey]?.benchGate.provenance = CandidateCatalog.BenchGate.Provenance(
+            source: "measured_single_host",
+            hardware: "M5 32GB",
+            measuredAt: "2026-07-25",
+            notes: "fixture"
+        )
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.sustainedTPS = 1
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let candidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        let provenance = try XCTUnwrap(candidate["bench_gate_provenance"] as? [String: Any])
+        let drift = try XCTUnwrap(candidate["bench_gate_drift"] as? [String])
+
+        XCTAssertEqual(provenance["source"] as? String, "measured_single_host")
+        XCTAssertEqual(provenance["hardware"] as? String, "M5 32GB")
+        XCTAssertEqual(provenance["measured_at"] as? String, "2026-07-25")
+        XCTAssertEqual(drift, ["tps_below_gate"])
+        XCTAssertEqual(candidate["confidence"] as? String, "low")
+        XCTAssertEqual(candidate["buyer_ttft_ceiling_exceeded"] as? Bool, false)
+    }
+
     func testJSONCandidatesExcludeIneligibleDiagnosticsWhenEligibleRowsExist() throws {
         let eligibleKey = "qwen3-coder-30b-a3b-instruct"
         let diagnosticKey = "diagnostic-listed-row"
@@ -994,27 +1090,27 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-10-catalog-recovery-v1", with: "fetched-2026-07-15")
-            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-15T00:00:00Z")
+            .replacingOccurrences(of: "published-2026-07-10-catalog-recovery-v1", with: "fetched-2026-08-10")
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-08-10T00:00:00Z")
             .utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
         let staleInputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : validFetched },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-07-30T00:00:00Z") }
+            now: { Self.date("2026-08-25T00:00:00Z") }
         )
 
         let stale = await staleInputs.loadDemandRank()
 
         XCTAssertFalse(stale.usedFallback)
-        XCTAssertEqual(stale.value.version, "fetched-2026-07-15")
+        XCTAssertEqual(stale.value.version, "fetched-2026-08-10")
         XCTAssertTrue(stale.warnings.contains(.demandRankStale))
 
         let fallbackInputs = AutotuneStaticInputs(
             fetch: { _ in validFetched },
             verifySignature: { _, _ in false },
-            now: { Self.date("2026-07-30T00:00:00Z") }
+            now: { Self.date("2026-08-25T00:00:00Z") }
         )
         let fallback = await fallbackInputs.loadDemandRank()
         XCTAssertTrue(fallback.usedFallback)
@@ -1030,7 +1126,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : fetched },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-07-11T00:00:00Z") }
+            now: { Self.date("2026-07-26T17:00:00Z") }
         )
 
         let selection = await inputs.loadDemandRank()
@@ -1046,7 +1142,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             verifySignature: { _, _ in true },
-            now: { Self.date("2026-07-11T00:00:00Z") }
+            now: { Self.date("2026-07-26T17:00:00Z") }
         )
 
         let selection = await inputs.loadDemandRank()
@@ -1096,7 +1192,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-07-11T00:00:00Z") }
+            now: { Self.date("2026-07-26T17:00:00Z") }
         )
 
         let selection = await inputs.loadDemandRank()
@@ -1122,7 +1218,7 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testPinnedPublicKeyIsValidCurve25519SigningKey() {
-        let keyData = Data(base64Encoded: AutotuneStaticInputs.autotune_static_json_ed25519_v4)
+        let keyData = Data(base64Encoded: AutotuneStaticInputs.publicKeyBase64)
 
         XCTAssertEqual(keyData?.count, 32)
         XCTAssertNotNil(try? Curve25519.Signing.PublicKey(rawRepresentation: try XCTUnwrap(keyData)))
@@ -1141,6 +1237,40 @@ final class AutotuneRecommendTests: XCTestCase {
     func testCandidateCatalogRejectsUppercaseRevisionAndSHA() throws {
         let json = """
         {"version":"test","generated_at":"2026-07-01T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"model-a":{"model_id":"namespace/model","model_revision":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","model_sha256":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}
+        """
+
+        XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(Data(json.utf8)))
+    }
+
+    func testCandidateCatalogBackfillsLegacyBenchGateProvenance() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let row = try XCTUnwrap(catalog.rows["qwen2.5-coder-32b-instruct"])
+        XCTAssertEqual(row.benchGate.provenance.source, "policy")
+        XCTAssertEqual(row.benchGate.provenance.notes, "#744 audit: gate set by operator policy to broaden eligibility.")
+    }
+
+    func testCandidateCatalogRejectsMutatedLegacyBridgeWithoutProvenance() throws {
+        let json = AutotuneStaticInputs.bakedCandidateCatalogJSON.replacingOccurrences(
+            of: "\"min_ram_gb\":48",
+            with: "\"min_ram_gb\":47",
+            options: [],
+            range: AutotuneStaticInputs.bakedCandidateCatalogJSON.range(of: "\"min_ram_gb\":48")
+        )
+
+        XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(Data(json.utf8)))
+    }
+
+    func testCandidateCatalogRejectsMissingBenchGateProvenanceOutsideLegacyBridge() throws {
+        let json = """
+        {"version":"new-release","generated_at":"2026-07-26T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"model-a":{"model_id":"mlx-community/Test-Model-4bit","model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}
+        """
+
+        XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(Data(json.utf8)))
+    }
+
+    func testCandidateCatalogRejectsNullBenchGateProvenanceOptional() throws {
+        let json = """
+        {"version":"new-release","generated_at":"2026-07-26T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"model-a":{"model_id":"mlx-community/Test-Model-4bit","model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":null}},"runtime_status":"recommendable"}}}
         """
 
         XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(Data(json.utf8)))
@@ -2276,7 +2406,12 @@ final class AutotuneRecommendTests: XCTestCase {
         let olderDemand = Data(AutotuneStaticInputs.bakedDemandRankJSON
             .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-07T12:00:00Z")
             .utf8)
-        let olderCatalog = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON
+        let explicitProvenanceCatalog = AutotuneStaticInputs.bakedCandidateCatalogJSON
+            .replacingOccurrences(
+                of: "\"bench_gate\":{\"min_sustained_tps\":",
+                with: "\"bench_gate\":{\"provenance\":{\"source\":\"legacy_unverified\",\"notes\":\"freshness fixture\"},\"min_sustained_tps\":"
+            )
+        let olderCatalog = Data(explicitProvenanceCatalog
             .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-07T12:00:00Z")
             .utf8)
         let staticInputs = AutotuneStaticInputs(
@@ -2335,14 +2470,12 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
-    // MARK: - Default-tier fallthrough + swap tolerance (v1.7.6 Track A1/A2a)
+    // MARK: - Rate-card recommendation gates + swap tolerance
 
-    func testRecommendationEmitsRateCardDefaultTierWarningWhenSpecificRowMissing() throws {
+    func testRecommendationRejectsModelWhenOnlyDefaultRateCardRowMatches() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
-        // Drop the specific row so the engine has to fall through to "default".
         request.rateCard.rows.removeValue(forKey: modelKey)
-        // Provide a default row so the fallthrough resolves.
         request.rateCard.rows["default"] = RateCardProjection.Row(
             promptRatePerMtok: 500_000,
             completionRatePerMtok: 1_000_000,
@@ -2352,12 +2485,11 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertTrue(result.warnings.contains(.rateCardDefaultTierUsed))
-        // v1.7.6 Track A1 correction: the SERVED model is the catalog model
-        // (what MLX will actually load), not the pricing key. Only the
-        // rate-card row used for earnings math resolves to "default".
-        XCTAssertEqual(result.recommendedModel, modelKey)
-        XCTAssertEqual(result.selectedCandidate?.catalogKey, modelKey)
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertNil(result.selectedCandidate)
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertFalse(result.warnings.contains(.rateCardDefaultTierUsed))
+        XCTAssertFalse(try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey }).eligible)
     }
 
     func testRecommendationNoDefaultTierWarningWhenSpecificRowPresent() throws {
@@ -2989,7 +3121,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     private static func policyIdentityCatalogJSON() -> String {
         """
-        {"version":"policy-identity-v1","generated_at":"2026-07-10T20:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"fixture":{"model_id":"mlx-community/Fixture-4bit","model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":8,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable","draft_candidates":[{"draft_model":"mlx-community/Fixture-Draft-4bit","draft_model_artifact_sha256":"\(String(repeating: "0", count: 64))"}],"workload_profiles":{"short_chat":{"8gb":{"status":"no_winner","no_winner_reason":"no_cells_evaluated","gate_policy":{"min_samples":20,"max_p95_ttft_ms":8000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":null,"p95_ttft_ms":null,"stop_token_leak_rate":null,"spec_decode_acceptance_rate":null,"sample_count":0},"source":"shared-schema-corpus"}}}}}}
+        {"version":"policy-identity-v1","generated_at":"2026-07-10T20:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"fixture":{"model_id":"mlx-community/Fixture-4bit","model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":8,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable","draft_candidates":[{"draft_model":"mlx-community/Fixture-Draft-4bit","draft_model_artifact_sha256":"\(String(repeating: "0", count: 64))"}],"workload_profiles":{"short_chat":{"8gb":{"status":"no_winner","no_winner_reason":"no_cells_evaluated","gate_policy":{"min_samples":20,"max_p95_ttft_ms":8000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":null,"p95_ttft_ms":null,"stop_token_leak_rate":null,"spec_decode_acceptance_rate":null,"sample_count":0},"source":"shared-schema-corpus"}}}}}}
         """
     }
 
@@ -3024,7 +3156,11 @@ final class AutotuneRecommendTests: XCTestCase {
               "min_bandwidth_tier": "C",
               "bench_gate": {
                 "min_sustained_tps": 1,
-                "max_4k_ttft_ms": 1000
+                "max_4k_ttft_ms": 1000,
+                "provenance": {
+                  "source": "legacy_unverified",
+                  "notes": "test fixture"
+                }
               },
               "runtime_status": "recommendable"\(draftCandidatesLine),
               "workload_profiles": \(workloadProfilesJSON)\(rowExtraLine)
@@ -3148,7 +3284,8 @@ final class AutotuneRecommendTests: XCTestCase {
             benchmarks: benchmarks,
             warnings: [],
             generatedAt: generatedAt,
-            donorMode: false
+            donorMode: false,
+            buyerTTFTCeilingMS: 0
         )
     }
 
@@ -3243,7 +3380,8 @@ final class AutotuneRecommendTests: XCTestCase {
             benchmarks: [modelKey: benchmark],
             warnings: [],
             generatedAt: generatedAt,
-            donorMode: false
+            donorMode: false,
+            buyerTTFTCeilingMS: 0
         )
     }
 

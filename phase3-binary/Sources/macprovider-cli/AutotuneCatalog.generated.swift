@@ -12,6 +12,7 @@ extension AutotuneStaticInputs {
 
     static let generatedTrustedPublicKeys = [
         "streamvc-autotune-static-v4": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
+        "streamvc-autotune-static-v5": "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA=",
     ]
 
     static let bakedCatalogSignerKeyID: String? = "streamvc-autotune-static-v4"

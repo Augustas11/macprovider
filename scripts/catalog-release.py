@@ -40,6 +40,19 @@ TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_en
 TIER2_SIG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+LEGACY_MISSING_PROVENANCE_RELEASE = "published-2026-07-10-catalog-recovery-v1"
+LEGACY_MISSING_PROVENANCE_CANDIDATE_SHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
+LEGACY_MISSING_PROVENANCE_ROWS = frozenset({
+    "qwen3-coder-30b-a3b-instruct",
+    "openai/gpt-oss-20b",
+    "google-gemma-4-26b-a4b-it",
+    "qwen3-8b",
+    "meta-llama/llama-3.1-8b-instruct",
+    "meta-llama/llama-3.2-3b-instruct",
+    "qwen3-32b",
+    "qwen2.5-coder-32b-instruct",
+    "nvidia/nemotron-3-nano-30b-a3b",
+})
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
@@ -211,8 +224,9 @@ def validate_candidate_workloads(row: dict, row_key: str) -> None:
                 fail(f"candidate row {row_key}: speculative recommendation is not bound to draft_candidates")
 
 
-def validate_candidate(data: bytes) -> dict:
+def validate_candidate(data: bytes, *, require_provenance: bool = False) -> dict:
     value = strict_json(data, "autotune-candidates")
+    candidate_hash = sha256(data)
     top = {"version", "generated_at", "source", "policy_version", "rows"}
     exact_keys(value, top, {"version", "generated_at", "source", "policy_version", "rows"}, "autotune-candidates")
     if value["source"] != "operator_curated_autotune_candidate_catalog":
@@ -252,11 +266,47 @@ def validate_candidate(data: bytes) -> dict:
         gate = row["bench_gate"]
         if not isinstance(gate, dict):
             fail(f"candidate row {key}: bench_gate must be an object")
-        exact_keys(gate, {"min_sustained_tps", "max_4k_ttft_ms"}, {"min_sustained_tps", "max_4k_ttft_ms"}, f"candidate row {key} bench_gate")
+        required_gate_fields = {"min_sustained_tps", "max_4k_ttft_ms"}
+        if (
+            require_provenance
+            or candidate_hash != LEGACY_MISSING_PROVENANCE_CANDIDATE_SHA256
+            or value["version"] != LEGACY_MISSING_PROVENANCE_RELEASE
+            or key not in LEGACY_MISSING_PROVENANCE_ROWS
+        ):
+            required_gate_fields.add("provenance")
+        exact_keys(
+            gate,
+            {"min_sustained_tps", "max_4k_ttft_ms", "provenance"},
+            required_gate_fields,
+            f"candidate row {key} bench_gate",
+        )
         if not isinstance(gate["min_sustained_tps"], (int, float)) or isinstance(gate["min_sustained_tps"], bool) or not math.isfinite(gate["min_sustained_tps"]) or gate["min_sustained_tps"] < 0:
             fail(f"candidate row {key}: invalid min_sustained_tps")
         if not isinstance(gate["max_4k_ttft_ms"], int) or isinstance(gate["max_4k_ttft_ms"], bool) or gate["max_4k_ttft_ms"] < 0:
             fail(f"candidate row {key}: invalid max_4k_ttft_ms")
+        if "provenance" in gate and gate["provenance"] is None:
+            fail(f"candidate row {key}: bench_gate.provenance must be an object")
+        provenance = gate.get("provenance")
+        if provenance is not None:
+            if not isinstance(provenance, dict):
+                fail(f"candidate row {key}: bench_gate.provenance must be an object")
+            provenance_fields = {"source", "hardware", "measured_at", "notes"}
+            exact_keys(provenance, provenance_fields, {"source"}, f"candidate row {key} bench_gate provenance")
+            if provenance["source"] not in {
+                "measured_single_host",
+                "runtime_validated_only",
+                "policy",
+                "no_throughput_bench",
+                "never_benched",
+                "legacy_unverified",
+            }:
+                fail(f"candidate row {key}: invalid bench_gate provenance source")
+            for optional_field in ("hardware", "measured_at", "notes"):
+                if optional_field in provenance and (
+                    not isinstance(provenance[optional_field], str)
+                    or not provenance[optional_field].strip()
+                ):
+                    fail(f"candidate row {key}: invalid bench_gate provenance {optional_field}")
         validate_candidate_workloads(row, key)
     # Reject keys that equal some model_id's normalized form while declaring a
     # different model_id. Go HighestClaimedTier prefers rowsByKey[normalized]
@@ -1449,7 +1499,7 @@ def updated_release_ledger(manifest_bytes: bytes) -> bytes:
 def generate(signer_key_id: str | None = None) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
-    candidate_obj = validate_candidate(candidate_path.read_bytes())
+    candidate_obj = validate_candidate(candidate_path.read_bytes(), require_provenance=True)
     demand_obj = validate_demand(demand_path.read_bytes())
     validate_pair(candidate_obj, demand_obj)
     candidate = canonical_bytes(candidate_obj)
@@ -1519,6 +1569,10 @@ def bootstrap(release_id: str, generated_at: str, policy_version: str) -> None:
                 "streamvc-autotune-static-v4": {
                     "public_key_base64": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
                     "status": "active",
+                },
+                "streamvc-autotune-static-v5": {
+                    "public_key_base64": "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA=",
+                    "status": "bridge",
                 }
             },
         }

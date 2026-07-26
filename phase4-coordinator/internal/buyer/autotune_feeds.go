@@ -21,11 +21,13 @@ import (
 )
 
 const (
-	maxAutotuneFeedBytes    = 4 << 20
-	maxAutotuneSidecarBytes = 16 << 10
-	candidateCatalogSource  = "operator_curated_autotune_candidate_catalog"
-	demandRankSource        = "openrouter_completion_token_rank_operator_curated"
-	demandSupplySource      = "macprovider_buyer_supply_deficit_v1"
+	maxAutotuneFeedBytes                    = 4 << 20
+	maxAutotuneSidecarBytes                 = 16 << 10
+	candidateCatalogSource                  = "operator_curated_autotune_candidate_catalog"
+	demandRankSource                        = "openrouter_completion_token_rank_operator_curated"
+	demandSupplySource                      = "macprovider_buyer_supply_deficit_v1"
+	legacyMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
+	legacyMissingProvenanceCandidateSHA256  = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
 )
 
 var (
@@ -404,8 +406,34 @@ type candidateWorkloadProfile struct {
 }
 
 type candidateBenchGate struct {
-	MinSustainedTPS *float64 `json:"min_sustained_tps"`
-	Max4KTTFTMS     *int     `json:"max_4k_ttft_ms"`
+	MinSustainedTPS *float64                  `json:"min_sustained_tps"`
+	Max4KTTFTMS     *int                      `json:"max_4k_ttft_ms"`
+	Provenance      *candidateBenchProvenance `json:"provenance"`
+}
+
+type candidateBenchProvenance struct {
+	Source     string                   `json:"source"`
+	Hardware   optionalProvenanceString `json:"hardware,omitempty"`
+	MeasuredAt optionalProvenanceString `json:"measured_at,omitempty"`
+	Notes      optionalProvenanceString `json:"notes,omitempty"`
+}
+
+type optionalProvenanceString struct {
+	present bool
+	value   string
+}
+
+func (v *optionalProvenanceString) UnmarshalJSON(raw []byte) error {
+	v.present = true
+	if bytes.Equal(raw, []byte("null")) {
+		return fmt.Errorf("must be a non-null string")
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	v.value = value
+	return nil
 }
 
 func validateCandidateCatalogFeed(raw []byte) (feedRelease, error) {
@@ -417,6 +445,8 @@ func validateCandidateCatalogFeed(raw []byte) (feedRelease, error) {
 	if err != nil {
 		return feedRelease{}, err
 	}
+	digest := sha256.Sum256(raw)
+	digestHex := hex.EncodeToString(digest[:])
 	allowedStatuses := map[string]struct{}{
 		"candidate":     {},
 		"listed":        {},
@@ -457,11 +487,58 @@ func validateCandidateCatalogFeed(raw []byte) (feedRelease, error) {
 		if row.BenchGate.Max4KTTFTMS == nil || *row.BenchGate.Max4KTTFTMS < 0 {
 			return feedRelease{}, fmt.Errorf("row %q bench_gate.max_4k_ttft_ms must be >= 0", key)
 		}
+		if err := validateCandidateBenchGateProvenance(release.version, digestHex, key, row.BenchGate.Provenance); err != nil {
+			return feedRelease{}, err
+		}
 		if err := validateCandidateWorkloads(key, row); err != nil {
 			return feedRelease{}, err
 		}
 	}
 	return release, nil
+}
+
+func validateCandidateBenchGateProvenance(releaseVersion, candidateSHA256, rowKey string, provenance *candidateBenchProvenance) error {
+	if provenance == nil {
+		if candidateSHA256 == legacyMissingProvenanceCandidateSHA256 &&
+			releaseVersion == legacyMissingProvenanceCandidateRelease &&
+			legacyMissingProvenanceCandidateRows[rowKey] {
+			return nil
+		}
+		return fmt.Errorf("row %q bench_gate.provenance is required", rowKey)
+	}
+	allowedSources := map[string]struct{}{
+		"measured_single_host":   {},
+		"runtime_validated_only": {},
+		"policy":                 {},
+		"no_throughput_bench":    {},
+		"never_benched":          {},
+		"legacy_unverified":      {},
+	}
+	if _, ok := allowedSources[provenance.Source]; !ok {
+		return fmt.Errorf("row %q bench_gate.provenance.source is invalid", rowKey)
+	}
+	for field, value := range map[string]optionalProvenanceString{
+		"hardware":    provenance.Hardware,
+		"measured_at": provenance.MeasuredAt,
+		"notes":       provenance.Notes,
+	} {
+		if value.present && strings.TrimSpace(value.value) == "" {
+			return fmt.Errorf("row %q bench_gate.provenance.%s must be non-empty when present", rowKey, field)
+		}
+	}
+	return nil
+}
+
+var legacyMissingProvenanceCandidateRows = map[string]bool{
+	"qwen3-coder-30b-a3b-instruct":     true,
+	"openai/gpt-oss-20b":               true,
+	"google-gemma-4-26b-a4b-it":        true,
+	"qwen3-8b":                         true,
+	"meta-llama/llama-3.1-8b-instruct": true,
+	"meta-llama/llama-3.2-3b-instruct": true,
+	"qwen3-32b":                        true,
+	"qwen2.5-coder-32b-instruct":       true,
+	"nvidia/nemotron-3-nano-30b-a3b":   true,
 }
 
 func validateCandidateWorkloads(rowKey string, row candidateRow) error {
