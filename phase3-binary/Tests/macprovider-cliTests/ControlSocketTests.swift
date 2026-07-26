@@ -1,3 +1,4 @@
+import ArgumentParser
 import Darwin
 import Foundation
 import MacProviderCore
@@ -949,6 +950,218 @@ final class ControlSocketTests: XCTestCase {
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payloadJSON.utf8)) as? [String: Any])
         XCTAssertEqual(object["status"] as? String, "unavailable")
         XCTAssertEqual(object["detail"] as? String, "disk_tier_disabled")
+    }
+
+    /// REVERIFY LOW — the disabled-tier disk crypto-shred must be reachable by the
+    /// REAL parsed CLI command, not just a hand-run `tier.purgeAllAndForget()`. This
+    /// drives the actual `KVCachePurgeCommand.run()` (parsed from argv) against a live
+    /// DISABLED-tier control socket, so the `status != "unavailable"` fall-through guard
+    /// in `KVCacheCommand.swift` executes for real. A regression that treats the socket's
+    /// `unavailable`/`disk_tier_disabled` reply as terminal (short-circuiting on the
+    /// `control_socket` branch, or bailing before the standalone shred) is caught here.
+    ///
+    /// UNGATED assertions (always run in CI): the disabled serve cleared RAM (socket was
+    /// hit) and the command fell THROUGH to the standalone path (no `control_socket`
+    /// route in stdout — the guard did not short-circuit). The deep disk+DEK shred
+    /// COMPLETING is keychain-dependent, so it is asserted by OUTCOME: whenever the
+    /// standalone path reports `purge_ok`, the on-disk namespace really is gone (0
+    /// entries); on a host without the Data-Protection Keychain the standalone
+    /// `makeTier` cannot activate and fails closed (`purge_failed`/`io_error`,
+    /// non-zero exit) — still the fall-through, still not a short-circuit.
+    func testKVCachePurgeCLIParsedFallThroughShredsWhenDiskTierDisabled() async throws {
+        let root = try makeKVResidueRoot()
+        let providerID = "prov-kvs-fallthrough"
+        let keychain = KVInMemoryKeychain()
+        // (2) Seed real on-disk KV residue for this namespace via a prior ENABLED run.
+        try await seedCommittedEntry(root: root, namespaceID: providerID, keychain: keychain)
+        let diskBefore = await diskEntryCount(root: root, namespaceID: providerID, keychain: keychain)
+        XCTAssertEqual(diskBefore, 1, "precondition: prior enabled run left one on-disk entry")
+
+        // (1) A running serve with the disk tier DISABLED (tier == nil) + seeded hot RAM.
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        await runtime.seedHotConversationForTest(
+            key: "conv:kvs-synth:cli", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
+        let hotBefore = await runtime.hotConversationStats().entries
+        XCTAssertEqual(hotBefore, 1)
+        let configPath = try writeKVConfig(providerID: providerID, socketPath: socketPath, directory: root)
+
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
+        try await server.start()
+
+        // (3) Drive the ACTUAL parsed command — full argv through AsyncParsableCommand.
+        let (stdout, error) = await runCLICapturing {
+            let command = try KVCachePurgeCommand.parse(["--all", "--forget", "--config", configPath])
+            try await command.run()
+        }
+        await server.stop()
+
+        // (4a) UNGATED: the disabled handler cleared RAM before delegating (socket hit).
+        let hotAfter = await runtime.hotConversationStats().entries
+        XCTAssertEqual(hotAfter, 0, "serve cleared RAM before delegating")
+        // (4b) UNGATED: the guard fell THROUGH to the standalone path — the socket's
+        // `unavailable` reply did NOT short-circuit on the `control_socket` branch.
+        XCTAssertFalse(stdout.contains("\"route\":\"control_socket\""),
+                       "disabled reply must not be treated as a terminal control_socket result")
+        XCTAssertTrue(stdout.contains("\"mode\":\"all_forget\""), "standalone branch emitted the purge result")
+        XCTAssertTrue(stdout.contains("purge_ok") || stdout.contains("purge_failed"),
+                      "standalone purge path produced a result")
+
+        // (4c) OUTCOME-gated deep shred: success ⇒ disk really gone; failure ⇒ fail-closed.
+        let diskAfter = await diskEntryCount(root: root, namespaceID: providerID, keychain: keychain)
+        if stdout.contains("purge_ok") {
+            XCTAssertEqual(diskAfter, 0, "fall-through standalone shred deleted the on-disk namespace")
+            XCTAssertNil(error, "successful shred exits cleanly")
+        } else {
+            XCTAssertTrue(stdout.contains("purge_failed"), "no keychain ⇒ standalone fails closed")
+            XCTAssertEqual(diskAfter, 1, "fail-closed standalone left the namespace intact (never a socket short-circuit)")
+            XCTAssertTrue(error is ExitCode, "fail-closed standalone purge exits non-zero")
+        }
+    }
+
+    /// REVERIFY LOW (status arm) — the same fall-through, exercised end-to-end through the
+    /// REAL parsed `KVCacheStatusCommand.run()`. With the disk tier disabled, the serve
+    /// holds no KV flock and its socket reply is `unavailable`/`disk_tier_disabled`; the
+    /// CLI's `!payloadJSON.contains("unavailable")` guard must fall THROUGH to the
+    /// standalone `tier.status()`, which surfaces the operator-critical disk residency.
+    ///
+    /// UNGATED: stdout must NOT be the raw socket reply (`disk_tier_disabled`) — a
+    /// short-circuit regression would `emitRaw` that payload. OUTCOME-gated: when the
+    /// standalone status succeeds (`status":"ok"`, keychain available) it surfaces the
+    /// disk residency fields (`entry_count`); otherwise it fails closed on the namespace
+    /// lock — either way it is the standalone path, not the socket's hot-only view.
+    func testKVCacheStatusCLIParsedFallThroughSurfacesDiskResidencyWhenDiskTierDisabled() async throws {
+        let root = try makeKVResidueRoot()
+        let providerID = "prov-kvs-status-fallthrough"
+        let keychain = KVInMemoryKeychain()
+        try await seedCommittedEntry(root: root, namespaceID: providerID, keychain: keychain)
+        let statusDiskBefore = await diskEntryCount(root: root, namespaceID: providerID, keychain: keychain)
+        XCTAssertEqual(statusDiskBefore, 1)
+
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        await runtime.seedHotConversationForTest(
+            key: "conv:kvs-synth:cli-s", tokens: (0 ..< 12).map(Int32.init), modelID: "ready-model")
+        let configPath = try writeKVConfig(providerID: providerID, socketPath: socketPath, directory: root)
+
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
+        try await server.start()
+        let (stdout, error) = await runCLICapturing {
+            let command = try KVCacheStatusCommand.parse(["--config", configPath])
+            try await command.run()
+        }
+        await server.stop()
+
+        // UNGATED: the socket's disabled reply did NOT short-circuit as a raw status body.
+        XCTAssertFalse(stdout.contains("disk_tier_disabled"),
+                       "socket unavailable reply must not be emitted as the terminal status")
+        // OUTCOME-gated: standalone status either surfaces disk residency, or fails closed
+        // on the namespace lock (no Data-Protection Keychain). Both are the standalone path.
+        if stdout.contains("\"status\":\"ok\"") {
+            XCTAssertTrue(stdout.contains("\"entry_count\""),
+                          "standalone status surfaces the on-disk residency")
+            XCTAssertNil(error, "successful standalone status exits cleanly")
+        } else {
+            XCTAssertTrue(stdout.contains("namespace lock unavailable"),
+                          "no keychain ⇒ standalone status fails closed on the namespace lock")
+            XCTAssertTrue(error is ExitCode, "fail-closed standalone status exits non-zero")
+        }
+    }
+
+    // MARK: - REVERIFY LOW helpers (parsed-CLI fall-through)
+
+    /// A fresh absolute root for KV disk residue (perms are set by the tier's own
+    /// `ensureDirectories`, exactly as `seedPriorEnabledRunResidue` relies on).
+    private func makeKVResidueRoot() throws -> URL {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kvcli-\(getpid())-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
+    /// Seed one committed on-disk entry for `namespaceID` under `root` via an ENABLED run
+    /// with the injected in-memory keychain, then shut down (releasing the flock). Mirrors
+    /// `seedPriorEnabledRunResidue` but lets the caller pin the root + namespace so a later
+    /// CLI `makeTier(namespaceID: providerID, directory: root)` targets the SAME namespace.
+    private func seedCommittedEntry(root: URL, namespaceID: String, keychain: KVInMemoryKeychain) async throws {
+        let enabled = KVDiskTier(
+            config: KVDiskCacheConfig(enabled: true, directory: root.path, minFreeBytes: 1024 * 1024),
+            namespaceID: namespaceID, eligibilityTTLSeconds: 900, keychain: keychain, sink: KVRecordingEventSink())
+        let activated = await enabled.activateForControlPlane()
+        XCTAssertTrue(activated, "seed activate")
+        let key = "conv:kvs-synth:residue"
+        let seq = 5
+        let index = try await enabled.store.currentIndex(rawKey: key)
+        let sampled = try await enabled.store.highWatermark(rawKey: key)
+        let byteCount = 1 * 2 * seq * 4 * KVCodecDType.f32.byteSize
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
+            layers: [KVLayerPayload(
+                layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
+                cacheOffset: seq, keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))],
+            identity: KVWriteIdentity(
+                requestModel: "qwen-test", servedModelID: "qwen-test-served",
+                modelSHA256: String(repeating: "b", count: 64), catalogRevision: "r1",
+                tokenizerID: "tok-1", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+                chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: 1,
+                mlxSwiftLMRevision: "3.31.4", mlxVersion: "0.0.0", cacheClass: "KVCacheSimple",
+                layerCount: 1, kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil,
+                decodePath: "ordinary", keyEpoch: 1),
+            sampledPurgeGeneration: sampled, commitSequence: 1,
+            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000,
+            incarnation: "inc-\(UUID().uuidString)")
+        guard case .committed = try await enabled.store.write(snapshot, nowMillis: 1_000_000) else {
+            XCTFail("seed enabled write should commit"); throw ControlSocketTestError.unexpectedContainerLoader
+        }
+        await enabled.shutdown()
+    }
+
+    /// Count on-disk entries for `namespaceID` via a DISABLED observer tier (in-memory
+    /// keychain, always available headless), releasing the flock before returning so the
+    /// CLI's own standalone tier can acquire it.
+    private func diskEntryCount(root: URL, namespaceID: String, keychain: KVInMemoryKeychain) async -> Int {
+        let tier = KVDiskTier(
+            config: KVDiskCacheConfig(enabled: false, directory: root.path, minFreeBytes: 1024 * 1024),
+            namespaceID: namespaceID, eligibilityTTLSeconds: 900, keychain: keychain, sink: KVRecordingEventSink())
+        let count = await tier.status()?.entryCount ?? -1
+        await tier.shutdown()
+        return count
+    }
+
+    /// Write a minimal YAML config the CLI resolves: provider_id (namespace), the live
+    /// control-socket path, and a DISABLED kv_disk_cache pinned to `directory`.
+    private func writeKVConfig(providerID: String, socketPath: URL, directory: URL) throws -> String {
+        let cfgDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kvcli-cfg-\(getpid())-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: cfgDir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: cfgDir) }
+        let cfgPath = cfgDir.appendingPathComponent("config.yaml").path
+        let yaml = """
+        provider_id: "\(providerID)"
+        ctl_socket_path: "\(socketPath.path)"
+        kv_disk_cache:
+          enabled: false
+          directory: "\(directory.path)"
+        """
+        try yaml.write(toFile: cfgPath, atomically: true, encoding: .utf8)
+        return cfgPath
+    }
+
+    /// Run `body` while capturing whatever it writes to fd 1 (the CLI emits via
+    /// `FileHandle.standardOutput`), and surface any thrown error (e.g. `ExitCode`).
+    private func runCLICapturing(_ body: () async throws -> Void) async -> (stdout: String, error: Error?) {
+        let pipe = Pipe()
+        let saved = dup(STDOUT_FILENO)
+        dup2(pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO)
+        var thrown: Error?
+        do { try await body() } catch { thrown = error }
+        fflush(stdout)
+        dup2(saved, STDOUT_FILENO)
+        close(saved)
+        pipe.fileHandleForWriting.closeFile()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return (String(decoding: data, as: UTF8.self), thrown)
     }
 
     private func makeSocketPath() throws -> URL {
