@@ -1,7 +1,70 @@
+import CryptoKit
+import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
 final class UninstallCommandTests: XCTestCase {
+
+    // MARK: - SPEC-037 FR-KVP8 — uninstall purges KV disk tier (Finding 3)
+
+    private func namespaceDigest(_ id: String) -> String {
+        SHA256.hash(data: Data(id.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// FR-KVP8: uninstall's KV cleanup (`purge --all --forget`) must enumerate-and-
+    /// delete the namespace's Keychain items (per-epoch master + per-entry DEKs) AND
+    /// remove the namespace directory, so no orphaned ciphertext or key material
+    /// outlives the product. Drives the exact seam `UninstallCommand.run()` invokes.
+    func testUninstallPurgesKVDiskCacheKeychainAndNamespaceDir() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvuninstall-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespaceID = "prov-uninstall"
+        let keychain = KVInMemoryKeychain()
+        let config = KVDiskCacheConfig(enabled: true, directory: root.path, minFreeBytes: 1024 * 1024)
+        let tier = KVDiskTier(config: config, namespaceID: namespaceID, eligibilityTTLSeconds: 900,
+                              keychain: keychain, sink: KVRecordingEventSink())
+        let activated = await tier.activateForControlPlane()
+        XCTAssertTrue(activated)
+
+        // Write one entry: creates the namespace dir + per-epoch master + per-entry DEK.
+        let key = "conv:kvs-synth:uninstall"
+        let seq = 4
+        let byteCount = 1 * 2 * seq * 4 * KVCodecDType.f32.byteSize
+        let identity = KVWriteIdentity(
+            requestModel: "m", servedModelID: "m", modelSHA256: String(repeating: "b", count: 64),
+            catalogRevision: "r", tokenizerID: "m", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+            chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: 1,
+            mlxSwiftLMRevision: "x", mlxVersion: "y", cacheClass: "KVCacheSimple", layerCount: 1,
+            kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil, decodePath: "ordinary", keyEpoch: 1)
+        let index = try await tier.store.currentIndex(rawKey: key)
+        let sampled = try await tier.store.highWatermark(rawKey: key)
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
+            layers: [KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4],
+                                    dtype: .f32, cacheOffset: seq,
+                                    keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))],
+            identity: identity, sampledPurgeGeneration: sampled, commitSequence: 1,
+            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000, incarnation: "inc-uninstall")
+        guard case .committed = try await tier.store.write(snapshot, nowMillis: 1_000_000) else {
+            return XCTFail("seed entry must commit")
+        }
+
+        let keyManager = KVKeyManager(keychain: keychain, namespaceID: namespaceID)
+        XCTAssertGreaterThanOrEqual(try keyManager.keychainItemCount(), 1, "entry write created Keychain items")
+        let namespaceDir = root.appendingPathComponent(namespaceDigest(namespaceID))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: namespaceDir.path), "namespace dir exists after write")
+
+        // Invoke the exact cleanup seam uninstall runs.
+        var warnings: [String] = []
+        await UninstallCommand.purgeKVDiskCache(tier, warnings: &warnings)
+
+        XCTAssertEqual(try keyManager.keychainItemCount(), 0, "uninstall deletes all namespace Keychain items")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: namespaceDir.path), "uninstall removes the namespace dir")
+        XCTAssertTrue(warnings.isEmpty, "a clean KV cleanup adds no warning: \(warnings)")
+    }
+
     func testStopLaunchdServicesAcceptsVerifiedAbsentJob() throws {
         var calls: [[String]] = []
 
