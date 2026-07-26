@@ -1324,19 +1324,20 @@ actor ControlSocketServer {
 
     /// SPEC-037 stage 5 (FR-KVP12) — report the inspection surface from the
     /// lock-holding serve process (JSON payload identical to the CLI shape). When the
-    /// disk tier is DISABLED here (`tier == nil`), still report the serve-owned RAM
-    /// (hot) residency with `enabled=false` so status remains functional while
-    /// disabled (FR-KVP8).
+    /// disk tier is DISABLED here (`tier == nil`), the serve holds NO KV namespace
+    /// flock, so it cannot report on-disk residue at all. Reply `unavailable`
+    /// (detail `disk_tier_disabled`) so the CLI falls THROUGH to the standalone
+    /// `tier.status()`, which acquires the now-free lock and reports the operator-
+    /// critical disk residency (bytes_used / entry_count / keychain_item_count) left by
+    /// a prior enabled run. A hot-only reply here would lack "unavailable", short-circuit
+    /// the CLI, and hide surviving disk residue.
     private nonisolated static func handleKVCacheStatus(
         tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
     ) async {
         guard let tier else {
-            let stats = await modelRuntime.hotConversationStats()
             let object: [String: Any] = [
-                "status": "ok",
-                "enabled": false,
-                "hot_entries": stats.entries,
-                "hot_tokens": stats.tokens,
+                "status": "unavailable",
+                "detail": "disk_tier_disabled",
             ]
             let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
             try? await connection.send(.kvCacheStatusResponse(payloadJSON: String(decoding: data, as: UTF8.self)))

@@ -923,9 +923,13 @@ final class ControlSocketTests: XCTestCase {
         return (disk, keychain)
     }
 
-    /// With the disk tier disabled, `kv-cache status` reports the RAM/hot residency
-    /// with enabled=false — not `unavailable`.
-    func testKVCacheStatusReportsHotStateWhenDiskTierDisabled() async throws {
+    /// FINDING B — with the disk tier disabled, the serve holds no KV namespace flock
+    /// and cannot see on-disk residue, so `kv-cache status` over the socket must reply
+    /// `unavailable`/`disk_tier_disabled` (NOT a hot-only view). The CLI's
+    /// `!payloadJSON.contains("\"unavailable\"")` guard then falls THROUGH to the
+    /// standalone `tier.status()`, which reports the operator-critical disk residency
+    /// (bytes_used / entry_count / keychain_item_count).
+    func testKVCacheStatusFallsThroughToStandaloneWhenDiskTierDisabled() async throws {
         let socketPath = try makeSocketPath()
         let runtime = makeRuntime(modelID: "ready-model")
         await runtime.seedHotConversationForTest(key: "conv:kvs-synth:s", tokens: (0 ..< 12).map(Int32.init), modelID: "ready-model")
@@ -941,11 +945,10 @@ final class ControlSocketTests: XCTestCase {
         guard case let .kvCacheStatusResponse(payloadJSON) = response else {
             return XCTFail("expected kvCacheStatusResponse, got \(response)")
         }
-        XCTAssertFalse(payloadJSON.contains("\"unavailable\""), "disabled tier must not report unavailable")
+        XCTAssertTrue(payloadJSON.contains("\"unavailable\""), "disabled tier must reply unavailable so the CLI falls through")
         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payloadJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(object["status"] as? String, "ok")
-        XCTAssertEqual(object["enabled"] as? Bool, false)
-        XCTAssertEqual(object["hot_entries"] as? Int, 1)
+        XCTAssertEqual(object["status"] as? String, "unavailable")
+        XCTAssertEqual(object["detail"] as? String, "disk_tier_disabled")
     }
 
     private func makeSocketPath() throws -> URL {
