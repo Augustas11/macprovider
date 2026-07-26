@@ -274,7 +274,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/608"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     },
     {
@@ -362,7 +362,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/612"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     },
     {
@@ -567,8 +567,8 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/658",
-        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55→vNext update/rollback/buyer-serving journey remains open. #610 still owns broader first-hop recovery conformance."
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55→vNext update/rollback/buyer-serving journey remains open under the #614 conformance ledger."
       }
     },
     {
@@ -655,7 +655,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/612"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
       }
     },
     {
@@ -1079,7 +1079,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Issue #609 implements and unit-tests the canonical Air artifact identity; conformance remains pending until the signed physical provider-to-buyer journey records the exact admitted artifact."
       }
     },
@@ -1102,7 +1102,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Issue #609 implements typed admission and heartbeat semantics; the signed physical journey must still prove the production coordinator receives and preserves the named identity."
       }
     },
@@ -1124,7 +1124,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Issue #609 separates weights diagnostics from catalog authority in code and tests; physical evidence remains required before promotion."
       }
     },
@@ -1150,7 +1150,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row; a signed physical buyer request must still verify the production route and receipt chain."
       }
     },
@@ -1173,7 +1173,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Issue #609 implements the finite bridge and deploy preflight; rollout evidence must count legacy providers, upgrade them, and prove the bridge can be removed without buyer-serving regression."
       }
     },
@@ -1195,7 +1195,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row; a signed physical swap journey remains required before enabling the path in production."
       }
     },
@@ -1218,7 +1218,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/743",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-018 v0.2.5 defines the #743 Harmony token-ID response parsing contract; conformance remains pending until the implementation and regression evidence are reconciled against AC-57 through AC-61."
       }
     },
@@ -1245,8 +1245,8 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/658",
-        "rationale": "Partial #658: append-only transport, protected renewal, and anonymous v1.8.55 bridge verifier are implemented; physical bridge/update/rollback/buyer-serving evidence remains pending. #610 still owns broader first-hop recovery."
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Partial #658: append-only transport, protected renewal, and anonymous v1.8.55 bridge verifier are implemented; physical bridge/update/rollback/buyer-serving evidence remains pending under the #614 conformance ledger."
       }
     },
     {
@@ -1273,8 +1273,8 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/658",
-        "rationale": "Partial #658: manual signed-release update, append-only transport, protected renewal, and anonymous v1.8.55 bridge verifier are implemented; physical bridge/update/rollback/buyer-serving evidence remains pending. #610 still owns broader first-hop recovery."
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Partial #658: manual signed-release update, append-only transport, protected renewal, and anonymous v1.8.55 bridge verifier are implemented; physical bridge/update/rollback/buyer-serving evidence remains pending under the #614 conformance ledger."
       }
     },
     {
@@ -1300,7 +1300,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/610",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Implementation mappings now cover local signed-set health, exact-set success binding, and rollback policy in PR #631, but signed physical journey evidence is still pending."
       }
     },
@@ -1379,7 +1379,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/651",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "The one-shot reload, public-v1.8.53 first-hop bridge, listener-bound commit gate, and all rollback-entry fencing are implemented with regression coverage, but a signed private candidate must still prove stable physical upgrade and rollback from the public v1.8.53 installation before conformance."
       }
     },
@@ -1405,7 +1405,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/612",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired here, but the requirement remains pending until a signed candidate completes the physical referral/X acceptance journey."
       }
     },
@@ -1425,7 +1425,7 @@
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "The signed 42efce21 acceptance candidate proved that both authenticated provider hardware-profile UPSERT paths failed under the intended provider_onboarding column-limited grants. This PR repairs the SQL without widening authority; conformance remains pending until a replacement signed candidate completes the physical referral journey."
       }
     },
@@ -1450,7 +1450,7 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/613",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested; conformance remains pending until the signed production deployment completes the real-X dwell reward and the missing fresh referred-provider journey."
       }
     },

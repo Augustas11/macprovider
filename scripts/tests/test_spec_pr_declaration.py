@@ -27,6 +27,32 @@ def declaration(**overrides: object) -> str:
 
 
 class SpecPRDeclarationTests(unittest.TestCase):
+    def test_spec_governance_review_boundary_is_codeowned(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        codeowners = {}
+        for raw_line in (root / ".github" / "CODEOWNERS").read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            path, *owners = line.split()
+            codeowners[path] = owners
+
+        expected = [
+            ".github/CODEOWNERS",
+            ".github/workflows/spec-index.yml",
+            "beta/DECISION_CRITERIA.md",
+            "docs/spec-governance-foundation.md",
+            "docs/spec-history/**",
+            "schemas/spec-*",
+            "scripts/check_spec_governance.py",
+            "scripts/check_spec_pr_declaration.py",
+            "scripts/gen_spec_index.py",
+            "scripts/tests/**",
+            "specs/**",
+        ]
+        missing = [path for path in expected if codeowners.get(path) != ["@Augustas11"]]
+        self.assertEqual([], missing)
+
     def test_behavior_change_none_accepts_governance_paths(self) -> None:
         self.assertEqual(
             [],
