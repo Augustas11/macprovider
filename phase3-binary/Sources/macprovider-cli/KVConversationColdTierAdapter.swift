@@ -157,15 +157,19 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
     /// Build the live-model geometry template that `captureSnapshot` learns from a
     /// committed entry's layer payloads. Factored out so `ModelRuntime`'s load-time
     /// seed (below) and the commit-time learn produce byte-identical geometry. The
-    /// sequence axis is the payload dim equal to `tokenCount` (the committed
-    /// sequence length), falling back to the structural rank-4 layout axis
-    /// (`ndim - 2`) when the token count is ambiguous.
+    /// sequence axis is derived STRUCTURALLY as the rank-4 `KVCacheSimple` layout axis
+    /// (`ndim - 2` — the `seq` axis of `[batch, kvHeads, seq, headDim]`), identical to
+    /// `seedGeometryTemplate`. This must not key off a payload dim that equals
+    /// `tokenCount`: for a shape like `[1,32,32,128]` with tokenCount=32 that would pick
+    /// axis 1 (kvHeads) instead of the real seq axis 2, and a commit would overwrite the
+    /// correct load-seed with a wrong-axis template. The v1 allowlist is
+    /// KVCacheSimple-only, whose seq axis is always `ndim - 2`.
     static func liveGeometryTemplate(fromPayloads payloads: [KVLayerPayload], tokenCount: Int) -> [KVLayerGeometry] {
         payloads.map { payload in
-            let seqAxis = payload.dims.firstIndex(of: tokenCount) ?? max(0, payload.ndim - 2)
-            return KVLayerGeometry(
+            KVLayerGeometry(
                 layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
-                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype, sequenceAxis: seqAxis)
+                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype,
+                sequenceAxis: max(0, payload.ndim - 2))
         }
     }
 

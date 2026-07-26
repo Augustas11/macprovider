@@ -596,6 +596,30 @@ final class KVConversationColdTierTests: XCTestCase {
         }
     }
 
+    /// FINDING D — a commit whose sequence length COLLIDES with another dim (e.g.
+    /// `[1,32,32,128]`, tokenCount=32) must still learn the structural seq axis
+    /// `ndim - 2` (axis 2), NOT the first dim equal to tokenCount (axis 1, kvHeads).
+    /// A wrong axis here would overwrite the correct load-time seed and later miss /
+    /// corrupt normal-length promotions.
+    func testLiveGeometryTemplateUsesStructuralAxisOnTokenCountCollision() {
+        let collided = [
+            KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 32, 32, 128],
+                           dtype: .f16, cacheOffset: 32, keyBytes: Data(), valueBytes: Data()),
+        ]
+        let learned = KVConversationColdTierAdapter.liveGeometryTemplate(fromPayloads: collided, tokenCount: 32)
+        XCTAssertEqual(learned.count, 1)
+        XCTAssertEqual(learned[0].sequenceAxis, 2, "seq axis must be ndim-2, not the kvHeads dim that also equals tokenCount")
+
+        // And it is byte-identical to the load-time seed for the same shape.
+        let seeded = KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: collided)
+        XCTAssertEqual(seeded[0].sequenceAxis, learned[0].sequenceAxis, "seed and commit agree even under collision")
+        XCTAssertEqual(seeded[0].dims, learned[0].dims)
+        XCTAssertEqual(seeded[0].ndim, learned[0].ndim)
+        XCTAssertEqual(seeded[0].dtype, learned[0].dtype)
+        XCTAssertEqual(seeded[0].classID, learned[0].classID)
+        XCTAssertEqual(seeded[0].layoutVersion, learned[0].layoutVersion)
+    }
+
     /// HIGH-1 (MLX-gated) — seed from a REAL `KVCacheSimple` populated via MLX and
     /// promote on the first request. Gated on KV_ENABLE_MLX_TESTS (MLX aborts the
     /// process without a Metal library).
