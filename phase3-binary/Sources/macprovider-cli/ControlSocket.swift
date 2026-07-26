@@ -1278,29 +1278,30 @@ actor ControlSocketServer {
 
     /// SPEC-037 stage 5 (FR-KVP8) — execute a kv-cache purge in the lock-holding
     /// serve process. When the disk tier is DISABLED here (`tier == nil`), the serve
-    /// process still owns its RAM `ConversationCache`, so purge must remain functional
-    /// (FR-KVP8): clear the matching hot-tier residency — so we never keep serving a
-    /// purged prefix from RAM until TTL — and report what was removed. The disk
-    /// component is absent in this process (a standalone CLI handles disk purge when
-    /// no serve holds the namespace lock); this path never reports a hot purge it did
-    /// not perform.
+    /// process holds NO KV namespace flock (the disk store is never constructed), so
+    /// the on-disk crypto-shred must be delegated to the standalone CLI path, which
+    /// acquires the now-free namespace lock and deletes the namespace dir + Keychain
+    /// DEKs. We STILL clear the serve-owned RAM (hot) residency here first — so we
+    /// never keep serving a purged prefix from RAM until TTL — but then reply
+    /// `unavailable` (detail `disk_tier_disabled`) so the CLI's `status != "unavailable"`
+    /// guard falls THROUGH to `makeTier` + the standalone `purgeAllAndForget`/`purgeAll`/
+    /// `purge` that actually shreds disk. Replying `purge_ok` here would make the CLI
+    /// return early and skip the only code that deletes on-disk ciphertext + DEKs left
+    /// behind by a prior enabled run.
     private nonisolated static func handleKVCachePurge(
         mode: String, key: String?, tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
     ) async {
         guard let tier else {
-            let entriesRemoved: Int
+            // Clear RAM hot residency (correct half — do not keep serving a purged
+            // prefix from RAM), then delegate the disk shred to the standalone CLI.
             switch mode {
             case "all", "all_forget":
-                // Report the hot residency actually cleared.
-                let before = await modelRuntime.hotConversationStats().entries
                 await modelRuntime.purgeAllHotConversations()
-                entriesRemoved = before
             default:
-                let hadHot = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
-                entriesRemoved = hadHot ? 1 : 0
+                _ = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
             }
             try? await connection.send(.kvCachePurgeResponse(
-                status: "purge_ok", entriesRemoved: entriesRemoved, bytesFreed: 0, detail: "disk_tier_disabled"))
+                status: "unavailable", entriesRemoved: 0, bytesFreed: 0, detail: "disk_tier_disabled"))
             return
         }
         // Enabled: the tier's purge path already clears the wired hot-tier residency

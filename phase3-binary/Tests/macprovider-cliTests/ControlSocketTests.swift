@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -721,10 +722,14 @@ final class ControlSocketTests: XCTestCase {
 
     // MARK: - SPEC-037 FR-KVP8 — disabled-disk-tier RAM purge/status (Finding 2)
 
-    /// With the disk tier DISABLED (kvDiskTier == nil), a socket-routed single-key
-    /// purge must clear the serve-owned RAM (hot) entry and report purge_ok for what
-    /// it removed — NOT reply `unavailable` (which would fall back to a standalone
-    /// store that cannot touch this process's RAM, leaving a purged prefix live).
+    /// With the disk tier DISABLED (kvDiskTier == nil), the serve holds NO KV
+    /// namespace flock, so the on-disk crypto-shred is delegated to the standalone
+    /// CLI path. A socket-routed single-key purge must (1) still clear the serve-owned
+    /// RAM (hot) entry — so we never keep serving a purged prefix from RAM — and
+    /// (2) reply `unavailable`/`disk_tier_disabled` so the CLI's `status != "unavailable"`
+    /// guard falls THROUGH to the standalone `purge` that actually shreds disk +
+    /// Keychain. Replying `purge_ok` here would make the CLI return early and skip the
+    /// only disk-shred code.
     func testKVCachePurgeSingleClearsHotRAMWhenDiskTierDisabled() async throws {
         let socketPath = try makeSocketPath()
         let runtime = makeRuntime(modelID: "ready-model")
@@ -743,12 +748,13 @@ final class ControlSocketTests: XCTestCase {
         await connection.close()
         await server.stop()
 
-        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
+        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
             return XCTFail("expected kvCachePurgeResponse, got \(response)")
         }
-        XCTAssertEqual(status, "purge_ok")
-        XCTAssertEqual(entriesRemoved, 1, "the resident hot entry must be reported removed")
+        // (2) CLI must fall through to the standalone disk shred.
+        XCTAssertEqual(status, "unavailable")
         XCTAssertEqual(detail, "disk_tier_disabled")
+        // (1) RAM hot residency was cleared by the handler.
         let residentAfter = await runtime.hotConversationStats().entries
         XCTAssertEqual(residentAfter, 0, "hot entry evicted from RAM")
         // A subsequent begin() with a proper superset prompt (which WOULD warm-hit the
@@ -758,7 +764,8 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertEqual(cachedAfter, 0)
     }
 
-    /// With the disk tier disabled, `--all` clears every RAM entry over the socket.
+    /// With the disk tier disabled, `--all` clears every RAM entry over the socket and
+    /// replies `unavailable` so the CLI falls through to the standalone disk shred.
     func testKVCachePurgeAllClearsHotRAMWhenDiskTierDisabled() async throws {
         let socketPath = try makeSocketPath()
         let runtime = makeRuntime(modelID: "ready-model")
@@ -775,19 +782,18 @@ final class ControlSocketTests: XCTestCase {
         await connection.close()
         await server.stop()
 
-        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
+        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
             return XCTFail("expected kvCachePurgeResponse, got \(response)")
         }
-        XCTAssertEqual(status, "purge_ok")
-        XCTAssertEqual(entriesRemoved, 2, "purge --all reports every hot entry removed")
+        XCTAssertEqual(status, "unavailable")
         XCTAssertEqual(detail, "disk_tier_disabled")
         let residentAfter = await runtime.hotConversationStats().entries
         XCTAssertEqual(residentAfter, 0)
     }
 
-    /// With the disk tier disabled and NO resident hot entry, a single-key purge must
-    /// not claim to have removed anything it did not (entriesRemoved == 0), yet still
-    /// report purge_ok (nothing in RAM to miss — honest).
+    /// With the disk tier disabled and NO resident hot entry, the handler still replies
+    /// `unavailable`/`disk_tier_disabled` (the CLI must delegate the disk shred to the
+    /// standalone path regardless of whether RAM held anything to clear).
     func testKVCachePurgeDisabledReportsZeroForAbsentHotEntry() async throws {
         let socketPath = try makeSocketPath()
         let runtime = makeRuntime(modelID: "ready-model")
@@ -799,11 +805,122 @@ final class ControlSocketTests: XCTestCase {
         await connection.close()
         await server.stop()
 
-        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, _) = response else {
+        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
             return XCTFail("expected kvCachePurgeResponse, got \(response)")
         }
-        XCTAssertEqual(status, "purge_ok")
-        XCTAssertEqual(entriesRemoved, 0, "must not report a removal it did not perform")
+        XCTAssertEqual(status, "unavailable")
+        XCTAssertEqual(detail, "disk_tier_disabled")
+    }
+
+    /// FINDING A — the disabled-tier disk crypto-shred must be IDENTICAL whether or
+    /// not a serve is running: both flows converge on the standalone
+    /// `purgeAllAndForget` (the CLI fall-through), which deletes on-disk ciphertext +
+    /// Keychain DEKs left by a prior enabled run. The socket arm reaches it because the
+    /// disabled handler replies `unavailable` (not `purge_ok`) so the CLI does not
+    /// short-circuit; the no-serve arm reaches it because `trySocket` finds nothing.
+    func testDisabledForgetShredsDiskIdenticallyWithAndWithoutServe() async throws {
+        // Arm A — a running serve with the disk tier DISABLED (tier == nil).
+        let armA = try await seedPriorEnabledRunResidue()
+        let (diskA, kcA) = await residencyCounts(armA)
+        XCTAssertEqual(diskA, 1, "precondition: prior enabled run left a disk entry")
+        XCTAssertGreaterThan(kcA, 0, "precondition: prior enabled run left Keychain DEK material")
+
+        let socketPath = try makeSocketPath()
+        let runtime = makeRuntime(modelID: "ready-model")
+        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:armA", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)   // kvDiskTier == nil
+        try await server.start()
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.kvCachePurgeRequest(mode: "all_forget", key: nil))
+        let response = try await connection.receive(timeout: 2)
+        await connection.close()
+        await server.stop()
+        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
+            return XCTFail("expected kvCachePurgeResponse, got \(response)")
+        }
+        XCTAssertEqual(status, "unavailable", "disabled serve must delegate disk shred to the standalone CLI")
+        XCTAssertEqual(detail, "disk_tier_disabled")
+        let hotAfterA = await runtime.hotConversationStats().entries
+        XCTAssertEqual(hotAfterA, 0, "serve cleared RAM before delegating")
+        // The CLI now falls through to the standalone shred.
+        _ = await armA.tier.purgeAllAndForget()
+        let (diskAfterA, kcAfterA) = await residencyCounts(armA)
+        await armA.tier.shutdown()
+
+        // Arm B — no serve at all: the CLI goes straight to the standalone shred.
+        let armB = try await seedPriorEnabledRunResidue()
+        let (diskB, kcB) = await residencyCounts(armB)
+        XCTAssertEqual(diskB, 1)
+        XCTAssertGreaterThan(kcB, 0)
+        _ = await armB.tier.purgeAllAndForget()
+        let (diskAfterB, kcAfterB) = await residencyCounts(armB)
+        await armB.tier.shutdown()
+
+        // Identical end state: both arms shredded disk ciphertext + Keychain DEKs.
+        XCTAssertEqual(diskAfterA, 0)
+        XCTAssertEqual(kcAfterA, 0)
+        XCTAssertEqual(diskAfterB, 0)
+        XCTAssertEqual(kcAfterB, 0)
+        XCTAssertEqual(diskAfterA, diskAfterB, "disk end state identical with/without a running serve")
+        XCTAssertEqual(kcAfterA, kcAfterB, "Keychain end state identical with/without a running serve")
+    }
+
+    /// A disabled disk tier over a namespace that a prior ENABLED run populated with one
+    /// committed entry (ciphertext on disk + a DEK in the shared Keychain). Returns the
+    /// disabled tier plus the shared root/keychain for residency assertions.
+    private struct DiskResidue {
+        let tier: KVDiskTier
+        let root: URL
+        let keychain: KVInMemoryKeychain
+    }
+
+    private func seedPriorEnabledRunResidue() async throws -> DiskResidue {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("kvres-\(getpid())-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let keychain = KVInMemoryKeychain()
+        // Prior ENABLED run: write one committed entry, then shut down (releasing the lock).
+        let enabled = KVDiskTier(
+            config: KVDiskCacheConfig(enabled: true, directory: root.path, minFreeBytes: 1024 * 1024),
+            namespaceID: "ns-res", eligibilityTTLSeconds: 900, keychain: keychain, sink: KVRecordingEventSink())
+        let activated = await enabled.activateForControlPlane()
+        XCTAssertTrue(activated)
+        let key = "conv:kvs-synth:residue"
+        let seq = 5
+        let index = try await enabled.store.currentIndex(rawKey: key)
+        let sampled = try await enabled.store.highWatermark(rawKey: key)
+        let byteCount = 1 * 2 * seq * 4 * KVCodecDType.f32.byteSize
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
+            layers: [KVLayerPayload(
+                layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
+                cacheOffset: seq, keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))],
+            identity: KVWriteIdentity(
+                requestModel: "qwen-test", servedModelID: "qwen-test-served",
+                modelSHA256: String(repeating: "b", count: 64), catalogRevision: "r1",
+                tokenizerID: "tok-1", tokenizerConfigSHA256: String(repeating: "c", count: 64),
+                chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: 1,
+                mlxSwiftLMRevision: "3.31.4", mlxVersion: "0.0.0", cacheClass: "KVCacheSimple",
+                layerCount: 1, kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil,
+                decodePath: "ordinary", keyEpoch: 1),
+            sampledPurgeGeneration: sampled, commitSequence: 1,
+            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000,
+            incarnation: "inc-\(UUID().uuidString)")
+        guard case .committed = try await enabled.store.write(snapshot, nowMillis: 1_000_000) else {
+            XCTFail("prior enabled write should commit"); throw ControlSocketTestError.unexpectedContainerLoader
+        }
+        await enabled.shutdown()
+        // Current run has the tier DISABLED, sharing the same on-disk namespace + Keychain.
+        let disabled = KVDiskTier(
+            config: KVDiskCacheConfig(enabled: false, directory: root.path, minFreeBytes: 1024 * 1024),
+            namespaceID: "ns-res", eligibilityTTLSeconds: 900, keychain: keychain, sink: KVRecordingEventSink())
+        return DiskResidue(tier: disabled, root: root, keychain: keychain)
+    }
+
+    private func residencyCounts(_ residue: DiskResidue) async -> (disk: Int, keychain: Int) {
+        let disk = await residue.tier.status()?.entryCount ?? 0
+        let keychain = (try? residue.keychain.enumerate(servicePrefix: "").count) ?? -1
+        return (disk, keychain)
     }
 
     /// With the disk tier disabled, `kv-cache status` reports the RAM/hot residency
