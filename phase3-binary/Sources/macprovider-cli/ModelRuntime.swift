@@ -2062,7 +2062,59 @@ actor ModelRuntime: ModelRuntimeServing {
             all: { await cache.purgeAllHot() })
         // HIGH-5: drain queued cold writes on graceful shutdown before lock release.
         tier.setDrainHook { seconds in await cache.drainColdWrites(timeoutSeconds: seconds) }
+        // HIGH-1 (SPEC-037 KVS-01a): seed the adapter's live-model geometry template
+        // from the ACTUAL loaded cache geometry BEFORE admitting requests, so the
+        // first post-restart request can promote a persisted entry rather than
+        // falling back to a fresh prefill until some other conversation commits.
+        await seedColdGeometry(into: adapter)
         coldTierAttached = true
+    }
+
+    /// HIGH-1 (SPEC-037 KVS-01a) — seed the cold-tier adapter's live-model geometry
+    /// template from the REAL loaded `KVCacheSimple` geometry. Runs a minimal
+    /// warmup prefill under the serve generation parameters to populate a cache,
+    /// snapshots its per-layer geometry, and seeds the adapter keyed by the served
+    /// model ID. Best-effort: no loaded container (headless/test), MLX/Metal
+    /// unavailable, a non-`KVCacheSimple` runtime (e.g. a kv-quantized serve, which
+    /// never persists anyway), or any warmup failure simply skips the seed — the
+    /// tier then behaves as before (the model's first post-restart turn misses).
+    /// The seeded template only supplies the EXPECTED geometry to validate against;
+    /// every promoted entry still passes full FR-KVP4 envelope validation against
+    /// the live manifest, so a stale/wrong seed can only cause a miss.
+    private func seedColdGeometry(into adapter: KVConversationColdTierAdapter) async {
+        guard let container = currentContainer, let servedModelID = currentModelID else { return }
+        let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
+        let prefillStepSize = prefillStepSize
+        let template: [KVLayerGeometry]? = try? await inferenceGate.withPermit {
+            try await container.perform { context -> [KVLayerGeometry]? in
+                let input = UserInput(chat: [.user("warmup")])
+                let lmInput = try await context.processor.prepare(input: input)
+                let parameters = Self.makeServeGenerateParameters(
+                    maxTokens: 1,
+                    maxContextTokens: maxContextTokens,
+                    kvBitsOverride: kvBitsOverride,
+                    prefillStepSize: prefillStepSize,
+                    temperature: 0.0,
+                    topP: 1.0
+                )
+                let kvCache = context.model.newCache(parameters: parameters)
+                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
+                // A single-token warmup populates the per-layer cache tensors; that is
+                // all the seed needs (only the geometry is read, never the values).
+                _ = try generate(input: lmInput, context: context, iterator: iterator) { (_: [Int]) in
+                    GenerateDisposition.stop
+                }
+                // Only the v1-allowlisted unquantized class is serializable/persisted;
+                // any other runtime skips the seed exactly as it skips persistence.
+                guard let caches = kvCache as? [KVCacheSimple],
+                      let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
+                return KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: payloads)
+            }
+        } ?? nil
+        if let template, !template.isEmpty {
+            adapter.seedTemplate(servedModelID: servedModelID, template: template)
+        }
     }
 
     /// Build the per-request cold-tier context (nil when the tier is not attached).

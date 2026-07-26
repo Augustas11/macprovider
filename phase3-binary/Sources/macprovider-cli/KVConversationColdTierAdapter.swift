@@ -50,10 +50,12 @@ extension KVIdentityCore {
 /// learned from each write. Envelope validation on promotion compares this
 /// live-model template against the persisted manifest, so a warm-swap to a
 /// different geometry/dtype/layer-count is a miss even when the served model ID
-/// or hash somehow matches. The template is process-local: a served model that
-/// has not yet committed in the current process has no template, so its first
-/// post-restart turn cannot promote until it commits once (documented residual;
-/// closing it needs load-time geometry capture).
+/// or hash somehow matches. The template is seeded at cold-tier attach / model
+/// load from the ACTUAL loaded `KVCacheSimple` geometry (HIGH-1,
+/// `seedTemplate`), so the FIRST post-restart request can promote (SPEC-037
+/// KVS-01a); commits thereafter refresh it. When the seed is unavailable
+/// (MLX/Metal absent, or a non-`KVCacheSimple` runtime), the model's first
+/// post-restart turn falls back to a fresh prefill until it commits once.
 final class KVConversationColdTierAdapter: ConversationColdTier {
     private let store: KVDiskCacheStore
     private let namespaceID: String
@@ -150,6 +152,61 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         epochLock.lock(); cachedEpoch = epoch; epochLock.unlock()
     }
 
+    // MARK: - HIGH-1 load-time geometry seeding (SPEC-037 KVS-01a)
+
+    /// Build the live-model geometry template that `captureSnapshot` learns from a
+    /// committed entry's layer payloads. Factored out so `ModelRuntime`'s load-time
+    /// seed (below) and the commit-time learn produce byte-identical geometry. The
+    /// sequence axis is the payload dim equal to `tokenCount` (the committed
+    /// sequence length), falling back to the structural rank-4 layout axis
+    /// (`ndim - 2`) when the token count is ambiguous.
+    static func liveGeometryTemplate(fromPayloads payloads: [KVLayerPayload], tokenCount: Int) -> [KVLayerGeometry] {
+        payloads.map { payload in
+            let seqAxis = payload.dims.firstIndex(of: tokenCount) ?? max(0, payload.ndim - 2)
+            return KVLayerGeometry(
+                layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
+                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype, sequenceAxis: seqAxis)
+        }
+    }
+
+    /// HIGH-1 — build the seed template from a freshly warmed `KVCacheSimple`'s layer
+    /// payloads at model-load time. The sequence axis is keyed structurally to the
+    /// rank-4 `KVCacheSimple` layout (`ndim - 2` — the axis mlx writes KV into for the
+    /// `[batch, kvHeads, seq, headDim]` state), so it is derived without depending on
+    /// the (possibly ambiguous, e.g. 1-token) warmup sequence length. For
+    /// `KVCacheSimple` this equals the axis `captureSnapshot` records for any real
+    /// multi-token commit, so a seeded promotion validates identically. A wrong axis
+    /// or stale template can only ever cause a validation MISS (the store still
+    /// re-checks every FR-KVP4 field against the live manifest) — never a wrong
+    /// promotion; the template only supplies the EXPECTED geometry to compare against.
+    static func seedGeometryTemplate(fromPayloads payloads: [KVLayerPayload]) -> [KVLayerGeometry] {
+        payloads.map { payload in
+            KVLayerGeometry(
+                layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
+                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype,
+                sequenceAxis: max(0, payload.ndim - 2))
+        }
+    }
+
+    /// HIGH-1 — seed the live-model geometry template at cold-tier attach / model
+    /// load, BEFORE request admission, so the FIRST post-restart request for
+    /// `servedModelID` can promote a persisted entry (SPEC-037 KVS-01a) instead of
+    /// missing until some other conversation commits in-process. Never overwrites a
+    /// template already learned from an in-process commit (that one is at least as
+    /// fresh as this load-time seed).
+    func seedTemplate(servedModelID: String, template: [KVLayerGeometry]) {
+        guard !template.isEmpty else { return }
+        templateLock.lock()
+        if geometryTemplates[servedModelID] == nil { geometryTemplates[servedModelID] = template }
+        templateLock.unlock()
+    }
+
+    /// Test-only: whether a live-model geometry template is present for the served model.
+    func hasGeometryTemplateForTest(servedModelID: String) -> Bool {
+        templateLock.lock(); defer { templateLock.unlock() }
+        return geometryTemplates[servedModelID]?.isEmpty == false
+    }
+
     private func currentCachedEpoch() -> Int {
         epochLock.lock(); defer { epochLock.unlock() }; return cachedEpoch
     }
@@ -172,14 +229,14 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
 
     // MARK: - FR-KVP9 promotion
 
-    func promoteCandidate(conversationKey: String, identity: KVIdentityCore) async -> ColdPromotionCandidate? {
-        guard identity.modelSHA256 != nil else { return nil }   // identity_unavailable
-        templateLock.lock()
-        let template = geometryTemplates[identity.servedModelID]
-        templateLock.unlock()
-        guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
-        let epoch = await store.currentEpoch
-        let runtime = KVRuntimeIdentity(
+    /// Assemble the read-time runtime envelope from the per-request identity core plus
+    /// the owned live-model geometry `template` and the build-pinned ABI fields — so
+    /// write and read derive identical envelopes. Factored out of `promoteCandidate`
+    /// so the load-time-seeding mechanism can be validated headlessly against
+    /// `store.read` (whose hit returns raw `KVLayerPayload` bytes), without the
+    /// `MLXArray` restore below that needs a Metal runtime.
+    func promotionRuntime(identity: KVIdentityCore, template: [KVLayerGeometry], epoch: Int) -> KVRuntimeIdentity {
+        KVRuntimeIdentity(
             namespaceID: namespaceID,
             keyEpoch: epoch,
             indexHMAC: "",                 // recomputed inside read()
@@ -202,6 +259,22 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
             kvQuantPolicy: identity.kvQuantPolicy,
             decodePath: KVBuildIdentity.decodePathOrdinary,
             liveHighWatermark: 0)          // overridden inside read()
+    }
+
+    /// Test-only: the currently-owned live-model geometry template for a served model.
+    func geometryTemplateForTest(servedModelID: String) -> [KVLayerGeometry]? {
+        templateLock.lock(); defer { templateLock.unlock() }
+        return geometryTemplates[servedModelID]
+    }
+
+    func promoteCandidate(conversationKey: String, identity: KVIdentityCore) async -> ColdPromotionCandidate? {
+        guard identity.modelSHA256 != nil else { return nil }   // identity_unavailable
+        templateLock.lock()
+        let template = geometryTemplates[identity.servedModelID]
+        templateLock.unlock()
+        guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
+        let epoch = await store.currentEpoch
+        let runtime = promotionRuntime(identity: identity, template: template, epoch: epoch)
         let result = try? await store.read(
             rawKey: conversationKey, runtime: runtime, nowMillis: Self.nowMillis(), emitHitEvent: false)
         guard let result, case let .hit(hit) = result else { return nil }
@@ -283,12 +356,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
 
         // Learn/refresh the live-model geometry template for future promotions.
-        let template = payloads.map { payload -> KVLayerGeometry in
-            let seqAxis = payload.dims.firstIndex(of: fullTokens.count) ?? max(0, payload.ndim - 2)
-            return KVLayerGeometry(
-                layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
-                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype, sequenceAxis: seqAxis)
-        }
+        let template = Self.liveGeometryTemplate(fromPayloads: payloads, tokenCount: fullTokens.count)
         templateLock.lock()
         geometryTemplates[identity.servedModelID] = template
         templateLock.unlock()

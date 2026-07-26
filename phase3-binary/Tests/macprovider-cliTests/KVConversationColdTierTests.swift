@@ -1,3 +1,5 @@
+import Foundation
+import MLX
 import MLXLMCommon
 @testable import macprovider_cli
 import XCTest
@@ -435,6 +437,193 @@ final class KVConversationColdTierTests: XCTestCase {
         adapter.enqueuePersist(snap)
         await adapter.drainPendingPersists(timeoutSeconds: 5)
         XCTAssertEqual(adapter.writeLiveBytesForTest, 0, "persist Task releases the single-release reservation exactly once")
+    }
+
+    // MARK: - HIGH-1: load-time geometry seeding enables first post-restart promotion
+
+    /// Build a real store with one persisted entry whose envelope matches the live
+    /// build identity, returning the store + the identity a promotion must present.
+    private func makeSeededStoreWithEntry(
+        root: URL, namespaceID: String, key: String, dims: [Int], seq: Int
+    ) async throws -> (KVDiskCacheStore, KVIdentityCore) {
+        var config = KVDiskCacheStoreConfig(
+            root: root, namespaceID: namespaceID,
+            maxBytes: 1 << 30, maxEntries: 16, maxEntryBytes: 1 << 28,
+            retentionSeconds: 3600, stagingMaxBytes: 1 << 28, writeStagingMaxBytes: 1 << 28,
+            minFreeBytes: 1 << 20, promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
+        config.freeSpaceOverride = 1 << 34
+        let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: KVRecordingEventSink())
+        try await store.activate()
+
+        let modelSHA = String(repeating: "b", count: 64)
+        let tokCfg = String(repeating: "c", count: 64)
+        let tmpl = String(repeating: "d", count: 64)
+        let elementCount = dims.reduce(1, *)
+        let byteCount = elementCount * KVCodecDType.f32.byteSize
+        let layers = [KVLayerPayload(
+            layerIndex: 0, classID: "KVCacheSimple", ndim: dims.count, dims: dims, dtype: .f32,
+            cacheOffset: seq, keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))]
+        // The persisted envelope MUST carry the live build identity so promotion's
+        // full FR-KVP4 validation passes against it (the seed only supplies geometry).
+        let writeIdentity = KVWriteIdentity(
+            requestModel: "model-a", servedModelID: "served-a", modelSHA256: modelSHA,
+            catalogRevision: "r1", tokenizerID: "served-a", tokenizerConfigSHA256: tokCfg,
+            chatTemplateSHA256: tmpl, abiEpoch: KVBuildIdentity.abiEpoch,
+            mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision, mlxVersion: KVBuildIdentity.mlxVersion,
+            cacheClass: "KVCacheSimple", layerCount: 1, kvBits: nil, kvGroupSize: nil,
+            kvQuantMode: nil, kvQuantPolicy: nil, decodePath: KVBuildIdentity.decodePathOrdinary, keyEpoch: 1)
+        let index = try await store.currentIndex(rawKey: key)
+        let sampled = try await store.highWatermark(rawKey: key)
+        // promoteCandidate reads with the REAL wall clock, so the entry must be
+        // eligible relative to "now" — not a fixed past instant (which would expire).
+        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
+        let snapshot = KVWriteSnapshot(
+            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
+            layers: layers, identity: writeIdentity, sampledPurgeGeneration: sampled,
+            commitSequence: 1, createdAtMillis: nowMillis, eligibleUntilMillis: nowMillis + 3_600_000,
+            incarnation: "inc-seed")
+        guard case .committed = try await store.write(snapshot, nowMillis: nowMillis) else {
+            XCTFail("seed entry must commit"); return (store, identity())
+        }
+        let promoteIdentity = KVIdentityCore(
+            requestModel: "model-a", servedModelID: "served-a", modelSHA256: modelSHA,
+            catalogRevision: "r1", tokenizerID: "served-a", tokenizerConfigSHA256: tokCfg,
+            chatTemplateSHA256: tmpl, kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil)
+        return (store, promoteIdentity)
+    }
+
+    /// HIGH-1 (SPEC-037 KVS-01a) — a FRESH adapter (no prior in-process commit),
+    /// given a seeded geometry template + an existing store manifest, promotes the
+    /// first matching request. Without the seed the same first request cannot
+    /// promote (no live geometry to validate against) — proving the fix closes the
+    /// restart-survival gap. Fully headless: synthetic/injected geometry, no MLX.
+    func testSeededTemplateEnablesFirstPostRestartPromotionHeadless() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvseed-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = "conv:kvs-synth:seed"
+        let seq = 40
+        let (store, promoteIdentity) = try await makeSeededStoreWithEntry(
+            root: root, namespaceID: "ns-seed", key: key, dims: [1, 2, seq, 4], seq: seq)
+
+        // WITHOUT a seed: a fresh adapter has no live geometry ⇒ the first request
+        // cannot promote (the pre-fix restart-survival gap).
+        let unseeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed", eligibilityTTLSeconds: 900)
+        let missBeforeSeed = await unseeded.promoteCandidate(conversationKey: key, identity: promoteIdentity)
+        XCTAssertNil(missBeforeSeed, "without a seeded template the first post-restart request cannot promote")
+
+        // WITH a load-time seed (synthetic 1-token warmup geometry, seq len ignored):
+        // the seeded envelope validates and the store returns a HIT for the first
+        // request. Driven through `store.read` (whose hit carries raw byte payloads)
+        // rather than the full `promoteCandidate`, whose MLXArray restore needs Metal
+        // — the full restore path is covered by the MLX-gated test below.
+        let seeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed", eligibilityTTLSeconds: 900)
+        let warmupPayloads = [KVLayerPayload(
+            layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, 1, 4], dtype: .f32,
+            cacheOffset: 1, keyBytes: Data(), valueBytes: Data())]
+        let template = KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: warmupPayloads)
+        seeded.seedTemplate(servedModelID: "served-a", template: template)
+        XCTAssertTrue(seeded.hasGeometryTemplateForTest(servedModelID: "served-a"))
+
+        let ownedTemplate = try XCTUnwrap(seeded.geometryTemplateForTest(servedModelID: "served-a"))
+        let epoch = await store.currentEpoch
+        let runtime = seeded.promotionRuntime(identity: promoteIdentity, template: ownedTemplate, epoch: epoch)
+        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
+        let result = try await store.read(rawKey: key, runtime: runtime, nowMillis: nowMillis, emitHitEvent: false)
+        guard case let .hit(hit) = result else {
+            return XCTFail("seeded template must make the FIRST request a store hit, got \(result)")
+        }
+        XCTAssertEqual(hit.tokens, Array(0 ..< Int32(seq)),
+                       "promotion validates against the persisted canonical token sequence")
+        await store.deactivate()
+    }
+
+    /// HIGH-1 — the seed template built from a warmup cache with a DIFFERENT
+    /// (mismatched) per-layer geometry only ever causes a MISS, never a wrong
+    /// promotion: full FR-KVP4 validation still runs against the live manifest.
+    func testSeededTemplateWithWrongGeometryStillMisses() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvseedwrong-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = "conv:kvs-synth:seed-wrong"
+        let seq = 40
+        let (store, promoteIdentity) = try await makeSeededStoreWithEntry(
+            root: root, namespaceID: "ns-seed-wrong", key: key, dims: [1, 2, seq, 4], seq: seq)
+
+        let seeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed-wrong", eligibilityTTLSeconds: 900)
+        // Wrong head_dim (8 instead of the persisted 4) ⇒ non-seq geometry mismatch.
+        let wrongPayloads = [KVLayerPayload(
+            layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, 1, 8], dtype: .f32,
+            cacheOffset: 1, keyBytes: Data(), valueBytes: Data())]
+        seeded.seedTemplate(servedModelID: "served-a",
+                            template: KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: wrongPayloads))
+        let candidate = await seeded.promoteCandidate(conversationKey: key, identity: promoteIdentity)
+        XCTAssertNil(candidate, "a wrong seeded geometry must MISS, never wrongly promote")
+        await store.deactivate()
+    }
+
+    /// HIGH-1 — the load-time seed derives the SAME per-layer template geometry that
+    /// `captureSnapshot` learns from a real multi-token commit (equivalence proof for
+    /// `KVCacheSimple`'s rank-4 [batch, kvHeads, seq, headDim] layout).
+    func testSeedTemplateMatchesCaptureSnapshotDerivation() {
+        // A realistic committed shape with a unique, multi-token sequence length.
+        let committed = [
+            KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 57, 128],
+                           dtype: .f16, cacheOffset: 57, keyBytes: Data(), valueBytes: Data()),
+            KVLayerPayload(layerIndex: 1, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 57, 128],
+                           dtype: .f16, cacheOffset: 57, keyBytes: Data(), valueBytes: Data()),
+        ]
+        let learned = KVConversationColdTierAdapter.liveGeometryTemplate(fromPayloads: committed, tokenCount: 57)
+        // A 1-token warmup produces the same NON-seq geometry; the seq-axis value is ignored.
+        let warmup = [
+            KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 1, 128],
+                           dtype: .f16, cacheOffset: 1, keyBytes: Data(), valueBytes: Data()),
+            KVLayerPayload(layerIndex: 1, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 1, 128],
+                           dtype: .f16, cacheOffset: 1, keyBytes: Data(), valueBytes: Data()),
+        ]
+        let seeded = KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: warmup)
+        XCTAssertEqual(seeded.count, learned.count)
+        for (s, l) in zip(seeded, learned) {
+            XCTAssertEqual(s.sequenceAxis, l.sequenceAxis, "seed and commit agree on the sequence axis (ndim-2)")
+            XCTAssertEqual(s.ndim, l.ndim)
+            XCTAssertEqual(s.dtype, l.dtype)
+            XCTAssertEqual(s.classID, l.classID)
+            XCTAssertEqual(s.layoutVersion, l.layoutVersion)
+            // Non-seq axes must match exactly (they are what validation compares).
+            for axis in 0 ..< l.dims.count where axis != l.sequenceAxis {
+                XCTAssertEqual(s.dims[axis], l.dims[axis], "non-seq dim \(axis) must match")
+            }
+        }
+    }
+
+    /// HIGH-1 (MLX-gated) — seed from a REAL `KVCacheSimple` populated via MLX and
+    /// promote on the first request. Gated on KV_ENABLE_MLX_TESTS (MLX aborts the
+    /// process without a Metal library).
+    func testSeededTemplateFromRealCachePromotesFirstRequestMLX() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
+                          "requires MLX Metal runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvseedmlx-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // A real cache: shape [1, 2, 2, 2] f32, so seq len 2, head_dim 2, 2 kv heads.
+        let realCache = KVCacheSimple()
+        realCache.state = [
+            MLXArray((0 ..< 16).map { Float($0) }, [1, 2, 2, 2]),
+            MLXArray((0 ..< 16).map { Float($0) + 100 }, [1, 2, 2, 2]),
+        ]
+        let realPayloads = try XCTUnwrap(KVCacheSerialization.snapshotLayers([realCache]))
+        let seq = 2
+        let key = "conv:kvs-synth:seed-mlx"
+        let (store, promoteIdentity) = try await makeSeededStoreWithEntry(
+            root: root, namespaceID: "ns-seed-mlx", key: key, dims: [1, 2, seq, 2], seq: seq)
+
+        let seeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed-mlx", eligibilityTTLSeconds: 900)
+        seeded.seedTemplate(servedModelID: "served-a",
+                            template: KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: realPayloads))
+        let candidate = await seeded.promoteCandidate(conversationKey: key, identity: promoteIdentity)
+        XCTAssertNotNil(candidate, "seed from a real MLX cache lets the first request promote")
+        XCTAssertEqual(candidate?.canonicalTokens, Array(0 ..< Int32(seq)))
+        await store.deactivate()
     }
 
     /// HIGH-3: the write-live reservation must cover the ACTIVE seal footprint (one chunk
