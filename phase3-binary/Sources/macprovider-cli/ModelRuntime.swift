@@ -321,12 +321,54 @@ actor ModelRuntime: ModelRuntimeServing {
         draftLoaded: Bool,
         numDraftTokens: Int?
     ) -> SpeculativeRoute {
-        guard request.allowsSpeculativeDecoding,
+        guard !HarmonyResponseParser.isHarmonyModelID(request.model),
+              request.allowsSpeculativeDecoding,
               draftLoaded,
               numDraftTokens != nil else {
             return .tokenIterator
         }
         return .speculative
+    }
+
+    struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer {
+        let base: any MLXLMCommon.Tokenizer
+
+        var bosToken: String? { base.bosToken }
+
+        var eosToken: String? {
+            guard let token = base.eosToken,
+                  let tokenID = base.convertTokenToId(token),
+                  ModelRuntime.isHarmonyTerminalToken(tokenID) else {
+                return base.eosToken
+            }
+            return nil
+        }
+
+        var unknownToken: String? { base.unknownToken }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            base.encode(text: text, addSpecialTokens: addSpecialTokens)
+        }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            base.decode(tokenIds: tokenIds, skipSpecialTokens: skipSpecialTokens)
+        }
+
+        func convertTokenToId(_ token: String) -> Int? {
+            base.convertTokenToId(token)
+        }
+
+        func convertIdToToken(_ id: Int) -> String? {
+            base.convertIdToToken(id)
+        }
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            try base.applyChatTemplate(messages: messages, tools: tools, additionalContext: additionalContext)
+        }
     }
 
     private var state: SwapState = .ready
@@ -410,6 +452,33 @@ actor ModelRuntime: ModelRuntimeServing {
             topP: topP,
             prefillStepSize: prefillStepSize
         )
+    }
+
+    private nonisolated static func harmonyTerminalPreservingContext(
+        from context: ModelContext,
+        modelID: String
+    ) -> ModelContext {
+        guard HarmonyResponseParser.isHarmonyModelID(modelID) else {
+            return context
+        }
+        var generationContext = context
+        generationContext.configuration.eosTokenIds.remove(HarmonyResponseParser.returnTokenID)
+        generationContext.configuration.eosTokenIds.remove(HarmonyResponseParser.callTokenID)
+        generationContext.configuration.extraEOSTokens.remove("<|return|>")
+        generationContext.configuration.extraEOSTokens.remove("<|call|>")
+        generationContext.configuration.stopStrings?.remove("<|return|>")
+        generationContext.configuration.stopStrings?.remove("<|call|>")
+        generationContext.tokenizer = HarmonyTerminalPreservingTokenizer(base: context.tokenizer)
+        return generationContext
+    }
+
+    private nonisolated static func isHarmonyTerminalToken(_ tokenID: Int) -> Bool {
+        tokenID == HarmonyResponseParser.returnTokenID || tokenID == HarmonyResponseParser.callTokenID
+    }
+
+    static func isHarmonyTerminalFinish(modelID: String, generatedTokenIDs: [Int]) -> Bool {
+        HarmonyResponseParser.isHarmonyModelID(modelID)
+            && generatedTokenIDs.last.map(isHarmonyTerminalToken) == true
     }
 
     init(
@@ -1063,7 +1132,7 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             let elapsed = Date().timeIntervalSince(startedAt) * 1000.0
             return InternalWarmupResult(
-                tokensGenerated: completion.completionTokens,
+                tokensGenerated: completion.generatedCompletionTokens,
                 firstTokenElapsedMS: Double(completion.ttftMilliseconds ?? Int64(elapsed)),
                 totalElapsedMS: elapsed
             )
@@ -1243,31 +1312,38 @@ actor ModelRuntime: ModelRuntimeServing {
                         modelID: request.model,
                         kvBits: kvBitsOverride
                     )
-                    do {
-                        let kvCache: [KVCache]
-                        let iteratorInput: LMInput
-                        if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
-                            kvCache = reusableCache.layers
-                            iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
-                        } else {
-                            kvCache = context.model.newCache(parameters: parameters)
-                            iteratorInput = lmInput
-                        }
+                        do {
+                            let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                            let kvCache: [KVCache]
+                            let iteratorInput: LMInput
+                            if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
+                                kvCache = reusableCache.layers
+                                iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
+                            } else {
+                                kvCache = generationContext.model.newCache(parameters: parameters)
+                                iteratorInput = lmInput
+                            }
 
-                        var generatedTokenIds: [Int32] = []
-                        let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
-                        let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
-                            if !tokens.isEmpty {
-                                firstToken.recordIfMissing()
-                                generatedTokenIds = tokens.map { Int32($0) }
+                            let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
+                            let result: GenerateResult = generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                if !tokens.isEmpty {
+                                    firstToken.recordIfMissing()
+                                }
+                                if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
+                                    return GenerateDisposition.stop
+                                }
+                                if HarmonyResponseParser.isHarmonyModelID(request.model),
+                                   tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                    return GenerateDisposition.stop
+                                }
+                                return GenerateDisposition.more
                             }
-                            if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
-                                return GenerateDisposition.stop
+                            try drainCancelled.check()
+                            try Task.checkCancellation()
+                            if shouldCancel() {
+                                throw CancellationError()
                             }
-                            return GenerateDisposition.more
-                        }
-                        try drainCancelled.check()
-                        try Task.checkCancellation()
+                            let resultTokenIDs = result.tokenIds
 
                         guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
                             throw APIError(
@@ -1286,11 +1362,29 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop
                         )
 
-                        let parsed = Self.parseToolCallsIfRequested(filtered.text, request: request)
+                        let rawLengthFinish = request.maxTokens.map { result.generationTokenCount >= $0 } ?? false
+                        let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
+                            modelID: request.model,
+                            generatedTokenIDs: resultTokenIDs
+                        )
+                        let parserFinishReason = HarmonyResponseParser.isHarmonyModelID(request.model)
+                            ? (rawLengthFinish && !filtered.hitStop && !harmonyTerminalFinish ? "length" : (filtered.hitStop ? "request_stop" : "stop"))
+                            : (rawLengthFinish && !filtered.hitStop ? "length" : (filtered.hitStop ? "request_stop" : "stop"))
+                        let parsed = try Self.parseGeneratedOutput(
+                            filteredText: filtered.text,
+                            generatedTokenIDs: resultTokenIDs,
+                            decode: { context.tokenizer.decode(tokenIds: $0) },
+                            request: request,
+                            mode: .complete(finishReason: parserFinishReason),
+                            defaultCompletionTokens: result.generationTokenCount,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop,
+                            globalHitStop: filtered.hitStop
+                        )
                         let finishReason: String
                         if !parsed.toolCalls.isEmpty {
                             finishReason = "tool_calls"
-                        } else if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
+                        } else if rawLengthFinish, !filtered.hitStop, !parsed.hitStop, !harmonyTerminalFinish {
                             finishReason = "length"
                         } else {
                             finishReason = "stop"
@@ -1308,13 +1402,14 @@ actor ModelRuntime: ModelRuntimeServing {
                             promptTokens: promptTokenIds.count,
                             cachedPromptTokens: cachedPromptTokens,
                             kvCacheBytesReused: kvCacheBytesReused,
-                            completionTokens: result.generationTokenCount,
+                            completionTokens: parsed.completionTokens,
+                            generatedCompletionTokens: parsed.generatedCompletionTokens,
                             ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                         ), request: request)
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + generatedTokenIds)
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init))
                         }
                         return completion
                     } catch {
@@ -1580,6 +1675,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
+                    let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
                     let lease = await conversationCache.begin(
@@ -1594,16 +1690,29 @@ actor ModelRuntime: ModelRuntimeServing {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                     } else {
-                        kvCache = context.model.newCache(parameters: parameters)
+                        kvCache = generationContext.model.newCache(parameters: parameters)
                         iteratorInput = lmInput
                     }
 
                     var emittedText = ""
                     var stoppedByRequestStop = false
                     var toolStreamer = NativeToolCallStreamEmitter(modelID: request.model)
-                    var generatedTokenIds: [Int32] = []
+                    var streamingParseError: APIError?
+                    var harmonyObservedFinalTokenCount = 0
+                    var harmonyObservedTokenCount = 0
 
-                    let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools)
+                    let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
+                    var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+                    var harmonyStreamingParser = HarmonyResponseParser.StreamingParser(
+                        decode: { context.tokenizer.decode(tokenIds: $0) },
+                        decodeFinalToken: { tokenID in
+                            harmonyFinalDetokenizer.append(token: tokenID)
+                            return harmonyFinalDetokenizer.next()
+                        },
+                        allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
+                        stopCandidates: stopTokenFilter.tokens + request.stop
+                    )
+                    let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools) && !isHarmonyResponse
                     if Self.speculativeRoute(
                         for: request,
                         draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
@@ -1630,8 +1739,19 @@ actor ModelRuntime: ModelRuntimeServing {
                                 stopTokenFilter: stopTokenFilter,
                                 requestStops: request.stop
                             )
-                            let finalDelta = Self.delta(from: emittedText, to: final.text)
-                            let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                            let rawLengthFinish = request.maxTokens.map { generated.generationTokenCount >= $0 } ?? false
+                            let parsed = try Self.parseGeneratedOutput(
+                                filteredText: final.text,
+                                generatedTokenIDs: [],
+                                decode: { _ in "" },
+                                request: request,
+                                mode: .complete(finishReason: rawLengthFinish && !final.hitStop ? "length" : "stop"),
+                                defaultCompletionTokens: generated.generationTokenCount,
+                                stopTokenFilter: stopTokenFilter,
+                                requestStops: request.stop,
+                                globalHitStop: final.hitStop
+                            )
+                            let finalDelta = Self.delta(from: emittedText, to: parsed.content)
                             if !finalDelta.isEmpty {
                                 if let error = structuredAccumulator.append(finalDelta) {
                                     throw error
@@ -1654,7 +1774,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             } else if let maxTokens = request.maxTokens,
                                       generated.generationTokenCount >= maxTokens,
                                       !stoppedByRequestStop,
-                                      !final.hitStop {
+                                      !final.hitStop,
+                                      !parsed.hitStop {
                                 finishReason = "length"
                             } else {
                                 finishReason = "stop"
@@ -1665,7 +1786,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                 finishReason: finishReason,
                                 promptTokens: promptTokenIds.count,
                                 cachedPromptTokens: 0,
-                                completionTokens: generated.generationTokenCount,
+                                completionTokens: parsed.completionTokens,
+                                generatedCompletionTokens: parsed.generatedCompletionTokens,
                                 toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                                 modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                                 specDecodeDraftedTokens: generated.draftedTokens,
@@ -1684,14 +1806,49 @@ actor ModelRuntime: ModelRuntimeServing {
                             throw error
                         }
                     }
-                    let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
+                    let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
                     do {
-                        let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
+                        let result: GenerateResult = generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                             EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
                             if Task.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
                                 return .stop
                             }
-                            generatedTokenIds = tokens.map { Int32($0) }
+                            if isHarmonyResponse {
+                                do {
+                                    guard tokens.count >= harmonyObservedTokenCount else {
+                                        streamingParseError = Self.malformedHarmonyResponseError()
+                                        return .stop
+                                    }
+                                    let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
+                                    harmonyObservedTokenCount = tokens.count
+                                    let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
+                                    if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
+                                        harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
+                                        idleState.noteContent()
+                                    }
+                                    let output = try Self.harmonyParsedOutput(
+                                        from: parsed,
+                                        decode: { context.tokenizer.decode(tokenIds: $0) },
+                                        stopTokenFilter: stopTokenFilter,
+                                        requestStops: request.stop,
+                                        countCompletionTokens: false
+                                    )
+                                    if output.hitStop {
+                                        stoppedByRequestStop = true
+                                        return .stop
+                                    }
+                                    if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                        return .stop
+                                    }
+                                    return .more
+                                } catch let error as APIError {
+                                    streamingParseError = error
+                                    return .stop
+                                } catch {
+                                    streamingParseError = Self.malformedHarmonyResponseError()
+                                    return .stop
+                                }
+                            }
                             let decoded = context.tokenizer.decode(tokenIds: tokens)
                             let candidate = Self.streamingSafePrefix(
                                 decoded,
@@ -1727,14 +1884,39 @@ actor ModelRuntime: ModelRuntimeServing {
                         }
                         try drainCancelled.check()
                         try Task.checkCancellation()
+                        if shouldCancel() {
+                            throw CancellationError()
+                        }
+                        if let streamingParseError {
+                            throw streamingParseError
+                        }
+                        let resultTokenIDs = result.tokenIds
 
                         let final = Self.applyOutputFilters(
                             result.output,
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop
                         )
-                        let finalDelta = Self.delta(from: emittedText, to: final.text)
-                        let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                        let rawLengthFinish = request.maxTokens.map { result.generationTokenCount >= $0 } ?? false
+                        let harmonyTerminalFinish = Self.isHarmonyTerminalFinish(
+                            modelID: request.model,
+                            generatedTokenIDs: resultTokenIDs
+                        )
+                        let parserFinishReason = isHarmonyResponse
+                            ? (rawLengthFinish && !stoppedByRequestStop && !harmonyTerminalFinish ? "length" : (stoppedByRequestStop ? "request_stop" : "stop"))
+                            : (rawLengthFinish && !final.hitStop && !stoppedByRequestStop ? "length" : ((final.hitStop || stoppedByRequestStop) ? "request_stop" : "stop"))
+                        let parsed = try Self.parseGeneratedOutput(
+                            filteredText: final.text,
+                            generatedTokenIDs: resultTokenIDs,
+                            decode: { context.tokenizer.decode(tokenIds: $0) },
+                            request: request,
+                            mode: .complete(finishReason: parserFinishReason),
+                            defaultCompletionTokens: result.generationTokenCount,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop,
+                            globalHitStop: final.hitStop || stoppedByRequestStop
+                        )
+                        let finalDelta = Self.delta(from: emittedText, to: parsed.content)
                         if streamToolsIncrementally {
                             for event in toolStreamer.observe(final.text) {
                                 onChunk(event)
@@ -1763,7 +1945,9 @@ actor ModelRuntime: ModelRuntimeServing {
                         } else if let maxTokens = request.maxTokens,
                            result.generationTokenCount >= maxTokens,
                            !stoppedByRequestStop,
-                           !final.hitStop
+                           !final.hitStop,
+                           !parsed.hitStop,
+                           !harmonyTerminalFinish
                         {
                             finishReason = "length"
                         } else {
@@ -1782,7 +1966,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             promptTokens: promptTokenIds.count,
                             cachedPromptTokens: cachedPromptTokens,
                             kvCacheBytesReused: kvCacheBytesReused,
-                            completionTokens: result.generationTokenCount,
+                            completionTokens: parsed.completionTokens,
+                            generatedCompletionTokens: parsed.generatedCompletionTokens,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                         )
@@ -1792,7 +1977,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             buyerVisibleContent: structuredAccumulator.content
                         )
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + generatedTokenIds)
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init))
                         }
                         return validated
                     } catch {
@@ -2329,6 +2514,150 @@ actor ModelRuntime: ModelRuntimeServing {
         return String(current.dropFirst(emitted.count))
     }
 
+    struct ParsedGeneratedOutput: Sendable {
+        let content: String
+        let toolCalls: [ToolCall]
+        let completionTokens: Int
+        let generatedCompletionTokens: Int
+        let hitStop: Bool
+        let isTerminal: Bool
+    }
+
+    static func parseGeneratedOutput(
+        filteredText: String,
+        generatedTokenIDs: [Int],
+        decode: ([Int]) -> String,
+        request: ChatCompletionRequest,
+        mode: HarmonyResponseParser.Mode,
+        defaultCompletionTokens: Int,
+        stopTokenFilter: StopTokenFilter = StopTokenFilter(tokens: []),
+        requestStops: [String] = [],
+        globalHitStop: Bool = false
+    ) throws -> ParsedGeneratedOutput {
+        guard HarmonyResponseParser.isHarmonyModelID(request.model) else {
+            let parsed = parseToolCallsIfRequested(filteredText, request: request)
+            return ParsedGeneratedOutput(
+                content: parsed.content,
+                toolCalls: parsed.toolCalls,
+                completionTokens: defaultCompletionTokens,
+                generatedCompletionTokens: defaultCompletionTokens,
+                hitStop: false,
+                isTerminal: true
+            )
+        }
+
+        let parsed = HarmonyResponseParser.parse(
+            tokenIDs: generatedTokenIDs,
+            decode: decode,
+            allowedFunctionNames: toolFunctionNames(from: request.promptSource.tools),
+            mode: mode,
+            stopCandidates: stopTokenFilter.tokens + requestStops
+        )
+        return try harmonyParsedOutput(
+            from: parsed,
+            decode: decode,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops,
+            globalHitStop: globalHitStop,
+            countCompletionTokens: true,
+            generatedCompletionTokens: defaultCompletionTokens
+        )
+    }
+
+    private static func harmonyParsedOutput(
+        from parsed: HarmonyResponseParser.ParseResult,
+        decode: ([Int]) -> String,
+        stopTokenFilter: StopTokenFilter,
+        requestStops: [String],
+        globalHitStop: Bool = false,
+        countCompletionTokens: Bool,
+        generatedCompletionTokens: Int = 0
+    ) throws -> ParsedGeneratedOutput {
+        guard parsed.status != .malformed, parsed.status != .notApplicable else {
+            throw harmonyResponseError(for: parsed.failure)
+        }
+        let filteredVisible = applyOutputFilters(
+            parsed.content ?? "",
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops
+        )
+        guard !globalHitStop || filteredVisible.hitStop else {
+            throw malformedHarmonyResponseError()
+        }
+        let toolCalls = filteredVisible.hitStop ? [] : parsed.toolCalls
+        let hasToolCalls = !toolCalls.isEmpty
+        let visibleContent = hasToolCalls ? "" : filteredVisible.text
+        return ParsedGeneratedOutput(
+            content: visibleContent,
+            toolCalls: toolCalls,
+            completionTokens: countCompletionTokens ? harmonyVisibleFinalTokenCount(
+                tokenIDs: parsed.finalContentTokenIDs,
+                parsedContent: parsed.content ?? "",
+                visibleText: visibleContent,
+                decode: decode
+            ) : 0,
+            generatedCompletionTokens: generatedCompletionTokens,
+            hitStop: filteredVisible.hitStop,
+            isTerminal: parsed.status == .parsed
+        )
+    }
+
+    private static func harmonyVisibleFinalTokenCount(
+        tokenIDs: [Int],
+        parsedContent: String,
+        visibleText: String,
+        decode: ([Int]) -> String
+    ) -> Int {
+        guard !visibleText.isEmpty, !tokenIDs.isEmpty else { return 0 }
+        guard visibleText != parsedContent else { return tokenIDs.count }
+        for count in 1 ... tokenIDs.count {
+            let prefix = decode(Array(tokenIDs.prefix(count)))
+            if prefix == visibleText || prefix.hasPrefix(visibleText) {
+                return count
+            }
+            if !visibleText.hasPrefix(prefix) {
+                return max(0, count - 1)
+            }
+        }
+        return tokenIDs.count
+    }
+
+    static func malformedHarmonyResponseError() -> APIError {
+        APIError(
+            status: 502,
+            message: "Malformed Harmony tool-call response",
+            type: "upstream_provider_error",
+            code: "malformed_tool_call_final_json",
+            inferenceRan: true,
+            settlementRan: true
+        )
+    }
+
+    static func harmonyResponseError(for failure: HarmonyResponseParser.Failure?) -> APIError {
+        switch failure {
+        case .perCallByteCapExceeded:
+            return APIError(
+                status: 502,
+                message: "Tool call arguments exceeded 1048576 bytes",
+                type: "upstream_provider_error",
+                code: "byte_cap_exceeded",
+                inferenceRan: true,
+                settlementRan: true
+            )
+        case .responseByteCapExceeded:
+            return APIError(
+                status: 502,
+                message: "Tool call arguments exceeded 2097152 bytes",
+                type: "upstream_provider_error",
+                code: "response_byte_cap_exceeded",
+                inferenceRan: true,
+                settlementRan: true
+            )
+        case .malformed, .none:
+            return malformedHarmonyResponseError()
+        }
+    }
+
     private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) -> (content: String, toolCalls: [ToolCall]) {
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
             return (text, [])
@@ -2427,6 +2756,7 @@ actor ModelRuntime: ModelRuntimeServing {
             cachedPromptTokens: completion.cachedPromptTokens,
             kvCacheBytesReused: completion.kvCacheBytesReused,
             completionTokens: completion.completionTokens,
+            generatedCompletionTokens: completion.generatedCompletionTokens,
             ttftMilliseconds: completion.ttftMilliseconds,
             toolCalls: completion.toolCalls,
             modelHashObserved: completion.modelHashObserved,
@@ -2975,6 +3305,7 @@ struct CompletionResult: Sendable {
     let kvCacheReuseRatio: Double
     let kvCacheBytesReused: Int
     let completionTokens: Int
+    let generatedCompletionTokens: Int
     let ttftMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?
@@ -2989,6 +3320,7 @@ struct CompletionResult: Sendable {
         cachedPromptTokens: Int = 0,
         kvCacheBytesReused: Int = 0,
         completionTokens: Int,
+        generatedCompletionTokens: Int? = nil,
         ttftMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
         modelHashObserved: String? = nil,
@@ -3005,6 +3337,7 @@ struct CompletionResult: Sendable {
         self.kvCacheReuseRatio = clampedPromptTokens == 0 ? 0 : Double(clampedCachedTokens) / Double(clampedPromptTokens)
         self.kvCacheBytesReused = clampedCachedTokens == 0 ? 0 : max(0, kvCacheBytesReused)
         self.completionTokens = completionTokens
+        self.generatedCompletionTokens = max(0, generatedCompletionTokens ?? completionTokens)
         self.ttftMilliseconds = ttftMilliseconds
         self.toolCalls = toolCalls
         self.modelHashObserved = modelHashObserved
@@ -3022,6 +3355,7 @@ struct CompletionResult: Sendable {
             cachedPromptTokens: cachedPromptTokens,
             kvCacheBytesReused: kvCacheBytesReused,
             completionTokens: completionTokens,
+            generatedCompletionTokens: generatedCompletionTokens,
             ttftMilliseconds: ttftMilliseconds,
             toolCalls: toolCalls,
             modelHashObserved: observed,

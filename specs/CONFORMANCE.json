@@ -484,7 +484,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1197,6 +1197,29 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/613",
         "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row; a signed physical swap journey remains required before enabling the path in production."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R001",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/HarmonyResponseParser.swift:enum HarmonyResponseParser",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func speculativeRoute",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseGeneratedOutput"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/HarmonyResponseParserTests.swift:final class HarmonyResponseParserTests",
+        "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
+        "phase3-binary/Tests/macprovider-cliTests/Spec028PlumbingTests.swift:testRuntimeSpeculativeRouteUsesGreedyGateAndDraftAvailability"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/743",
+        "rationale": "SPEC-018 v0.2.5 defines the #743 Harmony token-ID response parsing contract; conformance remains pending until the implementation and regression evidence are reconciled against AC-57 through AC-61."
       }
     },
     {

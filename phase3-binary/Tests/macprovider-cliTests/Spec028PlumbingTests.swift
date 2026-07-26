@@ -11,12 +11,13 @@ final class Spec028PlumbingTests: XCTestCase {
     }
 
     private func makeChatRequest(
+        model: String = "target",
         temperature: Double = 0.0,
         topP: Double = 1.0,
         extra: [String: Any] = [:]
     ) throws -> ChatCompletionRequest {
         var body: [String: Any] = [
-            "model": "target",
+            "model": model,
             "messages": [["role": "user", "content": "hello"]],
             "temperature": temperature,
             "top_p": topP,
@@ -155,6 +156,7 @@ final class Spec028PlumbingTests: XCTestCase {
         let stochastic = try makeChatRequest(temperature: 0.2)
         let toolChoice = try makeChatRequest(extra: ["tool_choice": "none"])
         let stop = try makeChatRequest(extra: ["stop": ["END"]])
+        let harmony = try makeChatRequest(model: "mlx-community/gpt-oss-20b-MXFP4-Q8")
 
         XCTAssertEqual(
             ModelRuntime.speculativeRoute(for: greedy, draftLoaded: true, numDraftTokens: 3),
@@ -179,6 +181,11 @@ final class Spec028PlumbingTests: XCTestCase {
         XCTAssertEqual(
             ModelRuntime.speculativeRoute(for: stop, draftLoaded: true, numDraftTokens: 3),
             .tokenIterator
+        )
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: harmony, draftLoaded: true, numDraftTokens: 3),
+            .tokenIterator,
+            "Harmony responses require token IDs for channel parsing"
         )
     }
 

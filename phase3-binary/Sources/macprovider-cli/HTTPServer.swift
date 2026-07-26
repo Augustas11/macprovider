@@ -577,7 +577,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         finishReason: completion.finishReason,
                         promptTokens: Int64(completion.promptTokens),
                         ttftMs: ttftMs,
-                        tokensOut: Int64(completion.completionTokens),
+                        tokensOut: Int64(completion.generatedCompletionTokens),
                         unixTsSeconds: unixTsSeconds,
                         modelHashSource: modelHashSource,
                         requestID: auditRequestID,
@@ -586,7 +586,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                     switch receipt {
                     case .issued(let header):
-                        let tokensOut = Int64(completion.completionTokens)
+                        let tokensOut = Int64(completion.generatedCompletionTokens)
                         writer.writeJSON(status: .ok, body: response, extraHeaders: Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)) { delivered in
                             if delivered {
                                 ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
@@ -960,7 +960,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         finishReason: completion.finishReason,
                         promptTokens: Int64(completion.promptTokens),
                         ttftMs: ttftMs,
-                        tokensOut: Int64(completion.completionTokens),
+                        tokensOut: Int64(completion.generatedCompletionTokens),
                         unixTsSeconds: unixTsSeconds,
                         modelHashSource: modelHashSource,
                         requestID: requestID,
@@ -970,7 +970,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     switch receipt {
                     case .issued(let header):
                         trailers = Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)
-                        ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: request.model, tokensOut: Int64(completion.completionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
+                        ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
                     case .omitted(let reason):
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: reason)
                     }
