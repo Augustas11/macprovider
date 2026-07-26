@@ -3,6 +3,7 @@
 package providerevents
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -62,18 +63,20 @@ const (
 const AnonymousProviderID = "_anonymous"
 
 const (
-	DefaultMaxDiagnostic     = 256
-	DefaultEventsQueryCap    = 100
-	DefaultPerProviderCap    = 2000
-	DefaultAnonymousCap      = 5000
-	DefaultGlobalCap         = 100000
-	DefaultLastKnownCap      = 20000
-	DefaultListPageCap       = 200
-	DefaultRetention         = 14 * 24 * time.Hour
-	FixedUTCLayout           = "2006-01-02T15:04:05.000000000Z"
+	DefaultMaxDiagnostic  = 256
+	DefaultEventsQueryCap = 100
+	DefaultPerProviderCap = 2000
+	DefaultAnonymousCap   = 5000
+	DefaultGlobalCap      = 100000
+	DefaultLastKnownCap   = 20000
+	DefaultListPageCap    = 200
+	DefaultRetention      = 14 * 24 * time.Hour
+	FixedUTCLayout        = "2006-01-02T15:04:05.000000000Z"
 )
 
 var (
+	urlLike  = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s]+`)
+	pathLike = regexp.MustCompile(`(^|[\s=])/(Users|Volumes|private|var|tmp|etc|opt)/[^\s,;]+`)
 	// secretLike strips credential-shaped substrings. Hyphen/underscore
 	// continuations after mpk_ are included so fragments cannot survive.
 	secretLike = regexp.MustCompile(`(?i)(bearer\s+\S+|mpk_[a-z0-9_\-]+|token\s*[:=]\s*\S+|"token"\s*:\s*"[^"]+"|provider_token\s*[:=]\s*\S+)`)
@@ -81,7 +84,7 @@ var (
 	// "Authorization: Bearer opaque" cannot leave the opaque token behind.
 	authorizationLike = regexp.MustCompile(`(?i)"?authorization"?\s*[:=]\s*[^\r\n]+`)
 	hex64Token        = regexp.MustCompile(`(?i)\b[a-f0-9]{64}\b`)
-	knownReasons = map[string]struct{}{
+	knownReasons      = map[string]struct{}{
 		ReasonInvalidToken:                  {},
 		ReasonInvalidAuthRequest:            {},
 		ReasonNoCommonAEADSuite:             {},
@@ -153,7 +156,15 @@ func RedactDiagnostic(raw string, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = DefaultMaxDiagnostic
 	}
-	cleaned := authorizationLike.ReplaceAllString(raw, "[redacted]")
+	cleaned := urlLike.ReplaceAllStringFunc(raw, func(value string) string {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return "[redacted_url]"
+		}
+		return parsed.Scheme + "://" + parsed.Host
+	})
+	cleaned = pathLike.ReplaceAllString(cleaned, "$1[redacted_path]")
+	cleaned = authorizationLike.ReplaceAllString(cleaned, "[redacted]")
 	cleaned = secretLike.ReplaceAllString(cleaned, "[redacted]")
 	cleaned = hex64Token.ReplaceAllString(cleaned, "[redacted]")
 	cleaned = strings.ToValidUTF8(cleaned, "")

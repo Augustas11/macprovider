@@ -157,6 +157,8 @@ type Server struct {
 	anonymousEventCount            int
 	lastKnownFlushMu               sync.Mutex
 	lastKnownFlush                 map[string]time.Time
+	diagnosticLastKnownFlushMu     sync.Mutex
+	diagnosticLastKnownFlush       map[string]time.Time
 	bootstrapLimiter               *bootstrapMintLimiter
 	idlePrewarmLimits              sync.Map
 	idlePrewarmQueue               chan idlePrewarmRecord
@@ -3080,6 +3082,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 	switch envelope.Type {
 	case "heartbeat":
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
+	case "diagnostic_status":
+		s.handleDiagnosticStatus(conn, providerID, assignedID, payload)
 	case "idle_prewarm_event":
 		s.handleIdlePrewarmEvent(providerID, payload)
 	case "state_update":
@@ -3113,6 +3117,107 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		}
 		s.log.Warn().Str("provider_id", providerID).Str("type", safeType).Msg("unknown provider message type")
 	}
+}
+
+func (s *Server) handleDiagnosticStatus(conn net.Conn, providerID, assignedID string, payload []byte) {
+	diag, field, err := ParseDiagnosticStatus(payload)
+	if err != nil {
+		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid diagnostic_status")
+		return
+	}
+	if diag.ProviderID != providerID {
+		s.log.Warn().Str("provider_id", providerID).Msg("diagnostic_status provider_id mismatch")
+		return
+	}
+	if diag.AssignedID == "" || diag.AssignedID != assignedID {
+		s.log.Warn().Str("provider_id", providerID).Msg("diagnostic_status assigned_id mismatch")
+		return
+	}
+	state := pool.State(diag.Status)
+	if !validState(state) {
+		s.log.Warn().Str("state", diag.Status).Str("provider_id", providerID).Msg("invalid diagnostic_status state")
+		return
+	}
+	live, ok := s.pool.Resolve(providerID, assignedID)
+	if !ok {
+		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("diagnostic_status inactive session")
+		return
+	}
+	activeConn, err := s.pool.Conn(providerID, assignedID)
+	if err != nil || activeConn != conn {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Str("assigned_id", assignedID).Msg("diagnostic_status stale session")
+		return
+	}
+	now := s.now().UTC()
+	var observedAt *time.Time
+	if diag.ObservedAt != "" {
+		if parsed, parseErr := time.Parse(time.RFC3339Nano, diag.ObservedAt); parseErr == nil {
+			t := parsed.UTC()
+			observedAt = &t
+		}
+	}
+	lastFailure, diagnosticAt := diagnosticFailureSummary(diag.LastConnectionFailure)
+	if lastFailure != "" && diagnosticAt == nil {
+		if observedAt != nil {
+			diagnosticAt = observedAt
+		} else {
+			t := now
+			diagnosticAt = &t
+		}
+	}
+	lastKnown := providerevents.LastKnown{
+		ProviderID:      providerID,
+		AssignedID:      assignedID,
+		BinaryVersion:   diag.BinaryVersion,
+		ModelID:         diag.ModelID,
+		ModelLoaded:     diag.ModelLoaded,
+		ModelHash:       diag.ModelHash,
+		State:           diag.Status,
+		LastSeenAt:      now,
+		RoutingEligible: state == pool.StateReady || state == pool.StateBusy,
+		Presence:        "connected",
+		Diagnostic:      lastFailure,
+		DiagnosticAt:    diagnosticAt,
+	}
+	lastKnown.RoutingEligible = live.RoutingEligible()
+	lastKnown.AuthState = string(live.AuthState)
+	if lastKnown.BinaryVersion == "" {
+		lastKnown.BinaryVersion = live.BinaryVersion
+	}
+	if !live.ConnectedAt.IsZero() {
+		t := live.ConnectedAt.UTC()
+		lastKnown.ConnectedAt = &t
+	}
+	if !live.LastHeartbeatAt.IsZero() {
+		t := live.LastHeartbeatAt.UTC()
+		lastKnown.LastHeartbeatAt = &t
+	}
+	if !live.LastActivityAt.IsZero() {
+		t := live.LastActivityAt.UTC()
+		lastKnown.LastActivityAt = &t
+	}
+	s.enqueueDiagnosticLastKnown(lastKnown)
+}
+
+func diagnosticFailureSummary(raw json.RawMessage) (string, *time.Time) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	var object struct {
+		At         string `json:"at"`
+		Diagnostic string `json:"diagnostic"`
+	}
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return "", nil
+	}
+	var failureAt *time.Time
+	if object.At != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, object.At); err == nil {
+			t := parsed.UTC()
+			failureAt = &t
+		}
+	}
+	return providerevents.RedactDiagnostic(object.Diagnostic, providerevents.DefaultMaxDiagnostic), failureAt
 }
 
 func (s *Server) handleSELivenessResponse(providerID, assignedID string, payload []byte) {

@@ -18,6 +18,8 @@ type adminProviderView struct {
 	AssignedID      string     `json:"assigned_id,omitempty"`
 	BinaryVersion   string     `json:"binary_version,omitempty"`
 	ModelID         string     `json:"model_id,omitempty"`
+	ModelLoaded     bool       `json:"model_loaded,omitempty"`
+	ModelHash       string     `json:"model_hash,omitempty"`
 	State           string     `json:"state,omitempty"`
 	AuthState       string     `json:"auth_state,omitempty"`
 	ConnectedAt     *time.Time `json:"connected_at,omitempty"`
@@ -26,6 +28,8 @@ type adminProviderView struct {
 	LastSeenAt      time.Time  `json:"last_seen_at"`
 	RoutingEligible bool       `json:"routing_eligible"`
 	RecentEvents    int        `json:"recent_event_count,omitempty"`
+	Diagnostic      string     `json:"diagnostic,omitempty"`
+	DiagnosticAt    *time.Time `json:"diagnostic_at,omitempty"`
 }
 
 func (s *Server) handleAdminProviders(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +140,7 @@ func (s *Server) writeAdminProviderList(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 		if p, ok := live[snap.ProviderID]; ok {
-			out = append(out, adminViewFromLive(p))
+			out = append(out, adminViewWithDiagnostic(adminViewFromLive(p), snap))
 		} else {
 			snap.Presence = "offline"
 			out = append(out, adminViewFromLastKnown(snap))
@@ -165,6 +169,14 @@ func (s *Server) writeAdminProviderDetail(w http.ResponseWriter, r *http.Request
 	var view adminProviderView
 	if p, ok := s.pool.Resolve(providerID, ""); ok && s.isProviderTransportConnected(p) {
 		view = adminViewFromLive(p)
+		snap, found, err := s.connectionEvents.GetLastKnown(ctx, providerID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"message": "last-known lookup failed", "code": "events_store_error"}})
+			return
+		}
+		if found {
+			view = adminViewWithDiagnostic(view, snap)
+		}
 	} else {
 		snap, found, err := s.connectionEvents.GetLastKnown(ctx, providerID)
 		if err != nil {
@@ -238,6 +250,8 @@ func adminViewFromLive(p pool.Provider) adminProviderView {
 		AssignedID:      p.AssignedID,
 		BinaryVersion:   p.BinaryVersion,
 		ModelID:         p.ModelID,
+		ModelLoaded:     p.State == pool.StateReady || p.State == pool.StateBusy || p.State == pool.StateDegraded,
+		ModelHash:       p.ModelHash,
 		State:           string(p.State),
 		AuthState:       string(p.AuthState),
 		RoutingEligible: p.RoutingEligible(),
@@ -263,6 +277,12 @@ func adminViewFromLive(p pool.Provider) adminProviderView {
 	return view
 }
 
+func adminViewWithDiagnostic(view adminProviderView, snap providerevents.LastKnown) adminProviderView {
+	view.Diagnostic = snap.Diagnostic
+	view.DiagnosticAt = snap.DiagnosticAt
+	return view
+}
+
 func adminViewFromLastKnown(snap providerevents.LastKnown) adminProviderView {
 	presence := snap.Presence
 	if presence == "" {
@@ -274,6 +294,8 @@ func adminViewFromLastKnown(snap providerevents.LastKnown) adminProviderView {
 		AssignedID:      snap.AssignedID,
 		BinaryVersion:   snap.BinaryVersion,
 		ModelID:         snap.ModelID,
+		ModelLoaded:     snap.ModelLoaded,
+		ModelHash:       snap.ModelHash,
 		State:           snap.State,
 		AuthState:       snap.AuthState,
 		ConnectedAt:     snap.ConnectedAt,
@@ -281,5 +303,7 @@ func adminViewFromLastKnown(snap providerevents.LastKnown) adminProviderView {
 		LastActivityAt:  snap.LastActivityAt,
 		LastSeenAt:      snap.LastSeenAt,
 		RoutingEligible: snap.RoutingEligible,
+		Diagnostic:      snap.Diagnostic,
+		DiagnosticAt:    snap.DiagnosticAt,
 	}
 }

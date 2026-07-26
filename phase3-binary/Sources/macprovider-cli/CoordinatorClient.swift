@@ -283,6 +283,8 @@ actor CoordinatorClient {
     private var operatorPaused: Bool
     private var catalogWarmSwapInvalidated = false
     private var acceptedAssignedProviderID: String?
+    private var lastConnectionFailureDiagnostic: String?
+    private var lastConnectionFailureAt: Date?
 
     init?(
         config: AppConfig,
@@ -680,6 +682,7 @@ actor CoordinatorClient {
                     return
                 }
                 let classification = Self.lifecycleClassification(for: error)
+                recordConnectionFailureDiagnostic(reasonCode: classification.reasonCode, error: error)
                 recordConnectionFailureLifecycle(
                     state: classification.state,
                     reasonCode: classification.reasonCode
@@ -728,6 +731,28 @@ actor CoordinatorClient {
             appended += 1
         }
         return result
+    }
+
+    private static func redactedDiagnosticText(_ value: String, maxLength: Int = 240) -> String {
+        let replacements: [(String, String)] = [
+            (#"\b[a-z][a-z0-9+.-]*://[^\s]+"#, "[redacted_url]"),
+            (#"(^|[\s=])/(Users|Volumes|private|var|tmp|etc|opt)/[^\s,;]+"#, "$1[redacted_path]"),
+            (#"authorization\s*:\s*bearer\s+[^\s,;]+"#, "Authorization: Bearer [redacted]"),
+            (#"\bbearer\s+[^\s,;]+"#, "Bearer [redacted]"),
+            (#"\b(provider[_-]?token|authorization|token)\s*[=:]\s*[^\s,;]+"#, "$1=[redacted]"),
+            (#"\bmpk_[A-Za-z0-9._~+/=-]+"#, "[redacted_provider_token]"),
+            (#"\bmp-[A-Za-z0-9._~+/=-]+"#, "[redacted_provider_token]"),
+            (#"\b[A-Fa-f0-9]{64}\b"#, "[redacted_sha256_like]"),
+        ]
+        var redacted = value
+        for (pattern, replacement) in replacements {
+            redacted = redacted.replacingOccurrences(
+                of: pattern,
+                with: replacement,
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        return sanitizedDiagnosticText(redacted, maxLength: maxLength)
     }
 
     private static func isFatalAuthProtocolFailure(_ error: Error) -> Bool {
@@ -1392,6 +1417,7 @@ actor CoordinatorClient {
         } catch {
             await cleanupConnection()
             let classification = Self.lifecycleClassification(for: error)
+            recordConnectionFailureDiagnostic(reasonCode: classification.reasonCode, error: error)
             recordConnectionFailureLifecycle(
                 state: classification.state,
                 reasonCode: classification.reasonCode
@@ -2486,9 +2512,9 @@ actor CoordinatorClient {
         }
         sleepAssertion?.stop()
         sleepAssertion = sleepAssertionFactory()
-        startHeartbeat(intervalSeconds: interval)
-        try await sendStateUpdate(state: nil, reason: reason)
-        if operatorPaused {
+	        startHeartbeat(intervalSeconds: interval)
+	        try await sendStateUpdate(state: nil, reason: reason)
+	        if operatorPaused {
             _ = try recordLifecycleTransition(
                 to: .pausedByOperator,
                 reasonCode: "operator_pause_restored_after_admission",
@@ -2539,6 +2565,91 @@ actor CoordinatorClient {
             }
             await runAutoupdateIfEligible(recommended)
         }
+    }
+
+    private func recordConnectionFailureDiagnostic(reasonCode: String, error: Error) {
+        let nsError = error as NSError
+        let raw = "\(reasonCode): domain=\(nsError.domain) code=\(nsError.code)"
+        lastConnectionFailureDiagnostic = Self.redactedDiagnosticText(raw, maxLength: 160)
+        lastConnectionFailureAt = Date()
+    }
+
+    func recordConnectionFailureDiagnosticForTest(reasonCode: String, error: Error) async {
+        recordConnectionFailureDiagnostic(reasonCode: reasonCode, error: error)
+    }
+
+    func diagnosticStatusPayloadForTest(reason: String = "test") async -> [String: Any] {
+        await diagnosticStatusPayload(reason: reason)
+    }
+
+    private func sendDiagnosticStatus(reason: String) async throws {
+        let payload = await diagnosticStatusPayload(reason: reason)
+        guard payload["assigned_id"] as? String != nil else { return }
+        try await send(payload)
+    }
+
+    private func diagnosticStatusPayload(reason: String) async -> [String: Any] {
+        let snapshot = await providerStatus.snapshot()
+        let observedAt = Date()
+        let assignedID = snapshot.coordinatorAssignedID ?? acceptedAssignedProviderID
+        var payload: [String: Any] = [
+            "type": "diagnostic_status",
+            "schema_version": 1,
+            "reason": Self.sanitizedDiagnosticText(reason, maxLength: 64),
+            "observed_at": ISO8601DateFormatter().string(from: observedAt),
+            "provider_id": providerID,
+            "assigned_id": assignedID ?? NSNull(),
+            "binary_version": Self.binaryVersion,
+            "status": snapshot.status.rawValue,
+            "model_id": coordinatorWireModelID(for: snapshot.modelID),
+            "model_loaded": snapshot.modelLoaded,
+            "model_hash": snapshot.modelHash ?? NSNull(),
+            "model_hash_algorithm": snapshot.modelHashAlgorithm ?? NSNull(),
+            "weights_manifest_sha256": snapshot.weightsManifestSHA256 ?? NSNull(),
+            "weights_manifest_algorithm": snapshot.weightsManifestAlgorithm ?? NSNull(),
+            "uptime_s": snapshot.uptimeSeconds,
+            "requests_total": snapshot.requestsTotal,
+            "requests_in_flight": snapshot.requestsInFlight,
+            "errors_total": snapshot.errorsTotal,
+            "restart_count": snapshot.restartCount,
+            "memory_rss_mb": snapshot.memoryRSSMB,
+            "memory_pressure": snapshot.memoryPressure.rawValue,
+            "thermal_state": snapshot.thermalState,
+            "thermally_throttled": snapshot.thermallyThrottled,
+            "capacity": [
+                "ram_gb": snapshot.capacity.ramGB,
+                "ram_tier": snapshot.capacity.ramTier,
+                "max_context_tokens": snapshot.capacity.maxContextTokens,
+                "max_concurrency": snapshot.capacity.maxConcurrency,
+                "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+            ] as [String: Any],
+            "coordinator": [
+                "connected": snapshot.coordinatorConnected,
+                "session": assignedID ?? NSNull(),
+                "tier": snapshot.coordinatorTier ?? NSNull(),
+                "identity_admission_mode": snapshot.coordinatorIdentityAdmissionMode ?? NSNull(),
+                "recommended_binary_version": snapshot.recommendedBinaryVersion ?? NSNull(),
+            ] as [String: Any],
+            "credential": [
+                "token_configured": providerToken != nil,
+                "bootstrap_mode": credentialBootstrap,
+            ] as [String: Any],
+            "catalog": [
+                "release_id": catalogReleaseID ?? NSNull(),
+                "policy_version": catalogPolicyVersion ?? NSNull(),
+                "candidate_sha256": catalogCandidateSHA256 ?? NSNull(),
+                "signer_key_id": catalogSignerKeyID ?? NSNull(),
+                "row_identity": catalogRowIdentity ?? NSNull(),
+            ] as [String: Any],
+            "compatibility_set_id": compatibilitySetID ?? NSNull(),
+        ]
+        if let lastConnectionFailureDiagnostic {
+            payload["last_connection_failure"] = [
+                "at": lastConnectionFailureAt.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
+                "diagnostic": lastConnectionFailureDiagnostic,
+            ] as [String: Any]
+        }
+        return payload
     }
 
     /// The server returns its authoritative active key after every accepted
@@ -4195,6 +4306,13 @@ actor CoordinatorClient {
             payload["last_autoupdate_event"] = event
         }
         try await send(payload)
+        if coordinatorSessionAccepted {
+            do {
+                try await sendDiagnosticStatus(reason: reason)
+            } catch {
+                Self.keepaliveDebug("diagnostic_status_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            }
+        }
     }
 
     private func sendDrainStatus(phase: String) async throws {

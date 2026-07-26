@@ -1996,11 +1996,18 @@ struct StatusCommand: AsyncParsableCommand {
     @Flag(help: "Show exact technical fields for diagnostics and support.")
     var advanced = false
 
+    @Flag(help: "Print the raw local status JSON for diagnostics and support.")
+    var json = false
+
     func run() async throws {
         let resolved = try ConfigLoader.load(
             cli: CLIOverrides(port: port, configPath: config)
         )
         let status = try await LocalStatusClient.fetch(port: resolved.port)
+        if json {
+            try Self.writeJSON(status)
+            return
+        }
         let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
         let staleSince = await Self.staleRecommendationSince(providerID: resolved.providerID)
         print(LocalStatusFormatter.format(
@@ -2012,6 +2019,12 @@ struct StatusCommand: AsyncParsableCommand {
             configPath: resolved.configPath,
             advanced: advanced
         ))
+    }
+
+    static func writeJSON(_ payload: [String: Any]) throws {
+        var data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        data.append(0x0a)
+        FileHandle.standardOutput.write(data)
     }
 
     static func staleRecommendationSince(

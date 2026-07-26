@@ -1,12 +1,24 @@
 package ws
 
 import (
+	"bytes"
+	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"net"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
+	"github.com/rs/zerolog"
+	_ "modernc.org/sqlite"
 )
 
 func TestParseNakAcceptsSwiftSpecShape(t *testing.T) {
@@ -27,6 +39,188 @@ func TestParseNakAcceptsSwiftSpecShape(t *testing.T) {
 	}
 	if nak.Error.Message != "Unrecognized message type: 'inference_request'" {
 		t.Fatalf("error.message = %q", nak.Error.Message)
+	}
+}
+
+func TestParseDiagnosticStatusBoundsAndIdentity(t *testing.T) {
+	payload := []byte(`{
+		"type":"diagnostic_status",
+		"schema_version":1,
+		"provider_id":"provider-a",
+		"assigned_id":"assigned-a",
+		"binary_version":"1.8.65",
+		"status":"ready",
+		"model_id":"qwen",
+		"model_loaded":true,
+		"model_hash":"` + strings.Repeat("a", 64) + `",
+		"model_hash_algorithm":"macprovider.snapshot-manifest.v1",
+		"last_connection_failure":{"at":"2026-07-22T12:00:00Z","diagnostic":"network_offline: redacted"}
+	}`)
+	diag, field, err := ParseDiagnosticStatus(payload)
+	if err != nil {
+		t.Fatalf("ParseDiagnosticStatus field=%s err=%v", field, err)
+	}
+	if diag.ProviderID != "provider-a" || diag.AssignedID != "assigned-a" || !diag.ModelLoaded {
+		t.Fatalf("parsed diagnostic mismatch: %#v", diag)
+	}
+
+	oversized := append([]byte(`{"type":"diagnostic_status","schema_version":1,"provider_id":"p","status":"ready","model_id":"m","pad":"`), bytes.Repeat([]byte("x"), 8192)...)
+	oversized = append(oversized, []byte(`"}`)...)
+	if _, field, err := ParseDiagnosticStatus(oversized); err == nil || field != "payload" {
+		t.Fatalf("oversize accepted field=%s err=%v", field, err)
+	}
+	for name, body := range map[string]string{
+		"missing assigned_id": `{"type":"diagnostic_status","schema_version":1,"provider_id":"p","status":"ready","model_id":"m","model_loaded":true}`,
+		"null assigned_id":    `{"type":"diagnostic_status","schema_version":1,"provider_id":"p","assigned_id":null,"status":"ready","model_id":"m","model_loaded":true}`,
+		"numeric assigned_id": `{"type":"diagnostic_status","schema_version":1,"provider_id":"p","assigned_id":1,"status":"ready","model_id":"m","model_loaded":true}`,
+	} {
+		if _, field, err := ParseDiagnosticStatus([]byte(body)); err == nil || !strings.Contains(field, "assigned_id") {
+			t.Fatalf("%s accepted field=%s err=%v", name, field, err)
+		}
+	}
+	for name, body := range map[string]string{
+		"missing model_loaded": `{"type":"diagnostic_status","schema_version":1,"provider_id":"p","assigned_id":"a","status":"ready","model_id":"m"}`,
+		"null model_loaded":    `{"type":"diagnostic_status","schema_version":1,"provider_id":"p","assigned_id":"a","status":"ready","model_id":"m","model_loaded":null}`,
+		"numeric model_loaded": `{"type":"diagnostic_status","schema_version":1,"provider_id":"p","assigned_id":"a","status":"ready","model_id":"m","model_loaded":1}`,
+	} {
+		if _, field, err := ParseDiagnosticStatus([]byte(body)); err == nil || !strings.Contains(field, "model_loaded") {
+			t.Fatalf("%s accepted field=%s err=%v", name, field, err)
+		}
+	}
+}
+
+func TestHandleDiagnosticStatusRequiresAssignedSession(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := providerevents.NewSQLiteStore(db)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	registry := pool.NewRegistry(nil)
+	server := NewServer(config.Default(), registry, zerolog.Nop(), WithConnectionEventStore(store))
+	now := time.Now().UTC()
+	currentServerConn, currentProviderConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = currentServerConn.Close()
+		_ = currentProviderConn.Close()
+	})
+	if _, ok := registry.RegisterAt(&pool.Provider{
+		ProviderID:      "provider-a",
+		AssignedID:      "assigned-good",
+		BinaryVersion:   "1.8.57",
+		ModelID:         "model-a",
+		State:           pool.StateReady,
+		AuthState:       pool.AuthBearerValidated,
+		ConnectedAt:     now,
+		LastHeartbeatAt: now,
+		LastActivityAt:  now,
+		SlotsFree:       1,
+		SlotsTotal:      1,
+	}, currentServerConn, now); !ok {
+		t.Fatal("register live provider failed")
+	}
+
+	mismatch := []byte(`{
+		"type":"diagnostic_status",
+		"schema_version":1,
+		"provider_id":"provider-a",
+		"assigned_id":"assigned-wrong",
+		"status":"ready",
+		"model_id":"model-a",
+		"model_loaded":true
+	}`)
+	server.handleDiagnosticStatus(currentServerConn, "provider-a", "assigned-good", mismatch)
+	if _, ok, err := store.GetLastKnown(context.Background(), "provider-a"); err != nil || ok {
+		t.Fatalf("mismatched assigned_id persisted ok=%v err=%v", ok, err)
+	}
+
+	failureAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	matched := []byte(`{
+		"type":"diagnostic_status",
+		"schema_version":1,
+		"provider_id":"provider-a",
+		"assigned_id":"assigned-good",
+		"observed_at":"2026-07-22T13:00:00Z",
+		"status":"ready",
+		"model_id":"model-a",
+		"model_loaded":true,
+		"last_connection_failure":{"at":"2026-07-22T12:00:00Z","diagnostic":"network_offline: redacted"}
+	}`)
+	staleServerConn, staleProviderConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = staleServerConn.Close()
+		_ = staleProviderConn.Close()
+	})
+	server.handleDiagnosticStatus(staleServerConn, "provider-a", "assigned-good", matched)
+	if _, ok, err := store.GetLastKnown(context.Background(), "provider-a"); err != nil || ok {
+		t.Fatalf("stale diagnostic_status persisted ok=%v err=%v", ok, err)
+	}
+
+	server.handleDiagnosticStatus(currentServerConn, "provider-a", "assigned-good", matched)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snap, ok, err := store.GetLastKnown(context.Background(), "provider-a")
+		if err != nil {
+			t.Fatalf("get last-known: %v", err)
+		}
+		if ok {
+			if snap.AssignedID != "assigned-good" || snap.Diagnostic == "" {
+				t.Fatalf("last-known mismatch: %#v", snap)
+			}
+			if snap.DiagnosticAt == nil || !snap.DiagnosticAt.Equal(failureAt) {
+				t.Fatalf("diagnostic_at = %v, want failure time %v", snap.DiagnosticAt, failureAt)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("matched diagnostic_status was not persisted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDiagnosticLastKnownIsRateLimitedAndQueueOnly(t *testing.T) {
+	store := &countingConnectionEventStore{}
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	server := &Server{
+		connectionEvents:         store,
+		connectionEventQueue:     make(chan connectionEventJob, 2),
+		lastKnownFlush:           map[string]time.Time{},
+		diagnosticLastKnownFlush: map[string]time.Time{},
+		now:                      func() time.Time { return now },
+	}
+	server.connectionEventWorkerOnce.Do(func() {})
+	snap := providerevents.LastKnown{ProviderID: "provider-a", AssignedID: "assigned-a", LastSeenAt: now}
+
+	server.enqueueDiagnosticLastKnown(snap)
+	server.enqueueDiagnosticLastKnown(providerevents.LastKnown{ProviderID: "provider-a", AssignedID: "assigned-a", LastSeenAt: now.Add(time.Second)})
+	if got := len(server.connectionEventQueue); got != 1 {
+		t.Fatalf("diagnostic rate limit queued %d snapshots, want 1", got)
+	}
+	now = now.Add(lastKnownMinInterval + time.Second)
+	server.enqueueDiagnosticLastKnown(providerevents.LastKnown{ProviderID: "provider-a", AssignedID: "assigned-a", LastSeenAt: now})
+	if got := len(server.connectionEventQueue); got != 2 {
+		t.Fatalf("diagnostic after rate window queued %d snapshots, want 2", got)
+	}
+	if got := store.upserts.Load(); got != 0 {
+		t.Fatalf("diagnostic enqueue used sync fallback upserts=%d", got)
+	}
+
+	full := &Server{
+		connectionEvents:         store,
+		connectionEventQueue:     make(chan connectionEventJob, 1),
+		lastKnownFlush:           map[string]time.Time{},
+		diagnosticLastKnownFlush: map[string]time.Time{},
+		now:                      func() time.Time { return now },
+	}
+	full.connectionEventWorkerOnce.Do(func() {})
+	full.connectionEventQueue <- connectionEventJob{}
+	full.enqueueDiagnosticLastKnown(providerevents.LastKnown{ProviderID: "provider-b", AssignedID: "assigned-b", LastSeenAt: now})
+	if got := store.upserts.Load(); got != 0 {
+		t.Fatalf("full diagnostic queue used sync fallback upserts=%d", got)
 	}
 }
 
@@ -97,6 +291,39 @@ func validV2SafetyHeartbeat() map[string]any {
 			"observation_id": "observation-a", "observed_at": "2026-07-14T12:00:00Z", "valid_for_ms": 90000,
 		},
 	}
+}
+
+type countingConnectionEventStore struct {
+	upserts atomic.Int32
+}
+
+func (s *countingConnectionEventStore) Record(context.Context, providerevents.Event) error {
+	return nil
+}
+
+func (s *countingConnectionEventStore) UpsertLastKnown(context.Context, providerevents.LastKnown) error {
+	s.upserts.Add(1)
+	return nil
+}
+
+func (s *countingConnectionEventStore) GetLastKnown(context.Context, string) (providerevents.LastKnown, bool, error) {
+	return providerevents.LastKnown{}, false, nil
+}
+
+func (s *countingConnectionEventStore) ListLastKnown(context.Context, int, string, string) ([]providerevents.LastKnown, error) {
+	return nil, nil
+}
+
+func (s *countingConnectionEventStore) ListEvents(context.Context, string, int) ([]providerevents.Event, error) {
+	return nil, nil
+}
+
+func (s *countingConnectionEventStore) LatestEventProvider(context.Context, string) (providerevents.Event, bool, error) {
+	return providerevents.Event{}, false, nil
+}
+
+func (s *countingConnectionEventStore) ReconcileBounds(context.Context) error {
+	return nil
 }
 
 func TestParseHeartbeatBindsV2SafetyTelemetryToOuterIdentity(t *testing.T) {

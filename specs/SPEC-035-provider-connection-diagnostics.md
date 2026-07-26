@@ -1,7 +1,7 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.1.1
-Status: draft (Partial #535 coordinator journal + operator GET)
+Version: v0.2.0
+Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
 
@@ -11,21 +11,24 @@ Give operators a secure, remote, queryable view of provider connection health
 and recent WebSocket auth/disconnect/warmup/liveness failures without exposing
 provider secrets or providing remote shell access.
 
-In scope for v0.1 (this Partial):
+In scope for v0.2 (this Partial):
 
 - Durable bounded `provider_connection_events` journal on a dedicated
   coordinator SQLite file (sibling of the request-log DB) so journal
   maintenance never shares the money-path writer lock.
-- Last-known non-secret provider snapshot for offline representation.
+- Last-known non-secret provider snapshot for offline representation, including
+  redacted model-loaded/model-hash and latest local connection failure summary.
 - Closed failure taxonomy and redaction rules.
 - Operator-authenticated GET endpoints under `/admin/providers*`.
 - Optional Prometheus counters with closed-set labels.
 - Anonymous/`_anonymous` bucket + global/per-provider caps, async enqueue,
   and periodic reconcile for reconnect storms.
+- Provider local JSON status over loopback-only CLI inspection.
+- Provider-originated `diagnostic_status` schema v1 over the already
+  authenticated provider WebSocket.
 
 Out of scope (later Partials of #535):
 
-- Provider-originated `diagnostic_status` over WSS and local schema unify.
 - `pearlctl provider inspect` and alert rules.
 - Separate HTTPS diagnostic beacon.
 - Buyer/gateway exposure of diagnostics.
@@ -77,7 +80,27 @@ anonymous-bucket, and global row caps so unbounded reconnect storms cannot grow
 storage without bound. Pre-identity failures MAY use the reserved
 `_anonymous` provider_id bucket under the anonymous cap.
 
+**SPEC-035-R006 — Provider local JSON diagnostic status.** The provider CLI MUST
+expose a localhost-only JSON diagnostic status suitable for operator collection
+without remote shell access. The local JSON MUST include provider ID, assigned
+ID when known, binary version, model ID, model-loaded state, model/weights hash
+metadata, coordinator connection state, request/error counters, and credential
+presence booleans. It MUST NOT expose raw provider tokens, Authorization header
+values, bootstrap-token material, or arbitrary local filesystem contents.
+
+**SPEC-035-R007 — Authenticated WSS diagnostic snapshot.** After an
+authenticated provider WebSocket session is accepted, the provider SHOULD send a
+bounded `diagnostic_status` schema v1 frame and SHOULD refresh it after state
+updates or reconnects when local failure state changes. The coordinator MUST
+accept this frame only from an admitted provider session, MUST verify
+`provider_id` and `assigned_id` match the active session, MUST reject oversized
+payloads and malformed required fields, MUST preserve live pool routing/auth
+truth over provider-supplied eligibility claims, and MUST store only redacted
+operator-visible last-known data. The diagnostic snapshot MUST NOT become
+buyer-visible and MUST NOT introduce a second credential or HTTPS beacon path.
+
 ## 4. Rollout
 
-v0.1 ships coordinator-side only. Provider WSS diagnostic snapshots, CLI
-inspect, alerts, and any HTTPS beacon remain deferred under #535.
+v0.2 ships coordinator-side journal/admin GETs plus provider `status --json` and
+authenticated WSS `diagnostic_status` snapshots. CLI inspect wrappers, alerts,
+and any HTTPS beacon remain deferred under #535.

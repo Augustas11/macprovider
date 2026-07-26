@@ -91,6 +91,31 @@ final class StatusCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Run: macprovider-cli autotune --recommend"), output)
     }
 
+    func testLocalStatusJSONIncludesCredentialPresenceBooleans() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let snapshot = await providerStatus.snapshot()
+        let body = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://user:password@coordinator.example/private?api_key=secret#fragment",
+            credentialStatus: ProviderCredentialStatus(source: .cliKeychain, state: .ready, restartSafe: true)
+        )
+
+        let credential = try XCTUnwrap(body["credential"] as? [String: Any])
+        XCTAssertEqual(credential["token_configured"] as? Bool, true)
+        XCTAssertEqual(credential["bootstrap_mode"] as? Bool, false)
+        XCTAssertNil(String(describing: credential).range(of: "mpk_", options: [.caseInsensitive]))
+        let encoded = try! JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        let text = String(decoding: encoded, as: UTF8.self)
+        XCTAssertFalse(text.contains("password"), text)
+        XCTAssertFalse(text.contains("api_key"), text)
+        XCTAssertFalse(text.contains("/private"), text)
+    }
+
     func testStatusShowsActionableAdmissionIdentityRecoveryContract() {
         var payload = status(providerID: "provider-a")
         payload["admission_identity"] = [

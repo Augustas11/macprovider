@@ -37,6 +37,8 @@ type LastKnown struct {
 	AssignedID      string     `json:"assigned_id,omitempty"`
 	BinaryVersion   string     `json:"binary_version,omitempty"`
 	ModelID         string     `json:"model_id,omitempty"`
+	ModelLoaded     bool       `json:"model_loaded,omitempty"`
+	ModelHash       string     `json:"model_hash,omitempty"`
 	State           string     `json:"state,omitempty"`
 	AuthState       string     `json:"auth_state,omitempty"`
 	ConnectedAt     *time.Time `json:"connected_at,omitempty"`
@@ -45,6 +47,8 @@ type LastKnown struct {
 	LastSeenAt      time.Time  `json:"last_seen_at"`
 	RoutingEligible bool       `json:"routing_eligible"`
 	Presence        string     `json:"presence,omitempty"` // connected|offline
+	Diagnostic      string     `json:"diagnostic,omitempty"`
+	DiagnosticAt    *time.Time `json:"diagnostic_at,omitempty"`
 }
 
 // Store is the durable journal + last-known surface used by operator GETs.
@@ -155,18 +159,36 @@ CREATE TABLE IF NOT EXISTS provider_last_known (
 	assigned_id TEXT NOT NULL DEFAULT '',
 	binary_version TEXT NOT NULL DEFAULT '',
 	model_id TEXT NOT NULL DEFAULT '',
+	model_loaded INTEGER NOT NULL DEFAULT 0,
+	model_hash TEXT NOT NULL DEFAULT '',
 	state TEXT NOT NULL DEFAULT '',
 	auth_state TEXT NOT NULL DEFAULT '',
 	connected_at_utc TEXT NOT NULL DEFAULT '',
 	last_heartbeat_at_utc TEXT NOT NULL DEFAULT '',
 	last_activity_at_utc TEXT NOT NULL DEFAULT '',
 	last_seen_at_utc TEXT NOT NULL,
-	routing_eligible INTEGER NOT NULL DEFAULT 0
+	routing_eligible INTEGER NOT NULL DEFAULT 0,
+	diagnostic TEXT NOT NULL DEFAULT '',
+	diagnostic_at_utc TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_provider_last_known_seen
 	ON provider_last_known(last_seen_at_utc DESC, provider_id ASC);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE provider_last_known ADD COLUMN model_loaded INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE provider_last_known ADD COLUMN model_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN diagnostic TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_last_known ADD COLUMN diagnostic_at_utc TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, alterErr := s.db.ExecContext(ctx, stmt); alterErr != nil &&
+			!strings.Contains(strings.ToLower(alterErr.Error()), "duplicate column") {
+			return alterErr
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) Record(ctx context.Context, event Event) error {
@@ -257,10 +279,11 @@ func (s *SQLiteStore) UpsertLastKnown(ctx context.Context, snap LastKnown) error
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO provider_last_known (
-	provider_id, assigned_id, binary_version, model_id, state, auth_state,
+	provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash,
+	state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(provider_id) DO UPDATE SET
 	assigned_id = CASE
 		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.assigned_id
@@ -276,6 +299,15 @@ ON CONFLICT(provider_id) DO UPDATE SET
 		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.model_id
 		WHEN excluded.model_id = '' THEN provider_last_known.model_id
 		ELSE excluded.model_id
+	END,
+	model_loaded = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.model_loaded
+		ELSE excluded.model_loaded
+	END,
+	model_hash = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.model_hash
+		WHEN excluded.model_hash = '' THEN provider_last_known.model_hash
+		ELSE excluded.model_hash
 	END,
 	state = CASE
 		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.state
@@ -309,11 +341,23 @@ ON CONFLICT(provider_id) DO UPDATE SET
 	routing_eligible = CASE
 		WHEN excluded.last_seen_at_utc >= provider_last_known.last_seen_at_utc THEN excluded.routing_eligible
 		ELSE provider_last_known.routing_eligible
+	END,
+	diagnostic = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.diagnostic
+		WHEN excluded.diagnostic = '' THEN provider_last_known.diagnostic
+		ELSE excluded.diagnostic
+	END,
+	diagnostic_at_utc = CASE
+		WHEN excluded.last_seen_at_utc < provider_last_known.last_seen_at_utc THEN provider_last_known.diagnostic_at_utc
+		WHEN excluded.diagnostic_at_utc = '' THEN provider_last_known.diagnostic_at_utc
+		ELSE excluded.diagnostic_at_utc
 	END`,
 		providerID,
 		strings.TrimSpace(snap.AssignedID),
 		RedactDiagnostic(snap.BinaryVersion, 64),
 		RedactDiagnostic(snap.ModelID, 128),
+		boolToInt(snap.ModelLoaded),
+		SanitizeModelHash(snap.ModelHash),
 		RedactDiagnostic(snap.State, 64),
 		RedactDiagnostic(snap.AuthState, 64),
 		formatOptionalTime(snap.ConnectedAt),
@@ -321,6 +365,8 @@ ON CONFLICT(provider_id) DO UPDATE SET
 		formatOptionalTime(snap.LastActivityAt),
 		FormatFixedUTC(snap.LastSeenAt),
 		boolToInt(snap.RoutingEligible),
+		RedactDiagnostic(snap.Diagnostic, DefaultMaxDiagnostic),
+		formatOptionalTime(snap.DiagnosticAt),
 	)
 	return err
 }
@@ -331,9 +377,9 @@ func (s *SQLiteStore) GetLastKnown(ctx context.Context, providerID string) (Last
 		return LastKnown{}, false, nil
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT provider_id, assigned_id, binary_version, model_id, state, auth_state,
+SELECT provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
 FROM provider_last_known WHERE provider_id = ?`, providerID)
 	snap, err := scanLastKnown(row)
 	if err == sql.ErrNoRows {
@@ -357,17 +403,17 @@ func (s *SQLiteStore) ListLastKnown(ctx context.Context, limit int, afterSeenAt,
 	)
 	if afterProviderID == "" || afterSeenAt == "" {
 		rows, err = s.db.QueryContext(ctx, `
-SELECT provider_id, assigned_id, binary_version, model_id, state, auth_state,
+SELECT provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
 FROM provider_last_known
 ORDER BY last_seen_at_utc DESC, provider_id ASC
 LIMIT ?`, limit)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-SELECT provider_id, assigned_id, binary_version, model_id, state, auth_state,
+SELECT provider_id, assigned_id, binary_version, model_id, model_loaded, model_hash, state, auth_state,
 	connected_at_utc, last_heartbeat_at_utc, last_activity_at_utc,
-	last_seen_at_utc, routing_eligible
+	last_seen_at_utc, routing_eligible, diagnostic, diagnostic_at_utc
 FROM provider_last_known
 WHERE last_seen_at_utc < ?
    OR (last_seen_at_utc = ? AND provider_id > ?)
@@ -602,14 +648,16 @@ func scanLastKnown(row rowScanner) (LastKnown, error) {
 	var (
 		snap                                    LastKnown
 		connectedRaw, heartbeatRaw, activityRaw string
-		lastSeenRaw                             string
-		routing                                 int
+		lastSeenRaw, diagnosticAtRaw            string
+		routing, modelLoaded                    int
 	)
 	if err := row.Scan(
 		&snap.ProviderID,
 		&snap.AssignedID,
 		&snap.BinaryVersion,
 		&snap.ModelID,
+		&modelLoaded,
+		&snap.ModelHash,
 		&snap.State,
 		&snap.AuthState,
 		&connectedRaw,
@@ -617,6 +665,8 @@ func scanLastKnown(row rowScanner) (LastKnown, error) {
 		&activityRaw,
 		&lastSeenRaw,
 		&routing,
+		&snap.Diagnostic,
+		&diagnosticAtRaw,
 	); err != nil {
 		return LastKnown{}, err
 	}
@@ -644,6 +694,12 @@ func scanLastKnown(row rowScanner) (LastKnown, error) {
 	snap.LastActivityAt = activity
 	snap.LastSeenAt = lastSeen.UTC()
 	snap.RoutingEligible = routing != 0
+	snap.ModelLoaded = modelLoaded != 0
+	diagnosticAt, err := parseOptionalTime(diagnosticAtRaw)
+	if err != nil {
+		return LastKnown{}, err
+	}
+	snap.DiagnosticAt = diagnosticAt
 	return snap, nil
 }
 
@@ -675,4 +731,17 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func SanitizeModelHash(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if len(value) != 64 {
+		return RedactDiagnostic(value, 128)
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return RedactDiagnostic(value, 128)
+		}
+	}
+	return value
 }
