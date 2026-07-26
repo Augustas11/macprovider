@@ -560,15 +560,15 @@
       ],
       "implementation_status": "partial",
       "production_status": "pending-verification",
-      "last_reconciled_commit": "38e3a5fcce6304d12c2708199698187b3964d3b1",
-      "last_reconciled_at": "2026-07-21",
+      "last_reconciled_commit": "e310e15c41e6449c70e8fd9f7dfc2f55abb1ae87",
+      "last_reconciled_at": "2026-07-26",
       "evidence": [],
       "requirement_id_migration": "pending",
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Partial #658: append-only discovery, protected renewal signer, and anonymous v1.8.55 bridge proof are landed in code/workflows; the physical v1.8.55→vNext update/rollback/buyer-serving journey remains open under the #614 conformance ledger."
+        "rationale": "Implementation and regression mappings now cover signed discovery, manual recovery, local integrity, launchd fencing, and rollback fencing after the closed updater-lifecycle fixes. SPEC-020 remains pending, not conformant, because release/update/restart/rollback behavior still needs mapped signed physical journey evidence under the #614 conformance ledger."
       }
     },
     {
@@ -1225,7 +1225,7 @@
     {
       "requirement_id": "SPEC-020-R001",
       "spec_id": "SPEC-020",
-      "state": "nonconformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleCoordinatorRecommendation",
         "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleSignedReleaseDiscovery",
@@ -1243,16 +1243,16 @@
       "journeys": [],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Partial #658: append-only transport, protected renewal, and anonymous v1.8.55 bridge verifier are implemented; physical bridge/update/rollback/buyer-serving evidence remains pending under the #614 conformance ledger."
+        "rationale": "Append-only signed discovery, protected renewal, and anonymous v1.8.55 bridge verification are mapped to code and regression tests. The unresolved item is signed physical discovery-to-update journey evidence for the current production-base path, so conformance remains pending under #614."
       }
     },
     {
       "requirement_id": "SPEC-020-R002",
       "spec_id": "SPEC-020",
-      "state": "nonconformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct UpdateCommand",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:discoverSignedReleaseHead",
@@ -1271,16 +1271,16 @@
       "journeys": [],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Partial #658: manual signed-release update, append-only transport, protected renewal, and anonymous v1.8.55 bridge verifier are implemented; physical bridge/update/rollback/buyer-serving evidence remains pending under the #614 conformance ledger."
+        "rationale": "Manual signed-release recovery, append-only transport, protected renewal, and anonymous v1.8.55 bridge verification are mapped to code and regression tests. The unresolved item is signed physical recovery evidence independent of coordinator state for the current production-base path, so conformance remains pending under #614."
       }
     },
     {
       "requirement_id": "SPEC-020-R003",
       "spec_id": "SPEC-020",
-      "state": "nonconformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
@@ -1298,16 +1298,16 @@
       "journeys": [],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Implementation mappings now cover local signed-set health, exact-set success binding, and rollback policy in PR #631, but signed physical journey evidence is still pending."
+        "rationale": "Local signed-set health, exact-set success binding, startup recovery, and rollback policy are mapped to code and regression tests. Unit and script coverage do not satisfy SPEC governance for release/update/restart/rollback behavior, so signed physical journey evidence is still pending under #614."
       }
     },
     {
       "requirement_id": "SPEC-020-R004",
       "spec_id": "SPEC-020",
-      "state": "nonconformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:acquireUpdateLockAndFenceReloadJobs",
         "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:rollbackCommittedSwapAfterRestartFailure",
@@ -1377,10 +1377,10 @@
       "journeys": [],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "The one-shot reload, public-v1.8.53 first-hop bridge, listener-bound commit gate, and all rollback-entry fencing are implemented with regression coverage, but a signed private candidate must still prove stable physical upgrade and rollback from the public v1.8.53 installation before conformance."
+        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, and legacy first-hop bridge regressions are mapped to code and tests. Legacy bridge checks remain compatibility evidence; conformance remains pending until the current production-base signed physical update and rollback journey is recorded under #614."
       }
     },
     {
