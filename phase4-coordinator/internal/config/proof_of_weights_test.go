@@ -52,6 +52,7 @@ func TestValidateProofOfWeightsHelloGateRejectsTTLBelowVerifierLimit(t *testing.
 	// admission window, so admission stays blocked despite every action succeeding.
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.Auth.GatewayServiceToken = "test-gateway-service-token"
 	cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 	proofOfWeightsOnboardingBaseline(&cfg)
 

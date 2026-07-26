@@ -40,14 +40,13 @@ func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 }
 
 func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
-	cfg := Default()
+	cfg := validTestConfig()
 	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.EnableSocialInviteBonus {
 		t.Fatal("referral launch policy must default off")
 	}
 	if cfg.Referrals.JoinBaseURL != "https://malibu.tech/j" {
 		t.Fatalf("default join_base_url=%q, want canonical public origin", cfg.Referrals.JoinBaseURL)
 	}
-	cfg.Auth.OperatorKey = "operator-key"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("disabled referral defaults should validate: %v", err)
 	}
@@ -65,8 +64,7 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 }
 
 func TestReferralJoinLinksRequireAdmissionAndPublicValidation(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Referrals.EnableJoinLinks = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires require_for_registration") {
 		t.Fatalf("join without admission error=%v", err)
@@ -86,8 +84,7 @@ func TestReferralJoinLinksRequireAdmissionAndPublicValidation(t *testing.T) {
 }
 
 func TestReferralSocialBonusRequiresDarkStackAndConfiguredDwell(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Referrals.EnableSocialInviteBonus = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires referral admission, public validation, and join links") {
 		t.Fatalf("social without server stack error=%v", err)
@@ -140,16 +137,14 @@ func TestReferralRequestAccessURLMustBeCredentialFreeHTTPSEvenWhenGateIsOff(t *t
 		"https://ACCESS.example.test/waitlist",
 		"https://access.example.test",
 	} {
-		cfg := Default()
-		cfg.Auth.OperatorKey = "operator-key"
+		cfg := validTestConfig()
 		cfg.Referrals.RequestAccessURL = raw
 		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_access_url") {
 			t.Fatalf("request_access_url=%q error=%v", raw, err)
 		}
 	}
 
-	cfg := Default()
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg := validTestConfig()
 	cfg.Referrals.RequestAccessURL = "https://access.example.test/waitlist?campaign=prebeta"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid request access URL: %v", err)
@@ -926,7 +921,7 @@ func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
 }
 
 func TestCLIOnlyOperatorKeysAllowPartialConfigurationWhileRoutesFailClosed(t *testing.T) {
-	cfg := Default()
+	cfg := validTestConfig()
 	cfg.Auth.OperatorKey = "legacy-operator"
 	cfg.Onboarding.AppTrackRegisterEnabled = false
 	cfg.Auth.OperatorKeys = map[string]string{"alice": "same-secret", "bob": "same-secret"}

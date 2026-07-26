@@ -82,10 +82,10 @@ type Server struct {
 	// enabled; Pearl production keeps canary disabled under #584. Guarded by
 	// canaryCorrMu. canaryBankGeneration is an interim monotonic bank/config
 	// generation (FR-CAN26 full hot-reload generation remains a Gap).
-	canaryCorrMu         sync.Mutex
-	canaryCorrByModel    map[string]*liveCorrelationEpoch
-	canarySharedDispatch map[string]sharedCanaryDispatch
-	canaryBankGeneration uint64
+	canaryCorrMu                  sync.Mutex
+	canaryCorrByModel             map[string]*liveCorrelationEpoch
+	canarySharedDispatch          map[string]sharedCanaryDispatch
+	canaryBankGeneration          uint64
 	losslessnessPending           sync.Map
 	losslessnessNonceIndex        sync.Map
 	losslessnessDigestIndex       sync.Map

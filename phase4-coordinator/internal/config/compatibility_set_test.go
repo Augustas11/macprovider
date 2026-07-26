@@ -11,8 +11,7 @@ const (
 )
 
 func TestCompatibilitySetPolicyRequiresTargetAndRollbackSet(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg := validTestConfig()
 	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
 		TargetID:    compatibilitySetTarget,
 		AcceptedIDs: []string{compatibilitySetTarget},
@@ -25,8 +24,7 @@ func TestCompatibilitySetPolicyRequiresTargetAndRollbackSet(t *testing.T) {
 }
 
 func TestCompatibilitySetPolicyAcceptsExactTargetAndRollbackSet(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg := validTestConfig()
 	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
 		TargetID:    compatibilitySetTarget,
 		AcceptedIDs: []string{compatibilitySetTarget, compatibilitySetRollback},
@@ -77,8 +75,7 @@ func TestCompatibilitySetPolicyRejectsMalformedAndPartialConfiguration(t *testin
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := Default()
-			cfg.Auth.OperatorKey = "test-operator-key"
+			cfg := validTestConfig()
 			cfg.Coordinator.CompatibilitySet = test.policy
 			err := cfg.Validate()
 			if err == nil || !strings.Contains(err.Error(), test.want) {
@@ -89,8 +86,7 @@ func TestCompatibilitySetPolicyRejectsMalformedAndPartialConfiguration(t *testin
 }
 
 func TestUnconfiguredCompatibilitySetPolicyRetainsLegacyValidation(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg := validTestConfig()
 	if cfg.Coordinator.CompatibilitySet.Configured() {
 		t.Fatal("default compatibility-set policy must be unconfigured")
 	}
@@ -102,8 +98,7 @@ func TestUnconfiguredCompatibilitySetPolicyRetainsLegacyValidation(t *testing.T)
 const compatibilitySetFirstHop = "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
 
 func TestCompatibilitySetFirstHopBridgeAllowsSessionWithoutBuyerAcceptance(t *testing.T) {
-	cfg := Default()
-	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg := validTestConfig()
 	cfg.Coordinator.CompatibilitySet = CompatibilitySetConfig{
 		TargetID:          compatibilitySetTarget,
 		AcceptedIDs:       []string{compatibilitySetTarget, compatibilitySetRollback},
@@ -169,8 +164,7 @@ func TestCompatibilitySetFirstHopBridgeRejectsOverlapAndTarget(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := Default()
-			cfg.Auth.OperatorKey = "test-operator-key"
+			cfg := validTestConfig()
 			cfg.Coordinator.CompatibilitySet = test.policy
 			err := cfg.Validate()
 			if err == nil || !strings.Contains(err.Error(), test.want) {
