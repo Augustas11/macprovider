@@ -156,25 +156,36 @@ func (w *phaseTimingResponseWriter) inject() {
 // unmarked so the gateway settles-on-estimate rather than refunds. On a
 // streaming 200 the attempt was dispatched and non-503, so the marker is
 // absent; the gateway ignores the marker on 200 regardless.
+//
+// #766: this is ALSO the single-terminal latch. The first write through this
+// wrapper is by definition the buyer-visible terminal (net/http discards any
+// later status), so the same one-shot gate that stamps the marker publishes
+// the claim to the request arbiter (terminal_arbiter.go). The sync.Once became
+// mu+claimed only so the already-claimed branch can record the late write; the
+// marker decision body itself is preserved verbatim in stampNoChargeMarker —
+// settlementNoPriorDispatchHeader semantics are read by the gateway for
+// settle-vs-refund and are pinned by the item-18 tests.
 type noPriorDispatchResponseWriter struct {
 	http.ResponseWriter
-	rec  *billingRecorder
-	once sync.Once
+	rec *billingRecorder
+
+	mu      sync.Mutex
+	claimed bool
 }
 
 func (w *noPriorDispatchResponseWriter) WriteHeader(code int) {
-	w.mark(code)
+	w.mark(code, true)
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *noPriorDispatchResponseWriter) Write(b []byte) (int, error) {
 	// A Write with no prior WriteHeader is an implicit 200 (net/http default).
-	w.mark(http.StatusOK)
+	w.mark(http.StatusOK, false)
 	return w.ResponseWriter.Write(b)
 }
 
 func (w *noPriorDispatchResponseWriter) Flush() {
-	w.mark(http.StatusOK)
+	w.mark(http.StatusOK, false)
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -184,21 +195,47 @@ func (w *noPriorDispatchResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func (w *noPriorDispatchResponseWriter) mark(code int) {
-	w.once.Do(func() {
-		if w.rec == nil {
-			return
+// mark is the one-shot latch. explicit distinguishes a real status assertion
+// (WriteHeader) from the implicit-200 that Write/Flush carry: once the terminal
+// is claimed, subsequent body writes and flushes are ordinary response traffic,
+// NOT competing terminals, and must not be counted as late writes — otherwise
+// buyerTerminalLateTotal would just be a stream-chunk counter. A WriteHeader
+// after the latch IS a competing terminal (net/http discards it and logs
+// "superfluous WriteHeader"), so it is counted.
+func (w *noPriorDispatchResponseWriter) mark(code int, explicit bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.claimed {
+		if explicit {
+			// Lost the latch: net/http already committed the earlier status,
+			// so this terminal is telemetry-only. Never suppressed, never
+			// billed against — just counted (#766, observe-only).
+			w.rec.noteLateBuyerTerminal(code)
 		}
-		// Any billed prior attempt, or a billable current terminal attempt,
-		// means the response must NOT carry the no-charge marker.
-		if w.rec.providerCredited {
-			return
-		}
-		if w.rec.dispatchedThisAttempt && code != http.StatusServiceUnavailable {
-			return
-		}
-		w.Header().Set(settlementNoPriorDispatchHeader, "1")
-	})
+		return
+	}
+	w.claimed = true
+	w.stampNoChargeMarker(code)
+	w.rec.claimBuyerTerminal(code)
+}
+
+// stampNoChargeMarker is the item-18 marker body, preserved VERBATIM from the
+// pre-#766 sync.Once closure. It is extracted only so the terminal claim in
+// mark can run unconditionally — the decision logic, the early returns, and
+// the header write are byte-identical to the previous implementation.
+func (w *noPriorDispatchResponseWriter) stampNoChargeMarker(code int) {
+	if w.rec == nil {
+		return
+	}
+	// Any billed prior attempt, or a billable current terminal attempt,
+	// means the response must NOT carry the no-charge marker.
+	if w.rec.providerCredited {
+		return
+	}
+	if w.rec.dispatchedThisAttempt && code != http.StatusServiceUnavailable {
+		return
+	}
+	w.Header().Set(settlementNoPriorDispatchHeader, "1")
 }
 
 func writePhaseTimingHeaders(h http.Header, state *forwardState, now time.Time) {

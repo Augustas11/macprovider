@@ -224,10 +224,60 @@ benchmark is un-quarantined on its next heartbeat with no operator action.
 
 ### P2 — debt
 
-**P2-1 · Single-terminal-wins request arbiter** — `money` — H4 (blocked)
-No arbiter joins the billing terminal (`billing_recorder.go:220`) and the buyer-504 terminal
-(`server.go:2996`); billing can complete while the buyer is told it timed out. **Fix:** a terminal
-latch/actor. Not unit-testable until it exists (see `harness/` H4).
+**P2-1 · Single-terminal-wins request arbiter** — `money` — H4
+**FIXED coordinator-side (issue #766), observe-only.** Nothing gateway-side.
+
+**The original framing was half wrong, and the correction is the finding.** There is **no
+goroutine race**: `recordRow` and every buyer write run on the request goroutine (the buyer
+package's only other goroutine is the recovery probe), and the relay layer's
+timeout-vs-completion race is *already* single-winner arbitrated under `activeMu`
+(`internal/ws/relay.go` — `done`/`errs` buffered 1, `done` pushed before `close(chunks)`). That
+arbitration is a **verified strength; a second latch there would be a regression.** The real gap
+was **structural**: nothing published "a buyer terminal was admitted", so `recordRow` could not
+observe whether the ledger and the buyer's HTTP status agreed. Today's no-charge-on-timeout
+property is an **accident** of two independent zeroing rules (`billing/formula.go`
+`FaultBreakerQualifying` early-return, and `billing_recorder.go`'s byte-estimated zeroing);
+nothing asserted it, and nothing would have noticed if either drifted.
+
+**Decision: consistency arbiter, NOT suppression.** Suppressing a "late" billing row is
+**under-billing** — the winning 200 row is written *after* the buyer terminal on the WS paths,
+and `forward_loop_test.go` scenario 2 pins the two-row `(502, retried=0)` + `(200, retried=1)`
+shape as the money contract. A suppressed provider credit is invisible and unrecoverable; an
+over-credit is detectable and reversible from the ledger — the same fail-open philosophy as
+#763. So the money rule is: **the buyer terminal wins the buyer's refund decision; every attempt
+row is retained for the provider ledger.** Only the late *buyer* terminal is telemetry-only,
+which `net/http` already enforces at the byte level.
+
+**Shipped:**
+- `internal/buyer/terminal_arbiter.go` — a per-request `requestTerminal` that latches the
+  buyer-visible terminal, records every credited row with a sequence number and an ordering
+  flag, and evaluates two agreement predicates.
+- The latch lives on the **existing** `noPriorDispatchResponseWriter` one-shot gate
+  (`phase_timing.go`) — the same point that stamps the item-18 no-charge marker, because that is
+  by construction the first buyer-visible write. The marker decision body is preserved verbatim
+  (`stampNoChargeMarker`); `settlementNoPriorDispatchHeader` is read by the gateway for
+  settle-vs-refund.
+- Rows are published from `billingRecorder.recordRow` immediately after **both**
+  `providerCredited = true` sites, so the arbiter sees exactly what the ledger credited.
+- Predicates: **I-1** a credited row with a success-shaped status under a ≥5xx buyer terminal and
+  no `FaultBreakerQualifying` flag (= *paid while the buyer was told it failed*); **I-2** a
+  dispatched request that served a 2xx and never credited anybody (= *served, unpaid*), evaluated
+  once at end-of-request against monotonic signals — never against the per-attempt
+  `dispatchedThisAttempt`, which resets on every failover iteration.
+- **Observe-only:** package-level `atomic.Uint64` counters (`buyerTerminalConflictTotal`,
+  `buyerTerminalLateTotal`, mirroring the `internal/ws/relay.go` idiom) plus
+  `event=terminal_conflict` / `event=buyer_terminal_late` warn logs. No enforcement, no config
+  flag, no response or ledger change. Enforcement — if ever — belongs in a later change designed
+  against real counter data.
+
+**Residual:** no prometheus surface (the buyer `Server` has no metrics handle; plumbing one is a
+separate change), so the counters are process-local and read via logs today. The
+`formula.go`-vs-`billing_recorder.go` double zeroing rule is now *observable* but still
+unreconciled — that is a spec decision, not a code fix, and is deliberately out of scope. The
+arbiter also does not treat the discarded `w.Write` error on the WS terminal as a signal.
+*Tripwire tests:* `internal/buyer/seam_h4_test.go` — five scenarios covering both terminal
+orderings, the forced credited-while-buyer-told-500 conflict, the predicate table, and
+claim-once across every transport.
 
 **P2-2 · Version floor unset in prod + client can't parse the rejection** — `supply`
 `required_binary_version` is set nowhere in prod config, and the Swift client has no `case 4004`
@@ -276,4 +326,7 @@ enable-after-survey shares the #765 live-pool survey prerequisite; warmup drift 
 4. ~~**P1-1 / P1-2**~~ — **DONE (#762, #763)**: money integrity before real buyer volume. #762 makes an
    id-less retry bill once; #763 makes an after-commit settle recoverable. Both keep the durable
    `(account_id, request_id)` key as the invariant — neither adds a second source of truth for money.
-5. P2 as debt burn-down.
+5. P2 as debt burn-down. ~~**P2-1**~~ — **DONE (#766)**, observe-only: the arbiter asserts that the
+   buyer terminal and the billing ledger agree, and deliberately does **not** suppress anything —
+   suppressing a late row would under-bill every failover retry. Enforcement stays out until the
+   conflict counter has been read on live traffic.

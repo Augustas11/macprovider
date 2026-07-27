@@ -156,19 +156,21 @@ func seamH3StreamingScenario(t *testing.T) {
 	}
 }
 
-// H4 · single-terminal-wins / paid-while-buyer-told-timeout (INV-6).
-// Documented skip: not unit-testable. There is no arbiter/latch joining the two
-// terminal paths — billing settlement (billingRecorder.recordRow,
-// internal/buyer/billing_recorder.go:220) and the buyer 504 timeout terminal
-// (forwardWSNonStreaming, internal/buyer/server.go:2996) are produced by independent
-// paths. The "billing completed while the buyer was told it timed out" property is an
-// emergent cross-path race, observable only end-to-end and non-deterministically;
-// unit-asserting an ordering that no code enforces is not meaningful. Convert to a real
-// test once a terminal latch is introduced at the recordRow seam (a single-terminal
-// request-arbiter). See audits/seam-hardening/findings.md INV-6/INV-9.
-func TestSeamH4_SingleTerminalWins(t *testing.T) {
-	t.Skip("INV-6: no single-terminal-wins request actor exists; the billing terminal " +
-		"(billing_recorder.go:220) and the buyer 504 terminal (server.go:2996) are independent " +
-		"paths with no arbiter. The gap is a cross-path race observable only end-to-end. Attach a " +
-		"real test at the recordRow seam once a single-terminal request-arbiter is introduced.")
-}
+// H4 · single-terminal-wins / paid-while-buyer-told-failed (INV-6).
+// The documented skip that used to live here is GONE — #766 introduced the
+// single-terminal request arbiter (internal/buyer/terminal_arbiter.go), and the
+// scenarios now live in seam_h4_test.go:
+//
+//	TestSeamH4_AgreeingTimeoutTerminal                  — bill-before-write ordering
+//	TestSeamH4_PostTerminalBillingRowIsOrderedAndAgrees — write-before-bill ordering
+//	TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict  — the INV-6 tripwire
+//	TestSeamH4_TerminalArbiterPredicates                — predicate unit table
+//	TestSeamH4_ClaimOncePerTransport                    — latch coverage per transport
+//
+// The skip's premise was half wrong: there is no cross-goroutine race (recordRow
+// and every buyer write run on the request goroutine, and the relay layer's
+// timeout-vs-completion race is already single-winner arbitrated under activeMu).
+// The gap was STRUCTURAL — nothing published "a buyer terminal was admitted", so
+// nothing could assert the ledger and the buyer's HTTP status agreed. With the
+// arbiter publishing both sides the property is deterministic, and H4-3 forces
+// the disagreement without any production-code seam.

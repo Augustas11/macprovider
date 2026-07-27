@@ -245,6 +245,13 @@ type Server struct {
 	autotuneFeeds     AutotuneFeeds
 	now               func() time.Time
 	version           string
+	// terminalObserver is the #766 arbiter observation seam. Nil in
+	// production — no Option sets it and nothing in the serving path reads
+	// the arbiter's state; the production surface is the warn logs plus the
+	// package counters in terminal_arbiter.go. Tests set it directly to
+	// assert per-request claim/row ordering, which is not otherwise
+	// reachable because the arbiter is owned by a request-scoped recorder.
+	terminalObserver func(*requestTerminal)
 }
 
 type receiptKeysBucket struct {
@@ -1769,6 +1776,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
+	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
+	// agreement check runs after the whole request has settled — the WS paths
+	// record their billing row AFTER the terminal write, so an end-of-handler
+	// evaluation is the only point where both sides are known. It never
+	// touches the response or the ledger.
+	defer rec.evaluateTerminalAgreement()
 	// Item 18: centrally stamp the positive no-prior-dispatch marker on any
 	// terminal response written while no provider has been billably credited
 	// for this request (rec.providerCredited false, and — for the current
