@@ -516,6 +516,11 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 
 	const totalRequests = 6
 	for i := 0; i < totalRequests; i++ {
+		// Post-#762 the gateway coalesces byte-identical id-less requests
+		// (replay, one dispatch). This test needs six real dispatches to
+		// exercise sticky forwarding, so each request opts out with a
+		// distinct client-supplied X-Request-ID — the documented bypass.
+		headers["X-Request-ID"] = fmt.Sprintf("11111111-1111-4111-8111-%012d", i)
 		status, _, respBody := s.chatRequest(headers, body)
 		if status != http.StatusOK {
 			t.Fatalf("sticky chat %d status=%d body=%s", i, status, string(respBody))
