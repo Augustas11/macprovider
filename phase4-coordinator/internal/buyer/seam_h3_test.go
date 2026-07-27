@@ -20,14 +20,14 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// H3 · relay-timeout strikes provider health on a buyer cancel (INV-3).
-// EXPECTED: PASS = confirms the bug. The ErrRelayTimeout branch
-// (internal/buyer/server.go:2994-2996) calls recordBreakerFault WITHOUT the
-// r.Context().Err() buyer-cancel guard that its ErrRelayClosed sibling has
-// (:2997-3002). So a buyer/gateway cancel racing a relay timeout penalizes the
-// provider. With breakerThreshold=1 a single fault flips it to StateDegraded,
-// observed via the registry snapshot. When the guard is added, the provider
-// stays StateReady and this test flips red — a regression tripwire for the fix.
+// H3 · relay-timeout must NOT strike provider health on a buyer cancel (INV-3,
+// fixed by #761). The ErrRelayTimeout branch in forwardWSNonStreaming now
+// carries the same r.Context().Err() buyer-cancel guard as its ErrRelayClosed
+// sibling (streaming twin guarded in forwardWSStreamingBuffered), so a
+// buyer/gateway cancel racing a relay timeout is attributed to the buyer, not
+// the provider. With breakerThreshold=1 a single wrongly-recorded fault would
+// flip the provider to StateDegraded — this asserts the cancel terminal is
+// returned and the provider stays StateReady. Regression tripwire for #761.
 func TestSeamH3_RelayTimeoutStrikesOnBuyerCancel(t *testing.T) {
 	const providerID, assignedID = "p1", "current"
 	at := time.Unix(1716768000, 0).UTC()
@@ -63,11 +63,14 @@ func TestSeamH3_RelayTimeoutStrikesOnBuyerCancel(t *testing.T) {
 
 	result, attempt := s.forwardWSNonStreaming(w, r, "req-h3", provider, relay, nil, nil, 1)
 
-	if result != wsForwardTimedOut {
-		t.Fatalf("expected wsForwardTimedOut, got %v", result)
+	if result != wsForwardCancelled {
+		t.Fatalf("expected wsForwardCancelled (buyer-cancel guard, #761), got %v", result)
 	}
-	if attempt.Status != http.StatusGatewayTimeout {
-		t.Fatalf("expected 504 timeout attempt, got %d", attempt.Status)
+	if attempt.Status != http.StatusOK {
+		t.Fatalf("expected cancel attempt status 200, got %d", attempt.Status)
+	}
+	if attempt.FaultFlag != "" {
+		t.Fatalf("expected no breaker-qualifying fault flag on a buyer cancel, got %q", attempt.FaultFlag)
 	}
 
 	var got pool.State
@@ -80,15 +83,66 @@ func TestSeamH3_RelayTimeoutStrikesOnBuyerCancel(t *testing.T) {
 	if !found {
 		t.Fatalf("provider %q not found in registry snapshot", providerID)
 	}
-	if got != pool.StateDegraded {
-		t.Fatalf("H3: expected the provider to be struck to Degraded by a relay-timeout fault "+
-			"under a cancelled buyer ctx (the confirmed bug), got state %v. If it stayed Ready, "+
-			"the missing r.Context().Err() guard was ADDED at server.go:2994 — update the audit", got)
+	if got != pool.StateReady {
+		t.Fatalf("H3 REGRESSION (INV-3/#761): a relay timeout racing a cancelled buyer ctx struck "+
+			"provider health (state %v, want Ready). The ErrRelayTimeout branch in "+
+			"forwardWSNonStreaming must check r.Context().Err() before recordBreakerFault, "+
+			"mirroring its ErrRelayClosed sibling.", got)
 	}
-	t.Logf("CONFIRMED FINDING (INV-3): relay-timeout struck provider health (→Degraded) despite a "+
-		"cancelled buyer context — the ErrRelayTimeout branch (server.go:2994) lacks the buyer-cancel "+
-		"guard its ErrRelayClosed sibling has (:2997). Fix: add `if r.Context().Err()!=nil { return }` "+
-		"before recordBreakerFault. (Streaming twin: forwardWSStreamingBuffered :3299.)")
+}
+
+// H3-streaming · twin of H3 for the streaming relay path (#761). The
+// forwardWSStreaming ErrRelayTimeout branch carries the same buyer-cancel
+// guard. With a cancelled buyer ctx AND a pending ErrRelayTimeout the select
+// picks either case at random, so each iteration exercises the guarded timeout
+// branch with ~50% probability; 20 iterations make an unguarded strike
+// (provider → Degraded at threshold=1) practically certain to be caught.
+func TestSeamH3Streaming_RelayTimeoutNoStrikeOnBuyerCancel(t *testing.T) {
+	const providerID, assignedID = "p1", "current"
+	at := time.Unix(1716768000, 0).UTC()
+
+	for i := 0; i < 20; i++ {
+		reg := pool.NewRegistry(nil)
+		reg.Register(&pool.Provider{
+			ProviderID:       providerID,
+			AssignedID:       assignedID,
+			State:            pool.StateReady,
+			SlotsFree:        1,
+			SlotsTotal:       1,
+			MaxConcurrency:   1,
+			MaxContextTokens: 20000,
+			LastHeartbeatAt:  at,
+			LastActivityAt:   at,
+		}, nil)
+		s := NewServer(reg, zerolog.Nop(), at, WithBreakerConfig(1, 120*time.Second))
+		provider := pool.Provider{ProviderID: providerID, AssignedID: assignedID}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		errCh := make(chan error, 1)
+		errCh <- providerws.ErrRelayTimeout
+		relay := &providerws.RelayStream{RequestID: "req-h3s", Errors: errCh}
+
+		result, attempt := s.forwardWSStreaming(w, r, "req-h3s", provider, relay, nil, 1)
+
+		if result != wsForwardCancelled {
+			t.Fatalf("iter %d: expected wsForwardCancelled, got %v", i, result)
+		}
+		if attempt.Status != http.StatusOK {
+			t.Fatalf("iter %d: expected cancel attempt status 200, got %d", i, attempt.Status)
+		}
+		for _, p := range reg.Snapshot() {
+			if p.ProviderID == providerID && p.State != pool.StateReady {
+				t.Fatalf("iter %d: H3-streaming REGRESSION (#761): relay timeout racing a cancelled "+
+					"buyer ctx struck provider health (state %v, want Ready) — the ErrRelayTimeout "+
+					"branch in forwardWSStreaming must check r.Context().Err() before "+
+					"recordBreakerFault", i, p.State)
+			}
+		}
+	}
 }
 
 // H4 · single-terminal-wins / paid-while-buyer-told-timeout (INV-6).

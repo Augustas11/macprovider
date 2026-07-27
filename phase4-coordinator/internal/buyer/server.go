@@ -905,7 +905,10 @@ func attestationStateForProviders(providers []pool.Provider) tier2PredicateState
 			continue
 		}
 		total++
-		if p.AttestationStatus == pool.AttestationStatusAttested {
+		// Only hardware-rooted attestation counts: a self-signed SE key
+		// satisfies AttestationStatusAttested but proves key custody, not
+		// hardware trust, and must not be surfaced as attested.
+		if p.AttestationStatus == pool.AttestationStatusAttested && p.AttestationTier == pool.AttestationTierHardware {
 			attested++
 		} else {
 			unsupported++
@@ -2995,6 +2998,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			markProviderDone()
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
 			if errors.Is(err, providerws.ErrRelayTimeout) {
+				if r.Context().Err() != nil {
+					return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during request", EstimatedCompTokens: estimatedCompletion()}
+				}
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 				return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: estimatedCompletion(), FaultFlag: billing.FaultBreakerQualifying}
 			} else if errors.Is(err, providerws.ErrRelayClosed) {
@@ -3299,6 +3305,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementTracker.output(billing.TerminalStateUpstreamTransportDisconnect)}
 			}
 			if errors.Is(err, providerws.ErrRelayTimeout) {
+				if r.Context().Err() != nil {
+					return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+				}
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 				if !committed {
 					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}

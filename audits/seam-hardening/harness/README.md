@@ -38,7 +38,8 @@ cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 
 | Scenario | Finding | Verdict | What executes |
 |---|---|---|---|
-| **H3** `RelayTimeoutStrikesOnBuyerCancel` | P0-3 | **PASS = confirms FAIL** | one `ErrRelayTimeout` + a cancelled buyer ctx (threshold=1) → provider struck to `StateDegraded` |
+| **H3** `RelayTimeoutStrikesOnBuyerCancel` | P0-3 | **FIXED (#761) — asserts guard** | one `ErrRelayTimeout` + a cancelled buyer ctx (threshold=1) → cancel terminal, provider stays `StateReady` |
+| **H3s** `RelayTimeoutNoStrikeOnBuyerCancel` | P0-3 | **FIXED (#761) — asserts guard** | streaming twin, 20 iterations across the select race — provider stays `StateReady` |
 | **H4** `SingleTerminalWins` | P2-1 | **SKIP (documented)** | not unit-testable: no arbiter joins the billing terminal and the buyer-504 terminal; testable only once a single-terminal arbiter exists |
 
 The "confirms FAIL/GAP" tests pass by asserting the **buggy-today** behavior, so when a fix lands

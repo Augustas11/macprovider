@@ -886,6 +886,15 @@ func TestInternalRoutingExposesEncryptedLegAndAttestationMetadata(t *testing.T) 
 	registry := pool.NewRegistry(nil)
 	registerTier2Provider(registry, "encrypted", "session-encrypted", "model-a", "https://encrypted.example", true, pool.AttestationStatusAttested)
 	registerTier2Provider(registry, "plain", "session-plain", "model-a", "https://plain.example", false, pool.AttestationStatusUnsupported)
+	// A status-attested provider with only a self-signed SE key must NOT count
+	// as attested on this surface (#759) — only hardware-tier attestation does.
+	registerTier2Provider(registry, "selfsigned", "session-selfsigned", "model-a", "https://selfsigned.example", false, pool.AttestationStatusAttested)
+	if !registry.SetSEPublicKey("encrypted", "session-encrypted", make([]byte, 64), pool.AttestationTierHardware) {
+		t.Fatal("failed to set hardware attestation tier on provider \"encrypted\"")
+	}
+	if !registry.SetSEPublicKey("selfsigned", "session-selfsigned", make([]byte, 64), pool.AttestationTierSelfSigned) {
+		t.Fatal("failed to set self-signed attestation tier on provider \"selfsigned\"")
+	}
 	server := buyer.NewServer(
 		registry,
 		zerolog.Nop(),
@@ -921,10 +930,12 @@ func TestInternalRoutingExposesEncryptedLegAndAttestationMetadata(t *testing.T) 
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if got.Tier2.EncryptedLeg.State != "partial" || got.Tier2.EncryptedLeg.EncryptedProviderCount != 1 || got.Tier2.EncryptedLeg.UnencryptedProviderCount != 1 || !got.Tier2.EncryptedLeg.Mixed || got.Tier2.EncryptedLeg.Scope != "coordinator_to_provider_only" {
+	if got.Tier2.EncryptedLeg.State != "partial" || got.Tier2.EncryptedLeg.EncryptedProviderCount != 1 || got.Tier2.EncryptedLeg.UnencryptedProviderCount != 2 || !got.Tier2.EncryptedLeg.Mixed || got.Tier2.EncryptedLeg.Scope != "coordinator_to_provider_only" {
 		t.Fatalf("encrypted leg metadata = %+v body=%s", got.Tier2.EncryptedLeg, rr.Body.String())
 	}
-	if got.Tier2.Attestation.State != "partial" || got.Tier2.Attestation.AttestedProviderCount != 1 || got.Tier2.Attestation.UnsupportedProviderCount != 1 || !got.Tier2.Attestation.Mixed {
+	// Only the hardware-tier provider counts as attested; the self-signed
+	// status-attested provider lands in the unsupported bucket (#759).
+	if got.Tier2.Attestation.State != "partial" || got.Tier2.Attestation.AttestedProviderCount != 1 || got.Tier2.Attestation.UnsupportedProviderCount != 2 || !got.Tier2.Attestation.Mixed {
 		t.Fatalf("attestation metadata = %+v body=%s", got.Tier2.Attestation, rr.Body.String())
 	}
 }
