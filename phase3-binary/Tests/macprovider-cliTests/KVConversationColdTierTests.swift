@@ -632,8 +632,8 @@ final class KVConversationColdTierTests: XCTestCase {
         // A real cache: shape [1, 2, 2, 2] f32, so seq len 2, head_dim 2, 2 kv heads.
         let realCache = KVCacheSimple()
         realCache.state = [
-            MLXArray((0 ..< 16).map { Float($0) }, [1, 2, 2, 2]),
-            MLXArray((0 ..< 16).map { Float($0) + 100 }, [1, 2, 2, 2]),
+            MLXArray((0 ..< 8).map { Float($0) }, [1, 2, 2, 2]),
+            MLXArray((0 ..< 8).map { Float($0) + 100 }, [1, 2, 2, 2]),
         ]
         let realPayloads = try XCTUnwrap(KVCacheSerialization.snapshotLayers([realCache]))
         let seq = 2
@@ -662,5 +662,79 @@ final class KVConversationColdTierTests: XCTestCase {
                              "footprint must exceed decoded size to cover the active seal buffers")
         XCTAssertGreaterThan(adapter.writeFootprintForTest(decoded: ceiling), ceiling,
                              "a decoded-at-ceiling snapshot's true write footprint exceeds the budget → reject")
+    }
+
+    // MARK: - SPEC-037 FR-KVP1: serve newCache → captureSnapshot persist invariant
+
+    /// PRIMARY GUARD (headless, ungated) — the exact invariant the serve `newCache`
+    /// branches on. mlx-swift-lm's `LanguageModel.newCache` builds a `RotatingKVCache`
+    /// when `maxKVSize != nil` and a serializable `KVCacheSimple` only when it is nil.
+    /// `makeServeGenerateParameters` always sets `maxKVSize = maxContextTokens`, so
+    /// before the fix EVERY serve request got a RotatingKVCache, `captureSnapshot`'s
+    /// `as? [KVCacheSimple]` cast failed, and the disk tier silently persisted nothing.
+    /// `cacheParameters` must drop `maxKVSize` for a tier-eligible request and leave it
+    /// untouched otherwise. This runs in normal CI with no MLX.
+    func testCacheParametersDropsMaxKVSizeOnlyForEligibleRequests() {
+        let maxContextTokens = 4096
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: maxContextTokens, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+
+        let eligible = ModelRuntime.cacheParameters(base, forceSimpleKV: true)
+        XCTAssertNil(eligible.maxKVSize,
+                     "tier-eligible request → maxKVSize nil so newCache builds a serializable KVCacheSimple")
+
+        let buyer = ModelRuntime.cacheParameters(base, forceSimpleKV: false)
+        XCTAssertEqual(buyer.maxKVSize, maxContextTokens,
+                       "non-eligible request keeps the rotating-cache bound unchanged")
+
+        // The KV-size selection must not perturb any other generation parameter.
+        XCTAssertEqual(eligible.maxTokens, base.maxTokens)
+        XCTAssertEqual(eligible.prefillStepSize, base.prefillStepSize)
+        XCTAssertEqual(eligible.temperature, base.temperature)
+        XCTAssertEqual(eligible.topP, base.topP)
+    }
+
+    /// END-TO-END (MLX-gated) — the test that would have caught the shipped no-op. The
+    /// tier-eligible serve path drops `maxKVSize` (asserted) so `newCache` returns a
+    /// `KVCacheSimple`; once populated, the REAL adapter's `captureSnapshot` must produce
+    /// a non-nil snapshot — its `as? [KVCacheSimple]` cast succeeds where a RotatingKVCache
+    /// would have failed and no-op'd the commit.
+    ///
+    /// No model weights are loadable in the unit harness, so — exactly like
+    /// `testSeededTemplateFromRealCachePromotesFirstRequestMLX` and `KVBridgeProbe` — we
+    /// construct the `KVCacheSimple` the eligible-path `newCache` returns and populate it
+    /// with a real one-token MLX state. Gated on KV_ENABLE_MLX_TESTS (MLX aborts the
+    /// process without a Metal library).
+    func testEligibleServeCacheCaptureSnapshotPersistsMLX() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
+                          "requires MLX Metal runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
+
+        // The eligible serve path drops maxKVSize → newCache builds a KVCacheSimple.
+        let base = GenerateParameters(
+            maxTokens: 1, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+        let eligibleParams = ModelRuntime.cacheParameters(base, forceSimpleKV: true)
+        XCTAssertNil(eligibleParams.maxKVSize, "eligible params must be the KVCacheSimple selector")
+
+        // A real KVCacheSimple as produced by the eligible-path newCache, populated by a
+        // one-token prefill: shape [batch=1, kvHeads=2, seq=1, headDim=2] f32.
+        let realCache = KVCacheSimple()
+        realCache.offset = 1
+        realCache.state = [
+            MLXArray((0 ..< 4).map { Float($0) }, [1, 2, 1, 2]),
+            MLXArray((0 ..< 4).map { Float($0) + 100 }, [1, 2, 1, 2]),
+        ]
+
+        let (adapter, _) = makeAdapter(writeStagingMaxBytes: 1 << 28)
+        let snapshot = adapter.captureSnapshot(
+            conversationKey: "conv:kvs-synth:persist-mlx",
+            layers: ConversationCacheLayers([realCache]),
+            fullTokens: [0],
+            sampledPurgeGeneration: 0,
+            identity: identity(),
+            nowMillis: Int(Date().timeIntervalSince1970 * 1000))
+        XCTAssertNotNil(snapshot,
+            "eligible-path KVCacheSimple serializes → captureSnapshot non-nil (the cast a RotatingKVCache fails)")
     }
 }
