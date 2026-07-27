@@ -17,6 +17,8 @@ Test files:
 - `phase5-gateway/internal/settlement/journal/journal_test.go` (H7's durability siblings: the
   per-effect fsync, torn tails, rotation/prune, reopen-after-close, the hard size cap)
 - `phase4-coordinator/internal/buyer/seam_h3_test.go`
+- `phase4-coordinator/internal/buyer/seam_h4_test.go` (H4's five scenarios, #766 — the H4 skip
+  is gone; `seam_h3_test.go` keeps a pointer comment where it used to live)
 
 ## Run
 
@@ -27,7 +29,7 @@ cd phase5-gateway     && go test ./internal/settlement/... -v                   
 cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 ```
 
-## Results (verified 2026-07-27) — 7 of 8 execute; only H4 is a documented skip
+## Results (verified 2026-07-27) — all 8 scenarios execute; no skips remain
 
 **Gateway suite**
 
@@ -47,13 +49,28 @@ cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 |---|---|---|---|
 | **H3** `RelayTimeoutStrikesOnBuyerCancel` | P0-3 | **FIXED (#761) — asserts guard** | one `ErrRelayTimeout` + a cancelled buyer ctx (threshold=1) → cancel terminal, provider stays `StateReady` |
 | **H3s** `RelayTimeoutNoStrikeOnBuyerCancel` | P0-3 | **FIXED (#761) — asserts guard** | streaming twin, 20 iterations across the select race — provider stays `StateReady` |
-| **H4** `SingleTerminalWins` | P2-1 | **SKIP (documented)** | not unit-testable: no arbiter joins the billing terminal and the buyer-504 terminal; testable only once a single-terminal arbiter exists |
+| **H4** `AgreeingTimeoutTerminal` | P2-1 | **FIXED (#766) — asserts arbiter** | relay timeout + LIVE buyer ctx, `MaxRetries=0` → `renderRetryExhausted` owns the buyer 504; one 504 row, claimed terminal 504, row seq **<** claim seq (bill-before-write), 0 conflicts |
+| **H4** `PostTerminalBillingRowIsOrderedAndAgrees` | P2-1 | **FIXED (#766) — asserts arbiter** | WS non-streaming generic relay error writes 502 inline, row logged after → **inverse** ordering (claim seq < row seq, `Late=true`), still 0 conflicts — "late" is an ordering fact, not a fault |
+| **H4** `CreditedWhileBuyerToldFailedIsAConflict` | P2-1 | **FIXED (#766) — the tripwire** | `settlement_attempt_outputs` dropped → provider credited (200, no breaker fault) while the buyer is told 500 → exactly 1 conflict, `buyerTerminalConflictTotal` +1, and the row is **retained, not suppressed** |
+| **H4** `TerminalArbiterPredicates` | P2-1 | **FIXED (#766)** | predicate table: I-1 conflict; `FaultBreakerQualifying` exempt (formula.go zeroes it); I-2 served-2xx-unpaid only at end-of-request; no-dispatch / no-billing exemptions; double-claim keeps the first; idempotent evaluation; nil-inert |
+| **H4** `ClaimOncePerTransport` | P2-1 | **FIXED (#766)** | WS non-streaming, WS streaming incremental **and** buffered, HTTP buffered, HTTP streaming — the claimed terminal equals the status the buyer observed on every transport |
 
 The "confirms FAIL/GAP" tests pass by asserting the **buggy-today** behavior, so when a fix lands
 they flip to failing-until-the-assertion-is-updated — a durable regression tripwire per finding.
 As of #763 no gateway scenario is still in that state: H1, H5a and H7 have all been re-pointed at the
 shipped fix, with their scenarios (not their assertions) left untouched, so each one now guards a
 behavior instead of documenting a gap.
+
+**H4's skip is retired (#766).** Its stated premise — "a cross-path race observable only end-to-end
+and non-deterministically" — was half wrong. There is no goroutine race: `recordRow` and every buyer
+write run on the request goroutine, and the relay layer's timeout-vs-completion race is already
+single-winner arbitrated under `activeMu`. The gap was **structural** — nothing published "a buyer
+terminal was admitted", so nothing could assert the ledger and the buyer's HTTP status agreed. With
+the arbiter publishing both sides the property is fully deterministic, and the tripwire forces the
+disagreement by dropping a settlement table rather than by adding a production test seam. Note that
+the arbiter is a **consistency** arbiter: it never suppresses a billing row, because a late row is
+the normal shape of the WS write-before-bill paths and suppressing it would under-bill every
+failover retry.
 
 ## Mechanism note (surfaced by wiring H1)
 

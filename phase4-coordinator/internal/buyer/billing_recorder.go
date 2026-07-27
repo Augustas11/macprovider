@@ -113,7 +113,13 @@ type billingRecorder struct {
 	// dispatch boundary, not at request_log write time, so streaming
 	// failover-before-first-chunk and HTTP/WS retries share one
 	// monotonic attempt identity surface for later receipt settlement.
-	routeSnapshotAttemptN   int
+	routeSnapshotAttemptN int
+	// terminal is the per-request single-terminal-wins arbiter (#766).
+	// OBSERVE-ONLY: it latches the buyer-visible terminal at the first
+	// committed write and records every credited row, then asserts the two
+	// agree. It NEVER gates a billing row. May be nil on recorders built by
+	// direct struct construction in tests — every call site nil-guards.
+	terminal                *requestTerminal
 	outputCursorByte        int64
 	settlementAttemptN      int
 	hasSettlementAttemptN   bool
@@ -137,6 +143,52 @@ func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, starte
 		accountID:               accountID,
 		authenticatedAccount:    authenticatedAccount,
 		hasAuthenticatedAccount: hasAuthenticatedAccount,
+		terminal:                newRequestTerminal(&s.log, requestID, accountID),
+	}
+}
+
+// claimBuyerTerminal latches the buyer-visible terminal status. Called from
+// noPriorDispatchResponseWriter.mark at the first committed write (#766).
+func (b *billingRecorder) claimBuyerTerminal(code int) {
+	if b == nil || b.terminal == nil {
+		return
+	}
+	b.terminal.claimBuyer(code)
+}
+
+// noteLateBuyerTerminal records a buyer write that arrived after the terminal
+// was latched. Telemetry only — net/http already discarded it.
+func (b *billingRecorder) noteLateBuyerTerminal(code int) {
+	if b == nil || b.terminal == nil {
+		return
+	}
+	b.terminal.noteLateBuyerWrite(code)
+}
+
+// noteBillableRow publishes a durably-credited provider row to the arbiter.
+func (b *billingRecorder) noteBillableRow(status, attemptN int, faultFlag string) {
+	if b == nil || b.terminal == nil {
+		return
+	}
+	b.terminal.noteBillableRow(status, attemptN, faultFlag)
+}
+
+// evaluateTerminalAgreement runs once per request, deferred from
+// handleChatCompletions so it observes the WS paths' post-write billing rows.
+// Observe-only: it emits warn logs + bumps package counters, and never changes
+// the response or the ledger.
+func (b *billingRecorder) evaluateTerminalAgreement() {
+	if b == nil || b.terminal == nil {
+		return
+	}
+	billingEnabled := false
+	if b.server != nil {
+		store, _, _ := b.server.billingState()
+		billingEnabled = store != nil && b.server.reqLog != nil
+	}
+	b.terminal.evaluateEndOfRequest(billingEnabled)
+	if b.server != nil && b.server.terminalObserver != nil {
+		b.server.terminalObserver(b.terminal)
 	}
 }
 
@@ -194,6 +246,12 @@ func (b *billingRecorder) beginDispatchAttempt() {
 // false and the response carries the item-18 no-charge marker.
 func (b *billingRecorder) markProviderDispatched() {
 	b.dispatchedThisAttempt = true
+	// Monotonic twin for the arbiter's end-of-request "served but unpaid"
+	// predicate — dispatchedThisAttempt resets above on every failover
+	// iteration, so it cannot answer "did this REQUEST ever dispatch?".
+	if b.terminal != nil {
+		b.terminal.noteDispatch()
+	}
 }
 
 // setRequestID updates the requestID field after idempotency-key
@@ -202,6 +260,9 @@ func (b *billingRecorder) markProviderDispatched() {
 // post-idempotency-rewrite semantics.
 func (b *billingRecorder) setRequestID(requestID string) {
 	b.requestID = requestID
+	if b.terminal != nil {
+		b.terminal.setRequestID(requestID)
+	}
 }
 
 // recordRow is the typed equivalent of the pre-refactor
@@ -355,6 +416,12 @@ func (b *billingRecorder) recordRow(
 		// leaves the ledger-exact "credited" signal set (conservative vs
 		// under-charge: the gateway settles rather than erasing real credit).
 		b.providerCredited = true
+		// #766 observe-only: publish the credited row to the request arbiter
+		// so the buyer terminal / ledger agreement is checkable. Placed with
+		// providerCredited (i.e. BEFORE the settlement-output bookkeeping) so
+		// the arbiter sees exactly what the ledger credited, including when a
+		// settlement-persist failure later turns the buyer terminal into a 500.
+		b.noteBillableRow(status, attemptN, faultFlag)
 		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
@@ -375,6 +442,8 @@ func (b *billingRecorder) recordRow(
 		// provider-bound billable row has persisted (reqLog.Insert above
 		// succeeded) and settlement is being recorded now.
 		b.providerCredited = true
+		// #766 observe-only, same contract as the hot-path site above.
+		b.noteBillableRow(status, attemptN, faultFlag)
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		billingInput := billing.HotPathInput{
