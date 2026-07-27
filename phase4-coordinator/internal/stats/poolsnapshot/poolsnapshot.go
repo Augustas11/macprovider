@@ -74,7 +74,10 @@ func (p *Provider) OverviewSnapshot() statsrollup.OverviewSnapshot {
 		}
 		snap.NodesOnline++
 		snap.CapacityEligibleProviderIDs = append(snap.CapacityEligibleProviderIDs, prov.ProviderID)
-		if prov.AttestationStatus == pool.AttestationStatusAttested {
+		// Hardware-attested means hardware-rooted attestation, not key custody:
+		// a self-signed SE key satisfies AttestationStatusAttested but must not
+		// count toward the public nodes_hardware_attested figure.
+		if prov.AttestationStatus == pool.AttestationStatusAttested && prov.AttestationTier == pool.AttestationTierHardware {
 			snap.NodesHardwareAttested++
 		}
 		snap.UnifiedRAMGBTotal += prov.RAMGB

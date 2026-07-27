@@ -59,6 +59,12 @@ const (
 	AttestationStatusUnsupported AttestationStatus = "unsupported"
 	AttestationStatusNotRequired AttestationStatus = "not_required"
 
+	// AttestationTier values (see Provider.AttestationTier). A self-signed SE
+	// key proves key custody, not hardware-rooted attestation — only
+	// AttestationTierHardware may be surfaced as hardware-attested.
+	AttestationTierSelfSigned = "self_signed"
+	AttestationTierHardware   = "hardware"
+
 	// AuthBearerValidated — connect arrived with a Bearer header that
 	// auth.Store.ValidateToken matched. Post-flag-flip this is the
 	// only admitted state.
