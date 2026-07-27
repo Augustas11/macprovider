@@ -1,8 +1,9 @@
 import ArgumentParser
 import Darwin
 import Foundation
+import MacProviderCore
 
-struct UninstallCommand: ParsableCommand {
+struct UninstallCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "uninstall",
         abstract: "Stop macprovider-cli and remove installed artifacts."
@@ -14,7 +15,7 @@ struct UninstallCommand: ParsableCommand {
     @Flag(help: "Accepted for compatibility; uninstall is non-interactive.")
     var yes = false
 
-    func run() throws {
+    func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         var warnings: [String] = []
         let paths = Self.artifactPaths(home: home)
@@ -51,6 +52,15 @@ struct UninstallCommand: ParsableCommand {
             operationID: "uninstall:\(UUID().uuidString.lowercased())",
             operatorPaused: false
         )
+        // SPEC-037 FR-KVP8 — before removing product files, purge the encrypted KV
+        // survival disk tier (purge --all --forget): remove the namespace directory
+        // and all per-epoch master + per-entry DEK Keychain items so no orphaned
+        // ciphertext or key material outlives the product. Runs now that both
+        // launchd jobs are proven stopped (no serve process holds the namespace
+        // lock). Best-effort: it works while the tier is disabled and NEVER
+        // hard-fails uninstall — a KV-cleanup hiccup is recorded as a warning.
+        await Self.purgeKVDiskCacheBestEffort(warnings: &warnings)
+
         // Preserve the provider identity credential for safe reinstall. A
         // routine uninstall is reversible and does not constitute an explicit
         // cryptographic identity reset; destroying the bearer while provider_id
@@ -84,6 +94,45 @@ struct UninstallCommand: ParsableCommand {
             print("warning: \(warning)")
         }
         print("macprovider-cli has been uninstalled.")
+    }
+
+    /// FR-KVP8 — resolve the installed KV disk tier and purge --all --forget it,
+    /// best-effort. When the tier cannot be resolved (config unreadable or empty
+    /// provider_id), we cannot locate the namespace to shred, so surface an explicit
+    /// warning rather than skipping silently — any encrypted KV survival data + Keychain
+    /// DEKs from a prior enabled run may remain. Never throws — uninstall must not
+    /// hard-fail on a KV-cleanup hiccup (it is reversible and preserves identity).
+    static func purgeKVDiskCacheBestEffort(warnings: inout [String]) async {
+        guard let tier = makeKVDiskTierForUninstall() else {
+            warnings.append(
+                "kv-cache cleanup skipped: could not resolve config/provider_id; encrypted KV "
+                + "survival data and Keychain DEKs may remain under the configured cache directory "
+                + "— run `macprovider-cli kv-cache purge --all --forget` after restoring config, or "
+                + "remove the cache dir manually.")
+            return
+        }
+        await purgeKVDiskCache(tier, warnings: &warnings)
+    }
+
+    /// Build the KV disk tier for the installed namespace (provider ID) from config,
+    /// or nil when unresolvable. `purgeAllAndForget` works even while the tier is
+    /// disabled (it only needs the namespace lock + provider ID).
+    static func makeKVDiskTierForUninstall() -> KVDiskTier? {
+        guard let resolved = try? ConfigLoader.load(cli: CLIOverrides()) else { return nil }
+        guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !providerID.isEmpty else { return nil }
+        let ttl = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
+        return KVDiskTier(config: resolved.kvDiskCache, namespaceID: providerID, eligibilityTTLSeconds: ttl)
+    }
+
+    /// Purge --all --forget the given tier (testable seam), then release the lock.
+    /// Best-effort: a failure is surfaced as a warning, never a thrown error.
+    static func purgeKVDiskCache(_ tier: KVDiskTier, warnings: inout [String]) async {
+        let result = await tier.purgeAllAndForget()
+        await tier.shutdown()
+        if case let .failed(detail) = result {
+            warnings.append("kv-cache cleanup incomplete: \(detail.rawValue)")
+        }
     }
 
     struct ArtifactPaths: Equatable {

@@ -316,6 +316,13 @@ actor ModelRuntime: ModelRuntimeServing {
         case tokenIterator
     }
 
+    // SPEC-037 FR-KVP1: the tier-eligible KVCacheSimple selection in the serve paths
+    // (see `cacheParameters`) never reaches the speculative caches. An eligible
+    // cold-tier request always carries a synthetic conversation key (`conv:kvs-synth:`),
+    // and `allowsSpeculativeDecoding` is false whenever `conversationKey != nil`
+    // (ChatCompletionRequest.allowsSpeculativeDecoding), so such a request is always
+    // routed to `.tokenIterator` here — the speculative branch below allocates its own
+    // caches and is untouched by the cache-type change.
     static func speculativeRoute(
         for request: ChatCompletionRequest,
         draftLoaded: Bool,
@@ -394,7 +401,19 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentModelHash: String?
     private var currentModelHashAlgorithm: String?
     private var currentWeightsManifestSHA256: String?
+    /// SPEC-037 HIGH-8 — SHA-256 of the loaded model's live tokenizer configuration
+    /// and chat-template bytes, hashed at load time. Nil when the tokenizer files are
+    /// unreachable, in which case the cold tier treats identity as unavailable and
+    /// skips persistence (rather than deriving a fake hash from the model hash).
+    private var currentTokenizerConfigSHA256: String?
+    private var currentChatTemplateSHA256: String?
     private let verifiedCatalogArtifactSHA256: String?
+    /// SPEC-037 FR-KVP4 (MEDIUM-5) — the model's CATALOG REVISION, distinct from the
+    /// artifact SHA. FR-KVP4 requires model_sha256 AND catalog revision as SEPARATE
+    /// identity fields; a catalog-revision change with unchanged artifact bytes must
+    /// disk_miss_envelope, not hit. Nil ⇒ the cold tier treats identity as unavailable
+    /// and neither promotes nor persists (never falls back to the artifact SHA).
+    private let verifiedModelCatalogRevision: String?
     private let maxContextTokens: Int
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
@@ -402,6 +421,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private let kvBitsOverride: Int?
     private let prefillStepSize: Int
     private let conversationCache: ConversationCache
+    /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
+    /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
+    /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
+    private var coldTierAttached = false
     private let inferenceGate: AsyncSemaphore
     private let maxBatch: Int
     private let warmSwapEnabled: Bool
@@ -454,6 +477,39 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// SPEC-037 FR-KVP1 — cold-tier persistence depends on the serve cache being a
+    /// `KVCacheSimple` (the only v1-allowlisted serializable class, KVDiskCacheFormat
+    /// `allowlistedCacheClasses`). `LanguageModel.newCache` builds a `RotatingKVCache`
+    /// whenever `maxKVSize != nil` and a `KVCacheSimple` only when it is nil (mlx-swift-lm
+    /// `LanguageModel.newCache`). `makeServeGenerateParameters` always sets
+    /// `maxKVSize = maxContextTokens`, so without this the disk tier's `captureSnapshot`
+    /// cast (`layers as? [KVCacheSimple]`) fails and `commit(cold:)` silently no-ops.
+    /// For tier-eligible requests we drop `maxKVSize` (→ `KVCacheSimple`); every other
+    /// request keeps the rotating cache unchanged. This affects ONLY the explicitly
+    /// allocated `newCache`; the `maxKVSize` carried by the `parameters` passed to
+    /// `TokenIterator` is ignored once the cache is explicit.
+    nonisolated static func cacheParameters(_ base: GenerateParameters, forceSimpleKV: Bool) -> GenerateParameters {
+        guard forceSimpleKV else { return base }
+        var p = base
+        p.maxKVSize = nil
+        return p
+    }
+
+    /// SPEC-037 FR-KVP1 (MEDIUM-B) — the single serve cache-allocation used at BOTH
+    /// serve sites (non-streaming + streaming). Builds the fresh serve `newCache`,
+    /// forcing a `KVCacheSimple` for tier-eligible requests (via `cacheParameters`) so
+    /// `captureSnapshot`'s `as? [KVCacheSimple]` cast can serialize it, and keeping the
+    /// rotating cache for every other request. Extracted so a serve-site regression that
+    /// drops the eligibility wrapper (reverting to `newCache(parameters:)`) must change
+    /// THIS helper — pinned by `testEligibleServeNewCacheProducesKVCacheSimple` — rather
+    /// than passing green via an inlined change at a call site. The serve sites are
+    /// one-line delegations; behavior is identical to the previous inline allocation.
+    nonisolated static func serveCache(
+        model: any LanguageModel, baseParameters: GenerateParameters, eligible: Bool
+    ) -> [KVCache] {
+        model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: eligible))
+    }
+
     private nonisolated static func harmonyTerminalPreservingContext(
         from context: ModelContext,
         modelID: String
@@ -494,7 +550,8 @@ actor ModelRuntime: ModelRuntimeServing {
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
-        verifiedModelArtifactSHA256: String? = nil
+        verifiedModelArtifactSHA256: String? = nil,
+        verifiedModelCatalogRevision: String? = nil
     ) async throws {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
@@ -516,6 +573,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
+        self.verifiedModelCatalogRevision = verifiedModelCatalogRevision
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
@@ -532,6 +590,8 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentModelHash = nil
             self.currentModelHashAlgorithm = nil
             self.currentWeightsManifestSHA256 = nil
+            self.currentTokenizerConfigSHA256 = nil
+            self.currentChatTemplateSHA256 = nil
             if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
@@ -552,6 +612,9 @@ actor ModelRuntime: ModelRuntimeServing {
             ? nil
             : ModelArtifactIdentity.snapshotManifestV1
         self.currentWeightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: directory)
+        let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
+        self.currentTokenizerConfigSHA256 = tokenizerHashes.config
+        self.currentChatTemplateSHA256 = tokenizerHashes.template
 
         if let draftModelID = normalizedDraftModelID {
             let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: normalizedDraftModelLoadPath ?? draftModelID)
@@ -619,7 +682,10 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentModelHash = modelHash
         self.currentModelHashAlgorithm = modelHashAlgorithm
         self.currentWeightsManifestSHA256 = weightsManifestSHA256
+        self.currentTokenizerConfigSHA256 = nil
+        self.currentChatTemplateSHA256 = nil
         self.verifiedCatalogArtifactSHA256 = nil
+        self.verifiedModelCatalogRevision = nil
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
@@ -718,6 +784,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 let modelHash: String?
                 let modelHashAlgorithm: String?
                 let weightsManifestSHA256: String?
+                let tokenizerConfigSHA256: String?
+                let chatTemplateSHA256: String?
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
                 let draftFailureReason: String?
@@ -728,6 +796,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash = loaded.1
                     modelHashAlgorithm = await self.currentModelHashAlgorithm
                     weightsManifestSHA256 = nil
+                    tokenizerConfigSHA256 = nil
+                    chatTemplateSHA256 = nil
                     if let configuredDraftModelID {
                         do {
                             let loadedDraft = try await testLoader(configuredDraftModelID)
@@ -757,6 +827,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash = expected
                     modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
                     weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
+                    let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
+                    tokenizerConfigSHA256 = swapTokenizerHashes.config
+                    chatTemplateSHA256 = swapTokenizerHashes.template
                     if let configuredDraftModelID {
                         do {
                             let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
@@ -808,6 +881,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash: modelHash,
                     modelHashAlgorithm: modelHashAlgorithm,
                     weightsManifestSHA256: weightsManifestSHA256,
+                    tokenizerConfigSHA256: tokenizerConfigSHA256,
+                    chatTemplateSHA256: chatTemplateSHA256,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason
@@ -889,6 +964,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHash: modelHash,
             modelHashAlgorithm: nil,
             weightsManifestSHA256: nil,
+            tokenizerConfigSHA256: nil,
+            chatTemplateSHA256: nil,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil
@@ -901,6 +978,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelHash: String?,
         modelHashAlgorithm: String?,
         weightsManifestSHA256: String?,
+        tokenizerConfigSHA256: String?,
+        chatTemplateSHA256: String?,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?
@@ -911,6 +990,8 @@ actor ModelRuntime: ModelRuntimeServing {
         currentModelHash = modelHash
         currentModelHashAlgorithm = modelHash == nil ? nil : modelHashAlgorithm
         currentWeightsManifestSHA256 = weightsManifestSHA256
+        currentTokenizerConfigSHA256 = tokenizerConfigSHA256
+        currentChatTemplateSHA256 = chatTemplateSHA256
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
@@ -1249,6 +1330,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
+        // SPEC-037 stage 5 — per-request cold-tier context, captured before the
+        // nonisolated inference closure (nil unless the disk tier is attached).
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -1310,7 +1394,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         conversationKey: request.conversationKey,
                         incomingTokens: promptTokenIds,
                         modelID: request.model,
-                        kvBits: kvBitsOverride
+                        kvBits: kvBitsOverride,
+                        cold: coldContext
                     )
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
@@ -1320,7 +1405,14 @@ actor ModelRuntime: ModelRuntimeServing {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                             } else {
-                                kvCache = generationContext.model.newCache(parameters: parameters)
+                                // SPEC-037 FR-KVP1: a tier-eligible request must run on a
+                                // KVCacheSimple so captureSnapshot can serialize it; keep the
+                                // rotating cache for everything else. TokenIterator still gets
+                                // the original `parameters` (its maxKVSize is ignored once the
+                                // cache is passed explicitly).
+                                kvCache = Self.serveCache(
+                                    model: generationContext.model, baseParameters: parameters,
+                                    eligible: coldContext?.eligible == true)
                                 iteratorInput = lmInput
                             }
 
@@ -1409,7 +1501,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                         ), request: request)
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init))
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return completion
                     } catch {
@@ -1645,6 +1737,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
+        // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
+        let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -1678,11 +1772,96 @@ actor ModelRuntime: ModelRuntimeServing {
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // SPEC-037 FR-KVP2.5: speculative-decode routing is
+                    // determined BEFORE any conversation-cache begin(). A
+                    // speculative-routed request acquires no lease, triggers no
+                    // promotion, commits nothing, and leaves no busy key. This
+                    // also fixes the latent stuck-busy-key bug on the streaming
+                    // speculative path, whose success branch previously returned
+                    // without committing or aborting a lease acquired above it
+                    // (and passed a possibly-trimmed prompt with cache: nil).
+                    if Self.speculativeRoute(
+                        for: request,
+                        draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
+                        numDraftTokens: snapshot.numDraftTokens
+                    ) == .speculative,
+                       let draftContainer = snapshot.draftContainer,
+                       let numDraftTokens = snapshot.numDraftTokens {
+                        var emittedText = ""
+                        var stoppedByRequestStop = false
+                        let generated = try await Self.collectSpeculativeText(
+                            input: lmInput,
+                            cache: nil,
+                            parameters: parameters,
+                            targetContext: context,
+                            draft: draftContainer,
+                            numDraftTokens: numDraftTokens,
+                            shouldCancel: shouldCancel,
+                            drainCancelled: drainCancelled
+                        )
+                        try drainCancelled.check()
+                        try Task.checkCancellation()
+
+                        let final = Self.applyOutputFilters(
+                            generated.output,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop
+                        )
+                        let finalDelta = Self.delta(from: emittedText, to: final.text)
+                        let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                        if !finalDelta.isEmpty {
+                            if let error = structuredAccumulator.append(finalDelta) {
+                                throw error
+                            }
+                            idleState.noteContent()
+                            emittedText = final.text
+                            stoppedByRequestStop = final.hitStop
+                            onChunk(.content(finalDelta))
+                        }
+                        if final.hitStop {
+                            stoppedByRequestStop = true
+                        }
+                        if let error = structuredAccumulator.error {
+                            throw error
+                        }
+
+                        let finishReason: String
+                        if !parsed.toolCalls.isEmpty {
+                            finishReason = "tool_calls"
+                        } else if let maxTokens = request.maxTokens,
+                                  generated.generationTokenCount >= maxTokens,
+                                  !stoppedByRequestStop,
+                                  !final.hitStop {
+                            finishReason = "length"
+                        } else {
+                            finishReason = "stop"
+                        }
+
+                        let completion = CompletionResult(
+                            content: parsed.content,
+                            finishReason: finishReason,
+                            promptTokens: promptTokenIds.count,
+                            cachedPromptTokens: 0,
+                            completionTokens: generated.generationTokenCount,
+                            toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                            specDecodeDraftedTokens: generated.draftedTokens,
+                            specDecodeAcceptedTokens: generated.acceptedTokens,
+                            specDecodeGeneration: snapshot.specDecodeGeneration
+                        )
+                        return try Self.validateStructuredStreamingCompletion(
+                            completion,
+                            request: request,
+                            buyerVisibleContent: structuredAccumulator.content
+                        )
+                    }
+
                     let lease = await conversationCache.begin(
                         conversationKey: request.conversationKey,
                         incomingTokens: promptTokenIds,
                         modelID: request.model,
-                        kvBits: kvBitsOverride
+                        kvBits: kvBitsOverride,
+                        cold: coldContext
                     )
                     let kvCache: [KVCache]
                     let iteratorInput: LMInput
@@ -1690,7 +1869,12 @@ actor ModelRuntime: ModelRuntimeServing {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                     } else {
-                        kvCache = generationContext.model.newCache(parameters: parameters)
+                        // SPEC-037 FR-KVP1: same tier-eligible → KVCacheSimple selection as
+                        // the non-streaming path (see cacheParameters). TokenIterator below
+                        // keeps the original `parameters`.
+                        kvCache = Self.serveCache(
+                            model: generationContext.model, baseParameters: parameters,
+                            eligible: coldContext?.eligible == true)
                         iteratorInput = lmInput
                     }
 
@@ -1701,6 +1885,14 @@ actor ModelRuntime: ModelRuntimeServing {
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
 
+                    // SPEC-037 FR-KVP2.5: speculative-decode routing is determined
+                    // BEFORE conversationCache.begin() (block above, ahead of the
+                    // lease acquisition) — a speculative-routed request acquires no
+                    // lease, triggers no promotion, commits nothing, and leaves no
+                    // busy key. This non-speculative path therefore never re-checks
+                    // speculativeRoute; the post-begin speculative block that origin
+                    // carried here would double-run and (on its success return) leak
+                    // the lease as a stuck busy key, so it is intentionally dropped.
                     let isHarmonyResponse = HarmonyResponseParser.isHarmonyModelID(request.model)
                     var harmonyFinalDetokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
                     var harmonyStreamingParser = HarmonyResponseParser.StreamingParser(
@@ -1713,99 +1905,6 @@ actor ModelRuntime: ModelRuntimeServing {
                         stopCandidates: stopTokenFilter.tokens + request.stop
                     )
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools) && !isHarmonyResponse
-                    if Self.speculativeRoute(
-                        for: request,
-                        draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
-                        numDraftTokens: snapshot.numDraftTokens
-                    ) == .speculative,
-                       let draftContainer = snapshot.draftContainer,
-                       let numDraftTokens = snapshot.numDraftTokens {
-                        do {
-                            let generated = try await Self.collectSpeculativeText(
-                                input: iteratorInput,
-                                cache: nil,
-                                parameters: parameters,
-                                targetContext: context,
-                                draft: draftContainer,
-                                numDraftTokens: numDraftTokens,
-                                shouldCancel: shouldCancel,
-                                drainCancelled: drainCancelled
-                            )
-                            try drainCancelled.check()
-                            try Task.checkCancellation()
-
-                            let final = Self.applyOutputFilters(
-                                generated.output,
-                                stopTokenFilter: stopTokenFilter,
-                                requestStops: request.stop
-                            )
-                            let rawLengthFinish = request.maxTokens.map { generated.generationTokenCount >= $0 } ?? false
-                            let parsed = try Self.parseGeneratedOutput(
-                                filteredText: final.text,
-                                generatedTokenIDs: [],
-                                decode: { _ in "" },
-                                request: request,
-                                mode: .complete(finishReason: rawLengthFinish && !final.hitStop ? "length" : "stop"),
-                                defaultCompletionTokens: generated.generationTokenCount,
-                                stopTokenFilter: stopTokenFilter,
-                                requestStops: request.stop,
-                                globalHitStop: final.hitStop
-                            )
-                            let finalDelta = Self.delta(from: emittedText, to: parsed.content)
-                            if !finalDelta.isEmpty {
-                                if let error = structuredAccumulator.append(finalDelta) {
-                                    throw error
-                                }
-                                idleState.noteContent()
-                                emittedText = final.text
-                                stoppedByRequestStop = final.hitStop
-                                onChunk(.content(finalDelta))
-                            }
-                            if final.hitStop {
-                                stoppedByRequestStop = true
-                            }
-                            if let error = structuredAccumulator.error {
-                                throw error
-                            }
-
-                            let finishReason: String
-                            if !parsed.toolCalls.isEmpty {
-                                finishReason = "tool_calls"
-                            } else if let maxTokens = request.maxTokens,
-                                      generated.generationTokenCount >= maxTokens,
-                                      !stoppedByRequestStop,
-                                      !final.hitStop,
-                                      !parsed.hitStop {
-                                finishReason = "length"
-                            } else {
-                                finishReason = "stop"
-                            }
-
-                            let completion = CompletionResult(
-                                content: parsed.content,
-                                finishReason: finishReason,
-                                promptTokens: promptTokenIds.count,
-                                cachedPromptTokens: 0,
-                                completionTokens: parsed.completionTokens,
-                                generatedCompletionTokens: parsed.generatedCompletionTokens,
-                                toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                                modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
-                                specDecodeDraftedTokens: generated.draftedTokens,
-                                specDecodeAcceptedTokens: generated.acceptedTokens,
-                                specDecodeGeneration: snapshot.specDecodeGeneration
-                            )
-                            return try Self.validateStructuredStreamingCompletion(
-                                completion,
-                                request: request,
-                                buyerVisibleContent: structuredAccumulator.content
-                            )
-                        } catch {
-                            if let lease {
-                                await conversationCache.abort(lease)
-                            }
-                            throw error
-                        }
-                    }
                     let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
                     do {
                         let result: GenerateResult = generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
@@ -1977,7 +2076,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             buyerVisibleContent: structuredAccumulator.content
                         )
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init))
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return validated
                     } catch {
@@ -1990,6 +2089,185 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             }
         }
+    }
+
+    /// SPEC-037 stage 5 (FR-KVP7) — attach the activated disk cold tier. Called by
+    /// the serve lifecycle after the store acquires its namespace lock, so the hot
+    /// tier only reaches disk once single-writer ownership is established.
+    func attachKVDiskTier(_ tier: KVDiskTier) async {
+        let adapter = KVConversationColdTierAdapter(
+            store: tier.store, namespaceID: tier.namespaceID,
+            eligibilityTTLSeconds: tier.eligibilityTTLSeconds,
+            writeStagingMaxBytes: tier.config.writeStagingMaxBytes,
+            maxEntryBytes: tier.config.maxEntryBytes,
+            stagingMaxBytes: tier.config.stagingMaxBytes)
+        await conversationCache.attachColdTier(adapter)
+        // CRITICAL-2: keep the adapter's cached epoch in step with the store so
+        // captureSnapshot stamps the epoch at commit time. Seeds immediately.
+        await tier.store.setEpochObserver { [weak adapter] epoch in adapter?.cacheEpoch(epoch) }
+        // CRITICAL-1: wire the store's purge path back to the hot tier so a purge /
+        // purge-all drops the matching RAM entry and fences outstanding leases
+        // before the on-disk generation is unlinked / the epoch is rotated.
+        let cache = conversationCache
+        await tier.store.setHotPurgeHooks(
+            single: { key in await cache.purgeHot(conversationKey: key) },
+            all: { await cache.purgeAllHot() })
+        // HIGH-5: drain queued cold writes on graceful shutdown before lock release.
+        tier.setDrainHook { seconds in await cache.drainColdWrites(timeoutSeconds: seconds) }
+        // HIGH-1 (SPEC-037 KVS-01a): seed the adapter's live-model geometry template
+        // from the ACTUAL loaded cache geometry BEFORE admitting requests, so the
+        // first post-restart request can promote a persisted entry rather than
+        // falling back to a fresh prefill until some other conversation commits.
+        await seedColdGeometry(into: adapter)
+        coldTierAttached = true
+    }
+
+    /// HIGH-1 (SPEC-037 KVS-01a) — seed the cold-tier adapter's live-model geometry
+    /// template from the REAL loaded `KVCacheSimple` geometry. Runs a minimal
+    /// warmup prefill under the serve generation parameters to populate a cache,
+    /// snapshots its per-layer geometry, and seeds the adapter keyed by the served
+    /// model ID. Best-effort: no loaded container (headless/test), MLX/Metal
+    /// unavailable, a non-`KVCacheSimple` runtime (e.g. a kv-quantized serve, which
+    /// never persists anyway), or any warmup failure simply skips the seed — the
+    /// tier then behaves as before (the model's first post-restart turn misses).
+    /// The seeded template only supplies the EXPECTED geometry to validate against;
+    /// every promoted entry still passes full FR-KVP4 envelope validation against
+    /// the live manifest, so a stale/wrong seed can only cause a miss.
+    private func seedColdGeometry(into adapter: KVConversationColdTierAdapter) async {
+        guard let container = currentContainer, let servedModelID = currentModelID else { return }
+        let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
+        let prefillStepSize = prefillStepSize
+        let template: [KVLayerGeometry]? = try? await inferenceGate.withPermit {
+            try await container.perform { context -> [KVLayerGeometry]? in
+                let input = UserInput(chat: [.user("warmup")])
+                let lmInput = try await context.processor.prepare(input: input)
+                let parameters = Self.makeServeGenerateParameters(
+                    maxTokens: 1,
+                    maxContextTokens: maxContextTokens,
+                    kvBitsOverride: kvBitsOverride,
+                    prefillStepSize: prefillStepSize,
+                    temperature: 0.0,
+                    topP: 1.0
+                )
+                // SPEC-037 FR-KVP1: the seed always models the tier-ELIGIBLE path, so it
+                // must build a KVCacheSimple (maxKVSize=nil) — otherwise the
+                // `as? [KVCacheSimple]` guard below never succeeds and no geometry is seeded.
+                let kvCache = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true))
+                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
+                // A single-token warmup populates the per-layer cache tensors; that is
+                // all the seed needs (only the geometry is read, never the values).
+                _ = try generate(input: lmInput, context: context, iterator: iterator) { (_: [Int]) in
+                    GenerateDisposition.stop
+                }
+                // Only the v1-allowlisted unquantized class is serializable/persisted;
+                // any other runtime skips the seed exactly as it skips persistence.
+                // MEDIUM-A: if the forced-simple warmup did NOT produce a KVCacheSimple,
+                // this loaded model's runtime does not support the disk tier at all
+                // (a model family that overrides `newCache` and ignores `maxKVSize`,
+                // e.g. gpt-oss/gemma-4/nemotron). Tell the operator ONCE at attach
+                // rather than leaving every eligible request to skip observably but
+                // silently at attach time. Log-only: the per-request observable skip in
+                // captureSnapshot still covers correctness.
+                guard let caches = kvCache as? [KVCacheSimple] else {
+                    // Report the FIRST layer that is NOT KVCacheSimple (heterogeneous
+                    // arrays whose layer 0 is simple but a later layer is not would
+                    // otherwise be misreported as "KVCacheSimple"); fall back to the
+                    // first layer's class, or "empty".
+                    let className = (kvCache.first(where: { !($0 is KVCacheSimple) }) ?? kvCache.first)
+                        .map { String(describing: type(of: $0)) } ?? "empty"
+                    Self.logColdTierUnsupportedCacheClass(servedModelID: servedModelID, cacheClass: className)
+                    return nil
+                }
+                guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
+                return KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: payloads)
+            }
+        } ?? nil
+        if let template, !template.isEmpty {
+            adapter.seedTemplate(servedModelID: servedModelID, template: template)
+        }
+    }
+
+    /// MEDIUM-A (SPEC-037) — warn ONCE at cold-tier attach when the loaded model's
+    /// forced-simple warmup produces a cache class outside the v1 serialization
+    /// allowlist (`KVCacheSimple`). Such a model cannot persist to the disk tier at
+    /// all; every eligible request will skip observably (unsupported_cache_class), so
+    /// this up-front line tells operators before the first request rather than only
+    /// per-request. Log-only — no eligibility-short-circuit plumbing.
+    private nonisolated static func logColdTierUnsupportedCacheClass(servedModelID: String, cacheClass: String) {
+        let line = "event=kv_disk_tier_unsupported_model served_model_id=\(servedModelID) "
+            + "cache_class=\(cacheClass) message=\"kv disk tier: model \(servedModelID) runtime produces "
+            + "\(cacheClass), not KVCacheSimple; disk survival will not persist for this model\"\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    // MARK: - FR-KVP8 hot-tier (RAM) purge/status — independent of disk-tier enablement
+
+    /// Purge a single hot (RAM) conversation entry, cancelling any queued cold-tier
+    /// persist and fencing outstanding leases. Works regardless of whether the disk
+    /// tier is enabled — a running serve owns its ConversationCache and must be able
+    /// to remove hot-tier residency so it never keeps serving a purged prefix from
+    /// RAM (FR-KVP8). Returns whether the hot tier held live state for the key.
+    func purgeHotConversation(conversationKey: String) async -> Bool {
+        await conversationCache.purgeHot(conversationKey: conversationKey)
+    }
+
+    /// Purge every hot (RAM) conversation entry, invalidating outstanding leases.
+    /// Independent of disk-tier enablement (FR-KVP8).
+    func purgeAllHotConversations() async {
+        await conversationCache.purgeAllHot()
+    }
+
+    /// A snapshot of the hot (RAM) conversation cache residency for `kv-cache status`.
+    func hotConversationStats() async -> (entries: Int, tokens: Int) {
+        await conversationCache.snapshotStats()
+    }
+
+    #if DEBUG
+    /// Test-only: seed a hot conversation entry (no completion needed) so the
+    /// disabled-tier RAM purge/status path is exercisable end-to-end via the control
+    /// socket. Sets only the cache offset — no MLX tensor state — so it runs headless.
+    func seedHotConversationForTest(key: String, tokens: [Int32], modelID: String) async {
+        guard let lease = await conversationCache.begin(
+            conversationKey: key, incomingTokens: tokens, modelID: modelID, kvBits: nil) else { return }
+        let cache = KVCacheSimple(); cache.offset = tokens.count
+        await conversationCache.commit(lease, cache: ConversationCacheLayers([cache]), fullTokens: tokens)
+    }
+
+    /// Test-only: begin() a hot lookup and report the cached-prompt-token count, so a
+    /// test can assert a post-purge begin is a cold-start miss (0). Aborts the lease.
+    func hotCachedPromptTokensForTest(key: String, tokens: [Int32], modelID: String) async -> Int {
+        guard let lease = await conversationCache.begin(
+            conversationKey: key, incomingTokens: tokens, modelID: modelID, kvBits: nil) else { return 0 }
+        let cached = lease.cachedPromptTokens
+        await conversationCache.abort(lease)
+        return cached
+    }
+    #endif
+
+    /// Build the per-request cold-tier context (nil when the tier is not attached).
+    /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
+    /// direct-HTTP provenance; the identity core carries the live model identity.
+    private func coldContext(for request: ChatCompletionRequest, snapshot: RuntimeSnapshot) -> ConversationColdContext? {
+        guard coldTierAttached else { return nil }
+        // Evaluate the FR-KVP11 gate FIRST (key sub-namespace + direct-HTTP provenance),
+        // independent of identity availability, so a gated request whose live identity is
+        // unavailable still reaches the telemetry sink (FR-KVP12) instead of the cold
+        // tier silently doing nothing. The pure resolution lives in
+        // `ConversationColdContext.resolve` (unit-tested per missing input).
+        let gated = KVDiskCacheGate.persists(
+            conversationKey: request.conversationKey, provenance: request.ingestProvenance)
+        return ConversationColdContext.resolve(
+            gated: gated,
+            requestModel: request.model,
+            servedModelID: snapshot.modelID ?? request.model,
+            modelSHA256: snapshot.modelHash,
+            // MEDIUM-5: the catalog revision is a SEPARATE identity field from the model
+            // artifact SHA (model_sha256). Absent ⇒ resolve() marks identity unavailable
+            // (no promote/persist) rather than aliasing the artifact hash as the revision.
+            catalogRevision: verifiedModelCatalogRevision,
+            tokenizerConfigSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256)
     }
 
     func measureStartupThroughput(maxTokens: Int = 8) async -> Double {
@@ -2315,6 +2593,51 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         return snapshot
+    }
+
+    /// SPEC-037 HIGH-8 — hash the loaded model's LIVE tokenizer configuration and
+    /// chat-template bytes for the KV envelope identity. Returns nil for either hash
+    /// that is genuinely unreachable, so the cold tier treats identity as unavailable
+    /// and skips persistence rather than deriving a fake hash from the model hash.
+    ///
+    /// - config hash: SHA-256 over the labelled bytes of `tokenizer_config.json` and
+    ///   `tokenizer.json` (whichever are present). Nil when neither exists.
+    /// - template hash: SHA-256 over a dedicated chat-template file if present, else
+    ///   over the `chat_template` field inside `tokenizer_config.json`. Nil when no
+    ///   chat template is discoverable.
+    static func tokenizerIdentityHashes(in directory: URL) -> (config: String?, template: String?) {
+        let fm = FileManager.default
+        func bytes(_ name: String) -> Data? {
+            let url = directory.appendingPathComponent(name)
+            guard fm.fileExists(atPath: url.path) else { return nil }
+            return try? Data(contentsOf: url)
+        }
+        func hex(_ data: Data) -> String {
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+
+        var configData = Data()
+        var configAny = false
+        for name in ["tokenizer_config.json", "tokenizer.json"] {
+            if let d = bytes(name) {
+                configData.append(Data((name + "\u{0}").utf8))
+                configData.append(d)
+                configAny = true
+            }
+        }
+        let configHash = configAny ? hex(configData) : nil
+
+        var templateData: Data?
+        for name in ["chat_template.jinja", "chat_template.json", "chat_template.txt"] {
+            if let d = bytes(name) { templateData = Data((name + "\u{0}").utf8) + d; break }
+        }
+        if templateData == nil, let cfg = bytes("tokenizer_config.json"),
+           let obj = try? JSONSerialization.jsonObject(with: cfg) as? [String: Any],
+           let template = obj["chat_template"] as? String {
+            templateData = Data(("chat_template\u{0}" + template).utf8)
+        }
+        let templateHash = templateData.map(hex)
+        return (configHash, templateHash)
     }
 
     static func modelWeightArtifactManifestHash(in directory: URL) throws -> String? {

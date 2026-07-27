@@ -1,0 +1,852 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+index 587694ac..2bc35722 100644
+--- a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
++++ b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+@@ -1245,11 +1245,11 @@ actor ControlSocketServer {
+                         .referralChallengeCancelAck(status: try await service.cancel())
+                     }
+                 case let .kvCachePurgeRequest(mode, key):
+-                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, connection: connection)
++                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                     await connection.close()
+                     return
+                 case .kvCacheStatusRequest:
+-                    await handleKVCacheStatus(tier: kvDiskTier, connection: connection)
++                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                     await connection.close()
+                     return
+                 default:
+@@ -1277,16 +1277,34 @@ actor ControlSocketServer {
+     }
+ 
+     /// SPEC-037 stage 5 (FR-KVP8) — execute a kv-cache purge in the lock-holding
+-    /// serve process. When the tier is not active here (`tier == nil`, disabled),
+-    /// reply `unavailable` so the client falls back to the standalone lock path.
++    /// serve process. When the disk tier is DISABLED here (`tier == nil`), the serve
++    /// process still owns its RAM `ConversationCache`, so purge must remain functional
++    /// (FR-KVP8): clear the matching hot-tier residency — so we never keep serving a
++    /// purged prefix from RAM until TTL — and report what was removed. The disk
++    /// component is absent in this process (a standalone CLI handles disk purge when
++    /// no serve holds the namespace lock); this path never reports a hot purge it did
++    /// not perform.
+     private nonisolated static func handleKVCachePurge(
+-        mode: String, key: String?, tier: KVDiskTier?, connection: ControlSocketConnection
++        mode: String, key: String?, tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
+     ) async {
+         guard let tier else {
++            let entriesRemoved: Int
++            switch mode {
++            case "all", "all_forget":
++                // Report the hot residency actually cleared.
++                let before = await modelRuntime.hotConversationStats().entries
++                await modelRuntime.purgeAllHotConversations()
++                entriesRemoved = before
++            default:
++                let hadHot = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
++                entriesRemoved = hadHot ? 1 : 0
++            }
+             try? await connection.send(.kvCachePurgeResponse(
+-                status: "unavailable", entriesRemoved: 0, bytesFreed: 0, detail: "tier_not_active"))
++                status: "purge_ok", entriesRemoved: entriesRemoved, bytesFreed: 0, detail: "disk_tier_disabled"))
+             return
+         }
++        // Enabled: the tier's purge path already clears the wired hot-tier residency
++        // (setHotPurgeHooks) in addition to disk — unchanged behavior.
+         let result: KVPurgeResult
+         switch mode {
+         case "all": result = await tier.purgeAll()
+@@ -1304,16 +1322,33 @@ actor ControlSocketServer {
+     }
+ 
+     /// SPEC-037 stage 5 (FR-KVP12) — report the inspection surface from the
+-    /// lock-holding serve process (JSON payload identical to the CLI shape).
++    /// lock-holding serve process (JSON payload identical to the CLI shape). When the
++    /// disk tier is DISABLED here (`tier == nil`), still report the serve-owned RAM
++    /// (hot) residency with `enabled=false` so status remains functional while
++    /// disabled (FR-KVP8).
+     private nonisolated static func handleKVCacheStatus(
+-        tier: KVDiskTier?, connection: ControlSocketConnection
++        tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
+     ) async {
+-        guard let tier, let inspection = await tier.status() else {
++        guard let tier else {
++            let stats = await modelRuntime.hotConversationStats()
++            let object: [String: Any] = [
++                "status": "ok",
++                "enabled": false,
++                "hot_entries": stats.entries,
++                "hot_tokens": stats.tokens,
++            ]
++            let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
++            try? await connection.send(.kvCacheStatusResponse(payloadJSON: String(decoding: data, as: UTF8.self)))
++            return
++        }
++        guard let inspection = await tier.status() else {
+             try? await connection.send(.kvCacheStatusResponse(payloadJSON: "{\"status\":\"unavailable\"}"))
+             return
+         }
+         let object: [String: Any] = [
+             "status": "ok",
++            "enabled": tier.config.effectiveEnabled,
++            "retention_minutes": tier.config.retentionMinutes,
+             "namespace_id": inspection.namespaceID,
+             "bytes_used": inspection.bytesUsed,
+             "control_bytes_used": inspection.controlBytesUsed,
+diff --git a/phase3-binary/Sources/macprovider-cli/KVCacheCommand.swift b/phase3-binary/Sources/macprovider-cli/KVCacheCommand.swift
+index c6132fd8..53d2c25e 100644
+--- a/phase3-binary/Sources/macprovider-cli/KVCacheCommand.swift
++++ b/phase3-binary/Sources/macprovider-cli/KVCacheCommand.swift
+@@ -229,6 +229,8 @@ struct KVCacheStatusCommand: AsyncParsableCommand {
+         }
+         KVCacheCommandSupport.emit([
+             "status": "ok",
++            "enabled": tier.config.effectiveEnabled,
++            "retention_minutes": tier.config.retentionMinutes,
+             "namespace_id": inspection.namespaceID,
+             "bytes_used": inspection.bytesUsed,
+             "control_bytes_used": inspection.controlBytesUsed,
+diff --git a/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift b/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift
+index 1d236711..38c91bf3 100644
+--- a/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift
++++ b/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift
+@@ -50,10 +50,12 @@ extension KVIdentityCore {
+ /// learned from each write. Envelope validation on promotion compares this
+ /// live-model template against the persisted manifest, so a warm-swap to a
+ /// different geometry/dtype/layer-count is a miss even when the served model ID
+-/// or hash somehow matches. The template is process-local: a served model that
+-/// has not yet committed in the current process has no template, so its first
+-/// post-restart turn cannot promote until it commits once (documented residual;
+-/// closing it needs load-time geometry capture).
++/// or hash somehow matches. The template is seeded at cold-tier attach / model
++/// load from the ACTUAL loaded `KVCacheSimple` geometry (HIGH-1,
++/// `seedTemplate`), so the FIRST post-restart request can promote (SPEC-037
++/// KVS-01a); commits thereafter refresh it. When the seed is unavailable
++/// (MLX/Metal absent, or a non-`KVCacheSimple` runtime), the model's first
++/// post-restart turn falls back to a fresh prefill until it commits once.
+ final class KVConversationColdTierAdapter: ConversationColdTier {
+     private let store: KVDiskCacheStore
+     private let namespaceID: String
+@@ -150,6 +152,61 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
+         epochLock.lock(); cachedEpoch = epoch; epochLock.unlock()
+     }
+ 
++    // MARK: - HIGH-1 load-time geometry seeding (SPEC-037 KVS-01a)
++
++    /// Build the live-model geometry template that `captureSnapshot` learns from a
++    /// committed entry's layer payloads. Factored out so `ModelRuntime`'s load-time
++    /// seed (below) and the commit-time learn produce byte-identical geometry. The
++    /// sequence axis is the payload dim equal to `tokenCount` (the committed
++    /// sequence length), falling back to the structural rank-4 layout axis
++    /// (`ndim - 2`) when the token count is ambiguous.
++    static func liveGeometryTemplate(fromPayloads payloads: [KVLayerPayload], tokenCount: Int) -> [KVLayerGeometry] {
++        payloads.map { payload in
++            let seqAxis = payload.dims.firstIndex(of: tokenCount) ?? max(0, payload.ndim - 2)
++            return KVLayerGeometry(
++                layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
++                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype, sequenceAxis: seqAxis)
++        }
++    }
++
++    /// HIGH-1 — build the seed template from a freshly warmed `KVCacheSimple`'s layer
++    /// payloads at model-load time. The sequence axis is keyed structurally to the
++    /// rank-4 `KVCacheSimple` layout (`ndim - 2` — the axis mlx writes KV into for the
++    /// `[batch, kvHeads, seq, headDim]` state), so it is derived without depending on
++    /// the (possibly ambiguous, e.g. 1-token) warmup sequence length. For
++    /// `KVCacheSimple` this equals the axis `captureSnapshot` records for any real
++    /// multi-token commit, so a seeded promotion validates identically. A wrong axis
++    /// or stale template can only ever cause a validation MISS (the store still
++    /// re-checks every FR-KVP4 field against the live manifest) — never a wrong
++    /// promotion; the template only supplies the EXPECTED geometry to compare against.
++    static func seedGeometryTemplate(fromPayloads payloads: [KVLayerPayload]) -> [KVLayerGeometry] {
++        payloads.map { payload in
++            KVLayerGeometry(
++                layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
++                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype,
++                sequenceAxis: max(0, payload.ndim - 2))
++        }
++    }
++
++    /// HIGH-1 — seed the live-model geometry template at cold-tier attach / model
++    /// load, BEFORE request admission, so the FIRST post-restart request for
++    /// `servedModelID` can promote a persisted entry (SPEC-037 KVS-01a) instead of
++    /// missing until some other conversation commits in-process. Never overwrites a
++    /// template already learned from an in-process commit (that one is at least as
++    /// fresh as this load-time seed).
++    func seedTemplate(servedModelID: String, template: [KVLayerGeometry]) {
++        guard !template.isEmpty else { return }
++        templateLock.lock()
++        if geometryTemplates[servedModelID] == nil { geometryTemplates[servedModelID] = template }
++        templateLock.unlock()
++    }
++
++    /// Test-only: whether a live-model geometry template is present for the served model.
++    func hasGeometryTemplateForTest(servedModelID: String) -> Bool {
++        templateLock.lock(); defer { templateLock.unlock() }
++        return geometryTemplates[servedModelID]?.isEmpty == false
++    }
++
+     private func currentCachedEpoch() -> Int {
+         epochLock.lock(); defer { epochLock.unlock() }; return cachedEpoch
+     }
+@@ -172,14 +229,14 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
+ 
+     // MARK: - FR-KVP9 promotion
+ 
+-    func promoteCandidate(conversationKey: String, identity: KVIdentityCore) async -> ColdPromotionCandidate? {
+-        guard identity.modelSHA256 != nil else { return nil }   // identity_unavailable
+-        templateLock.lock()
+-        let template = geometryTemplates[identity.servedModelID]
+-        templateLock.unlock()
+-        guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
+-        let epoch = await store.currentEpoch
+-        let runtime = KVRuntimeIdentity(
++    /// Assemble the read-time runtime envelope from the per-request identity core plus
++    /// the owned live-model geometry `template` and the build-pinned ABI fields — so
++    /// write and read derive identical envelopes. Factored out of `promoteCandidate`
++    /// so the load-time-seeding mechanism can be validated headlessly against
++    /// `store.read` (whose hit returns raw `KVLayerPayload` bytes), without the
++    /// `MLXArray` restore below that needs a Metal runtime.
++    func promotionRuntime(identity: KVIdentityCore, template: [KVLayerGeometry], epoch: Int) -> KVRuntimeIdentity {
++        KVRuntimeIdentity(
+             namespaceID: namespaceID,
+             keyEpoch: epoch,
+             indexHMAC: "",                 // recomputed inside read()
+@@ -202,6 +259,22 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
+             kvQuantPolicy: identity.kvQuantPolicy,
+             decodePath: KVBuildIdentity.decodePathOrdinary,
+             liveHighWatermark: 0)          // overridden inside read()
++    }
++
++    /// Test-only: the currently-owned live-model geometry template for a served model.
++    func geometryTemplateForTest(servedModelID: String) -> [KVLayerGeometry]? {
++        templateLock.lock(); defer { templateLock.unlock() }
++        return geometryTemplates[servedModelID]
++    }
++
++    func promoteCandidate(conversationKey: String, identity: KVIdentityCore) async -> ColdPromotionCandidate? {
++        guard identity.modelSHA256 != nil else { return nil }   // identity_unavailable
++        templateLock.lock()
++        let template = geometryTemplates[identity.servedModelID]
++        templateLock.unlock()
++        guard let template, !template.isEmpty else { return nil } // no live geometry to validate against
++        let epoch = await store.currentEpoch
++        let runtime = promotionRuntime(identity: identity, template: template, epoch: epoch)
+         let result = try? await store.read(
+             rawKey: conversationKey, runtime: runtime, nowMillis: Self.nowMillis(), emitHitEvent: false)
+         guard let result, case let .hit(hit) = result else { return nil }
+@@ -283,12 +356,7 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
+         guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
+ 
+         // Learn/refresh the live-model geometry template for future promotions.
+-        let template = payloads.map { payload -> KVLayerGeometry in
+-            let seqAxis = payload.dims.firstIndex(of: fullTokens.count) ?? max(0, payload.ndim - 2)
+-            return KVLayerGeometry(
+-                layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
+-                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype, sequenceAxis: seqAxis)
+-        }
++        let template = Self.liveGeometryTemplate(fromPayloads: payloads, tokenCount: fullTokens.count)
+         templateLock.lock()
+         geometryTemplates[identity.servedModelID] = template
+         templateLock.unlock()
+diff --git a/phase3-binary/Sources/macprovider-cli/KVDiskTier.swift b/phase3-binary/Sources/macprovider-cli/KVDiskTier.swift
+index 0aca0467..e0924c7f 100644
+--- a/phase3-binary/Sources/macprovider-cli/KVDiskTier.swift
++++ b/phase3-binary/Sources/macprovider-cli/KVDiskTier.swift
+@@ -205,6 +205,8 @@ final class KVDiskTier: @unchecked Sendable {
+             + " retention_minutes=\(config.retentionMinutes)(cleanup_only)"
+             + " synthetic_gate=conv:kvs-synth:+direct_http"
+             + " purge_command=\"macprovider-cli kv-cache purge\""
++            + " status_command=\"macprovider-cli kv-cache status\""
++            + " forget_command=\"macprovider-cli kv-cache purge --all --forget\""
+             + " free_space=\(headroom)")
+         if let freeBytes, freeBytes < config.minFreeBytes {
+             log("event=kv_disk_cache action=warn reason=insufficient_free_space free=\(freeBytes) floor=\(config.minFreeBytes)")
+diff --git a/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift b/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift
+index f8744dd8..e1b2dcd9 100644
+--- a/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift
++++ b/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift
+@@ -2062,9 +2062,105 @@ actor ModelRuntime: ModelRuntimeServing {
+             all: { await cache.purgeAllHot() })
+         // HIGH-5: drain queued cold writes on graceful shutdown before lock release.
+         tier.setDrainHook { seconds in await cache.drainColdWrites(timeoutSeconds: seconds) }
++        // HIGH-1 (SPEC-037 KVS-01a): seed the adapter's live-model geometry template
++        // from the ACTUAL loaded cache geometry BEFORE admitting requests, so the
++        // first post-restart request can promote a persisted entry rather than
++        // falling back to a fresh prefill until some other conversation commits.
++        await seedColdGeometry(into: adapter)
+         coldTierAttached = true
+     }
+ 
++    /// HIGH-1 (SPEC-037 KVS-01a) — seed the cold-tier adapter's live-model geometry
++    /// template from the REAL loaded `KVCacheSimple` geometry. Runs a minimal
++    /// warmup prefill under the serve generation parameters to populate a cache,
++    /// snapshots its per-layer geometry, and seeds the adapter keyed by the served
++    /// model ID. Best-effort: no loaded container (headless/test), MLX/Metal
++    /// unavailable, a non-`KVCacheSimple` runtime (e.g. a kv-quantized serve, which
++    /// never persists anyway), or any warmup failure simply skips the seed — the
++    /// tier then behaves as before (the model's first post-restart turn misses).
++    /// The seeded template only supplies the EXPECTED geometry to validate against;
++    /// every promoted entry still passes full FR-KVP4 envelope validation against
++    /// the live manifest, so a stale/wrong seed can only cause a miss.
++    private func seedColdGeometry(into adapter: KVConversationColdTierAdapter) async {
++        guard let container = currentContainer, let servedModelID = currentModelID else { return }
++        let maxContextTokens = maxContextTokens
++        let kvBitsOverride = kvBitsOverride
++        let prefillStepSize = prefillStepSize
++        let template: [KVLayerGeometry]? = try? await inferenceGate.withPermit {
++            try await container.perform { context -> [KVLayerGeometry]? in
++                let input = UserInput(chat: [.user("warmup")])
++                let lmInput = try await context.processor.prepare(input: input)
++                let parameters = Self.makeServeGenerateParameters(
++                    maxTokens: 1,
++                    maxContextTokens: maxContextTokens,
++                    kvBitsOverride: kvBitsOverride,
++                    prefillStepSize: prefillStepSize,
++                    temperature: 0.0,
++                    topP: 1.0
++                )
++                let kvCache = context.model.newCache(parameters: parameters)
++                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
++                // A single-token warmup populates the per-layer cache tensors; that is
++                // all the seed needs (only the geometry is read, never the values).
++                _ = try generate(input: lmInput, context: context, iterator: iterator) { (_: [Int]) in
++                    GenerateDisposition.stop
++                }
++                // Only the v1-allowlisted unquantized class is serializable/persisted;
++                // any other runtime skips the seed exactly as it skips persistence.
++                guard let caches = kvCache as? [KVCacheSimple],
++                      let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
++                return KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: payloads)
++            }
++        } ?? nil
++        if let template, !template.isEmpty {
++            adapter.seedTemplate(servedModelID: servedModelID, template: template)
++        }
++    }
++
++    // MARK: - FR-KVP8 hot-tier (RAM) purge/status — independent of disk-tier enablement
++
++    /// Purge a single hot (RAM) conversation entry, cancelling any queued cold-tier
++    /// persist and fencing outstanding leases. Works regardless of whether the disk
++    /// tier is enabled — a running serve owns its ConversationCache and must be able
++    /// to remove hot-tier residency so it never keeps serving a purged prefix from
++    /// RAM (FR-KVP8). Returns whether the hot tier held live state for the key.
++    func purgeHotConversation(conversationKey: String) async -> Bool {
++        await conversationCache.purgeHot(conversationKey: conversationKey)
++    }
++
++    /// Purge every hot (RAM) conversation entry, invalidating outstanding leases.
++    /// Independent of disk-tier enablement (FR-KVP8).
++    func purgeAllHotConversations() async {
++        await conversationCache.purgeAllHot()
++    }
++
++    /// A snapshot of the hot (RAM) conversation cache residency for `kv-cache status`.
++    func hotConversationStats() async -> (entries: Int, tokens: Int) {
++        await conversationCache.snapshotStats()
++    }
++
++    #if DEBUG
++    /// Test-only: seed a hot conversation entry (no completion needed) so the
++    /// disabled-tier RAM purge/status path is exercisable end-to-end via the control
++    /// socket. Sets only the cache offset — no MLX tensor state — so it runs headless.
++    func seedHotConversationForTest(key: String, tokens: [Int32], modelID: String) async {
++        guard let lease = await conversationCache.begin(
++            conversationKey: key, incomingTokens: tokens, modelID: modelID, kvBits: nil) else { return }
++        let cache = KVCacheSimple(); cache.offset = tokens.count
++        await conversationCache.commit(lease, cache: ConversationCacheLayers([cache]), fullTokens: tokens)
++    }
++
++    /// Test-only: begin() a hot lookup and report the cached-prompt-token count, so a
++    /// test can assert a post-purge begin is a cold-start miss (0). Aborts the lease.
++    func hotCachedPromptTokensForTest(key: String, tokens: [Int32], modelID: String) async -> Int {
++        guard let lease = await conversationCache.begin(
++            conversationKey: key, incomingTokens: tokens, modelID: modelID, kvBits: nil) else { return 0 }
++        let cached = lease.cachedPromptTokens
++        await conversationCache.abort(lease)
++        return cached
++    }
++    #endif
++
+     /// Build the per-request cold-tier context (nil when the tier is not attached).
+     /// The FR-KVP11 gate decision requires BOTH the synthetic key prefix and
+     /// direct-HTTP provenance; the identity core carries the live model identity.
+diff --git a/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift b/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift
+index 0a3a9383..9b2295e8 100644
+--- a/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift
++++ b/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift
+@@ -1,8 +1,9 @@
+ import ArgumentParser
+ import Darwin
+ import Foundation
++import MacProviderCore
+ 
+-struct UninstallCommand: ParsableCommand {
++struct UninstallCommand: AsyncParsableCommand {
+     static let configuration = CommandConfiguration(
+         commandName: "uninstall",
+         abstract: "Stop macprovider-cli and remove installed artifacts."
+@@ -14,7 +15,7 @@ struct UninstallCommand: ParsableCommand {
+     @Flag(help: "Accepted for compatibility; uninstall is non-interactive.")
+     var yes = false
+ 
+-    func run() throws {
++    func run() async throws {
+         let home = FileManager.default.homeDirectoryForCurrentUser
+         var warnings: [String] = []
+         let paths = Self.artifactPaths(home: home)
+@@ -51,6 +52,15 @@ struct UninstallCommand: ParsableCommand {
+             operationID: "uninstall:\(UUID().uuidString.lowercased())",
+             operatorPaused: false
+         )
++        // SPEC-037 FR-KVP8 — before removing product files, purge the encrypted KV
++        // survival disk tier (purge --all --forget): remove the namespace directory
++        // and all per-epoch master + per-entry DEK Keychain items so no orphaned
++        // ciphertext or key material outlives the product. Runs now that both
++        // launchd jobs are proven stopped (no serve process holds the namespace
++        // lock). Best-effort: it works while the tier is disabled and NEVER
++        // hard-fails uninstall — a KV-cleanup hiccup is recorded as a warning.
++        await Self.purgeKVDiskCacheBestEffort(warnings: &warnings)
++
+         // Preserve the provider identity credential for safe reinstall. A
+         // routine uninstall is reversible and does not constitute an explicit
+         // cryptographic identity reset; destroying the bearer while provider_id
+@@ -86,6 +96,36 @@ struct UninstallCommand: ParsableCommand {
+         print("macprovider-cli has been uninstalled.")
+     }
+ 
++    /// FR-KVP8 — resolve the installed KV disk tier and purge --all --forget it,
++    /// best-effort. Skips silently when there is no resolvable config or provider
++    /// identity (nothing to clean). Never throws — uninstall must not hard-fail on a
++    /// KV-cleanup hiccup.
++    static func purgeKVDiskCacheBestEffort(warnings: inout [String]) async {
++        guard let tier = makeKVDiskTierForUninstall() else { return }
++        await purgeKVDiskCache(tier, warnings: &warnings)
++    }
++
++    /// Build the KV disk tier for the installed namespace (provider ID) from config,
++    /// or nil when unresolvable. `purgeAllAndForget` works even while the tier is
++    /// disabled (it only needs the namespace lock + provider ID).
++    static func makeKVDiskTierForUninstall() -> KVDiskTier? {
++        guard let resolved = try? ConfigLoader.load(cli: CLIOverrides()) else { return nil }
++        guard let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
++              !providerID.isEmpty else { return nil }
++        let ttl = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
++        return KVDiskTier(config: resolved.kvDiskCache, namespaceID: providerID, eligibilityTTLSeconds: ttl)
++    }
++
++    /// Purge --all --forget the given tier (testable seam), then release the lock.
++    /// Best-effort: a failure is surfaced as a warning, never a thrown error.
++    static func purgeKVDiskCache(_ tier: KVDiskTier, warnings: inout [String]) async {
++        let result = await tier.purgeAllAndForget()
++        await tier.shutdown()
++        if case let .failed(detail) = result {
++            warnings.append("kv-cache cleanup incomplete: \(detail.rawValue)")
++        }
++    }
++
+     struct ArtifactPaths: Equatable {
+         let binary: URL
+         let supportDirectory: URL
+diff --git a/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift b/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift
+index bde40768..16e87f11 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift
+@@ -719,6 +719,118 @@ final class ControlSocketTests: XCTestCase {
+         XCTAssertEqual(try ControlSocketCodec.decode(try ControlSocketCodec.encode(frame)), frame)
+     }
+ 
++    // MARK: - SPEC-037 FR-KVP8 — disabled-disk-tier RAM purge/status (Finding 2)
++
++    /// With the disk tier DISABLED (kvDiskTier == nil), a socket-routed single-key
++    /// purge must clear the serve-owned RAM (hot) entry and report purge_ok for what
++    /// it removed — NOT reply `unavailable` (which would fall back to a standalone
++    /// store that cannot touch this process's RAM, leaving a purged prefix live).
++    func testKVCachePurgeSingleClearsHotRAMWhenDiskTierDisabled() async throws {
++        let socketPath = try makeSocketPath()
++        let runtime = makeRuntime(modelID: "ready-model")
++        let key = "conv:kvs-synth:ram-single"
++        let tokens = (0 ..< 40).map(Int32.init)
++        await runtime.seedHotConversationForTest(key: key, tokens: tokens, modelID: "ready-model")
++        // Prove residency via a non-mutating stats read (begin() would consume the entry).
++        let residentBefore = await runtime.hotConversationStats().entries
++        XCTAssertEqual(residentBefore, 1, "precondition: hot entry resident")
++
++        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)   // kvDiskTier == nil
++        try await server.start()
++        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
++        try await connection.send(.kvCachePurgeRequest(mode: "single", key: key))
++        let response = try await connection.receive(timeout: 2)
++        await connection.close()
++        await server.stop()
++
++        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
++            return XCTFail("expected kvCachePurgeResponse, got \(response)")
++        }
++        XCTAssertEqual(status, "purge_ok")
++        XCTAssertEqual(entriesRemoved, 1, "the resident hot entry must be reported removed")
++        XCTAssertEqual(detail, "disk_tier_disabled")
++        let residentAfter = await runtime.hotConversationStats().entries
++        XCTAssertEqual(residentAfter, 0, "hot entry evicted from RAM")
++        // A subsequent begin() with a proper superset prompt (which WOULD warm-hit the
++        // 40-token entry) is now a cold-start miss — nothing is served from RAM.
++        let probe = (0 ..< 44).map(Int32.init)
++        let cachedAfter = await runtime.hotCachedPromptTokensForTest(key: key, tokens: probe, modelID: "ready-model")
++        XCTAssertEqual(cachedAfter, 0)
++    }
++
++    /// With the disk tier disabled, `--all` clears every RAM entry over the socket.
++    func testKVCachePurgeAllClearsHotRAMWhenDiskTierDisabled() async throws {
++        let socketPath = try makeSocketPath()
++        let runtime = makeRuntime(modelID: "ready-model")
++        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:a", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
++        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:b", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
++        let residentBefore = await runtime.hotConversationStats().entries
++        XCTAssertEqual(residentBefore, 2)
++
++        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
++        try await server.start()
++        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
++        try await connection.send(.kvCachePurgeRequest(mode: "all", key: nil))
++        let response = try await connection.receive(timeout: 2)
++        await connection.close()
++        await server.stop()
++
++        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
++            return XCTFail("expected kvCachePurgeResponse, got \(response)")
++        }
++        XCTAssertEqual(status, "purge_ok")
++        XCTAssertEqual(entriesRemoved, 2, "purge --all reports every hot entry removed")
++        XCTAssertEqual(detail, "disk_tier_disabled")
++        let residentAfter = await runtime.hotConversationStats().entries
++        XCTAssertEqual(residentAfter, 0)
++    }
++
++    /// With the disk tier disabled and NO resident hot entry, a single-key purge must
++    /// not claim to have removed anything it did not (entriesRemoved == 0), yet still
++    /// report purge_ok (nothing in RAM to miss — honest).
++    func testKVCachePurgeDisabledReportsZeroForAbsentHotEntry() async throws {
++        let socketPath = try makeSocketPath()
++        let runtime = makeRuntime(modelID: "ready-model")
++        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
++        try await server.start()
++        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
++        try await connection.send(.kvCachePurgeRequest(mode: "single", key: "conv:kvs-synth:absent"))
++        let response = try await connection.receive(timeout: 2)
++        await connection.close()
++        await server.stop()
++
++        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, _) = response else {
++            return XCTFail("expected kvCachePurgeResponse, got \(response)")
++        }
++        XCTAssertEqual(status, "purge_ok")
++        XCTAssertEqual(entriesRemoved, 0, "must not report a removal it did not perform")
++    }
++
++    /// With the disk tier disabled, `kv-cache status` reports the RAM/hot residency
++    /// with enabled=false — not `unavailable`.
++    func testKVCacheStatusReportsHotStateWhenDiskTierDisabled() async throws {
++        let socketPath = try makeSocketPath()
++        let runtime = makeRuntime(modelID: "ready-model")
++        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:s", tokens: (0 ..< 12).map(Int32.init), modelID: "ready-model")
++
++        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
++        try await server.start()
++        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
++        try await connection.send(.kvCacheStatusRequest)
++        let response = try await connection.receive(timeout: 2)
++        await connection.close()
++        await server.stop()
++
++        guard case let .kvCacheStatusResponse(payloadJSON) = response else {
++            return XCTFail("expected kvCacheStatusResponse, got \(response)")
++        }
++        XCTAssertFalse(payloadJSON.contains("\"unavailable\""), "disabled tier must not report unavailable")
++        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payloadJSON.utf8)) as? [String: Any])
++        XCTAssertEqual(object["status"] as? String, "ok")
++        XCTAssertEqual(object["enabled"] as? Bool, false)
++        XCTAssertEqual(object["hot_entries"] as? Int, 1)
++    }
++
+     private func makeSocketPath() throws -> URL {
+         let dir = URL(fileURLWithPath: "/tmp")
+             .appendingPathComponent("mpcs-\(getpid())-\(Int.random(in: 0 ... 999_999))")
+diff --git a/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift b/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift
+index 90615941..aeaa845e 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift
+@@ -1,3 +1,5 @@
++import Foundation
++import MLX
+ import MLXLMCommon
+ @testable import macprovider_cli
+ import XCTest
+@@ -437,6 +439,193 @@ final class KVConversationColdTierTests: XCTestCase {
+         XCTAssertEqual(adapter.writeLiveBytesForTest, 0, "persist Task releases the single-release reservation exactly once")
+     }
+ 
++    // MARK: - HIGH-1: load-time geometry seeding enables first post-restart promotion
++
++    /// Build a real store with one persisted entry whose envelope matches the live
++    /// build identity, returning the store + the identity a promotion must present.
++    private func makeSeededStoreWithEntry(
++        root: URL, namespaceID: String, key: String, dims: [Int], seq: Int
++    ) async throws -> (KVDiskCacheStore, KVIdentityCore) {
++        var config = KVDiskCacheStoreConfig(
++            root: root, namespaceID: namespaceID,
++            maxBytes: 1 << 30, maxEntries: 16, maxEntryBytes: 1 << 28,
++            retentionSeconds: 3600, stagingMaxBytes: 1 << 28, writeStagingMaxBytes: 1 << 28,
++            minFreeBytes: 1 << 20, promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
++        config.freeSpaceOverride = 1 << 34
++        let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: KVRecordingEventSink())
++        try await store.activate()
++
++        let modelSHA = String(repeating: "b", count: 64)
++        let tokCfg = String(repeating: "c", count: 64)
++        let tmpl = String(repeating: "d", count: 64)
++        let elementCount = dims.reduce(1, *)
++        let byteCount = elementCount * KVCodecDType.f32.byteSize
++        let layers = [KVLayerPayload(
++            layerIndex: 0, classID: "KVCacheSimple", ndim: dims.count, dims: dims, dtype: .f32,
++            cacheOffset: seq, keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))]
++        // The persisted envelope MUST carry the live build identity so promotion's
++        // full FR-KVP4 validation passes against it (the seed only supplies geometry).
++        let writeIdentity = KVWriteIdentity(
++            requestModel: "model-a", servedModelID: "served-a", modelSHA256: modelSHA,
++            catalogRevision: "r1", tokenizerID: "served-a", tokenizerConfigSHA256: tokCfg,
++            chatTemplateSHA256: tmpl, abiEpoch: KVBuildIdentity.abiEpoch,
++            mlxSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision, mlxVersion: KVBuildIdentity.mlxVersion,
++            cacheClass: "KVCacheSimple", layerCount: 1, kvBits: nil, kvGroupSize: nil,
++            kvQuantMode: nil, kvQuantPolicy: nil, decodePath: KVBuildIdentity.decodePathOrdinary, keyEpoch: 1)
++        let index = try await store.currentIndex(rawKey: key)
++        let sampled = try await store.highWatermark(rawKey: key)
++        // promoteCandidate reads with the REAL wall clock, so the entry must be
++        // eligible relative to "now" — not a fixed past instant (which would expire).
++        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
++        let snapshot = KVWriteSnapshot(
++            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
++            layers: layers, identity: writeIdentity, sampledPurgeGeneration: sampled,
++            commitSequence: 1, createdAtMillis: nowMillis, eligibleUntilMillis: nowMillis + 3_600_000,
++            incarnation: "inc-seed")
++        guard case .committed = try await store.write(snapshot, nowMillis: nowMillis) else {
++            XCTFail("seed entry must commit"); return (store, identity())
++        }
++        let promoteIdentity = KVIdentityCore(
++            requestModel: "model-a", servedModelID: "served-a", modelSHA256: modelSHA,
++            catalogRevision: "r1", tokenizerID: "served-a", tokenizerConfigSHA256: tokCfg,
++            chatTemplateSHA256: tmpl, kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil)
++        return (store, promoteIdentity)
++    }
++
++    /// HIGH-1 (SPEC-037 KVS-01a) — a FRESH adapter (no prior in-process commit),
++    /// given a seeded geometry template + an existing store manifest, promotes the
++    /// first matching request. Without the seed the same first request cannot
++    /// promote (no live geometry to validate against) — proving the fix closes the
++    /// restart-survival gap. Fully headless: synthetic/injected geometry, no MLX.
++    func testSeededTemplateEnablesFirstPostRestartPromotionHeadless() async throws {
++        let root = FileManager.default.temporaryDirectory
++            .appendingPathComponent("kvseed-\(UUID().uuidString)", isDirectory: true)
++        defer { try? FileManager.default.removeItem(at: root) }
++        let key = "conv:kvs-synth:seed"
++        let seq = 40
++        let (store, promoteIdentity) = try await makeSeededStoreWithEntry(
++            root: root, namespaceID: "ns-seed", key: key, dims: [1, 2, seq, 4], seq: seq)
++
++        // WITHOUT a seed: a fresh adapter has no live geometry ⇒ the first request
++        // cannot promote (the pre-fix restart-survival gap).
++        let unseeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed", eligibilityTTLSeconds: 900)
++        let missBeforeSeed = await unseeded.promoteCandidate(conversationKey: key, identity: promoteIdentity)
++        XCTAssertNil(missBeforeSeed, "without a seeded template the first post-restart request cannot promote")
++
++        // WITH a load-time seed (synthetic 1-token warmup geometry, seq len ignored):
++        // the seeded envelope validates and the store returns a HIT for the first
++        // request. Driven through `store.read` (whose hit carries raw byte payloads)
++        // rather than the full `promoteCandidate`, whose MLXArray restore needs Metal
++        // — the full restore path is covered by the MLX-gated test below.
++        let seeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed", eligibilityTTLSeconds: 900)
++        let warmupPayloads = [KVLayerPayload(
++            layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, 1, 4], dtype: .f32,
++            cacheOffset: 1, keyBytes: Data(), valueBytes: Data())]
++        let template = KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: warmupPayloads)
++        seeded.seedTemplate(servedModelID: "served-a", template: template)
++        XCTAssertTrue(seeded.hasGeometryTemplateForTest(servedModelID: "served-a"))
++
++        let ownedTemplate = try XCTUnwrap(seeded.geometryTemplateForTest(servedModelID: "served-a"))
++        let epoch = await store.currentEpoch
++        let runtime = seeded.promotionRuntime(identity: promoteIdentity, template: ownedTemplate, epoch: epoch)
++        let nowMillis = Int(Date().timeIntervalSince1970 * 1000)
++        let result = try await store.read(rawKey: key, runtime: runtime, nowMillis: nowMillis, emitHitEvent: false)
++        guard case let .hit(hit) = result else {
++            return XCTFail("seeded template must make the FIRST request a store hit, got \(result)")
++        }
++        XCTAssertEqual(hit.tokens, Array(0 ..< Int32(seq)),
++                       "promotion validates against the persisted canonical token sequence")
++        await store.deactivate()
++    }
++
++    /// HIGH-1 — the seed template built from a warmup cache with a DIFFERENT
++    /// (mismatched) per-layer geometry only ever causes a MISS, never a wrong
++    /// promotion: full FR-KVP4 validation still runs against the live manifest.
++    func testSeededTemplateWithWrongGeometryStillMisses() async throws {
++        let root = FileManager.default.temporaryDirectory
++            .appendingPathComponent("kvseedwrong-\(UUID().uuidString)", isDirectory: true)
++        defer { try? FileManager.default.removeItem(at: root) }
++        let key = "conv:kvs-synth:seed-wrong"
++        let seq = 40
++        let (store, promoteIdentity) = try await makeSeededStoreWithEntry(
++            root: root, namespaceID: "ns-seed-wrong", key: key, dims: [1, 2, seq, 4], seq: seq)
++
++        let seeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed-wrong", eligibilityTTLSeconds: 900)
++        // Wrong head_dim (8 instead of the persisted 4) ⇒ non-seq geometry mismatch.
++        let wrongPayloads = [KVLayerPayload(
++            layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, 1, 8], dtype: .f32,
++            cacheOffset: 1, keyBytes: Data(), valueBytes: Data())]
++        seeded.seedTemplate(servedModelID: "served-a",
++                            template: KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: wrongPayloads))
++        let candidate = await seeded.promoteCandidate(conversationKey: key, identity: promoteIdentity)
++        XCTAssertNil(candidate, "a wrong seeded geometry must MISS, never wrongly promote")
++        await store.deactivate()
++    }
++
++    /// HIGH-1 — the load-time seed derives the SAME per-layer template geometry that
++    /// `captureSnapshot` learns from a real multi-token commit (equivalence proof for
++    /// `KVCacheSimple`'s rank-4 [batch, kvHeads, seq, headDim] layout).
++    func testSeedTemplateMatchesCaptureSnapshotDerivation() {
++        // A realistic committed shape with a unique, multi-token sequence length.
++        let committed = [
++            KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 57, 128],
++                           dtype: .f16, cacheOffset: 57, keyBytes: Data(), valueBytes: Data()),
++            KVLayerPayload(layerIndex: 1, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 57, 128],
++                           dtype: .f16, cacheOffset: 57, keyBytes: Data(), valueBytes: Data()),
++        ]
++        let learned = KVConversationColdTierAdapter.liveGeometryTemplate(fromPayloads: committed, tokenCount: 57)
++        // A 1-token warmup produces the same NON-seq geometry; the seq-axis value is ignored.
++        let warmup = [
++            KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 1, 128],
++                           dtype: .f16, cacheOffset: 1, keyBytes: Data(), valueBytes: Data()),
++            KVLayerPayload(layerIndex: 1, classID: "KVCacheSimple", ndim: 4, dims: [1, 8, 1, 128],
++                           dtype: .f16, cacheOffset: 1, keyBytes: Data(), valueBytes: Data()),
++        ]
++        let seeded = KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: warmup)
++        XCTAssertEqual(seeded.count, learned.count)
++        for (s, l) in zip(seeded, learned) {
++            XCTAssertEqual(s.sequenceAxis, l.sequenceAxis, "seed and commit agree on the sequence axis (ndim-2)")
++            XCTAssertEqual(s.ndim, l.ndim)
++            XCTAssertEqual(s.dtype, l.dtype)
++            XCTAssertEqual(s.classID, l.classID)
++            XCTAssertEqual(s.layoutVersion, l.layoutVersion)
++            // Non-seq axes must match exactly (they are what validation compares).
++            for axis in 0 ..< l.dims.count where axis != l.sequenceAxis {
++                XCTAssertEqual(s.dims[axis], l.dims[axis], "non-seq dim \(axis) must match")
++            }
++        }
++    }
++
++    /// HIGH-1 (MLX-gated) — seed from a REAL `KVCacheSimple` populated via MLX and
++    /// promote on the first request. Gated on KV_ENABLE_MLX_TESTS (MLX aborts the
++    /// process without a Metal library).
++    func testSeededTemplateFromRealCachePromotesFirstRequestMLX() async throws {
++        try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
++                          "requires MLX Metal runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
++        let root = FileManager.default.temporaryDirectory
++            .appendingPathComponent("kvseedmlx-\(UUID().uuidString)", isDirectory: true)
++        defer { try? FileManager.default.removeItem(at: root) }
++        // A real cache: shape [1, 2, 2, 2] f32, so seq len 2, head_dim 2, 2 kv heads.
++        let realCache = KVCacheSimple()
++        realCache.state = [
++            MLXArray((0 ..< 16).map { Float($0) }, [1, 2, 2, 2]),
++            MLXArray((0 ..< 16).map { Float($0) + 100 }, [1, 2, 2, 2]),
++        ]
++        let realPayloads = try XCTUnwrap(KVCacheSerialization.snapshotLayers([realCache]))
++        let seq = 2
++        let key = "conv:kvs-synth:seed-mlx"
++        let (store, promoteIdentity) = try await makeSeededStoreWithEntry(
++            root: root, namespaceID: "ns-seed-mlx", key: key, dims: [1, 2, seq, 2], seq: seq)
++
++        let seeded = KVConversationColdTierAdapter(store: store, namespaceID: "ns-seed-mlx", eligibilityTTLSeconds: 900)
++        seeded.seedTemplate(servedModelID: "served-a",
++                            template: KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: realPayloads))
++        let candidate = await seeded.promoteCandidate(conversationKey: key, identity: promoteIdentity)
++        XCTAssertNotNil(candidate, "seed from a real MLX cache lets the first request promote")
++        XCTAssertEqual(candidate?.canonicalTokens, Array(0 ..< Int32(seq)))
++        await store.deactivate()
++    }
++
+     /// HIGH-3: the write-live reservation must cover the ACTIVE seal footprint (one chunk
+     /// plaintext + sealed ciphertext(+tag) + one frame + the manifest buffer), not just
+     /// the decoded snapshot. So a snapshot whose decoded size sits AT the write-staging
+diff --git a/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift b/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift
+index e86bf0b2..913e4ace 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift
+@@ -1,7 +1,70 @@
++import CryptoKit
++import Foundation
++import MacProviderCore
+ import XCTest
+ @testable import macprovider_cli
+ 
+ final class UninstallCommandTests: XCTestCase {
++
++    // MARK: - SPEC-037 FR-KVP8 — uninstall purges KV disk tier (Finding 3)
++
++    private func namespaceDigest(_ id: String) -> String {
++        SHA256.hash(data: Data(id.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
++    }
++
++    /// FR-KVP8: uninstall's KV cleanup (`purge --all --forget`) must enumerate-and-
++    /// delete the namespace's Keychain items (per-epoch master + per-entry DEKs) AND
++    /// remove the namespace directory, so no orphaned ciphertext or key material
++    /// outlives the product. Drives the exact seam `UninstallCommand.run()` invokes.
++    func testUninstallPurgesKVDiskCacheKeychainAndNamespaceDir() async throws {
++        let root = FileManager.default.temporaryDirectory
++            .appendingPathComponent("kvuninstall-\(UUID().uuidString)", isDirectory: true)
++        defer { try? FileManager.default.removeItem(at: root) }
++        let namespaceID = "prov-uninstall"
++        let keychain = KVInMemoryKeychain()
++        let config = KVDiskCacheConfig(enabled: true, directory: root.path, minFreeBytes: 1024 * 1024)
++        let tier = KVDiskTier(config: config, namespaceID: namespaceID, eligibilityTTLSeconds: 900,
++                              keychain: keychain, sink: KVRecordingEventSink())
++        let activated = await tier.activateForControlPlane()
++        XCTAssertTrue(activated)
++
++        // Write one entry: creates the namespace dir + per-epoch master + per-entry DEK.
++        let key = "conv:kvs-synth:uninstall"
++        let seq = 4
++        let byteCount = 1 * 2 * seq * 4 * KVCodecDType.f32.byteSize
++        let identity = KVWriteIdentity(
++            requestModel: "m", servedModelID: "m", modelSHA256: String(repeating: "b", count: 64),
++            catalogRevision: "r", tokenizerID: "m", tokenizerConfigSHA256: String(repeating: "c", count: 64),
++            chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: 1,
++            mlxSwiftLMRevision: "x", mlxVersion: "y", cacheClass: "KVCacheSimple", layerCount: 1,
++            kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil, decodePath: "ordinary", keyEpoch: 1)
++        let index = try await tier.store.currentIndex(rawKey: key)
++        let sampled = try await tier.store.highWatermark(rawKey: key)
++        let snapshot = KVWriteSnapshot(
++            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
++            layers: [KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4],
++                                    dtype: .f32, cacheOffset: seq,
++                                    keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))],
++            identity: identity, sampledPurgeGeneration: sampled, commitSequence: 1,
++            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000, incarnation: "inc-uninstall")
++        guard case .committed = try await tier.store.write(snapshot, nowMillis: 1_000_000) else {
++            return XCTFail("seed entry must commit")
++        }
++
++        let keyManager = KVKeyManager(keychain: keychain, namespaceID: namespaceID)
++        XCTAssertGreaterThanOrEqual(try keyManager.keychainItemCount(), 1, "entry write created Keychain items")
++        let namespaceDir = root.appendingPathComponent(namespaceDigest(namespaceID))
++        XCTAssertTrue(FileManager.default.fileExists(atPath: namespaceDir.path), "namespace dir exists after write")
++
++        // Invoke the exact cleanup seam uninstall runs.
++        var warnings: [String] = []
++        await UninstallCommand.purgeKVDiskCache(tier, warnings: &warnings)
++
++        XCTAssertEqual(try keyManager.keychainItemCount(), 0, "uninstall deletes all namespace Keychain items")
++        XCTAssertFalse(FileManager.default.fileExists(atPath: namespaceDir.path), "uninstall removes the namespace dir")
++        XCTAssertTrue(warnings.isEmpty, "a clean KV cleanup adds no warning: \(warnings)")
++    }
++
+     func testStopLaunchdServicesAcceptsVerifiedAbsentJob() throws {
+         var calls: [[String]] = []
+ 

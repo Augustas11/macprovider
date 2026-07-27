@@ -65,6 +65,15 @@ public enum ControlSocketFrame: Equatable, Sendable {
         code: ReferralControlErrorCode,
         retryAfterSeconds: Int?
     )
+
+    // SPEC-037 stage 5 (FR-KVP8/KVP12) — in-process KV survival disk-tier control,
+    // executed by the serve process that holds the namespace flock. `mode` is one
+    // of "single" | "all" | "all_forget"; the raw key travels only over the
+    // owner-only local socket, never argv.
+    case kvCachePurgeRequest(mode: String, key: String?)
+    case kvCachePurgeResponse(status: String, entriesRemoved: Int, bytesFreed: Int, detail: String?)
+    case kvCacheStatusRequest
+    case kvCacheStatusResponse(payloadJSON: String)
 }
 
 public enum ControlSocketCodec {
@@ -205,6 +214,21 @@ public enum ControlSocketCodec {
             ]
             if let retryAfterSeconds { frame["retry_after_seconds"] = retryAfterSeconds }
             object = frame
+        case let .kvCachePurgeRequest(mode, key):
+            var frame: [String: Any] = ["type": "kv_cache_purge_request", "mode": mode]
+            if let key { frame["key"] = key }
+            object = frame
+        case let .kvCachePurgeResponse(status, entriesRemoved, bytesFreed, detail):
+            var frame: [String: Any] = [
+                "type": "kv_cache_purge_response", "status": status,
+                "entries_removed": entriesRemoved, "bytes_freed": bytesFreed,
+            ]
+            if let detail { frame["detail"] = detail }
+            object = frame
+        case .kvCacheStatusRequest:
+            object = ["type": "kv_cache_status_request"]
+        case let .kvCacheStatusResponse(payloadJSON):
+            object = ["type": "kv_cache_status_response", "payload_json": payloadJSON]
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -358,6 +382,18 @@ public enum ControlSocketCodec {
                 code: code,
                 retryAfterSeconds: retryAfter
             )
+        case "kv_cache_purge_request":
+            return .kvCachePurgeRequest(mode: try stringField("mode", in: object), key: object["key"] as? String)
+        case "kv_cache_purge_response":
+            return .kvCachePurgeResponse(
+                status: try stringField("status", in: object),
+                entriesRemoved: try intField("entries_removed", in: object),
+                bytesFreed: try intField("bytes_freed", in: object),
+                detail: object["detail"] as? String)
+        case "kv_cache_status_request":
+            return .kvCacheStatusRequest
+        case "kv_cache_status_response":
+            return .kvCacheStatusResponse(payloadJSON: try stringField("payload_json", in: object))
         default:
             throw ControlSocketError.unknownType(type)
         }
@@ -866,6 +902,11 @@ actor ControlSocketServer {
     private let pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?
     private let watchdogCleanup: ControlSocketWatchdogCleanup?
+    /// SPEC-037 stage 5 — the serve-owned, lock-holding disk tier. When present,
+    /// kv-cache purge/status frames are executed in-process (no lock
+    /// re-acquisition); nil ⇒ the tier is disabled and the standalone CLI path
+    /// acquires the free lock instead.
+    private let kvDiskTier: KVDiskTier?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -886,7 +927,8 @@ actor ControlSocketServer {
         providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
-        watchdogCleanup: ControlSocketWatchdogCleanup? = nil
+        watchdogCleanup: ControlSocketWatchdogCleanup? = nil,
+        kvDiskTier: KVDiskTier? = nil
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
@@ -902,6 +944,7 @@ actor ControlSocketServer {
         self.pauseProvider = pauseProvider
         self.resumeProvider = resumeProvider
         self.watchdogCleanup = watchdogCleanup
+        self.kvDiskTier = kvDiskTier
     }
 
     func start() async throws {
@@ -983,6 +1026,7 @@ actor ControlSocketServer {
                 providerToken: providerToken,
                 pauseProvider: pauseProvider,
                 resumeProvider: resumeProvider,
+                kvDiskTier: self.kvDiskTier,
                 server: self
             )
         }
@@ -1043,6 +1087,7 @@ actor ControlSocketServer {
         providerToken: String?,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)?,
         resumeProvider: (@Sendable () async -> ProviderControlCommandResult)?,
+        kvDiskTier: KVDiskTier?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -1077,7 +1122,8 @@ actor ControlSocketServer {
                     malibuAccrualClient: malibuAccrualClient,
                     providerToken: providerToken,
                     pauseProvider: pauseProvider,
-                    resumeProvider: resumeProvider
+                    resumeProvider: resumeProvider,
+                    kvDiskTier: kvDiskTier
                 )
                 await server.removeClientFD(clientFD)
             }
@@ -1099,7 +1145,8 @@ actor ControlSocketServer {
         malibuAccrualClient: MalibuAccrualClient? = nil,
         providerToken: String? = nil,
         pauseProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
-        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil
+        resumeProvider: (@Sendable () async -> ProviderControlCommandResult)? = nil,
+        kvDiskTier: KVDiskTier? = nil
     ) async {
         let connection = ControlSocketConnection(fd: fd)
 
@@ -1197,6 +1244,14 @@ actor ControlSocketServer {
                     ) { service in
                         .referralChallengeCancelAck(status: try await service.cancel())
                     }
+                case let .kvCachePurgeRequest(mode, key):
+                    await handleKVCachePurge(mode: mode, key: key, tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                    await connection.close()
+                    return
+                case .kvCacheStatusRequest:
+                    await handleKVCacheStatus(tier: kvDiskTier, modelRuntime: modelRuntime, connection: connection)
+                    await connection.close()
+                    return
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()
@@ -1219,6 +1274,101 @@ actor ControlSocketServer {
             }
         }
         await connection.close()
+    }
+
+    /// SPEC-037 stage 5 (FR-KVP8) — execute a kv-cache purge in the lock-holding
+    /// serve process. When the disk tier is DISABLED here (`tier == nil`), the serve
+    /// process holds NO KV namespace flock (the disk store is never constructed), so
+    /// the on-disk crypto-shred must be delegated to the standalone CLI path, which
+    /// acquires the now-free namespace lock and deletes the namespace dir + Keychain
+    /// DEKs. We STILL clear the serve-owned RAM (hot) residency here first — so we
+    /// never keep serving a purged prefix from RAM until TTL — but then reply
+    /// `unavailable` (detail `disk_tier_disabled`) so the CLI's `status != "unavailable"`
+    /// guard falls THROUGH to `makeTier` + the standalone `purgeAllAndForget`/`purgeAll`/
+    /// `purge` that actually shreds disk. Replying `purge_ok` here would make the CLI
+    /// return early and skip the only code that deletes on-disk ciphertext + DEKs left
+    /// behind by a prior enabled run.
+    private nonisolated static func handleKVCachePurge(
+        mode: String, key: String?, tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
+    ) async {
+        guard let tier else {
+            // Clear RAM hot residency (correct half — do not keep serving a purged
+            // prefix from RAM), then delegate the disk shred to the standalone CLI.
+            switch mode {
+            case "all", "all_forget":
+                await modelRuntime.purgeAllHotConversations()
+            default:
+                _ = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
+            }
+            try? await connection.send(.kvCachePurgeResponse(
+                status: "unavailable", entriesRemoved: 0, bytesFreed: 0, detail: "disk_tier_disabled"))
+            return
+        }
+        // Enabled: the tier's purge path already clears the wired hot-tier residency
+        // (setHotPurgeHooks) in addition to disk — unchanged behavior.
+        let result: KVPurgeResult
+        switch mode {
+        case "all": result = await tier.purgeAll()
+        case "all_forget": result = await tier.purgeAllAndForget()
+        default: result = await tier.purge(rawKey: key ?? "")
+        }
+        switch result {
+        case let .ok(entriesRemoved, bytesFreed):
+            try? await connection.send(.kvCachePurgeResponse(
+                status: "purge_ok", entriesRemoved: entriesRemoved, bytesFreed: bytesFreed, detail: nil))
+        case let .failed(detail):
+            try? await connection.send(.kvCachePurgeResponse(
+                status: "purge_failed", entriesRemoved: 0, bytesFreed: 0, detail: detail.rawValue))
+        }
+    }
+
+    /// SPEC-037 stage 5 (FR-KVP12) — report the inspection surface from the
+    /// lock-holding serve process (JSON payload identical to the CLI shape). When the
+    /// disk tier is DISABLED here (`tier == nil`), the serve holds NO KV namespace
+    /// flock, so it cannot report on-disk residue at all. Reply `unavailable`
+    /// (detail `disk_tier_disabled`) so the CLI falls THROUGH to the standalone
+    /// `tier.status()`, which acquires the now-free lock and reports the operator-
+    /// critical disk residency (bytes_used / entry_count / keychain_item_count) left by
+    /// a prior enabled run. A hot-only reply here would lack "unavailable", short-circuit
+    /// the CLI, and hide surviving disk residue.
+    private nonisolated static func handleKVCacheStatus(
+        tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
+    ) async {
+        guard let tier else {
+            let object: [String: Any] = [
+                "status": "unavailable",
+                "detail": "disk_tier_disabled",
+            ]
+            let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+            try? await connection.send(.kvCacheStatusResponse(payloadJSON: String(decoding: data, as: UTF8.self)))
+            return
+        }
+        guard let inspection = await tier.status() else {
+            try? await connection.send(.kvCacheStatusResponse(payloadJSON: "{\"status\":\"unavailable\"}"))
+            return
+        }
+        let object: [String: Any] = [
+            "status": "ok",
+            "enabled": tier.config.effectiveEnabled,
+            "retention_minutes": tier.config.retentionMinutes,
+            "namespace_id": inspection.namespaceID,
+            "bytes_used": inspection.bytesUsed,
+            "control_bytes_used": inspection.controlBytesUsed,
+            "usage_journal_bytes": inspection.usageJournalBytes,
+            "total_bytes_used": inspection.totalBytesUsed,
+            "max_bytes": inspection.maxBytes,
+            "entry_count": inspection.entryCount,
+            "max_entries": inspection.maxEntries,
+            "free_space_headroom": inspection.freeSpaceHeadroom,
+            "key_epoch": inspection.keyEpoch,
+            "tombstone_count": inspection.tombstoneCount,
+            "keychain_item_count": inspection.keychainItemCount,
+            "reuse_eligibility_ttl_seconds": inspection.eligibilityTTLSeconds,
+            "purge_high_watermark_entries": inspection.purgeHighWatermarkEntries,
+            "counters": inspection.counters,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+        try? await connection.send(.kvCacheStatusResponse(payloadJSON: String(decoding: data, as: UTF8.self)))
     }
 
     private nonisolated static func handleReferralRequest(

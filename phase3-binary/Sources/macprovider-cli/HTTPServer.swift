@@ -480,6 +480,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             let request = try ChatCompletionRequest.parse(data: data)
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
+                .withIngestProvenance(.directHTTP)  // SPEC-037 FR-KVP11: operator direct-HTTP path
             parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))

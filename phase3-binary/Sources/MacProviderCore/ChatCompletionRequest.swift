@@ -1,5 +1,18 @@
 import Foundation
 
+/// SPEC-037 FR-KVP11 — the ingest boundary a request arrived on. Threaded
+/// parallel to `conversationKey`; the KV disk-tier synthetic-key gate persists
+/// and promotes ONLY `.directHTTP` traffic (in addition to the key-prefix
+/// requirement). Every other provenance — including the `.unknown` default —
+/// never persists, so a buyer cannot reach the disk tier by crafting a key
+/// shape on a non-gateway path.
+public enum KVIngestProvenance: String, Sendable, Equatable {
+    case directHTTP
+    case relay
+    case tier2
+    case unknown
+}
+
 public struct ChatCompletionRequest: Sendable {
     public let model: String
     public let messages: [ChatMessage]
@@ -14,6 +27,9 @@ public struct ChatCompletionRequest: Sendable {
     public let responseFormat: ResponseFormat
     public let promptSource: ChatCompletionPromptSource
     public let conversationKey: String?
+    // SPEC-037 FR-KVP11: the ingest boundary this request arrived on. Defaults
+    // to `.unknown` (non-persisting) at parse; each boundary stamps its own.
+    public let ingestProvenance: KVIngestProvenance
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
         guard data.count <= RequestValidation.rawBodyByteCap else {
@@ -112,7 +128,8 @@ public struct ChatCompletionRequest: Sendable {
             seed: seed,
             responseFormat: responseFormat,
             promptSource: promptSource,
-            conversationKey: nil
+            conversationKey: nil,
+            ingestProvenance: .unknown
         )
     }
 
@@ -130,7 +147,29 @@ public struct ChatCompletionRequest: Sendable {
             seed: seed,
             responseFormat: responseFormat,
             promptSource: promptSource,
-            conversationKey: Self.validConversationKey(key)
+            conversationKey: Self.validConversationKey(key),
+            ingestProvenance: ingestProvenance
+        )
+    }
+
+    /// SPEC-037 FR-KVP11: stamp the ingest boundary. Called once at each ingest
+    /// site (direct-HTTP header path / relay / Tier-2), parallel to the key.
+    public func withIngestProvenance(_ provenance: KVIngestProvenance) -> ChatCompletionRequest {
+        return ChatCompletionRequest(
+            model: model,
+            messages: messages,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            stream: stream,
+            stop: stop,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            seed: seed,
+            responseFormat: responseFormat,
+            promptSource: promptSource,
+            conversationKey: conversationKey,
+            ingestProvenance: provenance
         )
     }
 
@@ -163,7 +202,8 @@ public struct ChatCompletionRequest: Sendable {
         seed: Int?,
         responseFormat: ResponseFormat,
         promptSource: ChatCompletionPromptSource,
-        conversationKey: String?
+        conversationKey: String?,
+        ingestProvenance: KVIngestProvenance = .unknown
     ) {
         self.model = model
         self.messages = messages
@@ -178,6 +218,7 @@ public struct ChatCompletionRequest: Sendable {
         self.responseFormat = responseFormat
         self.promptSource = promptSource
         self.conversationKey = conversationKey
+        self.ingestProvenance = ingestProvenance
     }
 
     public func validateModelMatches(_ loadedModel: String?, aliases: [String] = []) throws {

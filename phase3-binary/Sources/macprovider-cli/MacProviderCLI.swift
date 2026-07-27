@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -303,6 +303,67 @@ struct ServeCommand: AsyncParsableCommand {
         help: "Chunked prefill window (mlx-swift GenerateParameters.prefillStepSize). Default 512. Larger values (e.g. 2048, 4096) reduce TTFT on long cold prefills. Overrides MACPROVIDER_PREFILL_STEP_SIZE and config key prefill_step_size."
     )
     var prefillStepSize: Int?
+
+    // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
+    // an Optional so absence defers to the environment / YAML / default; the resolver
+    // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
+    // invalid value. --kv-disk-cache-allow-buyer-keys reaching the resolver as true is
+    // rejected (precondition error) and forces the tier off.
+    @Flag(name: .customLong("kv-disk-cache-enabled"), inversion: .prefixedNo, help: "Enable the encrypted KV-cache survival disk tier. Overrides MACPROVIDER_KV_DISK_CACHE_ENABLED and config key kv_disk_cache.enabled. Default off.")
+    var kvDiskCacheEnabled: Bool?
+
+    @Flag(name: .customLong("kv-disk-cache-allow-buyer-keys"), inversion: .prefixedNo, help: "Permit buyer-supplied conversation keys in the KV disk tier. Rejected in v0.1 (fails closed, tier disabled). Overrides MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS and config key kv_disk_cache.allow_buyer_keys.")
+    var kvDiskCacheAllowBuyerKeys: Bool?
+
+    @Option(name: .customLong("kv-disk-cache-dir"), help: "KV disk-tier directory (absolute; leading ~ expanded). Overrides MACPROVIDER_KV_DISK_CACHE_DIR and config key kv_disk_cache.directory.")
+    var kvDiskCacheDir: String?
+
+    @Option(name: .customLong("kv-disk-cache-max-bytes"), help: "KV disk-tier namespace byte cap (>0). Overrides MACPROVIDER_KV_DISK_CACHE_MAX_BYTES and config key kv_disk_cache.max_bytes.")
+    var kvDiskCacheMaxBytes: Int?
+
+    @Option(name: .customLong("kv-disk-cache-max-entries"), help: "KV disk-tier max entries (>0). Overrides MACPROVIDER_KV_DISK_CACHE_MAX_ENTRIES and config key kv_disk_cache.max_entries.")
+    var kvDiskCacheMaxEntries: Int?
+
+    @Option(name: .customLong("kv-disk-cache-max-entry-bytes"), help: "KV disk-tier per-entry byte cap (>0). Overrides MACPROVIDER_KV_DISK_CACHE_MAX_ENTRY_BYTES and config key kv_disk_cache.max_entry_bytes.")
+    var kvDiskCacheMaxEntryBytes: Int?
+
+    @Option(name: .customLong("kv-disk-cache-retention-minutes"), help: "KV disk-tier entry retention in minutes (>0). Overrides MACPROVIDER_KV_DISK_CACHE_RETENTION_MINUTES and config key kv_disk_cache.retention_minutes.")
+    var kvDiskCacheRetentionMinutes: Int?
+
+    @Option(name: .customLong("kv-disk-cache-staging-max-bytes"), help: "KV disk-tier read/promotion staging ceiling (>0, ≤256 MiB). Overrides MACPROVIDER_KV_DISK_CACHE_STAGING_MAX_BYTES and config key kv_disk_cache.staging_max_bytes.")
+    var kvDiskCacheStagingMaxBytes: Int?
+
+    @Option(name: .customLong("kv-disk-cache-write-staging-max-bytes"), help: "KV disk-tier write/snapshot staging ceiling (>0, ≤1 GiB). Overrides MACPROVIDER_KV_DISK_CACHE_WRITE_STAGING_MAX_BYTES and config key kv_disk_cache.write_staging_max_bytes.")
+    var kvDiskCacheWriteStagingMaxBytes: Int?
+
+    @Option(name: .customLong("kv-disk-cache-min-free-bytes"), help: "KV disk-tier minimum free-space floor (≥1 GiB). Overrides MACPROVIDER_KV_DISK_CACHE_MIN_FREE_BYTES and config key kv_disk_cache.min_free_bytes.")
+    var kvDiskCacheMinFreeBytes: Int?
+
+    @Option(name: .customLong("kv-disk-cache-promotion-max-s"), help: "KV disk-tier promotion decode deadline in seconds (>0). Overrides MACPROVIDER_KV_DISK_CACHE_PROMOTION_MAX_S and config key kv_disk_cache.promotion_max_seconds.")
+    var kvDiskCachePromotionMaxSeconds: Int?
+
+    @Option(name: .customLong("kv-disk-cache-shutdown-drain-s"), help: "KV disk-tier graceful-shutdown drain budget in seconds (≥0). Overrides MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S and config key kv_disk_cache.shutdown_drain_seconds.")
+    var kvDiskCacheShutdownDrainSeconds: Int?
+
+    /// SPEC-037 FR-KVP11 (MEDIUM-5): the KV disk-tier CLI overrides assembled from the
+    /// parsed `--kv-disk-cache-*` flags. Exposed so tests can assert the flag → override
+    /// wiring (and CLI-wins precedence / allow_buyer_keys rejection) without running serve.
+    var kvDiskCacheCLIOverrides: KVDiskCacheCLIOverrides {
+        KVDiskCacheCLIOverrides(
+            enabled: kvDiskCacheEnabled,
+            allowBuyerKeys: kvDiskCacheAllowBuyerKeys,
+            directory: kvDiskCacheDir,
+            maxBytes: kvDiskCacheMaxBytes,
+            maxEntries: kvDiskCacheMaxEntries,
+            maxEntryBytes: kvDiskCacheMaxEntryBytes,
+            retentionMinutes: kvDiskCacheRetentionMinutes,
+            stagingMaxBytes: kvDiskCacheStagingMaxBytes,
+            writeStagingMaxBytes: kvDiskCacheWriteStagingMaxBytes,
+            minFreeBytes: kvDiskCacheMinFreeBytes,
+            promotionMaxSeconds: kvDiskCachePromotionMaxSeconds,
+            shutdownDrainSeconds: kvDiskCacheShutdownDrainSeconds
+        )
+    }
 
     @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
     var noJoin = false
@@ -751,7 +812,10 @@ struct ServeCommand: AsyncParsableCommand {
                 idlePrewarmPrompt: idlePrewarmPrompt,
                 idlePrewarmRunOnBattery: idlePrewarmRunOnBattery,
                 streamInterval: streamInterval,
-                prefillStepSize: prefillStepSize
+                prefillStepSize: prefillStepSize,
+                // SPEC-037 FR-KVP11 (MEDIUM-5): forward the KV disk-tier flags so the
+                // triple-source config surface (CLI → env → YAML) is complete.
+                kvDiskCache: kvDiskCacheCLIOverrides
             )
         )
 
@@ -970,7 +1034,11 @@ struct ServeCommand: AsyncParsableCommand {
                 warmSwapEnabled: resolved.enableWarmSwap,
                 swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                 catalogModelIDAlias: catalogModelIDAlias,
-                verifiedModelArtifactSHA256: resolved.modelArtifactSHA256
+                verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
+                // MEDIUM-5 (FR-KVP4): thread the catalog REVISION separately from the
+                // artifact SHA so the cold-tier envelope carries both as distinct identity
+                // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
+                verifiedModelCatalogRevision: resolved.modelCatalogRevision
             )
         } catch {
             _ = try? lifecycleStateStore.transition(
@@ -983,6 +1051,48 @@ struct ServeCommand: AsyncParsableCommand {
             )
             throw error
         }
+        // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
+        // disk tier when enabled, then hand the serve-owned, lock-holding store to
+        // the model runtime (data path) and the control socket (in-process
+        // purge/status). Fail-closed: activation failure leaves the tier off and
+        // never blocks the serve loop. A disabled tier is not activated here, so a
+        // standalone `macprovider-cli kv-cache` invocation can acquire the free
+        // namespace lock itself.
+        // LOW (FR-KVP11): surface resolver errors that force the tier off BEFORE the
+        // effectiveEnabled guard. When effectiveEnabled is false because errors were
+        // recorded (e.g. allow_buyer_keys=true, or an out-of-bound knob), activation is
+        // skipped entirely — so the only logging site (inside activateForServeDetailed)
+        // never runs and the operator gets no signal. Emit each error here so a
+        // fail-closed disable (incl. the allow_buyer_keys precondition text) is visible.
+        if !resolved.kvDiskCache.errors.isEmpty {
+            for error in resolved.kvDiskCache.errors {
+                FileHandle.standardError.write(Data(("kv_disk_cache config error: \(error)\n").utf8))
+            }
+        }
+        var kvDiskTier: KVDiskTier?
+        if resolved.kvDiskCache.effectiveEnabled,
+           let kvProviderID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !kvProviderID.isEmpty {
+            let kvTTL = Int(ConversationCache.Config.fromEnvironment().ttlSeconds)
+            let tier = KVDiskTier(config: resolved.kvDiskCache, namespaceID: kvProviderID, eligibilityTTLSeconds: kvTTL)
+            switch await tier.activateForServeDetailed() {
+            case .activated:
+                await modelRuntime.attachKVDiskTier(tier)
+                kvDiskTier = tier
+            case .dormantLock, .dormantKeychain:
+                // FR-KVP7 (M-13): the namespace lock is held by another writer, OR
+                // (Item 6 / FR-KVP6) the Keychain is unavailable pre-unlock — keep the
+                // tier and retry with bounded backoff in the background, running full
+                // recovery and attaching once the condition clears.
+                kvDiskTier = tier
+                Task { [modelRuntime] in
+                    await tier.retryActivationUntilAcquired { await modelRuntime.attachKVDiskTier(tier) }
+                }
+            case .quarantined, .disabled:
+                break
+            }
+        }
+
         // The serve runtime defaults `--max-batch` to 1 (the prior
         // single-slot behavior). Operators opting in via --max-batch >1
         // own the safety check; we surface the configured value in
@@ -1404,7 +1514,8 @@ struct ServeCommand: AsyncParsableCommand {
             providerToken: resolved.providerToken,
             pauseProvider: pauseProvider,
             resumeProvider: resumeProvider,
-            watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup
+            watchdogCleanup: coordinatorClient == nil ? nil : watchdogCleanup,
+            kvDiskTier: kvDiskTier
         )
         do {
             try await controlSocket?.start()
@@ -1468,12 +1579,15 @@ struct ServeCommand: AsyncParsableCommand {
                 }
             }
         )
-        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
+        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer, kvDiskTier: kvDiskTier)
         defer {
-            Task {
+            Task { [kvDiskTier] in
                 await idlePrewarmer.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.stop()
+                // M-A: flush queued cold writes + release the namespace lock on the
+                // normal serve-teardown path as well.
+                await kvDiskTier?.shutdown()
             }
             terminationHandlers.forEach { $0.cancel() }
         }
@@ -2186,7 +2300,8 @@ private func execCanonicalInstall(_ canonical: URL) throws -> Never {
 private func installTerminationHandlers(
     coordinatorClient: CoordinatorClient?,
     controlSocket: ControlSocketServer?,
-    idlePrewarmer: IdlePrewarmer?
+    idlePrewarmer: IdlePrewarmer?,
+    kvDiskTier: KVDiskTier?
 ) -> [DispatchSourceSignal] {
     [SIGTERM, SIGINT].map { signalNumber in
         signal(signalNumber, SIG_IGN)
@@ -2196,6 +2311,9 @@ private func installTerminationHandlers(
                 await idlePrewarmer?.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.drainAndExit(reason: "\(signalName(signalNumber)) received")
+                // M-A: drain queued cold writes (bounded by shutdownDrainSeconds) and
+                // release the namespace lock BEFORE exit, on the signal path too.
+                await kvDiskTier?.shutdown()
                 Darwin.exit(0)
             }
         }

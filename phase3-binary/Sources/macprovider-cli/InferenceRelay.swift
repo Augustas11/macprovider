@@ -281,7 +281,13 @@ actor InferenceRelay {
 
         do {
             let requestData = Data(body.utf8)
-            let request = try ChatCompletionRequest.parse(data: requestData).withConversationKey(conversationKey)
+            // SPEC-037 FR-KVP11: stamp ingest provenance. Neither relay nor
+            // Tier-2 traffic is ever persisted by the disk tier (only the
+            // direct-HTTP operator path is), independent of key shape.
+            let ingestProvenance: KVIngestProvenance = tier2Session != nil ? .tier2 : .relay
+            let request = try ChatCompletionRequest.parse(data: requestData)
+                .withConversationKey(conversationKey)
+                .withIngestProvenance(ingestProvenance)
             telemetryModelID = request.model
             let validationModelID = warmSwapEnabled
                 ? await modelRuntime.currentSnapshot().modelID

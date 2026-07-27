@@ -1,7 +1,7 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.1.0
-Status: draft (normative design; IMPL lands behind a disabled-by-default flag)
+Version: v0.1.1
+Status: draft (normative design; IMPL landed behind a disabled-by-default flag)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
 Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds.
@@ -1059,6 +1059,22 @@ All are required tests in `phase3-binary/Tests/macprovider-cliTests/`:
   eligibility TTL) and headroom check; snapshot-at-commit identity
   (mutating the hot entry or warm-swapping after commit does not alter
   the persisted bytes or recorded identity).
+- **AC-10 real-serve cache-class persistence (v0.1.1):** an eligible
+  `conv:kvs-synth:` direct-HTTP request served through the ordinary
+  (non-speculative) streaming and non-streaming paths MUST allocate a
+  serializable `KVCacheSimple` — verified through the production serve
+  cache-allocation helper against a default-`newCache` model family — and
+  commit MUST yield a non-nil cold snapshot. A runtime whose model produces a
+  non-`KVCacheSimple` cache (a `newCache`-overriding family such as gpt-oss /
+  gemma-4 / nemotron, or KV-quantized layers) MUST fail safe to a **miss** with
+  an **observable** `disk_write_skipped(unsupported_cache_class)` — never a
+  silent no-op — and MUST log an unsupported-model notice once at tier attach.
+  The headless serve-allocation helper and observable-skip fixtures are required
+  CI tests; the full persist → restart → restore fixture is the **KVS-01a**
+  harness (`test/e2e/coldwarm-ttft`), a hardware-capability run required before
+  graduation past synthetic keys (FR-KVP13), not a CI test. *(This AC closes the
+  gap where the ACs did not exercise the real serve cache-allocation path — the
+  cause of the v0.1.0-era silent no-op fixed in the IMPL PR.)*
 
 ## 8. Sequencing with RESEARCH_232 / SPEC-038
 
