@@ -184,12 +184,17 @@ final class KVDiskCacheFormatTests: XCTestCase {
         let seq = 8
         let elements = 1 * 2 * seq * 4
         let tensorBytes = elements * KVCodecDType.f32.byteSize
-        let layers = (0 ..< 3).map { li in
-            KVLayerPayload(
+        // Broken into typed sub-expressions: the fully-inlined nested-map form times
+        // out the Swift type-checker on slower CI toolchains ("unable to type-check in
+        // reasonable time"), though it compiles locally.
+        let layers: [KVLayerPayload] = (0 ..< 3).map { (li: Int) -> KVLayerPayload in
+            let keyBytes = Data((0 ..< tensorBytes).map { (i: Int) -> UInt8 in UInt8((i + li) & 0xff) })
+            let valueBytes = Data((0 ..< tensorBytes).map { (i: Int) -> UInt8 in UInt8((i + li + 3) & 0xff) })
+            return KVLayerPayload(
                 layerIndex: li, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
                 cacheOffset: seq,
-                keyBytes: Data((0 ..< tensorBytes).map { UInt8(($0 + li) & 0xff) }),
-                valueBytes: Data((0 ..< tensorBytes).map { UInt8(($0 + li + 3) & 0xff) }))
+                keyBytes: keyBytes,
+                valueBytes: valueBytes)
         }
         let tokens = Array(0 ..< Int32(seq))
         let plaintext = try KVPayloadCodec.encode(tokens: tokens, layers: layers)
