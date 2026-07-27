@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	"gopkg.in/yaml.v3"
 )
 
@@ -741,6 +742,23 @@ type Tier2MDMConfig struct {
 type CoordinatorAdvertisedVersion struct {
 	LatestBinaryVersion   string `yaml:"latest_binary_version"`
 	RequiredBinaryVersion string `yaml:"required_binary_version"`
+	// PerModelRequiredBinaryVersion is the #768 per-model minimum binary
+	// version floor: model_id -> minimum version. It sits BESIDE the
+	// per-model hardware-tier gate (the signed autotune candidate catalog's
+	// min_ram_gb / min_bandwidth_tier rows), which answers "is this box big
+	// enough" but never "is this build new enough for the engine this model
+	// needs".
+	//
+	// Unset (nil/empty) is the default posture and is byte-identical to
+	// pre-#768 routing. Keys are matched case-insensitively against the
+	// provider's advertised model_id. Values are validated at load; an
+	// unparseable floor is a config error, not a silent fence.
+	//
+	// Unlike RequiredBinaryVersion (a hard ADMISSION floor enforced at the
+	// provider hello with a 4004 close), these floors are ROUTING floors: a
+	// below-floor provider stays connected and can still self-update, it just
+	// is not routed to, warmed, or counted as a serving peer for that model.
+	PerModelRequiredBinaryVersion map[string]string `yaml:"per_model_required_binary_version"`
 }
 
 type AuthConfig struct {
@@ -1645,6 +1663,9 @@ func (c Config) Validate() error {
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err
 	}
+	if err := c.validateAdvertisedVersions(); err != nil {
+		return err
+	}
 	if _, err := c.TrustedProxyPrefixes(); err != nil {
 		return err
 	}
@@ -1927,6 +1948,30 @@ func (c Config) Validate() error {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
+		}
+	}
+	return nil
+}
+
+// validateAdvertisedVersions rejects unparseable version floors at load. A
+// typo in `required_binary_version` would fence the whole fleet at hello
+// (compareSemver reports invalid, and invalid is treated as below-floor); a
+// typo in a per-model floor would silently unroute one model. Both are config
+// errors, so they fail the process at startup instead of in production.
+func (c Config) validateAdvertisedVersions() error {
+	advertised := c.CoordinatorAdvertisedVersion
+	if required := strings.TrimSpace(advertised.RequiredBinaryVersion); required != "" && !versionfloor.Valid(required) {
+		return fmt.Errorf("coordinator_advertised_version.required_binary_version %q must be a bare numeric version (e.g. 1.8.33)", required)
+	}
+	if latest := strings.TrimSpace(advertised.LatestBinaryVersion); latest != "" && !versionfloor.Valid(latest) {
+		return fmt.Errorf("coordinator_advertised_version.latest_binary_version %q must be a bare numeric version (e.g. 1.8.65)", latest)
+	}
+	for modelID, floor := range advertised.PerModelRequiredBinaryVersion {
+		if strings.TrimSpace(modelID) == "" {
+			return fmt.Errorf("coordinator_advertised_version.per_model_required_binary_version has an empty model_id key")
+		}
+		if !versionfloor.Valid(floor) {
+			return fmt.Errorf("coordinator_advertised_version.per_model_required_binary_version[%q] = %q must be a bare numeric version (e.g. 1.8.33)", modelID, floor)
 		}
 	}
 	return nil

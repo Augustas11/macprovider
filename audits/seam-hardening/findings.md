@@ -11,7 +11,7 @@ built) live in `harness/` and are named `TestSeam*`.
 | 2 · cache-tenant-isolation | **PASS by construction** | server-authored account-HMAC scope; KV in-memory only |
 | 3 · backend-rollout-safety | **PASS** (gap closed, #764) | strong flags/canary/self-update; perf telemetry now segmented by `binary_version` on `/poolz` |
 | 4 · attestation-honesty | **FAIL (client-facing)** | prose honest, but stat surfaces over-claim hardware trust |
-| 5 · fleet-version-floor | **PASS (1 gap)** | blocks incompatible/known-bad builds; capacity now clamped at ingest (#764); version floor still unset in prod (P2-2) |
+| 5 · fleet-version-floor | **PASS** (gaps closed, #767/#768) | blocks incompatible/known-bad builds; capacity clamped at ingest (#764); floor now SET in the prod overlay + a 4004 close stops the client's reconnect loop (P2-2); per-model routing floors share one check across routing/self-route/warm gates (P2-3) |
 
 Fundamentals are strong (cache isolation, rollout discipline, signed-catalog admission,
 honest prose). Exposure concentrates in two client-facing FAILs (settlement flat-wall,
@@ -279,15 +279,58 @@ arbiter also does not treat the discarded `w.Write` error on the WS terminal as 
 orderings, the forced credited-while-buyer-told-500 conflict, the predicate table, and
 claim-once across every transport.
 
-**P2-2 · Version floor unset in prod + client can't parse the rejection** — `supply`
-`required_binary_version` is set nowhere in prod config, and the Swift client has no `case 4004`
-(`phase3-binary/.../CoordinatorClient.swift:1460-1499`) → a below-floor close is a silent reconnect
-loop, not an upgrade directive. **Fix:** set the floor in the prod overlay, add a `4004` handler + an
-upgrade directive, add a `doctor` subcommand.
+**P2-2 · Version floor unset in prod + client can't parse the rejection** — `supply` — issue #767
+**FIXED.** `required_binary_version` was set nowhere in prod config, and the Swift client had no
+`case 4004` (`phase3-binary/.../CoordinatorClient.swift`) → a below-floor close fell through the
+close-code switch to `default: nil`, so the raw transport error propagated and the reconnect loop
+retried forever. The operator saw an unexplained flap, not an upgrade directive. (Confirmed live at
+fix time: `https://coordinator.streamvc.live/healthz` published a recommendation and no floor.)
+**Fix (shipped):** three parts.
+1. `required_binary_version: "1.8.33"` in the committed prod overlay
+(`phase4-coordinator/dist/coordinator.yaml`). 1.8.33 is the first release that declares a
+`compatibility_set_id` — everything ≤1.8.32 is the legacy cohort that already receives no autoupdate
+recommendation and already cannot satisfy the live overlay's `accepted_ids` gate. So the floor fences
+nobody currently admissible; it makes an already-true rejection explicit and machine-readable instead
+of leaving a legacy build to fail later on catalog admission. It sits far below the current release
+and below the #610 first-hop bridge build (1.8.48, additionally exempt by `firstHopOnly`), so raising
+it stays a deliberate act. `config.Validate` now rejects an unparseable floor at load.
+2. Swift `case 4004 where reason.hasPrefix("version_unsupported")` types the close, parses the
+required target out of the coordinator's `below required <version>` suffix (degrading to "the latest
+release" when absent or implausible), emits a human stderr directive plus a structured
+`coordinator_version_floor_rejected` event, and **returns out of `runReconnectLoop`** — mirroring the
+terminal-bootstrap pattern, because a below-floor fleet retrying on backoff is exactly the hammering
+the floor exists to prevent. Lifecycle records `catalog_incompatible` / `binary_version_unsupported`.
+3. `macprovider-cli doctor` — offline-first diagnostics (binary version, config path, provider id,
+coordinator endpoint) plus a floor check against the coordinator's existing `/healthz`, which now also
+publishes `required_binary_version`. No new coordinator endpoint. Unreachable degrades to
+`unreachable` and exits 0; below-floor exits 1.
+*Tripwire tests:* `internal/ws/seam_767_version_floor_test.go` (healthz surface + the exact close
+reason the client parses), `internal/config/seam_767_768_test.go` (prod overlay carries the floor;
+floor ≤ latest; malformed floors rejected), `Tests/macprovider-cliTests/VersionFloorRejectionTests.swift`
+(one attempt then stop), `Tests/macprovider-cliTests/DoctorCommandTests.swift`.
 
-**P2-3 · No per-model version floor** — `supply`
-Only a per-model *hardware-tier* gate exists; an old-but-hardware-eligible build can serve a model that
-needs a newer engine. **Fix:** add a per-model minimum-version floor to the routing gate.
+**P2-3 · No per-model version floor** — `supply` — issue #768
+**FIXED.** Only a per-model *hardware-tier* gate existed (the signed autotune candidate catalog's
+`min_ram_gb` / `min_bandwidth_tier` rows, evaluated once at WS hello), so an old-but-hardware-eligible
+build could serve a model needing a newer engine.
+**Fix (shipped):** `coordinator_advertised_version.per_model_required_binary_version` (model_id →
+minimum version), evaluated by ONE helper — `internal/versionfloor.Check` — called from every gate:
+public routing (`routing.EligibilityChecker.ProviderMeetsModelVersionFloor` → new
+`ReasonModelVersionFloor` + a `model_version_floor_unmet` 503 so operators see a supply-VERSION
+problem, not a supply-VOLUME one), the self-route / hard-pin preflight path
+(`validatePinnedProviderForRequest`, which bypasses the routing filter entirely), the slot-queue
+candidate list (which re-derives the routing gates by hand), and the warm-pool gates
+(`runWarmupGateAttempt`, `canaryBuyerServing`) — we never warm a box we won't route to. The version
+comparator moved to `internal/versionfloor` and the global hello floor now delegates to it, so there
+is exactly one ordering in the coordinator.
+*Posture:* unset map = no floors = byte-identical routing. A provider whose `binary_version` is
+unparseable while a floor is in force fails **safe** (gated out) and logs at WARN — that is suspect,
+not merely stale. A routine below-floor exclusion logs at DEBUG on the per-request buyer path (the
+503 code carries it) and at INFO once at the warmup gate. Floors are read at startup; changing them
+needs a coordinator restart, same as the global floor.
+*Tripwire tests:* `internal/versionfloor/versionfloor_test.go`,
+`internal/buyer/seam_768_version_floor_test.go` (all three gates + unconfigured byte-identity),
+`internal/ws/seam_768_warm_floor_test.go`, `internal/routing/filter_test.go`.
 
 **P2-4 · Hygiene: hello-gate spec vs prod config; same-account timing risk** — `hygiene` — **FIXED (#769)**
 Live Pearl posture verified 2026-07-27 against the RUNNING process (`--config-overlay
@@ -326,7 +369,12 @@ enable-after-survey shares the #765 live-pool survey prerequisite; warmup drift 
 4. ~~**P1-1 / P1-2**~~ — **DONE (#762, #763)**: money integrity before real buyer volume. #762 makes an
    id-less retry bill once; #763 makes an after-commit settle recoverable. Both keep the durable
    `(account_id, request_id)` key as the invariant — neither adds a second source of truth for money.
-5. P2 as debt burn-down. ~~**P2-1**~~ — **DONE (#766)**, observe-only: the arbiter asserts that the
+5. ~~**P2-1**~~ — **DONE (#766)**, observe-only: the arbiter asserts that the
    buyer terminal and the billing ledger agree, and deliberately does **not** suppress anything —
    suppressing a late row would under-bill every failover retry. Enforcement stays out until the
    conflict counter has been read on live traffic.
+6. ~~**P2-2 / P2-3**~~ — **DONE (#767, #768)**: seam 5's floor stopped being theoretical. The prod
+   overlay carries `required_binary_version` for the first time, a 4004 close is an upgrade directive
+   that stops the client's reconnect loop, `doctor` makes the standing checkable offline, and per-model
+   routing floors share one check across the public routing, self-route preflight, warm-pool, and
+   slot-queue gates (incl. the poll-time recheck from the audit).

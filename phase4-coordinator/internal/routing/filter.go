@@ -36,6 +36,11 @@ const (
 	// ReasonQuotaBlocked — provider failed the admission-quota
 	// check (typically provisional-tier rate cap).
 	ReasonQuotaBlocked
+	// ReasonModelVersionFloor — provider's reported binary_version is
+	// below the per-model minimum configured in
+	// coordinator_advertised_version.per_model_required_binary_version,
+	// or is unparseable while such a floor is in force (#768).
+	ReasonModelVersionFloor
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -56,6 +61,17 @@ type EligibilityChecker interface {
 	// class check with RoutingEligible(); a false return is
 	// reported as ReasonModelMismatch.
 	ProviderMatchesRequest(p pool.Provider) bool
+
+	// ProviderMeetsModelVersionFloor reports whether the provider's
+	// reported binary_version satisfies the per-model minimum
+	// version floor (#768). A false return is reported as
+	// ReasonModelVersionFloor. Implementations MUST delegate to the
+	// SAME versionfloor.Check used by the self-route preflight and
+	// warm-pool gates — "we never warm a box we won't route to"
+	// only holds while all three share one verdict. With no floors
+	// configured the implementation MUST return true for every
+	// provider so selection stays byte-identical to pre-#768.
+	ProviderMeetsModelVersionFloor(p pool.Provider) bool
 
 	// ProviderContextSufficient reports whether the provider's
 	// MaxContextTokens fits the request's estimated token budget.
@@ -121,10 +137,15 @@ type FilterResult struct {
 //  2. ProviderMatchesRequest (model/class + FR-P5 state) — combined
 //     gate; either failure is ReasonModelMismatch (the inline loop
 //     short-circuits to `continue` without separating the two)
-//  3. ProviderContextSufficient — ReasonContextTooSmall
-//  4. Tier2Decision — ReasonTier2HashMismatch / ReasonTier2Hash
+//  3. ProviderMeetsModelVersionFloor — ReasonModelVersionFloor
+//     (#768). Runs immediately after the model match because the
+//     floor is keyed BY model; a no-op when no floors are
+//     configured, so default-config selection stays byte-identical
+//     (AC-SR-1).
+//  4. ProviderContextSufficient — ReasonContextTooSmall
+//  5. Tier2Decision — ReasonTier2HashMismatch / ReasonTier2Hash
 //     Required / ReasonTier2EncryptedLeg / ReasonTier2Attestation
-//  5. QuotaPermits — ReasonQuotaBlocked (applied as a second pass
+//  6. QuotaPermits — ReasonQuotaBlocked (applied as a second pass
 //     here to preserve the "quota is soft, drives 429 only when
 //     every other check passed" semantics)
 //
@@ -150,6 +171,10 @@ func EligibleCandidates(
 		}
 		if !checker.ProviderMatchesRequest(p) {
 			res.Counts[ReasonModelMismatch]++
+			continue
+		}
+		if !checker.ProviderMeetsModelVersionFloor(p) {
+			res.Counts[ReasonModelVersionFloor]++
 			continue
 		}
 		if !checker.ProviderContextSufficient(p) {

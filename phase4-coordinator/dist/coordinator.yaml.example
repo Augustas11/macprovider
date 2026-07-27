@@ -350,13 +350,28 @@ malibu_emission:
 # clone deploy.
 #
 # `required_binary_version` (optional) hard-rejects providers below the
-# version, closing WS with CloseVersionTooOld. It is a hard admission floor,
-# not an autoupdate target, and is NOT subject to the S-H1 capability gate.
-# Use for security fixes that must not be optional. Leave unset for advisory
-# releases.
+# version, closing WS with 4004 version_unsupported. It is a hard admission
+# floor, not an autoupdate target, and is NOT subject to the S-H1 capability
+# gate. Use for security fixes that must not be optional. Leave unset for
+# advisory releases. CLIs carrying the #767 handler surface the close as an
+# upgrade directive and STOP reconnecting; older builds retry forever, which
+# is why the floor must be chosen below the deployed fleet.
+#
+# `per_model_required_binary_version` (optional, issue #768) is a PER-MODEL
+# ROUTING floor, not an admission floor: a below-floor provider stays
+# connected (so it can still self-update) but is excluded from public
+# routing, from the self-route / hard-pin preflight path, and from the
+# warm-pool candidate gates. It sits beside the per-model HARDWARE tier gate
+# (the signed autotune candidate catalog's min_ram_gb / min_bandwidth_tier
+# rows), which answers "is this box big enough" but never "is this build new
+# enough for the engine this model needs". Unset = no floors = byte-identical
+# routing. Keys match model_id case-insensitively; values must be bare
+# numeric versions or the coordinator refuses to start.
 coordinator_advertised_version:
   latest_binary_version: "1.8.65"
   # required_binary_version: "1.7.0"
+  # per_model_required_binary_version:
+  #   "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "1.8.60"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
 # may connect MUST be listed here). Edit this list locally — DO NOT
