@@ -91,13 +91,24 @@ func TestSeamH3_RelayTimeoutStrikesOnBuyerCancel(t *testing.T) {
 	}
 }
 
-// H3-streaming · twin of H3 for the streaming relay path (#761). The
-// forwardWSStreaming ErrRelayTimeout branch carries the same buyer-cancel
-// guard. With a cancelled buyer ctx AND a pending ErrRelayTimeout the select
-// picks either case at random, so each iteration exercises the guarded timeout
-// branch with ~50% probability; 20 iterations make an unguarded strike
-// (provider → Degraded at threshold=1) practically certain to be caught.
+// H3-streaming · twin of H3 for the streaming relay paths (#761). The
+// ErrRelayTimeout branch in forwardWSStreaming and the relay.Errors case in
+// forwardWSStreamingBuffered carry the same buyer-cancel guard as their
+// non-streaming sibling. With a cancelled buyer ctx AND a pending relay error
+// the select picks either case at random, so each iteration exercises the
+// guarded error branch with ~50% probability; 20 iterations make an unguarded
+// strike (provider → Degraded at threshold=1) or a mis-attributed failure
+// terminal practically certain to be caught. The buffered subtest forces the
+// buffered path via the per-request kill-switch env.
 func TestSeamH3Streaming_RelayTimeoutNoStrikeOnBuyerCancel(t *testing.T) {
+	t.Run("incremental", func(t *testing.T) { seamH3StreamingScenario(t) })
+	t.Run("buffered", func(t *testing.T) {
+		t.Setenv("COORDINATOR_STREAMING_FORCE_BUFFERED", "1")
+		seamH3StreamingScenario(t)
+	})
+}
+
+func seamH3StreamingScenario(t *testing.T) {
 	const providerID, assignedID = "p1", "current"
 	at := time.Unix(1716768000, 0).UTC()
 

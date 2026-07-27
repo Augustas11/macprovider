@@ -3466,6 +3466,9 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 		case err := <-relay.Errors:
 			markProviderDone()
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws buffered streaming relay failed")
+			if r.Context().Err() != nil {
+				return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+			}
 			if toolFinal.toolOpened && s.streamingDowngrade != nil {
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 			}
