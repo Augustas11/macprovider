@@ -105,11 +105,26 @@ const seamCompletionJSON = `{"id":"c","object":"chat.completion","created":1,"mo
 	`"usage":{"prompt_tokens":8,"completion_tokens":12,"total_tokens":20},` +
 	`"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
 
-// ---- H5 · id-less retry double-bill (INV-11) -------------------------------
-// EXPECTED: FAIL today (issue #200). An id-less buyer retry — which OpenRouter does —
-// mints a fresh request_id, so each attempt reserves+settles independently → double-bill.
+// ---- H5 · id-less retry bills once (INV-11) --------------------------------
+// EXPECTED: PASS = certifies the P1-1 FIX (issue #762). This test used to be
+// TestSeamH5a_IdlessRetryDoubleBills and asserted the buggy-today behavior: an id-less
+// buyer retry — which OpenRouter does by default — mints a fresh request_id per attempt,
+// so the durable (account_id, request_id) reservation key never matched and each attempt
+// reserved + settled independently → one buyer intent, two bills.
+//
+// #762 fingerprints the raw body (plus tenant / demo token / conversation tag) for
+// gateway-minted ids only, and REPLAYS attempt 1's buyer-visible response to an identical
+// re-send inside the configured window. The scenario is deliberately unchanged: what
+// flipped is the verdict, so the test stays a durable tripwire. A regression that
+// re-dispatches an id-less retry — or that bills it twice while still replaying — turns
+// this red again.
+//
+// The replay cache is NOT the money invariant. A cache miss (restart, eviction, oversize
+// body, truncated stream) adopts attempt 1's id and falls through to the durable
+// duplicate_request_id 409, so "billed once" holds even when the replay does not. See
+// TestIdlessDedupe_* in idless_dedupe_test.go for those paths.
 
-func TestSeamH5a_IdlessRetryDoubleBills(t *testing.T) {
+func TestSeamH5a_IdlessRetryBillsOnce(t *testing.T) {
 	var upstreamHits int
 	client := seamJSONUpstream(seamCompletionJSON, &upstreamHits)
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -118,23 +133,35 @@ func TestSeamH5a_IdlessRetryDoubleBills(t *testing.T) {
 	key := createAccountAndKey(t, store, cfg, "acct_h5a")
 
 	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
-	// No X-Request-ID → each call mints a fresh id → distinct reservations.
-	if r := postChat(t, h, key, body, nil); r.Code != http.StatusOK {
-		t.Fatalf("call 1 status=%d body=%s", r.Code, r.Body.String())
+	// No X-Request-ID → each call mints a fresh id → pre-#762, distinct reservations.
+	first := postChat(t, h, key, body, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("call 1 status=%d body=%s", first.Code, first.Body.String())
 	}
-	if r := postChat(t, h, key, body, nil); r.Code != http.StatusOK {
-		t.Fatalf("call 2 status=%d body=%s", r.Code, r.Body.String())
+	second := postChat(t, h, key, body, nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("call 2 status=%d body=%s", second.Code, second.Body.String())
 	}
 
-	used := billedTokens(t, h, key)
-	if used == 40 {
-		t.Logf("CONFIRMED FINDING (INV-11 FAIL): id-less retry double-billed %v tokens "+
-			"(2×20); upstream hit %d times. Fix: gateway-native Idempotency-Key dedupe "+
-			"(server.go:240-244, issue #200).", used, upstreamHits)
-		return
+	if got := second.Header().Get("X-MacProvider-Dedupe"); got != "replay" {
+		t.Fatalf("REGRESSION (INV-11): id-less retry was not served as a replay; "+
+			"X-MacProvider-Dedupe=%q want %q", got, "replay")
 	}
-	t.Fatalf("expected double-bill of 40 (confirmed finding); got daily_tokens_used=%v "+
-		"(if this is 20, the idempotency gap was FIXED — update the audit)", used)
+	if upstreamHits != 1 {
+		t.Fatalf("REGRESSION (INV-11): id-less retry re-dispatched inference; upstream hit %d times, want 1",
+			upstreamHits)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replay body differs from attempt 1:\n first=%s\nsecond=%s",
+			first.Body.String(), second.Body.String())
+	}
+	used := billedTokens(t, h, key)
+	if used != 20 {
+		t.Fatalf("REGRESSION (INV-11): id-less retry billed %v tokens, want 20 "+
+			"(40 = the pre-#762 double-bill is back)", used)
+	}
+	t.Logf("PASS (P1-1 FIXED, #762): id-less retry replayed attempt 1's response "+
+		"(upstream hits=%d, billed=%v once).", upstreamHits, used)
 }
 
 func TestSeamH5b_StableRequestIDBillsOnce(t *testing.T) {

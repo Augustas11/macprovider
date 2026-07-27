@@ -64,9 +64,37 @@ path (`forwardWSStreamingBuffered:3299`).
 
 ### P1 — before real volume
 
-**P1-1 · Retry double-bill without a stable request id** — `money` — test `TestSeamH5a` · issue #200
-An id-less buyer retry (which OpenRouter does) mints a fresh request_id (`server.go:240-244`) → a new
-reservation → billed again. **Fix:** gateway-native `Idempotency-Key` dedupe (tracked in #200).
+**P1-1 · Retry double-bill without a stable request id** — `money` — test `TestSeamH5a` · issue #762
+**FIXED gateway-side (issue #762).** An id-less buyer retry (which OpenRouter does by default) minted a
+fresh request_id (`phase5-gateway/.../server.go:240-244`), so the durable `(account_id, request_id)`
+reservation key never matched and each attempt reserved + settled independently → one buyer intent,
+N bills.
+**Fix (shipped):** a bounded in-memory fingerprint index
+(`phase5-gateway/internal/router/idless_dedupe.go`) over `"mpg-idless-v1"` ‖ account ‖ demo-token-hash ‖
+conversation tag ‖ SHA-256 of the RAW body bytes, consulted only for gateway-minted ids with no
+`Idempotency-Key` (both are higher-precedence dedupe contracts and bypass this path). An identical
+re-send inside `quotas.idless_dedupe_window_seconds` (default 60s, measured from attempt 1's TERMINAL;
+`0` disables) REPLAYS attempt 1's buyer-visible response, and an identical attempt arriving while
+attempt 1 is still in flight COALESCES onto it — holding no reservation and no concurrency lease while
+it waits (cap 4 waiters).
+**What is and is not authoritative:** the money invariant remains the durable reservation key. The
+index is a UX layer: on any miss — process restart, LRU/body eviction, oversize response, poisoned
+(truncated) stream, waiter-cap overflow — the retry adopts attempt 1's request id and falls through to
+the existing `duplicate_request_id` 409. Degraded UX, never a second bill. Publish is gated on a
+buyer-visible 2xx, NOT on settlement finality, so SPEC-022 hold entries still replay; replays call no
+Reserve/Settle/Hold and are invisible to the settlement reconciler by construction. Replayed headers
+are a whitelist (`Content-Type`, `X-Provider-Id`, `X-Request-ID`, new `X-MacProvider-Dedupe: replay`,
+plus freshly recomputed rate-limit headers); `X-MacProvider-Settlement-*` and `Retry-After` are never
+replayed. Metrics: `gateway_idless_dedupe_{replay,inflight_wait,conflict,uncacheable}_total`.
+`TestSeamH5a` flipped to `IdlessRetryBillsOnce` (PASS = certifies the fix); the miss and bypass paths
+are covered by `TestIdlessDedupe_*` in `phase5-gateway/internal/router/idless_dedupe_test.go`.
+**Residual (not fixed here):** the index is per-process and in-memory, so a gateway restart between
+attempts still double-bills — identical to today's behavior, not a regression. A durable
+`request_fingerprints` table (fingerprint → request_id, no body) is the named follow-up. The one real
+false positive is a deliberate re-roll at temperature > 0: same account, same demo token, same
+conversation tag, byte-identical body, no ids, inside 60s of attempt 1's terminal. It is bounded by the
+window, the five opt-outs, and the conflict counter — not by "did the buyer receive it", which the
+tripwire forecloses. Buyer-supplied `Idempotency-Key` dedupe on the coordinator path remains #200.
 
 **P1-2 · Settlement not crash-durable** — `money` — test `TestSeamH7`
 On the streaming after-commit path, if `SettleReservation` and the `EnsureUsageEvent` fallback both

@@ -251,6 +251,99 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		deadlines.armPhaseFromStart(deadlinePhaseNonStreamWall, requestBound)
 	}
+	// #762 (seam finding P1-1): bill each buyer intent once even when the
+	// retry carries no id. An id-less retry — the OpenRouter default — mints
+	// a fresh request_id per attempt, so the durable (account_id, request_id)
+	// reservation key never matches and every attempt reserves and settles
+	// again.
+	//
+	// Precedence, highest first: a buyer-supplied Idempotency-Key owns dedupe
+	// (the coordinator path, issue #200) and a client-supplied UUID
+	// X-Request-ID already deduped durably. Only gateway-minted ids — the
+	// case where the buyer expressed no identity at all — reach the
+	// fingerprint path.
+	//
+	// The fingerprint is computed here, AFTER validation, so a malformed or
+	// over-cap request can never occupy a slot. The index is a UX layer, not
+	// the money invariant: on any miss the retry adopts attempt 1's id and
+	// falls through to the durable duplicate_request_id 409 below.
+	var dedupeFingerprint string
+	if dedupeWindow := s.idlessDedupeWindow(); dedupeWindow > 0 &&
+		requestIDClass(r) == retry503RequestIDClassGatewayGenerated &&
+		strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
+		dedupeFingerprint = idlessRequestFingerprint(
+			subject.AccountID,
+			subject.DemoTokenHash,
+			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
+			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
+			body,
+		)
+		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
+		switch {
+		case entry == nil:
+			// In-flight claim cap is full. Skip dedupe entirely rather than
+			// letting the map grow: this request behaves exactly as it did
+			// pre-#762 (its own id, its own reservation, its own bill).
+			dedupeFingerprint = ""
+		case adopted:
+			// Attempt 1 owns this entry. Clearing the fingerprint is
+			// load-bearing: it makes the terminal defer below a no-op, so
+			// only the claim winner can ever publish or drop.
+			dedupeFingerprint = ""
+			// Adopt attempt 1's id for the rest of the request. The response
+			// header must be overwritten too — the middleware already wrote
+			// this attempt's freshly minted id (server.go:257) — or a
+			// fall-through 409 would name an id the buyer cannot correlate.
+			r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, entry.requestID))
+			w.Header().Set("X-Request-ID", entry.requestID)
+			if s.replayIdlessDuplicate(w, r, subject, dailyQuota, entry, dedupeWindow, deadlines) {
+				return
+			}
+		default:
+			sw.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			defer func() {
+				if dedupeFingerprint == "" {
+					return
+				}
+				// A panic unwinding through here has already written part of
+				// a 2xx in the streaming case; the recovery middleware will
+				// turn it into internal_error. Publishing that partial would
+				// cache a response no buyer ever completed, so drop it and
+				// re-panic so the middleware still sees and handles the
+				// panic exactly as before.
+				if recovered := recover(); recovered != nil {
+					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
+					panic(recovered)
+				}
+				// Publish is gated on a buyer-visible 2xx, not on settlement
+				// finality: a SPEC-022 hold is still a delivered answer, and
+				// a retry of it must not re-run inference. A buyer who
+				// disconnected never saw the whole response, so nothing is
+				// cached for them (their partial is settled as usual).
+				if sw.dedupePublishable() && r.Context().Err() == nil {
+					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						sw.dedupeCapture(), s.now())
+					return
+				}
+				// Audit R2 (code HIGH): a COMPLETE, delivered, billed 2xx
+				// whose body merely exceeded the replay cap must keep its
+				// fp->request_id mapping — dropping it would let an identical
+				// id-less retry mint a fresh id and bill again. Publish a
+				// body-less stub instead: the retry adopts the id and lands
+				// on the durable 409. Only poisoned attempts (partial or
+				// error content, failed buyer writes) and buyer disconnects
+				// drop, because those retries MUST re-dispatch.
+				if sw.dedupeDeliveredButUncacheable() && r.Context().Err() == nil {
+					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						nil, s.now())
+					return
+				}
+				s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
+			}()
+		}
+	}
 	promptEstimate := estimatePromptTokens(body)
 	promptReservation := promptCapTokens(body)
 	reservationTokens := promptReservation + maxTokens
@@ -964,6 +1057,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	settleCancelled := func() {
 		cancelCoordinator()
+		// #762: the buyer never received the whole stream — either they
+		// disconnected or a write to them failed. Poison explicitly rather
+		// than relying on r.Context().Err() being observable in the publish
+		// defer: a failed write does not necessarily cancel the context.
+		poisonDedupeCapture(w)
 		settleObservedContent("client_disconnect")
 	}
 	settleIdleTimeout := func() {
@@ -1016,6 +1114,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				}
 				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
 					terminalStructuredErrorCode = code
+					// #762: a 200 stream that ends in a SPEC-019 terminal
+					// error envelope is refunded, not an answer. Caching it
+					// would replay a stale provider error to a retry that
+					// deserves a fresh dispatch.
+					poisonDedupeCapture(w)
 					if _, err := w.Write(line); err != nil {
 						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
 						refundTerminalStructuredError()
@@ -1114,6 +1217,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+			// #762: explicit, even though settleCancelled poisons too — this
+			// is the exact path an audit flagged as publishing a partial,
+			// never-delivered 2xx.
+			poisonDedupeCapture(w)
 			settleCancelled()
 			return false
 		}
@@ -2516,10 +2623,64 @@ func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
 // statusWriter wraps http.ResponseWriter to capture the HTTP status code that
 // was written. handleChatCompletions uses it for an end-of-request log line
 // (G3 — operator observability for the flaky-provider failure mode).
+//
+// #762 extends it with a bounded capture of the buyer-visible body, armed
+// ONLY for the request that won an id-less dedupe fingerprint claim. The
+// capture is what a later identical id-less retry replays instead of paying
+// for a second generation.
 type statusWriter struct {
 	http.ResponseWriter
 	statusCode int
 	flushed    bool
+
+	captureArmed bool
+	captureCap   int
+	capture      []byte
+	overflowed   bool
+	// poisoned marks a response that reached the buyer as a 200 but is not
+	// a complete answer — a mid-stream SSE error frame. Replaying a
+	// truncated stream would hand a retry a worse answer than a fresh
+	// dispatch, so poisoned responses are dropped, not cached.
+	poisoned bool
+}
+
+// armDedupeCapture starts recording the buyer-visible body, up to limit bytes.
+func (sw *statusWriter) armDedupeCapture(limit int) {
+	sw.captureArmed = true
+	sw.captureCap = limit
+}
+
+// dedupePublishable reports whether the captured response may be replayed to
+// an identical id-less retry: a complete, buyer-visible 2xx that fit the cap.
+func (sw *statusWriter) dedupePublishable() bool {
+	return sw.captureArmed && !sw.poisoned && !sw.overflowed &&
+		sw.statusCode >= 200 && sw.statusCode < 300
+}
+
+// dedupeDeliveredButUncacheable reports a fully-delivered, unpoisoned 2xx
+// whose body exceeded the replay cap: the response reached the buyer and was
+// billed, so its fp->request_id mapping must survive as a body-less stub
+// even though replay is unavailable (audit R2, code HIGH).
+func (sw *statusWriter) dedupeDeliveredButUncacheable() bool {
+	return sw.captureArmed && !sw.poisoned && sw.overflowed &&
+		sw.statusCode >= 200 && sw.statusCode < 300
+}
+
+func (sw *statusWriter) dedupeCapture() []byte {
+	if !sw.captureArmed || sw.overflowed {
+		return nil
+	}
+	return sw.capture
+}
+
+// poisonDedupeCapture marks the response behind w as un-replayable. Called
+// from every mid-stream SSE error writer: those frames ride on an already
+// committed 200, so the status code alone cannot tell a complete stream from
+// a truncated one. A no-op for any writer that is not a *statusWriter.
+func poisonDedupeCapture(w http.ResponseWriter) {
+	if sw, ok := w.(*statusWriter); ok {
+		sw.poisoned = true
+	}
 }
 
 func (sw *statusWriter) WriteHeader(code int) {
@@ -2535,7 +2696,28 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 		sw.statusCode = http.StatusOK
 		sw.flushed = true
 	}
-	return sw.ResponseWriter.Write(b)
+	// Capture what the buyer actually RECEIVED, which is what the underlying
+	// writer reports — not what we handed it. Capturing before the write let
+	// a failed or short write (buyer gone mid-stream) be published as a
+	// complete 2xx and replayed to the next retry.
+	n, err := sw.ResponseWriter.Write(b)
+	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
+		switch {
+		case err != nil:
+			// The buyer did not get all of this. Whatever we hold is a
+			// partial response; it must never be replayed.
+			sw.poisoned = true
+			sw.capture = nil
+		case len(sw.capture)+n > sw.captureCap:
+			// Oversize responses are not cached at all (rather than
+			// truncated): a partial replay would be a wrong answer.
+			sw.overflowed = true
+			sw.capture = nil
+		default:
+			sw.capture = append(sw.capture, b[:n]...)
+		}
+	}
+	return n, err
 }
 
 // Flush satisfies http.Flusher so SSE streaming through this wrapper still
@@ -2557,6 +2739,10 @@ func (sw *statusWriter) Flush() {
 // dedicated writeProviderDisconnectedSSE wrapper so its strings
 // are centralized and resistant to drift.
 func writeSSEError(w http.ResponseWriter, message, errType, code string) {
+	// #762: an SSE error frame means this 200 stream is NOT a complete
+	// answer. Poison the dedupe capture so an identical id-less retry gets a
+	// fresh dispatch instead of replaying a truncated generation.
+	poisonDedupeCapture(w)
 	// H1: SSE error frames carry retryable too, classified by the same
 	// gatewayRetryableByCode table writeError uses. Headers are already
 	// flushed by the time an SSE frame is emitted (the stream started as
@@ -2576,6 +2762,8 @@ func writeStructuredOutputTimeoutSSE(w http.ResponseWriter, requestID string) {
 	// emitted, rather than a hardcoded false — a provider timeout IS
 	// retryable, and hardcoding false here contradicted the coordinator's
 	// own provider_timeout:true classification for the identical code.
+	// #762: a timeout terminal is never a replayable answer.
+	poisonDedupeCapture(w)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	payload, _ := json.Marshal(map[string]any{
 		"error": map[string]any{
@@ -2601,6 +2789,10 @@ func writeStructuredOutputTimeoutSSE(w http.ResponseWriter, requestID string) {
 // future refactors lean on a single named contract surface instead
 // of free-form writeSSEError args. Issue #186; architect R1 NOTE.
 func writeProviderDisconnectedSSE(w http.ResponseWriter) {
+	// #762: explicit here as well as inside writeSSEError, so a future
+	// refactor that stops routing this envelope through writeSSEError cannot
+	// silently start caching truncated streams.
+	poisonDedupeCapture(w)
 	writeSSEError(w, "Provider disconnected during streaming", "server_error", "provider_disconnected")
 }
 

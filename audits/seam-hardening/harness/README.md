@@ -11,6 +11,7 @@ are deterministic and need no running server or credentials.
 
 Test files:
 - `phase5-gateway/internal/router/seam_harness_test.go`
+- `phase5-gateway/internal/router/idless_dedupe_test.go` (H5a's miss/bypass siblings, #762)
 - `phase4-coordinator/internal/buyer/seam_h3_test.go`
 
 ## Run
@@ -28,7 +29,7 @@ cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 |---|---|---|---|
 | **H1** `ProgressingStreamSurvivesLegacyWall` | P0-2 | **PASS = certifies FIX** (#760) | a steadily-progressing stream runs 3s past a 1s legacy wall and completes with `[DONE]`, no `provider_disconnected`, clean usage outcome |
 | **H2** `BuyerDisconnectSettlesConsumerSide` | — | **PASS** | buyer-cancel → consumer-side settle, billed bounded to delivered |
-| **H5a** `IdlessRetryDoubleBills` | P1-1 | **PASS = confirms FAIL** | two id-less calls bill 40 (2×20) |
+| **H5a** `IdlessRetryBillsOnce` | P1-1 | **PASS = certifies FIX** (#762) | two id-less calls bill 20 once; 2nd carries `X-MacProvider-Dedupe: replay` with attempt 1's exact body, upstream dispatched once |
 | **H5b** `StableRequestIDBillsOnce` | P1-1 | **PASS** (control) | same-UUID 2nd call → 409, billed once (20) |
 | **H6** `ProviderOverReportBoundedToDelivered` | — | **PASS** | provider `completion_tokens=100000` rejected → estimate, billed 24 not 100008 |
 | **H7** `SettlementNotCrashDurable` | P1-2 | **PASS = confirms GAP** | committed 200 stream + settle double-failure → usage row dropped, refunded, nobody billed |
@@ -67,6 +68,20 @@ The wall had a **second copy** the harness cannot see: `http.Client.Timeout` in 
 which also covers body reads. Fixing only the request context would have been a production no-op, so
 the client is now built by a testable `newCoordinatorClient(cfg)` with `Timeout: 0` and a dedicated
 regression test (`cmd/gateway`, `TestCoordinatorClientHasNoBodyTimeout`, `httptest.NewServer`-backed).
+
+## Mechanism note (H5a, post-#762)
+
+H5a's scenario is likewise untouched — two byte-identical id-less calls — but its verdict flipped from
+"PASS = confirms FAIL" to "PASS = certifies FIX". A fingerprint over the RAW body bytes (plus account,
+demo-token hash, and sticky conversation tag) lets attempt 2 replay attempt 1's buyer-visible response
+instead of re-dispatching inference; `X-MacProvider-Dedupe: replay` is what the tripwire asserts on.
+
+The replay cache is explicitly NOT the money invariant, so a green H5a alone would over-claim: the
+durable `(account_id, request_id)` reservation key still is, and every cache miss adopts attempt 1's id
+and lands on the existing `duplicate_request_id` 409. `idless_dedupe_test.go` carries that half —
+outside-window resend, truncated stream, error terminal, waiter-cap overflow (asserting the adopted id
+on the 409), body eviction, both bypasses, and the `idless_dedupe_window_seconds: 0` kill switch — so
+"billed once" is proven on the miss paths and not only on the happy path.
 
 The companion clocks in the harness suite live in
 `phase5-gateway/internal/router/request_deadlines_test.go` (ceiling on an endless stream, heartbeat-only
