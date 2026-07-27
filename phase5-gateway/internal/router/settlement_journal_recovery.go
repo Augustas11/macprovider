@@ -193,10 +193,16 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		s.journalAttempts.clear(key)
 		return journal.RecoveredSettled, nil
 	}
-	if !errors.Is(settleErr, storage.ErrReservationNotFound) && !errors.Is(settleErr, storage.ErrReservationTerminal) {
-		// Transient (or unknown) — keep the effect unsealed and try again.
-		return "", settleErr
-	}
+	// Audit R1 (code HIGH): do NOT bail out on an unclassified settle error.
+	// The §17.7 crash window (EnsureUsageEvent succeeded, crash before the
+	// refund) leaves an ACTIVE reservation plus an existing usage row, so
+	// SettleReservation fails on the usage_events PK with an error that is
+	// neither NotFound nor Terminal — and would wedge here forever while
+	// DailyUsage double-counts. Fall through to the idempotent rung instead:
+	// EnsureUsageEvent verifies-or-inserts, the refund releases the hold, and
+	// the seal lands. If the settle failure was transient DB pathology, the
+	// fallback rung either completes the equivalent §17.7 outcome or fails
+	// too, leaving the effect unsealed for the next tick.
 
 	ev := storage.UsageEvent{
 		RequestID:        rec.RequestID,

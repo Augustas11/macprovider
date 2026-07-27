@@ -56,6 +56,7 @@ package journal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -64,6 +65,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -706,7 +708,17 @@ func fsyncDir(dir string) error {
 	}
 	defer d.Close()
 	if err := d.Sync(); err != nil {
-		slog.Warn("gateway settlement journal could not fsync its directory", "dir", dir, "error", err)
+		// Some filesystems reject directory fsync outright (EINVAL/ENOTSUP);
+		// that is a platform quirk, not a durability failure, and is safe to
+		// ignore. Any OTHER error means the new segment's directory entry may
+		// not survive power loss — propagate it so WriteEffect reports the
+		// failure instead of returning a false durability promise (audit R1,
+		// code MEDIUM).
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+			slog.Warn("gateway settlement journal directory fsync unsupported on this filesystem", "dir", dir, "error", err)
+			return nil
+		}
+		return fmt.Errorf("settlement journal: fsync dir %s: %w", dir, err)
 	}
 	return nil
 }

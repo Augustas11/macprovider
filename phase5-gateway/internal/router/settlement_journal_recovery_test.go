@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -684,5 +685,127 @@ func TestSettlementJournal_MetricsExposedOnMetricsEndpoint(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("/metrics missing %q", want)
 		}
+	}
+}
+
+// TestSettlementJournal_CrashBetweenUsageEventAndRefundRecovers pins the
+// audit R1 code-HIGH crash window: the §17.7 fallback wrote the usage row,
+// then the process crashed before RefundReservation. On restart the DB holds
+// an ACTIVE reservation plus a matching usage row, so SettleReservation fails
+// on the usage_events PK with an error that is neither NotFound nor Terminal.
+// Recovery must fall through to the idempotent rung (verify → refund → seal)
+// instead of wedging on the unclassified settle error while DailyUsage
+// double-counts.
+func TestSettlementJournal_CrashBetweenUsageEventAndRefundRecovers(t *testing.T) {
+	srv, store, dbPath, jnl, _ := newJournalHarness(t, nil)
+	seedJournalReservation(t, store, "acct_crashwin", "req-crashwin", 100)
+	rec := journalSettleEffect("acct_crashwin", "req-crashwin")
+	if err := jnl.WriteEffect(rec); err != nil {
+		t.Fatalf("WriteEffect: %v", err)
+	}
+	// Simulate the crash window: the usage row exists (identical payload),
+	// the reservation is still active, the effect is unsealed.
+	if err := store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: "req-crashwin", AccountID: "acct_crashwin",
+		WindowDate: rec.WindowDate, PromptTokens: rec.PromptTokens,
+		CompletionTokens: rec.CompletionTokens, TotalTokens: rec.TotalTokens,
+		TokenSource: rec.TokenSource, Outcome: rec.Outcome, CreatedAt: fixedNow(),
+	}); err != nil {
+		t.Fatalf("EnsureUsageEvent seed: %v", err)
+	}
+
+	summary, err := srv.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RecoverSettlementJournal: %v", err)
+	}
+	if summary.UsageEvents != 1 || summary.Quarantined != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v — the crash window must resolve via the idempotent rung, "+
+			"not wedge on the unclassified settle error", summary)
+	}
+	rows, total := usageTokenTotals(t, dbPath, "acct_crashwin")
+	if rows != 1 || total != 20 {
+		t.Fatalf("rows=%d total=%d want exactly 1 row of 20 tokens", rows, total)
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_crashwin")
+	if snap.activeRows != 0 || snap.activeReserved != 0 {
+		t.Fatalf("reservation hold not released: %+v — DailyUsage would double-count "+
+			"the usage row plus the active hold", snap)
+	}
+	scan, _ := jnl.Scan()
+	if len(scan.Unsealed) != 0 {
+		t.Fatalf("Unsealed=%d want 0 (sealed usage_event)", len(scan.Unsealed))
+	}
+}
+
+// refundFailSpyStore drives the §17.7 branch (settle fails, usage-event
+// fallback succeeds via the real store) with a failing RefundReservation.
+type refundFailSpyStore struct {
+	*sqlite.Store
+}
+
+func (s *refundFailSpyStore) SettleReservation(context.Context, storage.ReservationSettlement) error {
+	return errors.New("injected settle failure (seal-gate test)")
+}
+
+func (s *refundFailSpyStore) RefundReservation(context.Context, string, string, int64) error {
+	return errors.New("injected refund failure (seal-gate test)")
+}
+
+// TestSettlementJournal_RefundFailureLeavesEffectUnsealed pins the audit R1
+// architect MEDIUM: the §17.7 fallback must NOT seal past a failed
+// RefundReservation — a sealed effect suppresses recovery's retry, leaving
+// the still-active hold double-counting against the buyer's quota until the
+// reaper. Unsealed, recovery retries the refund and only then seals.
+func TestSettlementJournal_RefundFailureLeavesEffectUnsealed(t *testing.T) {
+	client := seamStreamingUpstream(func(pw *io.PipeWriter) {
+		_, _ = io.WriteString(pw, `data: {"id":"c","usage":{"prompt_tokens":8,"completion_tokens":12,"total_tokens":20},"choices":[{"delta":{"content":"hi"}}]}`+
+			"\n\n"+`data: [DONE]`+"\n\n")
+		_ = pw.Close()
+	})
+	_, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Settlement.JournalRecoveryGraceSeconds = 0
+	}, WithHTTPClient(client))
+	jnl := openTestJournal(t, cfg)
+	spy := &refundFailSpyStore{Store: store}
+	h := New(cfg, spy, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(client), WithSettlementJournal(jnl)).Handler()
+	key := createAccountAndKey(t, store, cfg, "acct_refundfail")
+
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	resp := postChat(t, h, key, body, map[string]string{"X-Request-ID": "88888888-8888-4888-8888-888888888888"})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	// The usage row landed (§17.7 fallback), the refund failed, so the effect
+	// must remain UNSEALED for recovery.
+	scan, err := jnl.Scan()
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(scan.Unsealed) != 1 {
+		t.Fatalf("Unsealed=%d want 1 — sealing past a failed refund suppresses the retry", len(scan.Unsealed))
+	}
+
+	// Recovery over the real store retries: usage row verifies, refund
+	// succeeds, seal lands, hold released, still exactly one bill.
+	recovered := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithSettlementJournal(jnl))
+	summary, err := recovered.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RecoverSettlementJournal: %v", err)
+	}
+	if summary.UsageEvents != 1 {
+		t.Fatalf("summary=%+v want one usage-event re-drive", summary)
+	}
+	rows, total := usageTokenTotals(t, dbPath, "acct_refundfail")
+	if rows != 1 || total != 20 {
+		t.Fatalf("rows=%d total=%d want 1/20", rows, total)
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_refundfail")
+	if snap.activeRows != 0 || snap.activeReserved != 0 {
+		t.Fatalf("hold not released after recovery: %+v", snap)
+	}
+	if scan, _ := jnl.Scan(); len(scan.Unsealed) != 0 {
+		t.Fatalf("effect still unsealed after recovery")
 	}
 }

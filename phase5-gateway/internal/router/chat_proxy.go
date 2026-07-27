@@ -2316,7 +2316,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// IS still active (e.g., settleRequest failed on a transient
 		// DB error, leaving the reservation row in 'active' state),
 		// the call releases the quota hold.
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		refundErr := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		// SEAL (#763): the durable bill exists (usage_events) and the hold is
 		// released, so the effect is complete and must never be re-driven.
 		//
@@ -2325,8 +2325,17 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// before the seal re-drives into EnsureUsageEvent (payload matches →
 		// nil) and RefundReservation (no-op), which is exactly this branch
 		// again. Sealing before the refund would instead leave a quota hold
-		// that only the reaper clears.
-		if armed {
+		// that only the reaper clears. And the seal is GATED on the refund
+		// (audit R1, architect MEDIUM): sealing past a failed refund would
+		// suppress recovery's retry and leave DailyUsage double-counting the
+		// usage row plus the still-active hold until the reaper.
+		if refundErr != nil {
+			slog.Warn("gateway settlement §17.7 refund failed; leaving journal effect unsealed for recovery",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"error", refundErr.Error(),
+			)
+		} else if armed {
 			s.sealSettlementEffect(journalKey, journal.SealUsageEvent)
 		}
 		slog.Warn("gateway settlement used SPEC-006 § 17.7 fallback usage_events insert (settle_path failure)",
