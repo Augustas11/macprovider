@@ -62,9 +62,26 @@ func TestClampCapacity(t *testing.T) {
 			wantMax: 9999, wantTotal: 9999, wantFree: 9999,
 		},
 		{
-			name:           "negative claim is left alone rather than fabricated",
+			// Audit R1 (security): a negative claim must NOT pass through —
+			// the relay admission guard only enforces when MaxConcurrency > 0,
+			// so an untouched -1 would disable concurrency admission
+			// entirely. Floor to 1 and count it on the tripwire.
+			name:           "negative claim floors to one and trips the counter",
 			maxConcurrency: -1, total: 0, free: 0, ceil: 8,
-			wantMax: -1, wantTotal: 0, wantFree: 0,
+			wantMax: 1, wantTotal: 0, wantFree: 0,
+			wantOverClaim: true,
+		},
+		{
+			name:           "negative claim with inflated slots floors and clamps",
+			maxConcurrency: -1, total: 9999, free: 9999, ceil: 8,
+			wantMax: 1, wantTotal: 1, wantFree: 1,
+			wantOverClaim: true,
+		},
+		{
+			name:           "zero claim floors to one and trips the counter",
+			maxConcurrency: 0, total: 0, free: 0, ceil: 8,
+			wantMax: 1, wantTotal: 0, wantFree: 0,
+			wantOverClaim: true,
 		},
 	}
 	for _, tc := range cases {

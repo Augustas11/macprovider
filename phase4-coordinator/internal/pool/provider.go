@@ -2187,6 +2187,20 @@ func (r *Registry) Conn(providerID, assignedID string) (net.Conn, error) {
 	return p.conn, nil
 }
 
+// CurrentMaxConcurrency returns the live (already ingest-clamped) concurrency
+// cap for a registered provider. Used by the state_update slot clamp so a
+// provider cannot report slot counts above its own admitted capacity (#764
+// audit R1, security lane).
+func (r *Registry) CurrentMaxConcurrency(providerID string) (int, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return 0, false
+	}
+	return p.MaxConcurrency, true
+}
+
 func (r *Registry) Snapshot() []Provider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

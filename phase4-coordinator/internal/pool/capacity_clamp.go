@@ -37,9 +37,13 @@ type ClampedCapacity struct {
 //     one that claims 9999 total / 0 free (saturated) stays fully busy.
 //
 // A ceiling <= 0 disables the clamp and passes the triple through untouched, so
-// an operator can restore pre-#764 behavior without a code change. Negative or
-// absent reported values are left alone rather than invented: capacity is
-// clamped here, never fabricated.
+// an operator can restore pre-#764 behavior without a code change. With the
+// clamp active, a reported max_concurrency below 1 is floored to 1: a negative
+// (or zero) claim is not "less capacity" — downstream the relay admission
+// guard only enforces its cap when MaxConcurrency > 0, so letting a negative
+// value through would DISABLE concurrency admission entirely (security-lane
+// finding, audit R1). Flooring to 1 keeps the cap armed at the minimum and
+// counts the nonsense claim on the tripwire.
 func ClampCapacity(maxConcurrency, slotsTotal, slotsFree, ceiling int) ClampedCapacity {
 	out := ClampedCapacity{
 		MaxConcurrency: maxConcurrency,
@@ -50,14 +54,12 @@ func ClampCapacity(maxConcurrency, slotsTotal, slotsFree, ceiling int) ClampedCa
 	if ceiling <= 0 {
 		return out
 	}
-	out.OverClaimed = maxConcurrency > ceiling || slotsTotal > ceiling
+	out.OverClaimed = maxConcurrency > ceiling || slotsTotal > ceiling || maxConcurrency < 1
 	if out.MaxConcurrency > ceiling {
 		out.MaxConcurrency = ceiling
 	}
-	if out.MaxConcurrency < 0 {
-		// A negative claim is nonsense the ceiling cannot clamp, and the slot
-		// repair below would only propagate it. Leave the triple untouched.
-		return out
+	if out.MaxConcurrency < 1 {
+		out.MaxConcurrency = 1
 	}
 	// used is computed from the RAW pair so a saturated provider stays
 	// saturated after the ceiling shrinks its total.

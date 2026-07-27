@@ -177,12 +177,43 @@ func TestStateUpdateSlotsAreClamped(t *testing.T) {
 	payload := []byte(`{"type":"state_update","state":"ready","metrics_snapshot":{"slots_free":9999,"slots_total":9999}}`)
 	server.handleStateUpdate("provider-a", "assigned-a", payload)
 
+	// Audit R1 (security): the reference is the provider's LIVE clamped cap
+	// (2), not the global ceiling (8) — otherwise a max-2 provider could hold
+	// slots_total=8 via state_update until the next heartbeat, which is real
+	// over-admission for HTTP-forwarding providers with no relay limiter.
 	snap := registry.Snapshot()
-	if snap[0].SlotsTotal > 8 || snap[0].SlotsFree > 8 {
-		t.Fatalf("state_update slots = (total %d, free %d), want both <= 8", snap[0].SlotsTotal, snap[0].SlotsFree)
+	if snap[0].SlotsTotal != 2 || snap[0].SlotsFree != 2 {
+		t.Fatalf("state_update slots = (total %d, free %d), want (2, 2) — the provider's live cap, not the ceiling", snap[0].SlotsTotal, snap[0].SlotsFree)
 	}
 	if got := capacityOverClaimMetricValue(t, reg, capacityPhaseStateUpdate); got != 1 {
 		t.Fatalf("state_update tripwire = %v, want 1", got)
+	}
+}
+
+// Audit R1 (security lane HIGH): a NEGATIVE max_concurrency claim must not
+// pass through the clamp — the relay admission guard only enforces its cap
+// when MaxConcurrency > 0, so an untouched -1 would disable concurrency
+// admission entirely while inflated slots absorb routing.
+func TestNegativeMaxConcurrencyClaimIsFloored(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	registry := pool.NewRegistry(nil)
+	server := NewServer(capacityTestConfig(8), registry, zerolog.Nop(),
+		WithCapacityOverClaimMetrics(statsmetrics.New(reg)))
+	registerCapacityTestProvider(t, server, registry, 2)
+
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":-1,"slots_free":9999,"slots_total":9999,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0}`)
+	server.handleHeartbeat(nil, "provider-a", "assigned-a", payload)
+
+	snap := registry.Snapshot()
+	if snap[0].MaxConcurrency != 1 {
+		t.Fatalf("negative claim produced MaxConcurrency=%d, want floor 1 (relay cap must stay armed)", snap[0].MaxConcurrency)
+	}
+	if snap[0].SlotsTotal > 1 || snap[0].SlotsFree > 1 {
+		t.Fatalf("negative claim slots = (total %d, free %d), want both <= 1", snap[0].SlotsTotal, snap[0].SlotsFree)
+	}
+	if got := capacityOverClaimMetricValue(t, reg, capacityPhaseHeartbeat); got < 1 {
+		t.Fatalf("heartbeat tripwire = %v, want >= 1 for a nonsense claim", got)
 	}
 }
 

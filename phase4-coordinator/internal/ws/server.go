@@ -4548,22 +4548,32 @@ func poolHardwareCapacity(summary *HardwareSummary) *pool.ProviderHardwareCapaci
 }
 
 // clampStateUpdateSlots applies the capacity ceiling to a state_update's
-// optional slot pair. state_update carries no max_concurrency, so the ceiling
-// itself is the reference total. Absent (nil) fields stay absent — the clamp
-// never materializes a value the provider did not send.
+// optional slot pair. state_update carries no max_concurrency, so the
+// reference total is the provider's LIVE (already ingest-clamped) cap — not
+// the global ceiling: a provider admitted at MaxConcurrency=2 must not hold
+// slots_total=8 via state_update until the next heartbeat repairs it (#764
+// audit R1, security lane; HTTP-forwarding providers have no relay-side
+// active limiter, so inflated slots there are real over-admission). The
+// ceiling is the fallback reference when the provider is unknown. Absent
+// (nil) fields stay absent — the clamp never materializes a value the
+// provider did not send.
 func (s *Server) clampStateUpdateSlots(providerID string, slotsTotal, slotsFree *int) (*int, *int) {
 	ceiling := s.maxConcurrencyCeiling()
 	if ceiling <= 0 || (slotsTotal == nil && slotsFree == nil) {
 		return slotsTotal, slotsFree
 	}
-	total, free := ceiling, ceiling
+	reference := ceiling
+	if live, ok := s.pool.CurrentMaxConcurrency(providerID); ok && live > 0 && live < reference {
+		reference = live
+	}
+	total, free := reference, reference
 	if slotsTotal != nil {
 		total = *slotsTotal
 	}
 	if slotsFree != nil {
 		free = *slotsFree
 	}
-	clamped := pool.ClampCapacity(ceiling, total, free, ceiling)
+	clamped := pool.ClampCapacity(reference, total, free, reference)
 	if clamped.SlotsTotal == total && clamped.SlotsFree == free {
 		return slotsTotal, slotsFree
 	}
