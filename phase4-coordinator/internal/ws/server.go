@@ -142,6 +142,7 @@ type Server struct {
 	idlePrewarmMetrics             IdlePrewarmMetrics
 	modelHashMismatchMetrics       ModelHashMismatchMetrics
 	credentialBootstrapMetrics     CredentialBootstrapMetrics
+	capacityOverClaimMetrics       CapacityOverClaimMetrics
 	connectionEvents               ConnectionEventStore
 	connectionEventMetrics         ConnectionEventMetrics
 	closeEventMeta                 sync.Map // net.Conn -> closeEventMeta
@@ -319,6 +320,29 @@ type CredentialBootstrapMetrics interface {
 	IncCredentialBootstrap(outcome string)
 }
 
+// CapacityOverClaimMetrics receives the issue-#764 tripwire. The counter is
+// PERMANENT: it is a process-lifetime prometheus counter that never resets and
+// is incremented on EVERY offending frame, not once per provider — a box that
+// keeps over-claiming keeps counting, so the rate is itself the signal.
+type CapacityOverClaimMetrics interface {
+	IncCapacityOverClaim(phase string)
+}
+
+// EventProviderCapacityOverClaim is the structured-log event name for a
+// provider-reported capacity claim above pool.max_concurrency_ceiling.
+const EventProviderCapacityOverClaim = "provider_capacity_over_claim"
+
+// EventProviderBenchmarkQuarantine is the structured-log event name for an
+// issue-#765 fail-suspect transition (quarantined / released).
+const EventProviderBenchmarkQuarantine = "provider_benchmark_quarantine"
+
+// capacity-over-claim tripwire phases. Closed set — used as a prometheus label.
+const (
+	capacityPhaseHello       = "hello"
+	capacityPhaseHeartbeat   = "heartbeat"
+	capacityPhaseStateUpdate = "state_update"
+)
+
 const (
 	idlePrewarmEventBurst           = 10
 	idlePrewarmEventRefillPerSecond = 1
@@ -483,6 +507,12 @@ func WithModelHashMismatchMetrics(metrics ModelHashMismatchMetrics) Option {
 func WithCredentialBootstrapMetrics(metrics CredentialBootstrapMetrics) Option {
 	return func(s *Server) {
 		s.credentialBootstrapMetrics = metrics
+	}
+}
+
+func WithCapacityOverClaimMetrics(metrics CapacityOverClaimMetrics) Option {
+	return func(s *Server) {
+		s.capacityOverClaimMetrics = metrics
 	}
 }
 
@@ -2240,6 +2270,21 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	if s.cfg.Pool.WarmupGateEnabled {
 		initialState = pool.StateDegraded
 	}
+	// Issue #764: clamp the reported capacity BEFORE it enters the registry, so
+	// no downstream consumer ever sees the raw claim. A fresh session starts
+	// fully free, so the reported triple is (max, max, max).
+	capacity := s.clampProviderCapacity(hello.MaxConcurrency, hello.MaxConcurrency, hello.MaxConcurrency)
+	if capacity.OverClaimed {
+		s.recordCapacityOverClaim(capacityPhaseHello)
+		s.log.Warn().
+			Str("event", EventProviderCapacityOverClaim).
+			Str("provider_id", hello.ProviderID).
+			Str("phase", capacityPhaseHello).
+			Int("reported_max_concurrency", capacity.ReportedMax).
+			Int("ceiling", s.maxConcurrencyCeiling()).
+			Int("effective_max_concurrency", capacity.MaxConcurrency).
+			Msg("provider capacity claim exceeds the operator ceiling; clamped")
+	}
 	return &pool.Provider{
 		ProviderID:             hello.ProviderID,
 		AssignedID:             assignedID,
@@ -2248,9 +2293,9 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		ModelParamsB:           hello.ModelParamsB,
 		RAMGB:                  hello.RAMGB,
 		MaxContextTokens:       hello.MaxContextTokens,
-		MaxConcurrency:         hello.MaxConcurrency,
-		SlotsFree:              hello.MaxConcurrency,
-		SlotsTotal:             hello.MaxConcurrency,
+		MaxConcurrency:         capacity.MaxConcurrency,
+		SlotsFree:              capacity.SlotsFree,
+		SlotsTotal:             capacity.SlotsTotal,
 		ThroughputTPSEstimate:  hello.ThroughputTPSEstimate,
 		ModelLoadTimeMs:        hello.ModelLoadTimeMs,
 		EndpointURL:            endpointURL,
@@ -3630,6 +3675,10 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		return false
 	}
 	outcome := attempt.outcome
+	// Issue #764: the canary is the coordinator's only live TTFT/TPS
+	// measurement. Recording it on the pool entry is what makes /poolz able to
+	// segment latency by binary_version and isolate a slow backend build.
+	s.pool.RecordCanaryLatency(provider.ProviderID, provider.AssignedID, attempt.metrics.TTFTMS, attempt.metrics.SustainedTPS)
 	if attempt.modelClassBank {
 		pass := outcome == canaryProbePass
 		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
@@ -4258,6 +4307,52 @@ func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byt
 	s.log.Warn().Str("provider_id", providerID).Str("request_id", ack.RequestID).Msg("unexpected preflight_ack")
 }
 
+// maxConcurrencyCeiling is the operator cap on provider-reported concurrency.
+// 0 (or negative, which Validate rejects) disables the clamp.
+func (s *Server) maxConcurrencyCeiling() int {
+	return s.cfg.Pool.MaxConcurrencyCeiling
+}
+
+// clampProviderCapacity applies the ceiling to one provider-reported triple.
+// Every provider-controlled capacity ingest point MUST route through this.
+func (s *Server) clampProviderCapacity(maxConcurrency, slotsTotal, slotsFree int) pool.ClampedCapacity {
+	return pool.ClampCapacity(maxConcurrency, slotsTotal, slotsFree, s.maxConcurrencyCeiling())
+}
+
+// recordCapacityOverClaim fires the permanent tripwire. It is called once per
+// offending frame and never decrements; the counter is monotonic for the
+// process lifetime by construction (prometheus.Counter).
+func (s *Server) recordCapacityOverClaim(phase string) {
+	if s.capacityOverClaimMetrics != nil {
+		s.capacityOverClaimMetrics.IncCapacityOverClaim(phase)
+	}
+}
+
+// applyBenchmarkQuarantine translates the issue-#765 verdict into the pool's
+// fail-suspect flag. BenchmarkVerdictUnknown (gate off, evaluator off, or an
+// evidence-store error) deliberately leaves the flag untouched.
+func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string, verdict pow.BenchmarkVerdict) {
+	var quarantined bool
+	switch verdict {
+	case pow.BenchmarkVerdictMissing:
+		quarantined = true
+	case pow.BenchmarkVerdictVerified:
+		quarantined = false
+	default:
+		return
+	}
+	if !s.pool.SetBenchmarkQuarantine(providerID, assignedID, quarantined) {
+		return
+	}
+	s.log.Warn().
+		Str("event", EventProviderBenchmarkQuarantine).
+		Str("provider_id", providerID).
+		Str("assigned_id", assignedID).
+		Str("model_id", modelID).
+		Bool("quarantined", quarantined).
+		Msg("provider verified-benchmark quarantine state changed")
+}
+
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {
 	hb, presence, field, err := ParseHeartbeat(payload)
 	if err != nil {
@@ -4292,15 +4387,34 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			return
 		}
 	}
+	// Issue #764: clamp before ApplyHeartbeat, which assigns MaxConcurrency /
+	// SlotsTotal / SlotsFree onto the pool entry verbatim. Clamping here (rather
+	// than inside the registry) keeps the ceiling a single ingest-side concern
+	// and covers the relay's admission check, which reads
+	// provider.MaxConcurrency straight off the pool entry.
+	capacity := s.clampProviderCapacity(hb.MaxConcurrency, hb.SlotsTotal, hb.SlotsFree)
+	if capacity.OverClaimed {
+		s.recordCapacityOverClaim(capacityPhaseHeartbeat)
+		s.log.Warn().
+			Str("event", EventProviderCapacityOverClaim).
+			Str("provider_id", providerID).
+			Str("phase", capacityPhaseHeartbeat).
+			Int("reported_max_concurrency", capacity.ReportedMax).
+			Int("reported_slots_total", hb.SlotsTotal).
+			Int("ceiling", s.maxConcurrencyCeiling()).
+			Int("effective_max_concurrency", capacity.MaxConcurrency).
+			Int("effective_slots_total", capacity.SlotsTotal).
+			Msg("provider capacity claim exceeds the operator ceiling; clamped")
+	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
 		Status:                    state,
 		ModelID:                   hb.ModelID,
 		ModelParamsB:              hb.ModelParamsB,
 		RAMGB:                     hb.RAMGB,
 		MaxContextTokens:          hb.MaxContextTokens,
-		MaxConcurrency:            hb.MaxConcurrency,
-		SlotsFree:                 hb.SlotsFree,
-		SlotsTotal:                hb.SlotsTotal,
+		MaxConcurrency:            capacity.MaxConcurrency,
+		SlotsFree:                 capacity.SlotsFree,
+		SlotsTotal:                capacity.SlotsTotal,
 		ThroughputTPSEstimate:     hb.ThroughputTPSEstimate,
 		RequestsServedSinceLast:   hb.RequestsServedSinceLast,
 		ThroughputTPSSinceLast:    hb.ThroughputTPSSinceLast,
@@ -4357,7 +4471,13 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Msg("provider heartbeat")
 	}
 	if s.telemetryDrift != nil {
-		s.logTelemetryDriftAlerts(s.telemetryDrift.EvaluateHeartbeat(context.Background(), *entry))
+		alerts, verdict := s.telemetryDrift.EvaluateHeartbeatWithVerdict(context.Background(), *entry)
+		s.logTelemetryDriftAlerts(alerts)
+		// Issue #765: absence of a verified benchmark is fail-suspect, not
+		// fail-open. Dormant unless BOTH telemetry_drift.enabled and
+		// telemetry_drift.quarantine_missing_benchmark are set, in which case
+		// the verdict is Unknown and routing is untouched.
+		s.applyBenchmarkQuarantine(providerID, assignedID, entry.ModelID, verdict)
 	}
 }
 
@@ -4427,6 +4547,59 @@ func poolHardwareCapacity(summary *HardwareSummary) *pool.ProviderHardwareCapaci
 	}
 }
 
+// clampStateUpdateSlots applies the capacity ceiling to a state_update's
+// optional slot pair. state_update carries no max_concurrency, so the
+// reference total is the provider's LIVE (already ingest-clamped) cap — not
+// the global ceiling: a provider admitted at MaxConcurrency=2 must not hold
+// slots_total=8 via state_update until the next heartbeat repairs it (#764
+// audit R1, security lane; HTTP-forwarding providers have no relay-side
+// active limiter, so inflated slots there are real over-admission). The
+// ceiling is the fallback reference when the provider is unknown. Absent
+// (nil) fields stay absent — the clamp never materializes a value the
+// provider did not send.
+func (s *Server) clampStateUpdateSlots(providerID string, slotsTotal, slotsFree *int) (*int, *int) {
+	ceiling := s.maxConcurrencyCeiling()
+	if ceiling <= 0 || (slotsTotal == nil && slotsFree == nil) {
+		return slotsTotal, slotsFree
+	}
+	reference := ceiling
+	if live, ok := s.pool.CurrentMaxConcurrency(providerID); ok && live > 0 && live < reference {
+		reference = live
+	}
+	total, free := reference, reference
+	if slotsTotal != nil {
+		total = *slotsTotal
+	}
+	if slotsFree != nil {
+		free = *slotsFree
+	}
+	clamped := pool.ClampCapacity(reference, total, free, reference)
+	if clamped.SlotsTotal == total && clamped.SlotsFree == free {
+		return slotsTotal, slotsFree
+	}
+	s.recordCapacityOverClaim(capacityPhaseStateUpdate)
+	s.log.Warn().
+		Str("event", EventProviderCapacityOverClaim).
+		Str("provider_id", providerID).
+		Str("phase", capacityPhaseStateUpdate).
+		Int("reported_slots_total", total).
+		Int("reported_slots_free", free).
+		Int("ceiling", ceiling).
+		Int("effective_slots_total", clamped.SlotsTotal).
+		Int("effective_slots_free", clamped.SlotsFree).
+		Msg("provider capacity claim exceeds the operator ceiling; clamped")
+	outTotal, outFree := slotsTotal, slotsFree
+	if slotsTotal != nil {
+		v := clamped.SlotsTotal
+		outTotal = &v
+	}
+	if slotsFree != nil {
+		v := clamped.SlotsFree
+		outFree = &v
+	}
+	return outTotal, outFree
+}
+
 func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte) {
 	update, field, err := ParseStateUpdate(payload)
 	if err != nil {
@@ -4441,10 +4614,16 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 	if state == pool.StateReady && s.warmupGatePending(providerID) {
 		state = pool.StateDegraded
 	}
+	// Issue #764: state_update is the THIRD provider-controlled capacity ingest
+	// (after hello and heartbeat) — it writes SlotsFree/SlotsTotal straight onto
+	// the pool entry. Leaving it unclamped would let a provider restore an
+	// inflated free-slot count immediately after a clamped heartbeat, so the
+	// ceiling applies here too.
+	slotsTotal, slotsFree := s.clampStateUpdateSlots(providerID, update.MetricsSnapshot.SlotsTotal, update.MetricsSnapshot.SlotsFree)
 	entry, ok := s.pool.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{
 		State:               state,
-		SlotsFree:           update.MetricsSnapshot.SlotsFree,
-		SlotsTotal:          update.MetricsSnapshot.SlotsTotal,
+		SlotsFree:           slotsFree,
+		SlotsTotal:          slotsTotal,
 		LastAutoupdateEvent: update.LastAutoupdateEvent,
 		At:                  s.now(),
 	})
@@ -4818,7 +4997,10 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		TotalSlots     int      `json:"total_slots"`
 		FreeSlots      int      `json:"free_slots"`
 		Models         []string `json:"models"`
-	}{TotalProviders: len(providers)}
+		// Issue #764 — additive per-binary_version TTFT/TPS + capacity
+		// breakdown. New key only; the six fields above keep their shapes.
+		ByBinaryVersion map[string]poolzVersionSegment `json:"by_binary_version"`
+	}{TotalProviders: len(providers), ByBinaryVersion: poolzVersionSegments(providers)}
 	cfg := s.tier2Config()
 	for _, p := range providers {
 		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout

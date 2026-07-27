@@ -524,6 +524,10 @@ func main() {
 	// transaction boundary. Generic Postgres signature exemptions are never
 	// recovery authority.
 	wsOpts = append(wsOpts, providerws.WithAdmissionIdentityRecoveryAdminStore(tokenStore))
+	// Issue #764 tripwire. Deliberately OUTSIDE the statsPools branch: the
+	// capacity ceiling is always active, so its counter must always be wired —
+	// a coordinator without a stats database must not silently lose the signal.
+	wsOpts = append(wsOpts, providerws.WithCapacityOverClaimMetrics(metricsHandle))
 	if statsPools != nil {
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
@@ -615,6 +619,7 @@ func main() {
 			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
 			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateThreshold,
 			cfg.ProofOfWeights.TelemetryDrift.AlertCooldownSeconds,
+			cfg.ProofOfWeights.TelemetryDrift.QuarantineMissingBenchmark,
 		)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("proof_of_weights.telemetry_drift config invalid")
@@ -626,6 +631,7 @@ func main() {
 			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
 			Int("tps_min_requests_window", driftCfg.TPSMinRequestsWindow).
 			Int("opoi_pass_rate_window", driftCfg.OPoIPassRateWindow).
+			Bool("quarantine_missing_benchmark", driftCfg.QuarantineMissingBenchmark).
 			Msg("proof-of-weights telemetry drift alerts enabled")
 	}
 	if cfg.Auth.RequireProviderTokens {

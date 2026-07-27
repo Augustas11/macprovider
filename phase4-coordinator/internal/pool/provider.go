@@ -178,6 +178,20 @@ type Provider struct {
 	CanaryFailCount     int             `json:"canary_fail_count,omitempty"`
 	CanaryLastCheckedAt *time.Time      `json:"canary_last_checked_at,omitempty"`
 	CanaryLastFailedAt  *time.Time      `json:"canary_last_failed_at,omitempty"`
+	// CanaryLastTTFTMS / CanaryLastSustainedTPS are the wall-time latency
+	// metrics of the most recent completed canary probe. They are the only
+	// coordinator-measured live TTFT/TPS signal (buyer relays are not timed
+	// into the pool), so /poolz uses them for the per-binary_version
+	// segmentation that isolates a slow backend build. Zero = never probed.
+	CanaryLastTTFTMS       int     `json:"canary_last_ttft_ms,omitempty"`
+	CanaryLastSustainedTPS float64 `json:"canary_last_sustained_tps,omitempty"`
+	// BenchmarkQuarantined marks a provider that has no verified autotune
+	// benchmark while the telemetry-drift quarantine gate is enabled. Absence
+	// of a benchmark is a DISTINCT suspect bucket (issue #765): it is not proof
+	// of misbehaviour, so the session stays admitted and operator-visible, but
+	// it is fail-suspect rather than fail-open and receives no buyer traffic
+	// until a benchmark exists. Always false when the gate is off.
+	BenchmarkQuarantined bool `json:"benchmark_quarantined,omitempty"`
 	// LastBuyerSuccessAt is the most recent coordinator-observed successful
 	// buyer relay for this provider (HTTP 2xx / completed stream). Used by
 	// FR-CAN23 observed-serving residual so a peer that never served buyers
@@ -439,6 +453,9 @@ func (p Provider) RoutingEligible() bool {
 	if len(p.PendingReceiptPubkey) > 0 {
 		return false
 	}
+	if p.BenchmarkQuarantined {
+		return false
+	}
 	return p.State == StateReady && p.SlotsFree > 0
 }
 
@@ -456,6 +473,9 @@ func (p Provider) ServingCapable() bool {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {
+		return false
+	}
+	if p.BenchmarkQuarantined {
 		return false
 	}
 	return p.State == StateReady || p.State == StateBusy
@@ -1565,6 +1585,43 @@ func (r *Registry) SetModelClassOPoIPass(providerID, assignedID string, pass *bo
 	p.ModelClassOPoIPass = pass
 }
 
+// RecordCanaryLatency stores the wall-time metrics of a completed canary probe
+// so /poolz can segment live TTFT/TPS by binary_version. Non-positive values
+// are ignored (a skipped or transport-failed probe measured nothing), which
+// keeps the last real observation rather than zeroing it.
+func (r *Registry) RecordCanaryLatency(providerID, assignedID string, ttftMS int, sustainedTPS float64) {
+	if ttftMS <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return
+	}
+	p.CanaryLastTTFTMS = ttftMS
+	if sustainedTPS > 0 && !math.IsNaN(sustainedTPS) && !math.IsInf(sustainedTPS, 0) {
+		p.CanaryLastSustainedTPS = sustainedTPS
+	}
+}
+
+// SetBenchmarkQuarantine flips the issue-#765 fail-suspect bucket for a live
+// session. Returns true when the flag CHANGED, so the caller can log the
+// transition once instead of on every heartbeat.
+func (r *Registry) SetBenchmarkQuarantine(providerID, assignedID string, quarantined bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.BenchmarkQuarantined == quarantined {
+		return false
+	}
+	p.BenchmarkQuarantined = quarantined
+	return true
+}
+
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
 	sanction, ok := r.canarySanctions[p.ProviderID]
 	if !ok || p.Tier != TierPinned {
@@ -2128,6 +2185,20 @@ func (r *Registry) Conn(providerID, assignedID string) (net.Conn, error) {
 		return nil, fmt.Errorf("provider session not connected")
 	}
 	return p.conn, nil
+}
+
+// CurrentMaxConcurrency returns the live (already ingest-clamped) concurrency
+// cap for a registered provider. Used by the state_update slot clamp so a
+// provider cannot report slot counts above its own admitted capacity (#764
+// audit R1, security lane).
+func (r *Registry) CurrentMaxConcurrency(providerID string) (int, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return 0, false
+	}
+	return p.MaxConcurrency, true
 }
 
 func (r *Registry) Snapshot() []Provider {
