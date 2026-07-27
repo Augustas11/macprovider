@@ -1,6 +1,6 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.1-draft
+**Status:** v0.2-draft
 **Date:** 2026-07-11
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
@@ -9,9 +9,11 @@
 2026-07-10 SPEC-vs-code drift audit; runbook item 9). Highest prior canonical spec
 was SPEC-031. This document is the reconstructed normative baseline for two
 coordinator trust signals that ship unspecced: the **autotune hardware-evidence
-admission gate** (the "hello-gate", **live in production**) and the **OPoI /
-proof-of-weights / telemetry-drift** signals (specced here but **disabled in
-production**). SPEC-031 explicitly deferred the *semantics* of `model_class_challenges`
+admission gate** (the "hello-gate", enabled in prod at the 2026-07-11 baseline,
+**explicitly disabled in the live Pearl overlay as of 2026-07-27** — see the
+production-posture section) and the **OPoI / proof-of-weights /
+telemetry-drift** signals (drift observe-mode **enabled live** since the
+2026-07-22 overlay revision; the rest disabled). SPEC-031 explicitly deferred the *semantics* of `model_class_challenges`
 and the OPoI pass flag to this baseline (SPEC-031 §2, §17); this spec owns them.
 
 ---
@@ -23,16 +25,18 @@ The coordinator carries two trust signals beyond the SPEC-031 liveness canary:
 1. **The autotune hello-gate** (`internal/autotune/gate.go`, `checkAutotuneHelloGate`
    in `internal/ws/server.go`) — an **admission** gate that, when enabled, refuses a
    provider at connect unless it presents fresh, verified **hardware evidence**
-   proving it can serve the model tier it claims. This gate is **enabled in
-   production** (`require_autotune_hello_gate: true` in the Pearl overlay) and is a
-   money-path / availability-path control: it is the gate that closed the intended
+   proving it can serve the model tier it claims. This gate was enabled in production at this spec's 2026-07-11 baseline but is **explicitly disabled
+   in the live Pearl overlay as of 2026-07-27** (`require_autotune_hello_gate: false`, overlay
+   revised 2026-07-22 — verified against the running process, epic #770 / #769; see the
+   production-posture section). It remains a money-path / availability-path control: it is the gate that closed the intended
    second provider in the 2026-07-10 transient-degrade incident (#2), leaving a
    single-provider pool.
 
 2. **OPoI / proof-of-weights / telemetry-drift** (`internal/pow/drift.go`) — a set
    of signals intended to detect a provider that has silently downgraded or swapped
-   its model. These are **disabled in production** and, critically, **as implemented
-   are not proof of weights at all**.
+   its model. Telemetry-drift observe mode is **enabled in the live overlay as of
+   2026-07-27** (`telemetry_drift.enabled: true`; the OPoI canary and every enforcement remain
+   off) and, critically, these signals **as implemented are not proof of weights at all**.
 
 **The central honesty problem.** "OPoI" (Overt Proof of Inference) and
 "proof_of_weights" are aspirational names for a mechanism that does not yet prove
@@ -48,8 +52,9 @@ telemetry-drift breach does **nothing but emit a `WARN` log**. This spec therefo
 **refuses to let "proof-of-weights" imply a guarantee the code does not deliver**:
 it labels OPoI **non-binding / liveness-derived**, defines what a *real*
 proof-of-weights test would require, and pins the current signals' guarantee ceiling
-at **observability-only**. The substantive, live normative content of this spec is
-the **hello-gate admission policy** (Part A).
+at **observability-only**. The substantive normative content of this spec is
+the **hello-gate admission policy** (Part A) — currently disabled in the live overlay (see the
+production-posture section).
 
 ## 2. Scope
 
@@ -108,8 +113,8 @@ the **hello-gate admission policy** (Part A).
 ## Part A — Autotune hardware-evidence admission gate
 
 **FR-HG1 — Gate activation.** The hello-gate is a no-op unless
-`proof_of_weights.require_autotune_hello_gate` is true (default false; **true in the
-Pearl production overlay**). When active, it MUST run at provider hello for **both**
+`proof_of_weights.require_autotune_hello_gate` is true (default false; **explicitly
+false in the live Pearl overlay as of 2026-07-27; see §1**). When active, it MUST run at provider hello for **both**
 the composed-auth (v2) and legacy admission paths, for **both** provisional and
 pinned tiers, **before** the provider is recorded in the pool
 (`recordProviderAdmission` / `checkOrRecordAdmission`). On the **composed-auth (v2)
@@ -291,7 +296,7 @@ heartbeat. Both branches matter: an *uncatalogued* transition target has no
 uncatalogued model buyers requested is exactly the capability-gate bypass this FR
 closes.
 
-> **Conformance gap (§14) — this is a live capability-gate bypass.** As shipped, the
+> **Conformance gap (§14) — a capability-gate bypass live in the shipped code (moot at runtime while the gate is disabled in the overlay, but it defeats the gate whenever enabled).** As shipped, the
 > gate runs **only at admission**; a heartbeat can then replace `Provider.ModelID`
 > (with a larger *or uncatalogued* model) without re-consulting the ceiling, and buyer
 > routing uses that mutable model id (uncatalogued Tier-2 status stays routable unless
@@ -386,8 +391,9 @@ measurement path — it can only observe canary outcomes — so `opoi_pass_rate_
 MUST require `pool.canary_enabled`. Validation enforces this **only when
 `telemetry_drift.enabled = true`** (the validator returns before the coupling check
 when drift is disabled), which is correct: the window is inert unless drift is enabled.
-With canary disabled (the production posture), OPoI is dormant; the hello-gate (Part A)
-is the only live element of this spec.
+With canary disabled (the production posture), OPoI is dormant. As of 2026-07-27 the
+hello-gate (Part A) is ALSO disabled in the live overlay, and telemetry-drift observe mode is
+the only live element of this spec.
 
 ## Config surface and reload contract
 
@@ -395,7 +401,7 @@ is the only live element of this spec.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `require_autotune_hello_gate` | bool | `false` (**true in prod**) | Master switch for Part A. |
+| `require_autotune_hello_gate` | bool | `false` (**explicitly false in the live overlay as of 2026-07-27; see §1**) | Master switch for Part A. |
 | `autotune_evidence_ttl_days` | int | `30` | Admission-reuse freshness window (cutoff = `now − ttl`; **raising** relaxes, **lowering** tightens); `>0` required when gate or drift enabled. |
 | `telemetry_drift.enabled` | bool | `false` | Master switch for Part C. |
 | `telemetry_drift.tps_ratio_threshold` | float | `0.70` | (0,1]; TPS-below-baseline trigger. |
@@ -412,8 +418,9 @@ config is **startup-only**. SIGHUP *does* reload a substantial surface — the T
 block, rewards/billing flags, settlement config, USD-conversion config, and routing
 model classes — but **not** `proof_of_weights.*`: the hello-gate wiring is fixed at
 construction and the whole proof-of-weights block is read from the boot config, so it
-is outside the SIGHUP allowlist. Since the hello-gate is a **live money-path/
-availability gate on a single-provider-fragile pool**, changing it (e.g. to relax
+is outside the SIGHUP allowlist. Since the hello-gate is a **money-path/availability gate on a
+single-provider-fragile pool whenever enabled** (disabled in the live overlay
+as of 2026-07-27), changing it (e.g. to relax
 evidence requirements during a redundancy emergency, or to enable/disable the gate)
 currently forces a coordinator restart — the same restart-outage class that SPEC-031
 FR-CAN26 addresses and that caused the 2026-07-10 ~5h outage. This spec **requires**
@@ -456,9 +463,10 @@ sessions keep serving during an unbounded scan does not satisfy this. Conformanc
 | FR-CFG1 config surface | Implemented | `ProofOfWeightsConfig` + validation. |
 | FR-CFG2 reload without restart + existing-session re-eval | **Gap** | `proof_of_weights.*` startup-only; SIGHUP reloads Tier-2/billing/settlement/USD/routing-classes but not this block, and there is no re-evaluation of existing sessions on gate enable/tighten. |
 
-**Re-enable / hardening bar.** The priority is **FR-HG7** — a **CRITICAL-severity** live
-bypass: the ceiling is not wired into routing, so a heartbeat model-swap (to a larger
-**or uncatalogued** model) defeats the whole gate, meaning the live gate does not
+**Re-enable / hardening bar.** The priority is **FR-HG7** — a **CRITICAL-severity**
+bypass live in the shipped code: the ceiling is not wired into routing, so a
+heartbeat model-swap (to a larger **or uncatalogued** model) defeats the whole
+gate whenever it is enabled, meaning the gate as shipped does not
 actually protect buyers from a capability-mismatched *served* model. Then the
 redundancy levers — **FR-HG5** below-two alert + **FR-CFG2** (no-restart tuning *and*
 existing-session re-eval, so an operator can safely relax the gate in an emergency
@@ -546,22 +554,33 @@ Forward criteria (expected to FAIL against the current build; §14 Gap rows):
   to the admitted weights (statistical/distributional or cryptographic attestation);
   the current nonce-echo OPoI does not qualify and is not so labeled.
 
-## Production posture (as of 2026-07-11)
+## Production posture (2026-07-11 baseline; superseded — see 2026-07-27 below)
 
-Read-only Pearl check (`/etc/macprovider/coordinator.pearl-overlays.yaml`):
+Read-only Pearl check at the 2026-07-11 baseline
+(`/etc/macprovider/coordinator.pearl-overlays.yaml`):
 
-- **Hello-gate: ENABLED** (`require_autotune_hello_gate: true`, `autotune_evidence_ttl_days: 30`).
-  This is the live, load-bearing element; it is what closed the intended second
-  provider in incident #2. Prod is **`pool_size: 1`** right now — the single-provider
-  fragility is a **live** condition, not hypothetical.
+- **Hello-gate: ENABLED at that time** (`require_autotune_hello_gate: true`,
+  `autotune_evidence_ttl_days: 30`). It is what closed the intended second
+  provider in incident #2. Prod was **`pool_size: 1`** — the single-provider
+  fragility was a **live** condition, not hypothetical.
+
+**2026-07-27 posture (#769, verified against the running process):** the same
+overlay now sets `require_autotune_hello_gate: false` (flipped by the
+2026-07-22 overlay revision), `pool.canary_enabled: false` explicitly, and
+`telemetry_drift.enabled: true` (observe mode — so the #764/#765
+`missing_benchmark` observe alerts ARE live; the #765 quarantine stays dormant
+behind the absent `quarantine_missing_benchmark`). Full snapshot + drift notes:
+`ops/runbooks/seam-769-gate-posture-2026-07-27.md`.
 - **OPoI/canary: DISABLED** (`canary_enabled: false`, `opoi_pass_rate_window: 0`) — OPoI
-  is dormant; Part B/C are specced-but-inactive.
+  is dormant; Part B (OPoI/canary) is specced-but-inactive, and Part C
+  telemetry-drift is live in OBSERVE mode only (heartbeat TPS/hash alerts;
+  no enforcement).
 - The `telemetry_drift` block is present in the overlay; with the OPoI window at 0 and
   canary disabled, the OPoI pass-rate path is inactive (TPS/hash drift may evaluate at
   heartbeat but is alert-only regardless — FR-TD1).
 
-The highest-value follow-up is **FR-HG7** (wire the ceiling into routing — closes the
-live capability-gate bypass). The single-provider fragility's remedy is chiefly
+The highest-value follow-up is **FR-HG7** (wire the ceiling into routing —
+closes the shipped-code capability-gate bypass before any re-enable). The single-provider fragility's remedy is chiefly
 **operational** (acquire and verify a second provider for the tier), surfaced by the
 FR-HG5 below-two alert and made safely tunable by FR-CFG2; it is **not** solved by
 auto-admitting an unverified provider (the recorded `air5` was never-verified and a
@@ -585,8 +604,25 @@ smaller box), which is why v0.1 ships no automatic probation.
 
 ## Changelog
 
+- **v0.2-draft (2026-07-27, epic #770 / #769)** — Prod-posture reconciliation.
+  Corrected the "true in the Pearl production overlay" claims (five sites: §1
+  prose, numbering note, FR-HG1, config table, production-posture section):
+  the RUNNING process loads `--config-overlay
+  /etc/macprovider/coordinator.pearl-overlays.yaml`, and that overlay
+  EXPLICITLY sets `require_autotune_hello_gate: false` (revised 2026-07-22;
+  the v0.1 claim was accurate at its 2026-07-11 baseline and drifted since).
+  Related live posture recorded the same day: `pool.canary_enabled: false`
+  explicit in the overlay AND the canary-buyer timer inactive with the
+  DISABLED sentinel (the accepted P0 #584 exception);
+  `telemetry_drift.enabled: true` live (observe mode — #764/#765
+  missing_benchmark observe alerts fire; quarantine stays dormant);
+  `warmup_gate_enabled` false live vs true committed (drift; surfaced in
+  `ops/runbooks/seam-769-gate-posture-2026-07-27.md`, not silently "fixed").
+  Sticky routing IS enabled live; the same-account timing-side-channel
+  risk-acceptance note required by #769 lives in the same runbook.
+
 - **v0.1-draft (2026-07-11):** Initial reconstructed baseline (runbook item 9, Wave C).
-  Verify-before-design read-only Pearl check established that the **hello-gate is live
+  Verify-before-design read-only Pearl check established that the **hello-gate was live at the 2026-07-11 baseline (flipped off by the 2026-07-22 overlay revision — see v0.2)
   in production** (`require_autotune_hello_gate: true`, `pool_size: 1`) while
   OPoI/canary are disabled — reshaping the spec so the live hello-gate admission policy
   (Part A, incl. the FR-HG5 redundancy fix) is the substantive core and OPoI is
