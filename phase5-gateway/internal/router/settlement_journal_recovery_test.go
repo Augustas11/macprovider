@@ -905,3 +905,47 @@ func TestSettlementJournal_ConflictPathReleasesActiveHold(t *testing.T) {
 		t.Fatalf("Unsealed=%d want 1 (conflict must not seal)", len(scan.Unsealed))
 	}
 }
+
+// TestSettlementJournal_ConflictRefundFailureDoesNotConsumeAttempts pins the
+// audit R3 architect MEDIUM: a real refund failure on the conflict path must
+// not advance the quarantine clock — quarantining with the hold still active
+// would suppress the very re-drive that releases it.
+func TestSettlementJournal_ConflictRefundFailureDoesNotConsumeAttempts(t *testing.T) {
+	srv, store, dbPath, jnl, cfg := newJournalHarness(t, nil)
+	_ = srv
+	seedJournalReservation(t, store, "acct_confretry", "req-confretry", 100)
+	rec := journalSettleEffect("acct_confretry", "req-confretry")
+	if err := jnl.WriteEffect(rec); err != nil {
+		t.Fatalf("WriteEffect: %v", err)
+	}
+	if err := store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: "req-confretry", AccountID: "acct_confretry",
+		WindowDate: rec.WindowDate, PromptTokens: rec.PromptTokens,
+		CompletionTokens: rec.CompletionTokens + 1, TotalTokens: rec.TotalTokens + 1,
+		TokenSource: rec.TokenSource, Outcome: rec.Outcome, CreatedAt: fixedNow(),
+	}); err != nil {
+		t.Fatalf("EnsureUsageEvent seed: %v", err)
+	}
+
+	// Many passes with a refund-failing store: never quarantine, hold intact
+	// question deferred, effect stays re-drivable.
+	failing := New(cfg, &refundFailSpyStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithSettlementJournal(jnl))
+	for pass := 0; pass < settlementJournalMaxConflictAttempts+3; pass++ {
+		summary, err := failing.RecoverSettlementJournal(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if summary.Quarantined != 0 {
+			t.Fatalf("pass %d quarantined the effect while the hold release kept failing", pass)
+		}
+	}
+	// Healthy store: hold released, conflict clock starts, quarantine follows.
+	healthy := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithSettlementJournal(jnl))
+	if _, err := healthy.RecoverSettlementJournal(context.Background(), 0); err != nil {
+		t.Fatalf("healthy pass: %v", err)
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_confretry")
+	if snap.activeRows != 0 || snap.activeReserved != 0 {
+		t.Fatalf("hold not released once refunds work: %+v", snap)
+	}
+}

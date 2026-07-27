@@ -227,11 +227,17 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		// release; already-terminal is the benign sentinel.
 		if refundErr := s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix()); refundErr != nil &&
 			!errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
-			slog.Warn("gateway settlement journal conflict-path refund failed; hold released on a later pass",
+			// Audit R3 (architect MEDIUM): a failed hold release must NOT
+			// consume a conflict attempt — quarantining on the final attempt
+			// with the hold still active would suppress the re-drive that
+			// releases it. Retry without counting; the conflict clock only
+			// advances once the hold is off the books.
+			slog.Warn("gateway settlement journal conflict-path refund failed; retrying before counting the attempt",
 				"account_id", rec.AccountID,
 				"request_id", rec.RequestID,
 				"error", refundErr,
 			)
+			return journal.RecoveredRetry, nil
 		}
 		attempts := s.journalAttempts.next(key)
 		if attempts < settlementJournalMaxConflictAttempts {
