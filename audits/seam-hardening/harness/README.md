@@ -26,7 +26,7 @@ cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 
 | Scenario | Finding | Verdict | What executes |
 |---|---|---|---|
-| **H1** `FlatWallKillsProgressingStream` | P0-2 | **PASS = confirms FAIL** | a steadily-progressing stream is cut at the (shortened) total wall, never hitting the idle timer |
+| **H1** `ProgressingStreamSurvivesLegacyWall` | P0-2 | **PASS = certifies FIX** (#760) | a steadily-progressing stream runs 3s past a 1s legacy wall and completes with `[DONE]`, no `provider_disconnected`, clean usage outcome |
 | **H2** `BuyerDisconnectSettlesConsumerSide` | — | **PASS** | buyer-cancel → consumer-side settle, billed bounded to delivered |
 | **H5a** `IdlessRetryDoubleBills` | P1-1 | **PASS = confirms FAIL** | two id-less calls bill 40 (2×20) |
 | **H5b** `StableRequestIDBillsOnce` | P1-1 | **PASS** (control) | same-UUID 2nd call → 409, billed once (20) |
@@ -47,10 +47,27 @@ they flip to failing-until-the-assertion-is-updated — a durable regression tri
 
 ## Mechanism note (surfaced by wiring H1)
 
-The total wall is `upCtx = context.WithTimeout(r.Context(), CoordinatorTimeout())`
+The total wall **was** `upCtx = context.WithTimeout(r.Context(), CoordinatorTimeout())`
 (`chat_proxy.go:122`); the upstream request is created with it (`http.NewRequestWithContext(upCtx,…)`).
-The streaming read loop selects on `r.Context()` + the 10s idle timer (`:1047`), **not** `upCtx` — so
-the total wall reaches a mid-stream generation only because the real `net/http.Transport` closes the
+The streaming read loop selects on `r.Context()` + the idle timer, **not** `upCtx` — so
+the total wall reached a mid-stream generation only because the real `net/http.Transport` closes the
 body when `upCtx` expires. A naive mock pipe ignores ctx and would let a stream outlive the wall (a
 test artifact, not a code fix); `seamStreamingUpstreamCtx` honors the request ctx to emulate the real
-transport, confirming P0-2 faithfully.
+transport, which is what made the original P0-2 confirmation faithful — and is exactly what makes the
+flipped test a real regression tripwire now.
+
+**Post-#760.** That wall is replaced by one cancel funnel with per-phase budgets
+(`phase5-gateway/internal/router/request_deadlines.go`): `admission` → `first_token` →
+a never-re-armed `stream_ceiling` derived from `max_tokens`, plus the idle timer converted from
+"any byte" to CONTENT progress. Non-streaming keeps its flat wall
+(`timeouts.non_stream_request_seconds`, unchanged 300s). H1 therefore flipped from
+"PASS = confirms FAIL" to "PASS = certifies FIX", with the scenario itself untouched.
+
+The wall had a **second copy** the harness cannot see: `http.Client.Timeout` in `cmd/gateway/main.go`,
+which also covers body reads. Fixing only the request context would have been a production no-op, so
+the client is now built by a testable `newCoordinatorClient(cfg)` with `Timeout: 0` and a dedicated
+regression test (`cmd/gateway`, `TestCoordinatorClientHasNoBodyTimeout`, `httptest.NewServer`-backed).
+
+The companion clocks in the harness suite live in
+`phase5-gateway/internal/router/request_deadlines_test.go` (ceiling on an endless stream, heartbeat-only
+stream vs. content progress, first-token phase, cause-based structured-output timeout).

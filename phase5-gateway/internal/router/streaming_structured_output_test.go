@@ -99,6 +99,9 @@ func TestStreamingStructuredOutputGatewayTimeoutEmitsProviderTimeout(t *testing.
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		// #760: the pre-header wall is the admission phase now, not
+		// coordinator_request_seconds.
+		cfg.Timeouts.CoordinatorAdmissionSeconds = 1
 	}, WithHTTPClient(client))
 	accountID := "acct_stream_structured_timeout"
 	fullKey := createAccountAndKey(t, store, cfg, accountID)
@@ -143,6 +146,10 @@ func TestStreamingStructuredOutputPostFirstByteTimeoutPreservesProviderTimeoutSe
 		cfg.Timeouts.CoordinatorRequestSeconds = 1
 		cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 1
 		cfg.Timeouts.StreamingIdleMS = 5000
+		// #760: the upstream committed headers and then emitted a
+		// content-LESS frame, so the clock that must fire here is the
+		// first-token phase, not the (longer) idle timer.
+		cfg.Timeouts.FirstTokenSeconds = 1
 	}, WithHTTPClient(client))
 	accountID := "acct_stream_structured_mid_timeout"
 	fullKey := createAccountAndKey(t, store, cfg, accountID)
@@ -186,6 +193,10 @@ func TestStreamingStructuredOutputUpstreamContextStartsAtRequestEntry(t *testing
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		// #760 AC-V2-9 guard: the admission phase is armed FROM gateway
+		// first byte of request, so the 1.1s request-body read below must
+		// exhaust it before the upstream is ever dialled.
+		cfg.Timeouts.CoordinatorAdmissionSeconds = 1
 	}, WithHTTPClient(client))
 	accountID := "acct_stream_structured_entry_timeout"
 	fullKey := createAccountAndKey(t, store, cfg, accountID)

@@ -3875,37 +3875,73 @@ func (f *settlementFailStore) RefundReservation(context.Context, string, string,
 	return nil
 }
 
-func TestChatCompletionsCoordinatorTimeoutAppliesToStreamAndNonStream(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+// hangingCoordinatorClient answers every upstream request by blocking until
+// the request context is cancelled — i.e. a coordinator that accepts the
+// connection and never commits response headers.
+func hangingCoordinatorClient() *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
 		return nil, r.Context().Err()
 	})}
+}
+
+// #760 split TestChatCompletionsCoordinatorTimeoutAppliesToStreamAndNonStream:
+// the two modes no longer share one clock, so one test per clock.
+//
+// STREAMING: a coordinator that accepts the connection and never commits
+// headers is bounded by the admission phase. The streaming ceiling is left at
+// its (much longer) default so the only clock that can end this request is
+// admission.
+//
+// The admission phase deliberately does NOT bound the non-streaming path: the
+// coordinator buffers a non-streaming response in full, so its headers do not
+// commit until provider work completes and a 120s admission budget would
+// false-fail a legitimate slow inference. That path keeps its flat wall —
+// TestNonStreamingStillBoundedByRequestWall below.
+func TestChatCompletionsAdmissionDeadlineFailsFastPreHeader(t *testing.T) {
+	client := hangingCoordinatorClient()
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
-		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.CoordinatorAdmissionSeconds = 1
 	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_admission_stream")
 
-	for _, tc := range []struct {
-		name string
-		body string
-	}{
-		{name: "non_stream", body: `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":false}`},
-		{name: "stream", body: `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":true}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fullKey := createAccountAndKey(t, store, cfg, "acct_timeout_"+tc.name)
-			start := time.Now()
-			resp := postChat(t, h, fullKey, tc.body, nil)
-			elapsed := time.Since(start)
-			if resp.Code != http.StatusServiceUnavailable {
-				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
-			}
-			if elapsed > 2500*time.Millisecond {
-				t.Fatalf("elapsed=%s, want <=2.5s", elapsed)
-			}
-			assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
-		})
+	start := time.Now()
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":true}`, nil)
+	elapsed := time.Since(start)
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("elapsed=%s, want <=2.5s (coordinator_admission_seconds=1)", elapsed)
+	}
+	assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
+}
+
+// TestNonStreamingStillBoundedByRequestWall pins the non-streaming path to its
+// own flat wall. The admission budget is deliberately long here so the ONLY
+// clock that can end the request is non_stream_request_seconds — if a future
+// change routes non-streaming through the (much longer) streaming ceiling or
+// drops its wall entirely, this test stops returning in ~1s.
+func TestNonStreamingStillBoundedByRequestWall(t *testing.T) {
+	client := hangingCoordinatorClient()
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.NonStreamRequestSeconds = 1
+		cfg.Timeouts.CoordinatorAdmissionSeconds = 600
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_non_stream_wall")
+
+	start := time.Now()
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":false}`, nil)
+	elapsed := time.Since(start)
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("elapsed=%s, want <=2.5s (non_stream_request_seconds=1)", elapsed)
+	}
+	assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
 }
 
 func TestChatCompletionsCoordinatorRequestCancelsWithBuyerContext(t *testing.T) {

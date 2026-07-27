@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/router"
 )
 
@@ -138,5 +142,77 @@ func TestRunSettlementReconcilerRunsOnInterval(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("settlement reconciler did not stop after interval test cancellation")
+	}
+}
+
+// TestCoordinatorClientHasNoBodyTimeout is the production half of issue #760.
+//
+// The router's per-phase deadlines are invisible from inside the router tests,
+// which inject their own Timeout-less http.Client. In production the real
+// client used to carry Timeout = coordinator_request_seconds — a SECOND flat
+// wall that covers BODY reads, so decomposing the request context alone would
+// have been a no-op: a healthy stream would still have died at the same 300s.
+//
+// The test drives the real newCoordinatorClient against a real
+// httptest.NewServer that commits headers immediately and then dribbles body
+// bytes for longer than coordinator_request_seconds. If Client.Timeout is ever
+// reintroduced, the body read fails here.
+func TestCoordinatorClientHasNoBodyTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for i := 0; i < 6; i++ {
+			_, _ = io.WriteString(w, "data: {\"delta\":\"x\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	// A 1s legacy wall: any request-spanning client timeout derived from it
+	// cuts the ~1.5s body below.
+	cfg.Timeouts.CoordinatorRequestSeconds = 1
+	client := newCoordinatorClient(cfg)
+
+	if client.Timeout != 0 {
+		t.Fatalf("coordinator client Timeout=%s; it MUST be 0 — a client-level timeout is a hidden "+
+			"second request wall that overrides the router's per-phase deadlines (#760)", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("coordinator transport is %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != cfg.CoordinatorHeaderTimeout() {
+		t.Fatalf("ResponseHeaderTimeout=%s want %s — lowering it to the connect budget reintroduces the #92/#171 regression",
+			transport.ResponseHeaderTimeout, cfg.CoordinatorHeaderTimeout())
+	}
+	if transport.TLSHandshakeTimeout != cfg.CoordinatorConnectTimeout() {
+		t.Fatalf("TLSHandshakeTimeout=%s want the connect budget %s", transport.TLSHandshakeTimeout, cfg.CoordinatorConnectTimeout())
+	}
+	if transport.DialContext == nil {
+		t.Fatal("DialContext is nil; the connect budget is not applied to dialling")
+	}
+
+	start := time.Now()
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("coordinator request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("body read failed after %s: %v — a hidden client-level wall is back", elapsed, err)
+	}
+	if elapsed <= cfg.CoordinatorTimeout() {
+		t.Fatalf("body completed in %s, which is within coordinator_request_seconds (%s) — the test "+
+			"no longer exercises a body read that outlives the legacy wall", elapsed, cfg.CoordinatorTimeout())
+	}
+	if !strings.Contains(string(body), "data: ") {
+		t.Fatalf("unexpected body %q", string(body))
 	}
 }

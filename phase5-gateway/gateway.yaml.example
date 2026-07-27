@@ -95,10 +95,47 @@ timeouts:
   # provider doesn't false-fail with coordinator_unavailable here, while the
   # 300s total bound still fails fast on a truly hung coordinator.
   coordinator_header_timeout_seconds: 300
+  # --- issue #760: per-phase deadlines (streaming path) -------------------
+  # coordinator_request_seconds above is no longer the streaming wall. It is
+  # kept as (a) the deploy-gate C2/C2b anchor and (b) the FLOOR of the derived
+  # streaming ceiling below, so decomposing the wall can only ever let a
+  # request live longer than it does today, never cut one that survives.
+  #
+  # TCP dial + TLS handshake budget. A hung handshake is never legitimate
+  # work. Deliberately NOT applied to response headers — shortening
+  # coordinator_header_timeout_seconds reintroduces the #92 / #171 regression
+  # where a slow-but-valid inference false-failed as coordinator_unavailable.
+  coordinator_connect_seconds: 60
+  # Gateway first byte of request -> coordinator response headers, across the
+  # whole 503/502 retry loop. This is the one real behavior change of #760: a
+  # pre-header hang now fails at 120s instead of 300s.
+  coordinator_admission_seconds: 120
+  # Response headers -> first content-bearing SSE delta. 0 (or unset) derives
+  # min(120, coordinator_header_timeout_seconds); an explicit value must be
+  # <= coordinator_header_timeout_seconds (the transport gives up first).
+  first_token_seconds: 0
+  # Hard streaming safety ceiling, derived from the request's max_tokens:
+  #   clamp(floor + max_tokens * per_token_ms,
+  #         >= coordinator_request_seconds, <= max)
+  # Armed once at gateway first byte of request and never re-armed, so no
+  # amount of upstream progress can push it out. stream_ceiling_max_seconds
+  # is the operator dial for how long one account_concurrency slot can be
+  # held (quotas.account_concurrency x this value in the worst case).
+  stream_ceiling_floor_seconds: 60
+  stream_ceiling_per_token_ms: 250
+  stream_ceiling_max_seconds: 900
+  # Non-streaming requests keep a single flat wall: the coordinator buffers
+  # the whole response, so there is no intermediate phase to observe.
+  # 0 (or unset) inherits coordinator_request_seconds — zero behavior change
+  # on that path, including configs that raised only the legacy wall.
+  non_stream_request_seconds: 0
   streaming_cancel_ms: 500
   # Post-first-byte stream idle timeout. If the coordinator stops producing
   # SSE bytes, terminate with provider_timeout before buyer clients hit their
-  # own shorter request deadlines.
+  # own shorter request deadlines. #760 made this a CONTENT-progress budget:
+  # it is re-based only by a frame carrying generated text, so a provider that
+  # keeps the socket warm with role-only, keepalive, or usage-only frames no
+  # longer holds the stream open indefinitely.
   streaming_idle_ms: 10000
 
 retry_503:
