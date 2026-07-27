@@ -309,10 +309,10 @@ struct ServeCommand: AsyncParsableCommand {
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
     // invalid value. --kv-disk-cache-allow-buyer-keys reaching the resolver as true is
     // rejected (precondition error) and forces the tier off.
-    @Flag(name: .customLong("kv-disk-cache-enabled"), inversion: .prefixedNo, help: "Enable the encrypted KV-cache survival disk tier (SPEC-037 FR-KVP11). Overrides MACPROVIDER_KV_DISK_CACHE_ENABLED and config key kv_disk_cache.enabled. Default off.")
+    @Flag(name: .customLong("kv-disk-cache-enabled"), inversion: .prefixedNo, help: "Enable the encrypted KV-cache survival disk tier. Overrides MACPROVIDER_KV_DISK_CACHE_ENABLED and config key kv_disk_cache.enabled. Default off.")
     var kvDiskCacheEnabled: Bool?
 
-    @Flag(name: .customLong("kv-disk-cache-allow-buyer-keys"), inversion: .prefixedNo, help: "Permit buyer-supplied conversation keys in the KV disk tier. REJECTED in SPEC-037 v0.1 (fails closed, tier disabled). Overrides MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS and config key kv_disk_cache.allow_buyer_keys.")
+    @Flag(name: .customLong("kv-disk-cache-allow-buyer-keys"), inversion: .prefixedNo, help: "Permit buyer-supplied conversation keys in the KV disk tier. Rejected in v0.1 (fails closed, tier disabled). Overrides MACPROVIDER_KV_DISK_CACHE_ALLOW_BUYER_KEYS and config key kv_disk_cache.allow_buyer_keys.")
     var kvDiskCacheAllowBuyerKeys: Bool?
 
     @Option(name: .customLong("kv-disk-cache-dir"), help: "KV disk-tier directory (absolute; leading ~ expanded). Overrides MACPROVIDER_KV_DISK_CACHE_DIR and config key kv_disk_cache.directory.")
