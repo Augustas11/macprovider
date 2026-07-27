@@ -114,6 +114,15 @@ type TelemetryDriftConfig struct {
 	OPoIPassRateWindow       int      `yaml:"opoi_pass_rate_window"`
 	OPoIPassRateThreshold    float64  `yaml:"opoi_pass_rate_threshold"`
 	AlertCooldownSeconds     int      `yaml:"alert_cooldown_s"`
+	// QuarantineMissingBenchmark turns the "no verified benchmark" observation
+	// from a silent pass into a routing quarantine (fail-suspect, not
+	// fail-open). It is a SECOND gate on top of Enabled — enabling
+	// telemetry_drift alone keeps the existing observe-only posture and only
+	// starts emitting the `missing_benchmark` alert. Both flags must be true
+	// before an un-benchmarked provider stops receiving buyer traffic, because
+	// the verified-evidence pipeline (autotune hardware evidence) does not yet
+	// cover the whole fleet and a single-flag rollout could empty the pool.
+	QuarantineMissingBenchmark bool `yaml:"quarantine_missing_benchmark"`
 }
 
 type CoordinatorConfig struct {
@@ -449,7 +458,28 @@ type PoolConfig struct {
 	// routing.failover_timeout_s (which governs replacement selection, not
 	// liveness). Defaults to 90s (3x the 30s heartbeat interval).
 	HeartbeatMissThresholdS int `yaml:"heartbeat_miss_threshold_s"`
-	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
+	// MaxConcurrencyCeiling caps the provider-reported `max_concurrency` (and
+	// the derived slot counts) at ingest (issue #764). Without it a box
+	// reporting 9999 is granted 9999 admission slots and out-ranks the honest
+	// fleet.
+	//
+	// The default 8 is the LARGEST value the honest fleet can produce: the
+	// provider CLI derives max_concurrency from the RAM tier and its top tier
+	// (64GB+) is exactly 8 (phase3-binary/.../ProviderStatus.swift `defaults(
+	// forPhysicalMemoryGB:)` — 8GB→1, 16GB→2, 32GB→4, 64GB+→8). The autotune
+	// recommender is stricter still, refusing to publish a
+	// `max_concurrency_override` above 1 (internal/buyer/autotune_feeds.go),
+	// because these are Macs running MLX where a generation saturates
+	// unified-memory bandwidth and requests effectively serialize. So 8 clamps
+	// nothing a current honest provider reports while making a 9999 claim
+	// inert. Raise it only alongside a provider-side tier that legitimately
+	// exceeds it.
+	//
+	// An over-claiming provider is NOT rejected (it may simply be running an
+	// old or misconfigured build) — it is clamped and counted by the permanent
+	// over-claim tripwire. 0 disables the clamp entirely.
+	MaxConcurrencyCeiling int `yaml:"max_concurrency_ceiling"`
+	WakeGapThresholdS     int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
 	WakeGapThresholdMs      int  `yaml:"wake_gap_threshold_ms"`
@@ -975,6 +1005,7 @@ func Default() Config {
 			HeartbeatIntervalS:      30,
 			DisconnectGracePeriodS:  30,
 			HeartbeatMissThresholdS: 90,
+			MaxConcurrencyCeiling:   8,
 			WakeGapThresholdS:       120,
 			WarmupFallbackS:         60,
 			WarmupGateEnabled:       true,
@@ -1699,6 +1730,11 @@ func (c Config) Validate() error {
 	if c.Pool.WarmupFallbackS <= 0 {
 		return fmt.Errorf("pool warmup_fallback_s must be > 0")
 	}
+	// 0 is the explicit "no ceiling" escape hatch (pre-clamp behavior);
+	// negatives are always an operator typo.
+	if c.Pool.MaxConcurrencyCeiling < 0 {
+		return fmt.Errorf("pool.max_concurrency_ceiling must be >= 0 (0 disables the clamp)")
+	}
 	if c.Pool.WarmupGateEnabled && (c.Pool.WarmupGateTimeoutS <= 0 || c.Pool.WarmupGateMaxTokens <= 0) {
 		return fmt.Errorf("pool warmup gate settings must be > 0 when enabled")
 	}
@@ -2044,6 +2080,13 @@ func (c Config) validateProofOfWeights() error {
 		}
 	}
 	if !p.TelemetryDrift.Enabled {
+		// The quarantine is a second gate ON TOP of the drift evaluator; it
+		// cannot run without it. Rejecting the combination here (rather than
+		// silently ignoring it) keeps a half-configured overlay from reading
+		// as "enforcement on".
+		if p.TelemetryDrift.QuarantineMissingBenchmark {
+			return fmt.Errorf("proof_of_weights.telemetry_drift.quarantine_missing_benchmark requires telemetry_drift.enabled")
+		}
 		return nil
 	}
 	if p.AutotuneEvidenceTTLDays <= 0 {

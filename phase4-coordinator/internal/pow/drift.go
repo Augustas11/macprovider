@@ -16,6 +16,13 @@ const EventTelemetryDriftDetected = "pow_telemetry_drift_detected"
 
 const defaultTPSMinRequestsWindow = 2
 
+// SignalMissingBenchmark is the issue-#765 suspect bucket: the provider has no
+// verified autotune benchmark, so the TPS and artifact-drift gates below have
+// no baseline to compare against. Before #765 that state exited the evaluator
+// silently (fail-open) — it is now a named signal and, when
+// QuarantineMissingBenchmark is set, a routing quarantine.
+const SignalMissingBenchmark = "missing_benchmark"
+
 type TelemetryDriftConfig struct {
 	Enabled                  bool
 	TPSRatioThreshold        float64
@@ -26,7 +33,30 @@ type TelemetryDriftConfig struct {
 	OPoIPassRateWindow       int
 	OPoIPassRateThreshold    float64
 	AlertCooldown            time.Duration
+	// QuarantineMissingBenchmark escalates SignalMissingBenchmark from an
+	// observe-only alert to BenchmarkVerdictMissing, which the caller applies
+	// as a routing quarantine. Default false so the evaluator keeps its
+	// existing observe posture until an operator opts in.
+	QuarantineMissingBenchmark bool
 }
+
+// BenchmarkVerdict is the evaluator's per-heartbeat opinion on whether the
+// provider has a verified-benchmark baseline. It is deliberately tri-state: an
+// evidence-store failure MUST NOT read as "no benchmark", or a database blip
+// would quarantine the whole fleet.
+type BenchmarkVerdict int
+
+const (
+	// BenchmarkVerdictUnknown — evaluator disabled, quarantine gate off, or the
+	// evidence lookup errored. The caller leaves the quarantine flag as-is.
+	BenchmarkVerdictUnknown BenchmarkVerdict = iota
+	// BenchmarkVerdictVerified — a verified benchmark resolved for the
+	// provider's live model. The caller clears any quarantine.
+	BenchmarkVerdictVerified
+	// BenchmarkVerdictMissing — the provider has no verified benchmark. The
+	// caller quarantines it until one exists.
+	BenchmarkVerdictMissing
+)
 
 type Alert struct {
 	Signal               string
@@ -105,23 +135,74 @@ func ResolveVerifiedBenchmark(catalog *autotune.Catalog, evidence autotune.Verif
 	return autotune.VerifiedBenchmark{}, false
 }
 
+// EvaluateHeartbeat preserves the pre-#765 alert-only contract for callers that
+// do not act on the benchmark verdict.
 func (e *Evaluator) EvaluateHeartbeat(ctx context.Context, provider pool.Provider) []Alert {
+	alerts, _ := e.EvaluateHeartbeatWithVerdict(ctx, provider)
+	return alerts
+}
+
+// EvaluateHeartbeatWithVerdict returns the drift alerts plus the issue-#765
+// verified-benchmark verdict.
+//
+// The verdict is computed from the SAME evidence lookup the alerts use, so the
+// quarantine costs no extra evidence-store round trip. Note the two distinct
+// "no benchmark" paths, both of which used to exit silently: the provider may
+// have no verified evidence AT ALL (LatestVerified !ok), or evidence that
+// carries no benchmark for the model it is currently serving
+// (ResolveVerifiedBenchmark false). Both are suspect; a store ERROR is not.
+func (e *Evaluator) EvaluateHeartbeatWithVerdict(ctx context.Context, provider pool.Provider) ([]Alert, BenchmarkVerdict) {
 	if e == nil || !e.cfg.Enabled {
-		return nil
+		return nil, BenchmarkVerdictUnknown
 	}
 	evidence, ok, err := e.evidence.LatestVerified(ctx, provider.ProviderID, e.evidenceTTL)
-	if err != nil || !ok {
-		return nil
+	if err != nil {
+		// Infrastructure failure, not a provider claim. Fail neutral: keep the
+		// previous verdict rather than quarantining (or releasing) on a blip.
+		return nil, BenchmarkVerdictUnknown
 	}
-	benchmark, hasBenchmark := ResolveVerifiedBenchmark(e.catalog, evidence, provider.ModelID)
+	var (
+		benchmark    autotune.VerifiedBenchmark
+		hasBenchmark bool
+	)
+	if ok {
+		benchmark, hasBenchmark = ResolveVerifiedBenchmark(e.catalog, evidence, provider.ModelID)
+	}
 	var alerts []Alert
-	if alert, ok := e.evaluateTPS(provider, benchmark, hasBenchmark); ok {
-		alerts = append(alerts, alert)
+	if !hasBenchmark {
+		alerts = append(alerts, Alert{
+			Signal:     SignalMissingBenchmark,
+			ProviderID: provider.ProviderID,
+			AssignedID: provider.AssignedID,
+			ModelID:    provider.ModelID,
+		})
 	}
-	if alert, ok := e.evaluateHash(provider, benchmark, hasBenchmark); ok {
-		alerts = append(alerts, alert)
+	if ok {
+		// Unchanged pre-#765 behavior: the TPS and hash gates run only when the
+		// provider has verified evidence. A provider with no evidence at all
+		// reaches only the missing-benchmark signal above, exactly as it
+		// previously reached nothing.
+		if alert, fired := e.evaluateTPS(provider, benchmark, hasBenchmark); fired {
+			alerts = append(alerts, alert)
+		}
+		if alert, fired := e.evaluateHash(provider, benchmark, hasBenchmark); fired {
+			alerts = append(alerts, alert)
+		}
 	}
-	return e.filterCooldown(alerts)
+	return e.filterCooldown(alerts), e.benchmarkVerdict(hasBenchmark)
+}
+
+// benchmarkVerdict keeps the enforcement decision behind the second config
+// gate. With the gate off the caller is told nothing changed, so the flag it
+// owns is never set and routing is byte-for-byte the pre-#765 behavior.
+func (e *Evaluator) benchmarkVerdict(hasBenchmark bool) BenchmarkVerdict {
+	if !e.cfg.QuarantineMissingBenchmark {
+		return BenchmarkVerdictUnknown
+	}
+	if hasBenchmark {
+		return BenchmarkVerdictVerified
+	}
+	return BenchmarkVerdictMissing
 }
 
 func (e *Evaluator) RecordModelClassCanary(provider pool.Provider, passed bool) []Alert {
@@ -290,21 +371,22 @@ func ParseHashAlertStatuses(values []string) ([]pool.HashStatus, error) {
 	return out, nil
 }
 
-func TelemetryDriftConfigFrom(enabled bool, tpsRatio, tpsMinAbsolute float64, tpsMinRequestsWindow int, hashStatuses []string, hashArtifactDrift bool, opoiWindow int, opoiThreshold float64, cooldownSeconds int) (TelemetryDriftConfig, error) {
+func TelemetryDriftConfigFrom(enabled bool, tpsRatio, tpsMinAbsolute float64, tpsMinRequestsWindow int, hashStatuses []string, hashArtifactDrift bool, opoiWindow int, opoiThreshold float64, cooldownSeconds int, quarantineMissingBenchmark bool) (TelemetryDriftConfig, error) {
 	statuses, err := ParseHashAlertStatuses(hashStatuses)
 	if err != nil {
 		return TelemetryDriftConfig{}, err
 	}
 	cooldown := time.Duration(cooldownSeconds) * time.Second
 	return TelemetryDriftConfig{
-		Enabled:                  enabled,
-		TPSRatioThreshold:        tpsRatio,
-		TPSMinAbsolute:           tpsMinAbsolute,
-		TPSMinRequestsWindow:     tpsMinRequestsWindow,
-		HashAlertOnStatus:        statuses,
-		HashAlertOnArtifactDrift: hashArtifactDrift,
-		OPoIPassRateWindow:       opoiWindow,
-		OPoIPassRateThreshold:    opoiThreshold,
-		AlertCooldown:            cooldown,
+		QuarantineMissingBenchmark: quarantineMissingBenchmark,
+		Enabled:                    enabled,
+		TPSRatioThreshold:          tpsRatio,
+		TPSMinAbsolute:             tpsMinAbsolute,
+		TPSMinRequestsWindow:       tpsMinRequestsWindow,
+		HashAlertOnStatus:          statuses,
+		HashAlertOnArtifactDrift:   hashArtifactDrift,
+		OPoIPassRateWindow:         opoiWindow,
+		OPoIPassRateThreshold:      opoiThreshold,
+		AlertCooldown:              cooldown,
 	}, nil
 }

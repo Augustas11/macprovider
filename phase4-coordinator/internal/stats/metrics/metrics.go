@@ -71,6 +71,11 @@ type Metrics struct {
 	CredentialBootstrapTotal     *prometheus.CounterVec
 	ReferralEventTotal           *prometheus.CounterVec
 	ProviderConnectionEventTotal *prometheus.CounterVec
+	// CapacityOverClaimTotal is the issue-#764 over-claim tripwire. It is
+	// PERMANENT by construction: a prometheus counter never decreases and is
+	// never reset for the process lifetime, and the coordinator increments it
+	// on every offending frame rather than once per provider.
+	CapacityOverClaimTotal *prometheus.CounterVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -157,6 +162,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of provider hash status transitions to hash_mismatch (Proof of Weights W1 observability).",
 			},
 		),
+		CapacityOverClaimTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "provider_capacity_over_claim_total",
+				Help: "Permanent count of provider-reported capacity claims above pool.max_concurrency_ceiling, by ingest phase.",
+			},
+			[]string{"phase"},
+		),
 		CredentialBootstrapTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "credential_bootstrap_total",
@@ -242,6 +254,16 @@ func (m *Metrics) IncModelHashMismatch() {
 		return
 	}
 	m.ModelHashMismatchTotal.Inc()
+}
+
+// IncCapacityOverClaim records one provider capacity claim above the operator
+// ceiling. phase is a closed set ("hello" | "heartbeat"); no
+// provider-controlled string is ever used as a label.
+func (m *Metrics) IncCapacityOverClaim(phase string) {
+	if m == nil || m.CapacityOverClaimTotal == nil {
+		return
+	}
+	m.CapacityOverClaimTotal.WithLabelValues(phase).Inc()
 }
 
 func (m *Metrics) IncCredentialBootstrap(outcome string) {

@@ -9,9 +9,9 @@ built) live in `harness/` and are named `TestSeam*`.
 |---|---|---|
 | 1 · settlement / deadline | **FAIL** | one flat request wall-clock; two money-integrity gaps |
 | 2 · cache-tenant-isolation | **PASS by construction** | server-authored account-HMAC scope; KV in-memory only |
-| 3 · backend-rollout-safety | **PASS (1 gap)** | strong flags/canary/self-update; perf telemetry not backend-segmented |
+| 3 · backend-rollout-safety | **PASS** (gap closed, #764) | strong flags/canary/self-update; perf telemetry now segmented by `binary_version` on `/poolz` |
 | 4 · attestation-honesty | **FAIL (client-facing)** | prose honest, but stat surfaces over-claim hardware trust |
-| 5 · fleet-version-floor | **PASS (2 gaps)** | blocks incompatible/known-bad builds; capacity trusted blindly |
+| 5 · fleet-version-floor | **PASS (1 gap)** | blocks incompatible/known-bad builds; capacity now clamped at ingest (#764); version floor still unset in prod (P2-2) |
 
 Fundamentals are strong (cache isolation, rollout discipline, signed-catalog admission,
 honest prose). Exposure concentrates in two client-facing FAILs (settlement flat-wall,
@@ -76,15 +76,66 @@ row — the buyer already got a committed 200. Tokens delivered, nobody billed, 
 sealed on terminal, with a startup recovery scan. Reservation-before-dispatch already exists.
 
 **P1-3 · Capacity trusted blindly; no clamp, no tripwire** — `ranking`/`supply` (closes a slice-3 + slice-5 gap)
-Provider-reported `max_concurrency` is granted verbatim (`phase4-coordinator/internal/ws/server.go:2249`,
-`:4196`, `relay.go:423`); the only drift signal is observe-only + default-off (`pow/drift.go:218`,
-`config.go:104`). A stale/over-claiming build serves silently. **Fix:** `min(hello, ceiling)` capacity
-clamp + a permanent over-claim tripwire counter on the heartbeat path, and segment TTFT/TPS rollups by
-`binary_version`/backend (`stats/handlers.go:78`). Keep the verified-benchmark baseline (`drift.go:151`).
+**FIXED coordinator-side (issue #764).** Nothing gateway-side: the gateway never reads
+provider capacity — the claim enters at the coordinator's provider-WS ingest and is consumed
+by coordinator routing and relay admission, so the clamp belongs there and there only.
+Provider-reported `max_concurrency` was granted verbatim (`phase4-coordinator/internal/ws/server.go:2249`,
+`:4196`, `relay.go:423`); the only drift signal was observe-only + default-off (`pow/drift.go:218`,
+`config.go:104`). A stale/over-claiming build served silently.
+**Shipped:**
+- `pool.max_concurrency_ceiling` (default **8**, `0` = disabled) — sized off the Mac/MLX reality
+  where requests serialize and the autotune recommender refuses `max_concurrency_override > 1`.
+- `pool.ClampCapacity` (`internal/pool/capacity_clamp.go`) applies `min(reported, ceiling)` and
+  keeps slots coherent: `slots_total <= clamped max`, `used = total - free` carried across the
+  clamp, `free` never negative and never above total.
+- Applied at **all three** provider-controlled ingest points, upstream of `pool.Registry`:
+  hello/registration, heartbeat, and `state_update` (the third one was not in the original
+  finding — an unclamped `state_update` would have restored inflated free slots right after a
+  clamped heartbeat). `relay.go` admission reads the clamped pool entry, so it needs no change.
+- Permanent tripwire `provider_capacity_over_claim_total{phase}` (prometheus counter; monotonic
+  for the process lifetime, incremented on **every** offending frame) + a
+  `provider_capacity_over_claim` warn log with provider_id / reported / ceiling / effective.
+- TTFT/TPS segmentation: the SPEC-017 rollup has no TTFT/TPS aggregate to extend (its overview
+  schema is a locked 14-field counter set with no latency), so the segmentation is additive on
+  the live snapshot surface — a `by_binary_version` block in the `/poolz` summary carrying
+  per-version provider/slot counts, canary-measured TTFT (avg + max) and sustained TPS, and the
+  provider-reported TPS estimate alongside. Fed by new
+  `pool.Registry.RecordCanaryLatency`, the coordinator's only live latency measurement.
+**Residual:** the segmentation covers canary-probed providers only — a provider that has never
+been probed (or a deployment with `pool.canary_enabled` off) contributes to the counts but not
+the latency averages; `*_samples` fields make that explicit rather than letting a zero read as
+"fast". Buyer-relay TTFT is still not timed into the pool. `/poolz` is operator-authenticated,
+so the segmentation is not a public surface.
+*Tripwire tests:* `internal/pool/capacity_clamp_test.go`, `internal/ws/capacity_clamp_test.go`,
+`internal/ws/poolz_version_segments_test.go`.
 
 **P1-4 · Runtime perf gate fails open on absent benchmark** — `ranking`
-`pow/drift.go` skips the TPS/hash check when `!hasBenchmark` — un-benchmarked providers are silently
-un-gated. **Fix:** treat "no verified benchmark" as quarantine-until-proven (absence = suspect).
+**FIXED coordinator-side (issue #765), shipped dormant.** Nothing gateway-side: routing
+eligibility is a coordinator concept. `pow/drift.go` skipped the TPS/hash check when
+`!hasBenchmark` — un-benchmarked providers were silently un-gated.
+**Shipped:** absence of a verified benchmark is now a distinct suspect bucket.
+- `pow.EvaluateHeartbeatWithVerdict` returns a tri-state `BenchmarkVerdict`
+  (Verified / Missing / Unknown) from the SAME evidence lookup the alerts already do — no extra
+  evidence-store round trip. Both silent-exit paths are covered: no verified evidence at all,
+  and evidence carrying no benchmark for the model actually being served.
+- A store **error** stays `Unknown` on purpose. Fail-suspect applies to provider claims, not to
+  infrastructure: a database blip must not quarantine the fleet.
+- Enforcement reuses the existing gating mechanism rather than inventing one — a
+  `BenchmarkQuarantined` flag on `pool.Provider` checked by `RoutingEligible()` /
+  `ServingCapable()`, exactly how the other suspect buckets (`AuthSelfMinted`, legacy catalog
+  admission, `PendingReceiptPubkey`) are expressed. No new state machine, no canary/breaker hold
+  collision.
+- **Config gate:** `proof_of_weights.telemetry_drift.quarantine_missing_benchmark`, default
+  false, and `Validate()` rejects it without `telemetry_drift.enabled` (itself default-off). Both
+  flags must be set before an un-benchmarked provider stops receiving buyer traffic, because the
+  verified-evidence pipeline does not yet cover the whole fleet. With the gate off the verdict is
+  always `Unknown` and routing is byte-for-byte pre-#765 — pinned by a unit test.
+**Residual:** enabling the gate on the current fleet would quarantine every provider without
+verified autotune hardware evidence; measuring that fraction on the live pool is a prerequisite
+to the rollout and has not been done. Release is per-heartbeat, so a provider that produces a
+benchmark is un-quarantined on its next heartbeat with no operator action.
+*Tripwire tests:* `internal/pow/drift_missing_benchmark_test.go`,
+`internal/pool/benchmark_quarantine_test.go`, `internal/ws/poolz_version_segments_test.go`.
 
 ### P2 — debt
 
@@ -125,6 +176,9 @@ timing side-channel. **Fix:** reconcile spec vs overlay; write the risk-acceptan
 
 1. **P0-1** + **P0-3** — two-line changes, highest stakes-per-character.
 2. **P0-2** — the flat-wall decomposition.
-3. **P1-3** — one clamp+tripwire closes the seam-3 and seam-5 gaps together.
+3. ~~**P1-3**~~ — **DONE (#764)**: one clamp+tripwire closed the seam-3 and seam-5 gaps together.
+   **P1-4** landed with it (#765) but ships dormant behind
+   `telemetry_drift.quarantine_missing_benchmark`; enabling it needs a live-fleet measurement of
+   how many providers lack verified benchmarks.
 4. **P1-1 / P1-2** — money integrity before real buyer volume.
 5. P2 as debt burn-down.
