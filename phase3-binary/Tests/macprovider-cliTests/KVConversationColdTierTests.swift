@@ -740,12 +740,14 @@ final class KVConversationColdTierTests: XCTestCase {
             "eligible-path KVCacheSimple serializes → captureSnapshot non-nil (the cast a RotatingKVCache fails)")
     }
 
-    /// PRIMARY SERVE-SITE GUARD (headless, ungated) — pins the exact `newCache`
-    /// cache-class invariant the eligible branch depends on, driven through a REAL
-    /// `LanguageModel.newCache`. A regression that reverts the eligible branch
-    /// (ModelRuntime.swift:1399/1860) to `newCache(parameters:)` — keeping `maxKVSize`
-    /// — would make `newCache` build a `RotatingKVCache`, `captureSnapshot`'s
-    /// `as? [KVCacheSimple]` cast fail, and the tier silently persist nothing. The fake
+    /// PRIMARY SERVE-SITE GUARD (headless, ungated) — pins the production serve
+    /// cache-allocation helper `ModelRuntime.serveCache(...)` that BOTH serve sites
+    /// (non-streaming ModelRuntime.swift + streaming) now delegate to as one-line calls.
+    /// It drives a REAL `LanguageModel.newCache` and asserts eligible → `[KVCacheSimple]`
+    /// (so `captureSnapshot`'s `as? [KVCacheSimple]` cast can serialize it) and
+    /// non-eligible → `RotatingKVCache`. Because the serve sites are trivial delegations,
+    /// a regression that drops the eligibility wrapper (reverting to
+    /// `newCache(parameters:)`) must change `serveCache` itself — caught here. The fake
     /// model uses the STOCK `KVCacheDimensionProvider` newCache (the same default real
     /// catalog models such as Llama/Qwen3 inherit), so the class selection here is the
     /// production one. Runs in normal CI: `newCache` is pure allocation, no Metal.
@@ -755,20 +757,18 @@ final class KVConversationColdTierTests: XCTestCase {
             maxTokens: 128, maxKVSize: 4096, kvBits: nil,
             temperature: 0.0, topP: 1.0, prefillStepSize: 512)
 
-        // Eligible branch: cacheParameters(forceSimpleKV:true) drops maxKVSize → the
-        // params the eligible serve site passes → newCache builds [KVCacheSimple].
-        let eligibleCaches = model.newCache(
-            parameters: ModelRuntime.cacheParameters(base, forceSimpleKV: true))
+        // Eligible branch: serveCache(eligible:true) drops maxKVSize via cacheParameters
+        // → the production serve allocation builds [KVCacheSimple].
+        let eligibleCaches = ModelRuntime.serveCache(model: model, baseParameters: base, eligible: true)
         XCTAssertNotNil(eligibleCaches as? [KVCacheSimple],
-            "eligible serve newCache must build [KVCacheSimple] so captureSnapshot's cast succeeds")
+            "eligible serveCache must build [KVCacheSimple] so captureSnapshot's cast succeeds")
         XCTAssertEqual(eligibleCaches.count, 3, "one cache per layer")
 
-        // Non-eligible branch keeps maxKVSize → RotatingKVCache (non-simple): the cast a
+        // Non-eligible branch keeps maxKVSize → RotatingKVCache (non-simple): the cast
         // captureSnapshot rejects, which is exactly why the eligible branch must differ.
-        let buyerCaches = model.newCache(
-            parameters: ModelRuntime.cacheParameters(base, forceSimpleKV: false))
+        let buyerCaches = ModelRuntime.serveCache(model: model, baseParameters: base, eligible: false)
         XCTAssertNil(buyerCaches as? [KVCacheSimple],
-            "non-eligible serve newCache keeps maxKVSize → a rotating (non-simple) cache")
+            "non-eligible serveCache keeps maxKVSize → a rotating (non-simple) cache")
         XCTAssertTrue(buyerCaches.allSatisfy { $0 is RotatingKVCache },
             "non-eligible params must select RotatingKVCache")
     }

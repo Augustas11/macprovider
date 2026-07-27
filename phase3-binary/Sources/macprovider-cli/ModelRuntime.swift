@@ -495,6 +495,21 @@ actor ModelRuntime: ModelRuntimeServing {
         return p
     }
 
+    /// SPEC-037 FR-KVP1 (MEDIUM-B) — the single serve cache-allocation used at BOTH
+    /// serve sites (non-streaming + streaming). Builds the fresh serve `newCache`,
+    /// forcing a `KVCacheSimple` for tier-eligible requests (via `cacheParameters`) so
+    /// `captureSnapshot`'s `as? [KVCacheSimple]` cast can serialize it, and keeping the
+    /// rotating cache for every other request. Extracted so a serve-site regression that
+    /// drops the eligibility wrapper (reverting to `newCache(parameters:)`) must change
+    /// THIS helper — pinned by `testEligibleServeNewCacheProducesKVCacheSimple` — rather
+    /// than passing green via an inlined change at a call site. The serve sites are
+    /// one-line delegations; behavior is identical to the previous inline allocation.
+    nonisolated static func serveCache(
+        model: any LanguageModel, baseParameters: GenerateParameters, eligible: Bool
+    ) -> [KVCache] {
+        model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: eligible))
+    }
+
     private nonisolated static func harmonyTerminalPreservingContext(
         from context: ModelContext,
         modelID: String
@@ -1395,8 +1410,9 @@ actor ModelRuntime: ModelRuntimeServing {
                                 // rotating cache for everything else. TokenIterator still gets
                                 // the original `parameters` (its maxKVSize is ignored once the
                                 // cache is passed explicitly).
-                                kvCache = generationContext.model.newCache(
-                                    parameters: Self.cacheParameters(parameters, forceSimpleKV: coldContext?.eligible == true))
+                                kvCache = Self.serveCache(
+                                    model: generationContext.model, baseParameters: parameters,
+                                    eligible: coldContext?.eligible == true)
                                 iteratorInput = lmInput
                             }
 
@@ -1856,8 +1872,9 @@ actor ModelRuntime: ModelRuntimeServing {
                         // SPEC-037 FR-KVP1: same tier-eligible → KVCacheSimple selection as
                         // the non-streaming path (see cacheParameters). TokenIterator below
                         // keeps the original `parameters`.
-                        kvCache = generationContext.model.newCache(
-                            parameters: Self.cacheParameters(parameters, forceSimpleKV: coldContext?.eligible == true))
+                        kvCache = Self.serveCache(
+                            model: generationContext.model, baseParameters: parameters,
+                            eligible: coldContext?.eligible == true)
                         iteratorInput = lmInput
                     }
 
@@ -2153,7 +2170,12 @@ actor ModelRuntime: ModelRuntimeServing {
                 // silently at attach time. Log-only: the per-request observable skip in
                 // captureSnapshot still covers correctness.
                 guard let caches = kvCache as? [KVCacheSimple] else {
-                    let className = kvCache.first.map { String(describing: type(of: $0)) } ?? "empty"
+                    // Report the FIRST layer that is NOT KVCacheSimple (heterogeneous
+                    // arrays whose layer 0 is simple but a later layer is not would
+                    // otherwise be misreported as "KVCacheSimple"); fall back to the
+                    // first layer's class, or "empty".
+                    let className = (kvCache.first(where: { !($0 is KVCacheSimple) }) ?? kvCache.first)
+                        .map { String(describing: type(of: $0)) } ?? "empty"
                     Self.logColdTierUnsupportedCacheClass(servedModelID: servedModelID, cacheClass: className)
                     return nil
                 }

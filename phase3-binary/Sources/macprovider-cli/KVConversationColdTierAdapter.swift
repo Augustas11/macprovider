@@ -329,7 +329,12 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         // `disk_write_skipped(unsupported_cache_class)` carrying the runtime class
         // name, then still fail safe to miss (return nil) as before.
         guard let caches = layers.layers as? [KVCacheSimple] else {
-            let className = layers.layers.first.map { String(describing: type(of: $0)) } ?? "empty"
+            // Report the FIRST layer that is NOT KVCacheSimple: for a heterogeneous
+            // array whose layer 0 IS KVCacheSimple but a later layer fails the cast,
+            // reporting layer 0's class would be misleadingly "KVCacheSimple". Fall
+            // back to the first layer's class, or "empty".
+            let className = (layers.layers.first(where: { !($0 is KVCacheSimple) }) ?? layers.layers.first)
+                .map { String(describing: type(of: $0)) } ?? "empty"
             Task { [store] in await store.noteUnsupportedCacheClassSkipped(rawKey: conversationKey, cacheClass: className) }
             return nil
         }
