@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestQuotaReaperDefaults(t *testing.T) {
@@ -247,7 +248,7 @@ func TestPhaseDeadlineDefaults(t *testing.T) {
 		{"stream_ceiling_floor_seconds", cfg.Timeouts.StreamCeilingFloorSeconds, 60},
 		{"stream_ceiling_per_token_ms", cfg.Timeouts.StreamCeilingPerTokenMS, 250},
 		{"stream_ceiling_max_seconds", cfg.Timeouts.StreamCeilingMaxSeconds, 900},
-		{"non_stream_request_seconds", cfg.Timeouts.NonStreamRequestSeconds, 300},
+		{"non_stream_request_seconds", cfg.Timeouts.NonStreamRequestSeconds, 0},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s=%d want %d", tc.name, tc.got, tc.want)
@@ -258,6 +259,21 @@ func TestPhaseDeadlineDefaults(t *testing.T) {
 	if cfg.NonStreamRequestTimeout() != cfg.CoordinatorTimeout() {
 		t.Errorf("NonStreamRequestTimeout=%s must equal the legacy CoordinatorTimeout=%s (no behavior change on the non-streaming path)",
 			cfg.NonStreamRequestTimeout(), cfg.CoordinatorTimeout())
+	}
+	// Unset non_stream_request_seconds must INHERIT an operator-raised legacy
+	// wall, not silently regress it to the compiled default (#760 audit,
+	// architect lane: a pre-#760 config setting only
+	// coordinator_request_seconds: 600 must keep 600s non-streaming).
+	inherited := cfg
+	inherited.Timeouts.CoordinatorRequestSeconds = 600
+	if got := inherited.NonStreamRequestTimeout(); got != 600*time.Second {
+		t.Errorf("NonStreamRequestTimeout with only coordinator_request_seconds raised = %s, want 600s (inherit)", got)
+	}
+	explicit := cfg
+	explicit.Timeouts.CoordinatorRequestSeconds = 600
+	explicit.Timeouts.NonStreamRequestSeconds = 300
+	if got := explicit.NonStreamRequestTimeout(); got != 300*time.Second {
+		t.Errorf("explicit non_stream_request_seconds must win over inheritance, got %s want 300s", got)
 	}
 	if err := validTestConfig().Validate(); err != nil {
 		t.Fatalf("default phase budgets must satisfy Validate(): %v", err)

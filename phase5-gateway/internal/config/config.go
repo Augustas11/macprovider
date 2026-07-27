@@ -152,7 +152,9 @@ type TimeoutsConfig struct {
 	StreamCeilingMaxSeconds   int `yaml:"stream_ceiling_max_seconds"`
 	// NonStreamRequestSeconds is the flat wall retained for non-streaming
 	// requests, where the coordinator buffers the whole response and there
-	// are no intermediate phases to observe.
+	// are no intermediate phases to observe. 0 (the default) inherits
+	// coordinator_request_seconds, so a pre-#760 config that raised only the
+	// legacy wall keeps its non-streaming bound unchanged.
 	NonStreamRequestSeconds int `yaml:"non_stream_request_seconds"`
 	StreamingCancelMS       int `yaml:"streaming_cancel_ms"`
 	StreamingIdleMS         int `yaml:"streaming_idle_ms"`
@@ -259,7 +261,7 @@ func Default() Config {
 			StreamCeilingFloorSeconds:   60,
 			StreamCeilingPerTokenMS:     250,
 			StreamCeilingMaxSeconds:     900,
-			NonStreamRequestSeconds:     300,
+			NonStreamRequestSeconds:     0, // inherit coordinator_request_seconds
 			StreamingCancelMS:           500,
 			StreamingIdleMS:             10000,
 		},
@@ -494,7 +496,7 @@ func (c Config) Validate() error {
 	if c.Timeouts.CoordinatorConnectSeconds <= 0 || c.Timeouts.CoordinatorAdmissionSeconds <= 0 ||
 		c.Timeouts.FirstTokenSeconds <= 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
 		c.Timeouts.StreamCeilingPerTokenMS <= 0 || c.Timeouts.StreamCeilingMaxSeconds <= 0 ||
-		c.Timeouts.NonStreamRequestSeconds <= 0 {
+		c.Timeouts.NonStreamRequestSeconds < 0 {
 		return fmt.Errorf("timeouts phase budgets must be positive")
 	}
 	if c.Timeouts.CoordinatorAdmissionSeconds < c.Timeouts.CoordinatorConnectSeconds {
@@ -520,8 +522,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("timeouts.stream_ceiling_max_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — the per-phase streaming ceiling must never be shorter than the flat wall it replaces",
 			c.Timeouts.StreamCeilingMaxSeconds, c.Timeouts.CoordinatorRequestSeconds)
 	}
-	if c.Timeouts.NonStreamRequestSeconds < c.Timeouts.CoordinatorConnectSeconds {
-		return fmt.Errorf("timeouts.non_stream_request_seconds (%d) must be >= timeouts.coordinator_connect_seconds (%d)",
+	if c.Timeouts.NonStreamRequestSeconds > 0 && c.Timeouts.NonStreamRequestSeconds < c.Timeouts.CoordinatorConnectSeconds {
+		return fmt.Errorf("timeouts.non_stream_request_seconds (%d) must be >= timeouts.coordinator_connect_seconds (%d), or 0 to inherit coordinator_request_seconds",
 			c.Timeouts.NonStreamRequestSeconds, c.Timeouts.CoordinatorConnectSeconds)
 	}
 	if !c.Settlement.ReconcileEnabled {
@@ -689,7 +691,12 @@ func (c Config) FirstTokenTimeout() time.Duration {
 }
 
 // NonStreamRequestTimeout is the flat wall retained for non-streaming
-// requests (unchanged behavior: same 300s default as the legacy wall).
+// requests. Unset (0) inherits CoordinatorTimeout so a pre-#760 config that
+// raised only coordinator_request_seconds keeps its non-streaming bound
+// (#760 audit, architect lane).
 func (c Config) NonStreamRequestTimeout() time.Duration {
+	if c.Timeouts.NonStreamRequestSeconds <= 0 {
+		return c.CoordinatorTimeout()
+	}
 	return time.Duration(c.Timeouts.NonStreamRequestSeconds) * time.Second
 }

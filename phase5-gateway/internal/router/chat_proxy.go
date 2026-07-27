@@ -428,6 +428,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	timing.markCoordinatorStart(s.now())
 	resp, retryExhausted, priorProviderDispatch, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
+	if err == nil && resp != nil && structuredStreaming {
+		// #760 audit (code lane): the retry loop returns its last retryable
+		// 502/503 with err == nil when the admission budget expires during
+		// backoff. A structured-streaming buyer's contract is an SSE stream,
+		// so passing that JSON error through would bypass the structured
+		// provider_timeout terminal. Convert here, covering every stale-resp
+		// return path in the loop at once.
+		if _, phaseExpired := phaseDeadlineExceeded(upCtx); phaseExpired {
+			_ = resp.Body.Close()
+			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
+				return
+			}
+			writeStructuredOutputTimeoutSSE(w, requestID(r))
+			return
+		}
+	}
 	if err != nil {
 		// #760: upCtx is now cancel-with-cause, so upCtx.Err() reports
 		// context.Canceled on an expired phase budget and the legacy
@@ -2303,11 +2319,17 @@ func countGeneratedDeltaStrings(key string, value any) int64 {
 }
 
 func countDeltaStringKey(key string) bool {
+	// Allowlist of delta keys that carry genuinely generated output. This
+	// both bounds billing estimation to real content and — since #760 —
+	// gates the streaming content-progress deadline, so it must not be a
+	// denylist: an unknown key (e.g. delta:{"foo":"x"}) would otherwise let
+	// a provider reset the progress timer and hold a slot to the stream
+	// ceiling without emitting anything a client consumes.
 	switch strings.ToLower(key) {
-	case "", "role", "id", "type", "name":
-		return false
-	default:
+	case "content", "reasoning_content", "refusal", "arguments", "text":
 		return true
+	default:
+		return false
 	}
 }
 

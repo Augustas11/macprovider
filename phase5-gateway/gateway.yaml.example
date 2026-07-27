@@ -124,9 +124,10 @@ timeouts:
   stream_ceiling_per_token_ms: 250
   stream_ceiling_max_seconds: 900
   # Non-streaming requests keep a single flat wall: the coordinator buffers
-  # the whole response, so there is no intermediate phase to observe. Same
-  # 300s as the legacy wall — zero behavior change on that path.
-  non_stream_request_seconds: 300
+  # the whole response, so there is no intermediate phase to observe.
+  # 0 (or unset) inherits coordinator_request_seconds — zero behavior change
+  # on that path, including configs that raised only the legacy wall.
+  non_stream_request_seconds: 0
   streaming_cancel_ms: 500
   # Post-first-byte stream idle timeout. If the coordinator stops producing
   # SSE bytes, terminate with provider_timeout before buyer clients hit their

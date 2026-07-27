@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -241,6 +242,109 @@ func TestHeartbeatOnlyStreamDiesAtProgressIdle(t *testing.T) {
 	}
 	if outcome, _ := usageEventOutcome(t, dbPath, "acct_heartbeat"); outcome != "provider_timeout" {
 		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestUnknownDeltaKeyDoesNotCountAsProgress pins the #760 security-lane fix:
+// the delta classifier is an ALLOWLIST of generated-output keys, so a provider
+// emitting frames with unknown keys (delta:{"foo":"x"}) cannot reset the
+// content-progress timer, disarm the first-token phase, or hold a slot to the
+// stream ceiling while shipping nothing a client consumes.
+func TestUnknownDeltaKeyDoesNotCountAsProgress(t *testing.T) {
+	client := seamStreamingUpstreamCtx(endlessFrameStream(40*time.Millisecond,
+		`data: {"id":"c","choices":[{"delta":{"foo":"x"}}]}`+"\n\n"))
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 400
+		// Every other clock is left long: only the content-progress budget
+		// can end this stream.
+		cfg.Timeouts.CoordinatorRequestSeconds = 300
+		cfg.Timeouts.FirstTokenSeconds = 300
+		cfg.Timeouts.StreamCeilingFloorSeconds = 300
+		cfg.Timeouts.StreamCeilingMaxSeconds = 900
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_unknown_delta")
+
+	start := time.Now()
+	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Fatalf("unknown-key delta stream ran %s — the classifier is counting non-allowlisted "+
+			"keys as generated output, so a provider can fabricate progress", elapsed)
+	}
+	if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) {
+		t.Fatalf("want provider_timeout terminal after %s; body=%.400q", elapsed, resp.Body.String())
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_unknown_delta"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestStructuredTimeoutDuringRetryBackoff pins the #760 code-lane fix: when
+// the admission budget expires during retry backoff, doCoordinatorChatWithRetry
+// returns its last retryable 503 with err == nil. A structured-streaming buyer
+// must still receive the SPEC-019 provider_timeout SSE terminal — not the raw
+// JSON 503 pass-through.
+func TestStructuredTimeoutDuringRetryBackoff(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Retry503.Enabled = true
+		cfg.Retry503.MaxAttempts = 3
+		// Backoff (3s) straddles the 1s admission budget: the phase expires
+		// while the retry loop sleeps, exercising the stale-resp return path.
+		cfg.Retry503.BackoffBaseMs = 3000
+		cfg.Retry503.BackoffMaxMs = 3000
+		cfg.Timeouts.CoordinatorAdmissionSeconds = 1
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_structured_backoff")
+
+	start := time.Now()
+	resp := postChat(t, h, key, structuredStreamingRequestBody(), nil)
+	elapsed := time.Since(start)
+
+	body := resp.Body.String()
+	if !strings.Contains(body, `"code":"provider_timeout"`) {
+		t.Fatalf("structured buyer got a non-timeout terminal after admission expiry in backoff "+
+			"(%s); body=%.400q", elapsed, body)
+	}
+	if strings.Contains(body, "no_provider_available") || strings.Contains(body, "coordinator_unavailable") {
+		t.Fatalf("raw JSON 503 passed through to a structured-streaming buyer; body=%.400q", body)
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_structured_backoff"); outcome != "provider_timeout" {
+		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	}
+}
+
+// TestDeltaClassifierAllowlist unit-pins which delta keys count as generated
+// output for both billing estimation and (since #760) deadline progress.
+func TestDeltaClassifierAllowlist(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want int64
+	}{
+		{"content", `{"choices":[{"delta":{"content":"abcd"}}]}`, 4},
+		{"reasoning_content", `{"choices":[{"delta":{"reasoning_content":"abc"}}]}`, 3},
+		{"refusal", `{"choices":[{"delta":{"refusal":"no"}}]}`, 2},
+		{"tool_call_arguments", `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":"{\"a\":1}"}}]}}]}`, 7},
+		{"unknown_key", `{"choices":[{"delta":{"foo":"xxxxxxxx"}}]}`, 0},
+		{"role_only", `{"choices":[{"delta":{"role":"assistant"}}]}`, 0},
+		{"nested_unknown", `{"choices":[{"delta":{"metadata":{"blob":"xxxxxxxx"}}}]}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, ok := streamingCompletionDeltaBytes(tc.data)
+			if !ok {
+				t.Fatalf("classifier rejected valid frame %q", tc.data)
+			}
+			if got != tc.want {
+				t.Fatalf("deltaBytes=%d want %d for %q", got, tc.want, tc.data)
+			}
+		})
 	}
 }
 
