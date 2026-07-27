@@ -2329,7 +2329,8 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// (audit R1, architect MEDIUM): sealing past a failed refund would
 		// suppress recovery's retry and leave DailyUsage double-counting the
 		// usage row plus the still-active hold until the reaper.
-		if refundErr != nil {
+		if refundErr != nil && !errors.Is(refundErr, storage.ErrReservationNotFound) &&
+			!errors.Is(refundErr, storage.ErrReservationTerminal) {
 			slog.Warn("gateway settlement §17.7 refund failed; leaving journal effect unsealed for recovery",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,

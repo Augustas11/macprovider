@@ -252,9 +252,21 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		}
 	}
 	// Release any still-active hold so DailyUsage does not double-count the
-	// buyer's quota. No-op when the reservation is already terminal, which is
-	// the common case here.
-	_ = s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix())
+	// buyer's quota. An already-terminal/missing reservation surfaces as
+	// ErrReservationNotFound (the UPDATE matches only status='active' rows)
+	// and is the benign common case; anything else is a real DB failure. The seal is GATED on it (audit R2, code
+	// MEDIUM — the mirror of the settleAfterCommit gate): sealing past a
+	// failed refund would suppress this very re-drive and leave the active
+	// hold double-counting until the reaper.
+	if refundErr := s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix()); refundErr != nil &&
+		!errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
+		slog.Warn("gateway settlement journal re-drive refund failed; leaving effect unsealed",
+			"account_id", rec.AccountID,
+			"request_id", rec.RequestID,
+			"error", refundErr,
+		)
+		return journal.RecoveredRetry, nil
+	}
 	s.sealSettlementEffect(key, journal.SealUsageEvent)
 	s.journalAttempts.clear(key)
 	slog.Warn("gateway settlement journal recovered a dropped settlement via the SPEC-006 § 17.7 fallback",

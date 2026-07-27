@@ -809,3 +809,60 @@ func TestSettlementJournal_RefundFailureLeavesEffectUnsealed(t *testing.T) {
 		t.Fatalf("effect still unsealed after recovery")
 	}
 }
+
+// TestSettlementJournal_RecoveryRefundFailureRetriesBeforeSealing pins the
+// audit R2 code MEDIUM — the mirror of the settleAfterCommit seal gate:
+// recovery's own refund step must not seal past a failed RefundReservation,
+// or this very re-drive is suppressed while the active hold double-counts.
+func TestSettlementJournal_RecoveryRefundFailureRetriesBeforeSealing(t *testing.T) {
+	srv, store, dbPath, jnl, cfg := newJournalHarness(t, nil)
+	_ = srv
+	seedJournalReservation(t, store, "acct_recrefund", "req-recrefund", 100)
+	rec := journalSettleEffect("acct_recrefund", "req-recrefund")
+	if err := jnl.WriteEffect(rec); err != nil {
+		t.Fatalf("WriteEffect: %v", err)
+	}
+	// Crash window: usage row exists, reservation still active.
+	if err := store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: "req-recrefund", AccountID: "acct_recrefund",
+		WindowDate: rec.WindowDate, PromptTokens: rec.PromptTokens,
+		CompletionTokens: rec.CompletionTokens, TotalTokens: rec.TotalTokens,
+		TokenSource: rec.TokenSource, Outcome: rec.Outcome, CreatedAt: fixedNow(),
+	}); err != nil {
+		t.Fatalf("EnsureUsageEvent seed: %v", err)
+	}
+
+	// First pass: refund fails → the effect must stay unsealed.
+	failing := New(cfg, &refundFailSpyStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithSettlementJournal(jnl))
+	first, err := failing.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("first pass: %v", err)
+	}
+	if first.UsageEvents != 0 {
+		t.Fatalf("first pass summary=%+v — must not count a recovery whose refund failed", first)
+	}
+	if scan, _ := jnl.Scan(); len(scan.Unsealed) != 1 {
+		t.Fatalf("effect sealed past a failed recovery refund (Unsealed=%d want 1)", len(scan.Unsealed))
+	}
+
+	// Second pass over the real store completes: refund, seal, one bill.
+	healthy := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithSettlementJournal(jnl))
+	second, err := healthy.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if second.UsageEvents != 1 {
+		t.Fatalf("second pass summary=%+v want one usage-event recovery", second)
+	}
+	rows, total := usageTokenTotals(t, dbPath, "acct_recrefund")
+	if rows != 1 || total != 20 {
+		t.Fatalf("rows=%d total=%d want 1/20", rows, total)
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_recrefund")
+	if snap.activeRows != 0 || snap.activeReserved != 0 {
+		t.Fatalf("hold not released: %+v", snap)
+	}
+	if scan, _ := jnl.Scan(); len(scan.Unsealed) != 0 {
+		t.Fatalf("still unsealed after healthy recovery")
+	}
+}
