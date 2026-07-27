@@ -23,6 +23,7 @@ import (
 )
 
 const autotuneV4PublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+const autotuneV5PublicKeyBase64 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
 
 func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	t.Parallel()
@@ -51,6 +52,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		AutotuneCandidatesSigPath: filepath.Join(staticDir, "autotune-candidates.json.sig"),
 		PublicKeys: map[string]string{
 			"streamvc-autotune-static-v4": autotuneV4PublicKeyBase64,
+			"streamvc-autotune-static-v5": autotuneV5PublicKeyBase64,
 		},
 	})
 	if err != nil {
@@ -276,6 +278,26 @@ func TestLoadAutotuneFeedsRejectsInvalidFeedSchema(t *testing.T) {
 			raw:  bytesReplace(t, validCandidateFeed("test-release"), `"notes":"fixture"`, `"notes":"fixture","unsafe_override":true`),
 			want: `unknown field "unsafe_override"`,
 		},
+		{
+			name: "new release missing provenance",
+			raw: bytesReplace(
+				t,
+				validCandidateFeed("test-release"),
+				`,"provenance":{"source":"legacy_unverified","notes":"test fixture"}`,
+				"",
+			),
+			want: "bench_gate.provenance is required",
+		},
+		{
+			name: "null provenance optional field",
+			raw: bytesReplace(
+				t,
+				validCandidateFeed("test-release"),
+				`"notes":"test fixture"`,
+				`"notes":null`,
+			),
+			want: "must be a non-null string",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,6 +309,23 @@ func TestLoadAutotuneFeedsRejectsInvalidFeedSchema(t *testing.T) {
 				t.Fatalf("LoadAutotuneFeeds error=%v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadAutotuneFeedsRejectsMutatedLegacyBridgeWithoutProvenance(t *testing.T) {
+	t.Parallel()
+	staticDir := filepath.Join("..", "..", "..", "phase3-binary", "dist", "static")
+	raw, err := os.ReadFile(filepath.Join(staticDir, "autotune-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := bytesReplace(t, raw, `"min_ram_gb":48`, `"min_ram_gb":47`)
+	publicKey, privateKey := testSigningKey(t)
+	dir := t.TempDir()
+	jsonPath, sigPath := writeSignedFeedPair(t, dir, "autotune-candidates", mutated, "test-key", privateKey)
+	_, err = buyer.LoadAutotuneFeeds(candidateFeedConfig(jsonPath, sigPath, "test-key", publicKey))
+	if err == nil || !strings.Contains(err.Error(), "bench_gate.provenance is required") {
+		t.Fatalf("LoadAutotuneFeeds error=%v, want provenance rejection", err)
 	}
 }
 
@@ -426,7 +465,7 @@ func testSigningKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func validCandidateFeed(version string) []byte {
 	return []byte(fmt.Sprintf(
-		`{"version":%q,"policy_version":"autotune-policy-v1","generated_at":"2026-07-10T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"test-model":{"model_id":"mlx-community/Test-Model-4bit","model_revision":"%s","model_sha256":"%s","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable","notes":"fixture"}}}`,
+		`{"version":%q,"policy_version":"autotune-policy-v1","generated_at":"2026-07-10T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"test-model":{"model_id":"mlx-community/Test-Model-4bit","model_revision":"%s","model_sha256":"%s","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable","notes":"fixture"}}}`,
 		version,
 		strings.Repeat("1", 40),
 		strings.Repeat("2", 64),

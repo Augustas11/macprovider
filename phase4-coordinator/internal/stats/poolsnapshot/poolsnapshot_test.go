@@ -112,18 +112,23 @@ func TestExcludesPendingReceiptPubkey(t *testing.T) {
 }
 
 func TestHardwareAttestedSubset(t *testing.T) {
+	// Only hardware-tier attestation counts as hardware-attested (#759): a
+	// self-signed SE key (or a bare attested status with no tier) proves key
+	// custody, not hardware trust, and must not inflate the public figure.
 	src := fakeSrc{
-		{ProviderID: "a", State: pool.StateReady, AttestationStatus: pool.AttestationStatusAttested},
+		{ProviderID: "a", State: pool.StateReady, AttestationStatus: pool.AttestationStatusAttested, AttestationTier: pool.AttestationTierSelfSigned},
 		{ProviderID: "b", State: pool.StateReady, AttestationStatus: pool.AttestationStatusStale},
 		{ProviderID: "c", State: pool.StateReady, AttestationStatus: pool.AttestationStatusNotRequired},
-		{ProviderID: "d", State: pool.StateBusy, AttestationStatus: pool.AttestationStatusAttested},
+		{ProviderID: "d", State: pool.StateBusy, AttestationStatus: pool.AttestationStatusAttested, AttestationTier: pool.AttestationTierHardware},
+		{ProviderID: "e", State: pool.StateReady, AttestationStatus: pool.AttestationStatusAttested},
 	}
 	got := newFixed(src).OverviewSnapshot()
-	if got.NodesOnline != 4 {
-		t.Fatalf("NodesOnline=%d want 4", got.NodesOnline)
+	if got.NodesOnline != 5 {
+		t.Fatalf("NodesOnline=%d want 5", got.NodesOnline)
 	}
-	if got.NodesHardwareAttested != 2 {
-		t.Fatalf("NodesHardwareAttested=%d want 2", got.NodesHardwareAttested)
+	if got.NodesHardwareAttested != 1 {
+		t.Fatalf("NodesHardwareAttested=%d want 1 (only the hardware-tier provider; "+
+			"self-signed and tierless attested keys are key-custody, not hardware)", got.NodesHardwareAttested)
 	}
 }
 

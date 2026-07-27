@@ -1775,7 +1775,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
-		entry.AttestationTier = "self_signed"
+		entry.AttestationTier = pool.AttestationTierSelfSigned
 	}
 	if len(initial.ProviderReceiptPubkey) > 0 {
 		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)

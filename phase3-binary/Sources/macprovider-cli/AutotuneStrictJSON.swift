@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum AutotuneStaticSchemaKind {
@@ -18,13 +19,14 @@ enum AutotuneStrictJSON {
         }
         switch kind {
         case .candidateCatalog:
-            try validateCandidate(object)
+            let digest = Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
+            try validateCandidate(object, candidateSHA256: digest)
         case .demandRank:
             try validateDemand(object)
         }
     }
 
-    private static func validateCandidate(_ object: [String: Any]) throws {
+    private static func validateCandidate(_ object: [String: Any], candidateSHA256: String) throws {
         try exactKeys(
             object,
             allowed: ["version", "generated_at", "source", "policy_version", "rows"],
@@ -34,6 +36,7 @@ enum AutotuneStrictJSON {
         guard let rows = object["rows"] as? [String: Any] else {
             throw AutotuneRecommendError.invalidStaticJSON("candidate catalog rows")
         }
+        let releaseVersion = object["version"] as? String
         let allowed = Set([
             "model_id", "model_revision", "model_sha256", "min_ram_gb", "min_bandwidth_tier",
             "bench_gate", "runtime_status", "notes", "draft_candidates", "workload_profiles",
@@ -49,10 +52,35 @@ enum AutotuneStrictJSON {
             }
             try exactKeys(
                 gate,
-                allowed: ["min_sustained_tps", "max_4k_ttft_ms"],
+                allowed: ["min_sustained_tps", "max_4k_ttft_ms", "provenance"],
                 required: ["min_sustained_tps", "max_4k_ttft_ms"],
                 label: "candidate row \(key) bench_gate"
             )
+            guard let rawProvenance = gate["provenance"] else {
+                guard candidateSHA256 == CandidateCatalog.legacyMissingProvenanceCatalogSHA256,
+                      releaseVersion == CandidateCatalog.legacyMissingProvenanceReleaseVersion,
+                      CandidateCatalog.legacyBenchGateProvenance[key] != nil
+                else {
+                    throw AutotuneRecommendError.invalidStaticJSON("candidate row \(key) bench_gate provenance")
+                }
+                continue
+            }
+            guard let provenance = rawProvenance as? [String: Any] else {
+                throw AutotuneRecommendError.invalidStaticJSON("candidate row \(key) bench_gate provenance")
+            }
+            try exactKeys(
+                provenance,
+                allowed: ["source", "hardware", "measured_at", "notes"],
+                required: ["source"],
+                label: "candidate row \(key) bench_gate provenance"
+            )
+            for optionalField in ["hardware", "measured_at", "notes"] where provenance.keys.contains(optionalField) {
+                guard let value = provenance[optionalField] as? String,
+                      !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else {
+                    throw AutotuneRecommendError.invalidStaticJSON("candidate row \(key) bench_gate provenance \(optionalField)")
+                }
+            }
         }
     }
 

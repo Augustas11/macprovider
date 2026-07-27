@@ -48,7 +48,8 @@ receives all of them either way.
 | --- | --- | --- |
 | `pool` | pool `ready == 0` (CRITICAL) / pool recovered (INFO) | no |
 | `provider` | provider → `unavailable` / → `degraded` / dropped from pool (WARN), recovered (INFO) | no |
-| `provider_diagnostics` | repeated recent `invalid_token`, `invalid_auth_request`, `warmup_failed`, `heartbeat_stale`, or reconnect/liveness failures, including pre-identity `_anonymous` auth failures; any `version_unsupported`; optional expected-provider missing-auth window | **yes** |
+| `provider_liveness` | repeated recent `heartbeat_stale`, `provider_websocket_disconnected`, or mixed reconnect/liveness failures | no |
+| `provider_diagnostics` | repeated recent `invalid_token`, `invalid_auth_request`, or `warmup_failed`, including pre-identity `_anonymous` auth failures; any `version_unsupported`; optional expected-provider missing-auth window; diagnostics read failures | **yes** |
 | `gateway_status` | gateway self-reports `idle` / `degraded` / `down` (WARN) | no |
 | `service` | coordinator `/healthz` or gateway `/v1/status` unreachable (CRITICAL), `/poolz` read failed (WARN), recovery (INFO) | **yes** |
 | `static_feed` | SPEC-023 autotune feeds (`/v1/autotune-candidates`, `.sig`, `/v1/demand-rank`, `.sig`) unreachable from Pearl (CRITICAL), recovery (INFO) | **yes** |
@@ -56,15 +57,16 @@ receives all of them either way.
 ## Email volume control (`EMAIL_MUTED_KINDS`)
 
 On a small fleet a single Mac going in and out of the pool produces
-`provider` + `pool` + `gateway_status` transitions every few minutes — 237
-emails in one week on Pearl, none of them operator-actionable. Those three
-kinds are therefore **journal-only by default**; the kinds that mean the
-Pearl-side services themselves are down still page.
+`provider` + `provider_liveness` + `pool` + `gateway_status` noise every few
+minutes, including heartbeat-stale bursts that are not operator-actionable.
+Those four kinds are therefore **journal-only by default**; auth/config
+diagnostics and the kinds that mean the Pearl-side services themselves are down
+still page.
 
 Override in `/etc/macprovider/monitor.env`:
 
 ```
-EMAIL_MUTED_KINDS=provider,pool,gateway_status   # the default
+EMAIL_MUTED_KINDS=provider,provider_liveness,pool,gateway_status   # the default
 EMAIL_MUTED_KINDS=all                            # email off entirely
 EMAIL_MUTED_KINDS=none                           # email everything (pre-mute behaviour)
 ```
@@ -85,8 +87,8 @@ remains the complete record.
 `/etc/macprovider/coordinator.env`. They read the operator-only coordinator
 admin endpoints and never query Pearl SQLite directly. The poll always includes
 the coordinator's capped `_anonymous` bucket so repeated pre-identity
-authentication failures page without exposing claimed provider IDs or raw
-protocol diagnostics.
+authentication failures remain visible in the monitor journal without exposing
+claimed provider IDs or raw protocol diagnostics.
 
 Optional `/etc/macprovider/monitor.env` overrides:
 
@@ -102,6 +104,7 @@ PROVIDER_EXPECTED_AUTH_WINDOW_MINUTES=30
 For a small prebeta cohort, leave `EXPECTED_PROVIDER_IDS` empty unless a provider
 is supposed to be online for a specific window. Values must use the coordinator
 provider-id grammar (`[a-zA-Z0-9_.-]`, 1-64 chars); invalid entries and entries
-beyond the 100-item monitor cap are ignored. This avoids paging on normal
-sleep/offline behavior while still paging on repeated auth/config/liveness
-failures.
+beyond the 100-item monitor cap are ignored. This avoids treating normal
+sleep/offline behavior as diagnostic signal while still logging repeated
+auth/config failures by email and liveness failures in the journal. Set
+`EMAIL_MUTED_KINDS=none` to email liveness failures too.
