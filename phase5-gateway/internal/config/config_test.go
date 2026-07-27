@@ -244,7 +244,7 @@ func TestPhaseDeadlineDefaults(t *testing.T) {
 	}{
 		{"coordinator_connect_seconds", cfg.Timeouts.CoordinatorConnectSeconds, 60},
 		{"coordinator_admission_seconds", cfg.Timeouts.CoordinatorAdmissionSeconds, 120},
-		{"first_token_seconds", cfg.Timeouts.FirstTokenSeconds, 120},
+		{"first_token_seconds", cfg.Timeouts.FirstTokenSeconds, 0},
 		{"stream_ceiling_floor_seconds", cfg.Timeouts.StreamCeilingFloorSeconds, 60},
 		{"stream_ceiling_per_token_ms", cfg.Timeouts.StreamCeilingPerTokenMS, 250},
 		{"stream_ceiling_max_seconds", cfg.Timeouts.StreamCeilingMaxSeconds, 900},
@@ -274,6 +274,22 @@ func TestPhaseDeadlineDefaults(t *testing.T) {
 	explicit.Timeouts.NonStreamRequestSeconds = 300
 	if got := explicit.NonStreamRequestTimeout(); got != 300*time.Second {
 		t.Errorf("explicit non_stream_request_seconds must win over inheritance, got %s want 300s", got)
+	}
+	// Unset first_token_seconds derives min(120s, header timeout) so a
+	// short-header config (CI integration fixtures use 60s) still boots and
+	// gets a coherent budget instead of a Validate rejection (#760 CI red).
+	if got := cfg.FirstTokenTimeout(); got != 120*time.Second {
+		t.Errorf("derived FirstTokenTimeout=%s want 120s under the default header timeout", got)
+	}
+	shortHeader := cfg
+	shortHeader.Timeouts.CoordinatorHeaderTimeoutSeconds = 60
+	if got := shortHeader.FirstTokenTimeout(); got != 60*time.Second {
+		t.Errorf("derived FirstTokenTimeout=%s want 60s clamped to the header timeout", got)
+	}
+	explicitFT := cfg
+	explicitFT.Timeouts.FirstTokenSeconds = 30
+	if got := explicitFT.FirstTokenTimeout(); got != 30*time.Second {
+		t.Errorf("explicit first_token_seconds must win over derivation, got %s want 30s", got)
 	}
 	if err := validTestConfig().Validate(); err != nil {
 		t.Fatalf("default phase budgets must satisfy Validate(): %v", err)
@@ -314,8 +330,13 @@ func TestValidateRejectsInconsistentPhaseDeadlines(t *testing.T) {
 			wantSub: "non_stream_request_seconds",
 		},
 		{
+			name:    "negative first token budget",
+			mutate:  func(c *Config) { c.Timeouts.FirstTokenSeconds = -1 },
+			wantSub: "phase budgets must be positive",
+		},
+		{
 			name:    "zero phase budget",
-			mutate:  func(c *Config) { c.Timeouts.FirstTokenSeconds = 0 },
+			mutate:  func(c *Config) { c.Timeouts.CoordinatorConnectSeconds = 0 },
 			wantSub: "phase budgets must be positive",
 		},
 	} {

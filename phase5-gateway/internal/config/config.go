@@ -141,7 +141,8 @@ type TimeoutsConfig struct {
 	// CoordinatorAdmissionSeconds bounds gateway first-byte-of-request to
 	// coordinator response headers, ACROSS the 503/502 retry loop.
 	CoordinatorAdmissionSeconds int `yaml:"coordinator_admission_seconds"`
-	// FirstTokenSeconds bounds response headers to the first
+	// FirstTokenSeconds (0 = derive: min(120, coordinator_header_timeout_
+	// seconds)) bounds response headers to the first
 	// content-bearing delta on a streaming response.
 	FirstTokenSeconds int `yaml:"first_token_seconds"`
 	// StreamCeiling* derive the hard streaming safety bound from the
@@ -257,7 +258,7 @@ func Default() Config {
 			// flat wall it replaces.
 			CoordinatorConnectSeconds:   60,
 			CoordinatorAdmissionSeconds: 120,
-			FirstTokenSeconds:           120,
+			FirstTokenSeconds:           0, // derive min(120, header timeout)
 			StreamCeilingFloorSeconds:   60,
 			StreamCeilingPerTokenMS:     250,
 			StreamCeilingMaxSeconds:     900,
@@ -494,7 +495,7 @@ func (c Config) Validate() error {
 	}
 	// Issue #760 per-phase deadline orderings.
 	if c.Timeouts.CoordinatorConnectSeconds <= 0 || c.Timeouts.CoordinatorAdmissionSeconds <= 0 ||
-		c.Timeouts.FirstTokenSeconds <= 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
+		c.Timeouts.FirstTokenSeconds < 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
 		c.Timeouts.StreamCeilingPerTokenMS <= 0 || c.Timeouts.StreamCeilingMaxSeconds <= 0 ||
 		c.Timeouts.NonStreamRequestSeconds < 0 {
 		return fmt.Errorf("timeouts phase budgets must be positive")
@@ -507,8 +508,12 @@ func (c Config) Validate() error {
 	// gives up on a header-less coordinator after coordinator_header_timeout_
 	// seconds, so a first_token budget beyond that can never be observed —
 	// streaming headers commit at the first commit-worthy SSE event (post-#92).
-	if c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.FirstTokenSeconds {
-		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.first_token_seconds (%d) — the transport header timeout bounds the first commit-worthy SSE event",
+	// Only an EXPLICIT first_token budget can conflict with the transport
+	// header timeout; the derived default (0) clamps itself to it, so a
+	// pre-#760 config with a short header timeout still boots (the CI
+	// integration fixtures use 60s, and prod configs are off-repo).
+	if c.Timeouts.FirstTokenSeconds > 0 && c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.FirstTokenSeconds {
+		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.first_token_seconds (%d) — the transport header timeout bounds the first commit-worthy SSE event; set first_token_seconds to 0 to derive it",
 			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.FirstTokenSeconds)
 	}
 	if c.Timeouts.StreamCeilingMaxSeconds < c.Timeouts.StreamCeilingFloorSeconds {
@@ -685,8 +690,20 @@ func (c Config) CoordinatorAdmissionTimeout() time.Duration {
 }
 
 // FirstTokenTimeout bounds response headers to the first content-bearing
-// streaming delta.
+// streaming delta. Unset (0) derives min(120s, the transport header timeout):
+// the header timeout already acts as a de-facto first-token bound (streaming
+// headers commit at the first SSE event, post-#92), so the derived budget can
+// never promise more time than the transport allows, and short-header configs
+// (CI fixtures, conservative prod overlays) keep booting unchanged (#760 CI
+// integration failure).
 func (c Config) FirstTokenTimeout() time.Duration {
+	if c.Timeouts.FirstTokenSeconds <= 0 {
+		derived := 120 * time.Second
+		if header := c.CoordinatorHeaderTimeout(); header > 0 && header < derived {
+			derived = header
+		}
+		return derived
+	}
 	return time.Duration(c.Timeouts.FirstTokenSeconds) * time.Second
 }
 

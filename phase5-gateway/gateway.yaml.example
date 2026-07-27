@@ -110,9 +110,10 @@ timeouts:
   # whole 503/502 retry loop. This is the one real behavior change of #760: a
   # pre-header hang now fails at 120s instead of 300s.
   coordinator_admission_seconds: 120
-  # Response headers -> first content-bearing SSE delta. Must be
+  # Response headers -> first content-bearing SSE delta. 0 (or unset) derives
+  # min(120, coordinator_header_timeout_seconds); an explicit value must be
   # <= coordinator_header_timeout_seconds (the transport gives up first).
-  first_token_seconds: 120
+  first_token_seconds: 0
   # Hard streaming safety ceiling, derived from the request's max_tokens:
   #   clamp(floor + max_tokens * per_token_ms,
   #         >= coordinator_request_seconds, <= max)
