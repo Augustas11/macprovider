@@ -172,3 +172,47 @@ func TestModelVersionFloorErrorCodeIsClassified(t *testing.T) {
 		t.Fatal("model_version_floor_unmet must be retryable=true: the fleet self-updates, so the same request can succeed later")
 	}
 }
+
+// TestModelVersionFloorRecheckedAtSlotQueuePoll pins the #768 audit R1
+// finding (security+architect MEDIUM): the waiter stores only providerID, so
+// the provider polled off the queue may not be the one that passed
+// slotQueueCandidates — a same-ID reconnect below the per-model floor must
+// terminate the wait (model_version_floor_unmet path), never be served.
+func TestModelVersionFloorRecheckedAtSlotQueuePoll(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	s := NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Now().UTC(),
+		WithModelVersionFloors(map[string]string{floorModelID: "1.8.60"}),
+	)
+	// The provider now registered under the queued ID is BELOW the floor —
+	// the same-ID-reconnect shape.
+	below := versionFloorProvider("p-queued", floorModelID, "1.8.50")
+	registry.Register(&below, nil)
+
+	waiter, ok := s.slotQueue.enter("p-queued")
+	if !ok {
+		t.Fatal("enter returned no waiter")
+	}
+	defer s.slotQueue.leave(waiter)
+
+	_, status := s.pollQueuedProvider(waiter, floorModelID, nil, 100)
+	if status != queuedProviderTerminal {
+		t.Fatalf("pollQueuedProvider status = %v, want terminal — a below-floor same-ID "+
+			"replacement must not be served off the slot queue", status)
+	}
+
+	// Control: the same poll serves an above-floor provider.
+	registry2 := pool.NewRegistry(nil)
+	s2 := NewServer(registry2, zerolog.Nop(), time.Now().UTC(),
+		WithModelVersionFloors(map[string]string{floorModelID: "1.8.60"}))
+	above := versionFloorProvider("p-queued", floorModelID, "1.8.65")
+	registry2.Register(&above, nil)
+	w2, _ := s2.slotQueue.enter("p-queued")
+	defer s2.slotQueue.leave(w2)
+	got, status2 := s2.pollQueuedProvider(w2, floorModelID, nil, 100)
+	if status2 != queuedProviderAvailable || got.ProviderID != "p-queued" {
+		t.Fatalf("control poll = (%q, %v), want the above-floor provider available", got.ProviderID, status2)
+	}
+}

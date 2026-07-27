@@ -6384,6 +6384,13 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		// #768 audit R1 (security+architect MEDIUM): the waiter stores only
+		// providerID, so the provider polled here may not be the one that
+		// passed slotQueueCandidates — a same-ID reconnect below the
+		// per-model floor must not be served off the queue.
+		if !s.providerMeetsModelVersionFloor(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
