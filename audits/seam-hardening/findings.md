@@ -239,11 +239,19 @@ upgrade directive, add a `doctor` subcommand.
 Only a per-model *hardware-tier* gate exists; an old-but-hardware-eligible build can serve a model that
 needs a newer engine. **Fix:** add a per-model minimum-version floor to the routing gate.
 
-**P2-4 · Hygiene: hello-gate spec vs prod config; same-account timing risk** — `hygiene`
-`SPEC-032` claims the hello-gate is prod-on; committed prod config does not set it (also confirm
-`canary_enabled`/`warmup_gate_enabled` are ON in the live overlay — Go zero-value OFF). And if sticky
-routing is enabled for multi-tenant traffic, document acceptance of the residual same-account TTFT
-timing side-channel. **Fix:** reconcile spec vs overlay; write the risk-acceptance note.
+**P2-4 · Hygiene: hello-gate spec vs prod config; same-account timing risk** — `hygiene` — **FIXED (#769)**
+Live Pearl posture verified 2026-07-27 against the RUNNING process (`--config-overlay
+/etc/macprovider/coordinator.pearl-overlays.yaml`, overlay keys override): the overlay EXPLICITLY
+sets `require_autotune_hello_gate: false` (revised 2026-07-22; SPEC-032 v0.2-draft corrects its five
+prod-on claims — accurate at the 2026-07-11 baseline, drifted since) and `telemetry_drift.enabled:
+true` (observe — #764/#765 missing_benchmark alerts fire live; quarantine dormant); canary OFF
+(explicit overlay false + timer inactive + DISABLED sentinel — the accepted P0 #584 exception);
+`warmup_gate_enabled` false live vs true committed (DRIFT — surfaced, operator decision, not
+auto-fixed); `sticky_enabled` true →
+the same-account TTFT side-channel risk-acceptance is written, with an explicit MUST-re-evaluate
+trigger before OpenRouter enrollment (a marketplace credential collapses "same account" into "same
+marketplace"). All in `ops/runbooks/seam-769-gate-posture-2026-07-27.md`. **Residual:** hello-gate
+enable-after-survey shares the #765 live-pool survey prerequisite; warmup drift unresolved by design.
 
 ---
 
