@@ -316,6 +316,13 @@ actor ModelRuntime: ModelRuntimeServing {
         case tokenIterator
     }
 
+    // SPEC-037 FR-KVP1: the tier-eligible KVCacheSimple selection in the serve paths
+    // (see `cacheParameters`) never reaches the speculative caches. An eligible
+    // cold-tier request always carries a synthetic conversation key (`conv:kvs-synth:`),
+    // and `allowsSpeculativeDecoding` is false whenever `conversationKey != nil`
+    // (ChatCompletionRequest.allowsSpeculativeDecoding), so such a request is always
+    // routed to `.tokenIterator` here — the speculative branch below allocates its own
+    // caches and is untouched by the cache-type change.
     static func speculativeRoute(
         for request: ChatCompletionRequest,
         draftLoaded: Bool,
@@ -468,6 +475,24 @@ actor ModelRuntime: ModelRuntimeServing {
             topP: topP,
             prefillStepSize: prefillStepSize
         )
+    }
+
+    /// SPEC-037 FR-KVP1 — cold-tier persistence depends on the serve cache being a
+    /// `KVCacheSimple` (the only v1-allowlisted serializable class, KVDiskCacheFormat
+    /// `allowlistedCacheClasses`). `LanguageModel.newCache` builds a `RotatingKVCache`
+    /// whenever `maxKVSize != nil` and a `KVCacheSimple` only when it is nil (mlx-swift-lm
+    /// `LanguageModel.newCache`). `makeServeGenerateParameters` always sets
+    /// `maxKVSize = maxContextTokens`, so without this the disk tier's `captureSnapshot`
+    /// cast (`layers as? [KVCacheSimple]`) fails and `commit(cold:)` silently no-ops.
+    /// For tier-eligible requests we drop `maxKVSize` (→ `KVCacheSimple`); every other
+    /// request keeps the rotating cache unchanged. This affects ONLY the explicitly
+    /// allocated `newCache`; the `maxKVSize` carried by the `parameters` passed to
+    /// `TokenIterator` is ignored once the cache is explicit.
+    nonisolated static func cacheParameters(_ base: GenerateParameters, forceSimpleKV: Bool) -> GenerateParameters {
+        guard forceSimpleKV else { return base }
+        var p = base
+        p.maxKVSize = nil
+        return p
     }
 
     private nonisolated static func harmonyTerminalPreservingContext(
@@ -1365,7 +1390,13 @@ actor ModelRuntime: ModelRuntimeServing {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                             } else {
-                                kvCache = generationContext.model.newCache(parameters: parameters)
+                                // SPEC-037 FR-KVP1: a tier-eligible request must run on a
+                                // KVCacheSimple so captureSnapshot can serialize it; keep the
+                                // rotating cache for everything else. TokenIterator still gets
+                                // the original `parameters` (its maxKVSize is ignored once the
+                                // cache is passed explicitly).
+                                kvCache = generationContext.model.newCache(
+                                    parameters: Self.cacheParameters(parameters, forceSimpleKV: coldContext?.eligible == true))
                                 iteratorInput = lmInput
                             }
 
@@ -1822,7 +1853,11 @@ actor ModelRuntime: ModelRuntimeServing {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
                     } else {
-                        kvCache = generationContext.model.newCache(parameters: parameters)
+                        // SPEC-037 FR-KVP1: same tier-eligible → KVCacheSimple selection as
+                        // the non-streaming path (see cacheParameters). TokenIterator below
+                        // keeps the original `parameters`.
+                        kvCache = generationContext.model.newCache(
+                            parameters: Self.cacheParameters(parameters, forceSimpleKV: coldContext?.eligible == true))
                         iteratorInput = lmInput
                     }
 
@@ -2098,7 +2133,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     temperature: 0.0,
                     topP: 1.0
                 )
-                let kvCache = context.model.newCache(parameters: parameters)
+                // SPEC-037 FR-KVP1: the seed always models the tier-ELIGIBLE path, so it
+                // must build a KVCacheSimple (maxKVSize=nil) — otherwise the
+                // `as? [KVCacheSimple]` guard below never succeeds and no geometry is seeded.
+                let kvCache = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true))
                 let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
                 // A single-token warmup populates the per-layer cache tensors; that is
                 // all the seed needs (only the geometry is read, never the values).
