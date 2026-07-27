@@ -277,8 +277,14 @@ func (t *requestTerminal) evaluateEndOfRequest(billingEnabled bool) {
 	if t.buyer.Status < 200 || t.buyer.Status >= 300 {
 		return
 	}
-	if len(t.rows) > 0 {
-		return
+	// Audit R1 (code MEDIUM): the suppressor must be a row that actually PAYS,
+	// not merely any recorded row — a zero-credit breaker-qualifying row from
+	// a failed earlier attempt (which billing/formula.go zeroes) must not mask
+	// a served-but-unpaid final attempt.
+	for i := range t.rows {
+		if t.rows[i].Status < 400 && t.rows[i].FaultFlag != billing.FaultBreakerQualifying {
+			return
+		}
 	}
 	t.recordConflictLocked(conflictServedWithoutCredit, billableRowEvent{AttemptN: -1})
 }

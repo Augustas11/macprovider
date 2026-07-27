@@ -412,6 +412,33 @@ func TestSeamH4_TerminalArbiterPredicates(t *testing.T) {
 		}
 	})
 
+	t.Run("zero_credit_breaker_row_does_not_mask_served_unpaid", func(t *testing.T) {
+		// Audit R1 (code MEDIUM): attempt 0 logs a zero-credit
+		// breaker-qualifying row (formula.go zeroes it), attempt 1 commits a
+		// 200 to the buyer and its post-commit recordRow fails. The breaker
+		// row must NOT suppress the served-but-unpaid conflict — only a row
+		// that actually pays may.
+		rt := newRequestTerminal(nil, "req-3b", "acct-1")
+		rt.noteDispatch()
+		rt.noteBillableRow(http.StatusBadGateway, 0, billing.FaultBreakerQualifying)
+		rt.claimBuyer(http.StatusOK)
+		rt.evaluateEndOfRequest(true)
+		if got := rt.Conflicts(); got != 1 {
+			t.Fatalf("conflicts = %d, want 1 — a zero-credit breaker row is not payment", got)
+		}
+	})
+
+	t.Run("paying_row_suppresses_served_unpaid", func(t *testing.T) {
+		rt := newRequestTerminal(nil, "req-3c", "acct-1")
+		rt.noteDispatch()
+		rt.noteBillableRow(http.StatusOK, 1, billing.FaultNone)
+		rt.claimBuyer(http.StatusOK)
+		rt.evaluateEndOfRequest(true)
+		if got := rt.Conflicts(); got != 0 {
+			t.Fatalf("conflicts = %d, want 0 — a credited paying row settles the debt", got)
+		}
+	})
+
 	t.Run("served_2xx_without_dispatch_is_not_a_conflict", func(t *testing.T) {
 		rt := newRequestTerminal(nil, "req-4", "acct-1")
 		rt.claimBuyer(http.StatusOK)
