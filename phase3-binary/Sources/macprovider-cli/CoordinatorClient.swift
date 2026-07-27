@@ -258,6 +258,10 @@ actor CoordinatorClient {
     private let bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey?
     private let bootstrapReferralCode: String?
     private var terminalBootstrapReferralFailure: ReferralBootstrapFailure?
+    // #767: set when the coordinator closed us with 4004 version_unsupported.
+    // Non-nil means the reconnect loop stopped on purpose and will not resume
+    // until the binary is upgraded and the process restarts.
+    private var terminalVersionFloorRejection: CoordinatorVersionFloorRejection?
     private let receiptIdentitySigningKeys: [Curve25519.Signing.PrivateKey]
     private let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
 
@@ -676,6 +680,25 @@ actor CoordinatorClient {
                 consecutiveAuthProtocolFailures = 0
             } catch {
                 await cleanupConnection()
+                // #767: a 4004 version_unsupported close is TERMINAL. Retrying
+                // cannot succeed until the binary is upgraded, and a below-floor
+                // fleet retrying on backoff is exactly the hammering the floor
+                // exists to prevent. Mirror the terminal-bootstrap pattern
+                // below: record the reason, tell the operator what to do, and
+                // return out of the loop entirely.
+                if let floorRejection = Self.versionFloorRejection(for: error) {
+                    terminalVersionFloorRejection = floorRejection
+                    recordConnectionFailureDiagnostic(
+                        reasonCode: "binary_version_unsupported",
+                        error: error
+                    )
+                    recordConnectionFailureLifecycle(
+                        state: .catalogIncompatible,
+                        reasonCode: "binary_version_unsupported"
+                    )
+                    Self.emitVersionFloorUpgradeDirective(floorRejection)
+                    return
+                }
                 if credentialBootstrap,
                    let terminalFailure = Self.terminalBootstrapReferralFailure(for: error) {
                     terminalBootstrapReferralFailure = terminalFailure
@@ -785,6 +808,96 @@ actor CoordinatorClient {
         terminalBootstrapReferralFailure
     }
 
+    /// A coordinator 4004 `version_unsupported` close (issue #767). This build is
+    /// below the coordinator's hard admission floor, so reconnecting cannot
+    /// succeed until the binary is upgraded — it is terminal, not transient.
+    struct CoordinatorVersionFloorRejection: Equatable, Sendable {
+        /// The version this binary reported in its hello.
+        let currentVersion: String
+        /// The coordinator's required minimum, when it named one. Absent means
+        /// the coordinator sent a reason we could not parse a target out of;
+        /// the directive degrades to "upgrade to the latest release".
+        let requiredVersion: String?
+        /// The sanitized close reason, for diagnostics.
+        let reason: String
+    }
+
+    /// Recognises the terminal version-floor rejection. Only a `version_unsupported`
+    /// rejection qualifies; every other close stays on the ordinary retry path.
+    static func versionFloorRejection(for error: Error) -> CoordinatorVersionFloorRejection? {
+        guard let authError = error as? CoordinatorAuthError,
+              case .rejected(let code, let message) = authError,
+              code == "version_unsupported" else {
+            return nil
+        }
+        return CoordinatorVersionFloorRejection(
+            currentVersion: binaryVersion,
+            requiredVersion: requiredBinaryVersion(from: message),
+            reason: message
+        )
+    }
+
+    /// Parses the required target out of the coordinator's close reason. The
+    /// coordinator sends "version_unsupported: binary_version X below required Y"
+    /// (phase4-coordinator/internal/ws/server.go); an older or future coordinator
+    /// that words it differently yields nil, and the caller degrades gracefully
+    /// rather than printing a wrong target.
+    static func requiredBinaryVersion(from reason: String) -> String? {
+        let marker = "below required "
+        guard let range = reason.range(of: marker) else {
+            return nil
+        }
+        let candidate = reason[range.upperBound...]
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let candidate, !candidate.isEmpty else {
+            return nil
+        }
+        // Defensive: only echo a plausible version back to the operator, never
+        // arbitrary coordinator-controlled text.
+        let allowed = CharacterSet(charactersIn: "0123456789.")
+        guard candidate.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            return nil
+        }
+        return candidate
+    }
+
+    /// The terminal version-floor rejection that stopped the reconnect loop, if
+    /// one did. Nil while the loop is healthy or stopped for any other reason.
+    func coordinatorVersionFloorRejection() -> CoordinatorVersionFloorRejection? {
+        terminalVersionFloorRejection
+    }
+
+    /// Emits the upgrade directive: a human line on stderr plus a structured
+    /// stderr event, matching the CLI's existing emitTokenPersistEvent shape.
+    static func emitVersionFloorUpgradeDirective(_ rejection: CoordinatorVersionFloorRejection) {
+        let target = rejection.requiredVersion.map { "v\($0)" } ?? "the latest release"
+        FileHandle.standardError.write(Data((
+            "FATAL coordinator rejected this build: binary version " +
+            "\(rejection.currentVersion) is below the required minimum \(target). " +
+            "Upgrade with 'macprovider-cli update', then restart the provider. " +
+            "Reconnect attempts stopped — a below-floor build must not hammer the coordinator.\n"
+        ).utf8))
+        var payload: [String: String] = [
+            "event": "coordinator_version_floor_rejected",
+            "close_code": "4004",
+            "current_binary_version": rejection.currentVersion,
+            "reason": rejection.reason,
+        ]
+        if let requiredVersion = rejection.requiredVersion {
+            payload["required_binary_version"] = requiredVersion
+        }
+        do {
+            var data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            data.append(0x0A)
+            FileHandle.standardError.write(data)
+        } catch {
+            FileHandle.standardError.write(Data("{\"event\":\"coordinator_version_floor_rejected\"}\n".utf8))
+        }
+    }
+
     struct ConnectionLifecycleClassification: Equatable, Sendable {
         let state: ProviderLifecycleState
         let reasonCode: String
@@ -848,6 +961,16 @@ actor CoordinatorClient {
                 return ConnectionLifecycleClassification(
                     state: .coordinatorUnavailable,
                     reasonCode: "autotune_gate_unavailable"
+                )
+            }
+            // #767: below the coordinator's hard binary-version floor. Same
+            // family as a catalog/compatibility rejection — this build cannot
+            // serve until it is upgraded — but with its own reason code so
+            // Malibu can surface "upgrade" instead of "reinstall the catalog".
+            if normalized == "version_unsupported" {
+                return ConnectionLifecycleClassification(
+                    state: .catalogIncompatible,
+                    reasonCode: "binary_version_unsupported"
                 )
             }
             if normalized.contains("catalog") || normalized.contains("compatibility") {
@@ -1515,6 +1638,17 @@ actor CoordinatorClient {
             reason == "referral_exhausted" ||
             reason == "referral_conflict":
             return .rejected(code: reason, message: reason)
+        case 4004 where reason.hasPrefix("version_unsupported"):
+            // Issue #767: the coordinator's hard binary-version floor
+            // (`coordinator_advertised_version.required_binary_version`) closes
+            // with CloseVersionUnsupported and a reason shaped
+            // "version_unsupported: binary_version <ours> below required <theirs>".
+            // Before this case the close fell through to `default: nil`, so the
+            // raw transport error propagated and the reconnect loop retried
+            // forever — the operator saw an unexplained flap instead of an
+            // upgrade directive. The FULL reason is carried in `message` so the
+            // required target can be parsed out; see requiredBinaryVersion(from:).
+            return .rejected(code: "version_unsupported", message: reason)
         case 4008 where reason == "credential_bootstrap_rate_limited":
             return .rejected(code: reason, message: reason)
         case 4000 where reason == "unrecognized auth message":

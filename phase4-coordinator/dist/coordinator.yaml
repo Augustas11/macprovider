@@ -313,5 +313,28 @@ providers:
 # operator-assisted full installer is the ONLY sanctioned upgrade path for that
 # legacy cohort (DECISION_CRITERIA Entry 161). Setting this value does not, and
 # must not, re-arm the legacy binary-only updater.
+#
+# `required_binary_version` (issue #767) is the HARD admission floor: a hello
+# below it is closed with 4004 version_unsupported. Prior to #767 it was set
+# nowhere in prod, so seam 5's floor existed only in code.
+#
+# WHY 1.8.33 and not something higher: 1.8.33 is the first release that
+# declares a `compatibility_set_id` in its hello — the boundary this file
+# already documents above. Everything at or below 1.8.32 is the legacy
+# pre-compatibility-set cohort that (a) receives no autoupdate
+# recommendation by design, and (b) cannot satisfy the live Pearl overlay's
+# `coordinator.compatibility_set.accepted_ids` gate because it sends no set
+# id at all. So the floor fences nobody who is currently admissible; it makes
+# the already-true rejection explicit and machine-readable instead of leaving
+# a legacy build to fail later, opaquely, on catalog admission.
+#
+# It is deliberately far below the current release (1.8.65) and below the
+# #610 first-hop bridge build (1.8.48, which is additionally exempt from the
+# floor by construction — see prepareProviderAdmission's firstHopOnly skip),
+# so raising it is a separate, deliberate act. Raise it only in lockstep with
+# a fleet-wide upgrade: a below-floor CLI carrying the #767 handler stops
+# reconnecting and tells its operator to upgrade, and one without it
+# reconnect-loops.
 coordinator_advertised_version:
   latest_binary_version: "1.8.65"
+  required_binary_version: "1.8.33"

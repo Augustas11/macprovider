@@ -10,15 +10,22 @@ import (
 // stubChecker is a hand-rolled EligibilityChecker for tests; the
 // real implementation lives on internal/buyer/server.go.
 type stubChecker struct {
-	matches    map[string]bool
-	contextOK  map[string]bool
-	tier2      map[string]routing.RejectionReason
-	tier2Hash  map[string]pool.HashStatus
-	quotaOK    map[string]bool
+	matches        map[string]bool
+	versionFloorOK map[string]bool
+	contextOK      map[string]bool
+	tier2          map[string]routing.RejectionReason
+	tier2Hash      map[string]pool.HashStatus
+	quotaOK        map[string]bool
 }
 
 func (s *stubChecker) ProviderMatchesRequest(p pool.Provider) bool {
 	if v, ok := s.matches[p.ProviderID]; ok {
+		return v
+	}
+	return true
+}
+func (s *stubChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
+	if v, ok := s.versionFloorOK[p.ProviderID]; ok {
 		return v
 	}
 	return true
@@ -200,17 +207,22 @@ func TestEligibleCandidates_PreQuotaCountTracksFirstLoopSurvivors(t *testing.T) 
 // quota) is enforced for every provider AND a rejected provider
 // never reaches a later gate.
 type recordingChecker struct {
-	t            *testing.T
-	calls        []string // "providerID/gate"
-	matchFail    map[string]bool
-	contextFail  map[string]bool
-	tier2Reason  map[string]routing.RejectionReason
-	quotaFail    map[string]bool
+	t                *testing.T
+	calls            []string // "providerID/gate"
+	matchFail        map[string]bool
+	versionFloorFail map[string]bool
+	contextFail      map[string]bool
+	tier2Reason      map[string]routing.RejectionReason
+	quotaFail        map[string]bool
 }
 
 func (r *recordingChecker) ProviderMatchesRequest(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/match")
 	return !r.matchFail[p.ProviderID]
+}
+func (r *recordingChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/version_floor")
+	return !r.versionFloorFail[p.ProviderID]
 }
 func (r *recordingChecker) ProviderContextSufficient(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/context")
@@ -236,15 +248,15 @@ func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T
 	ex.Add(providers[0], keyer)
 	checker := &recordingChecker{t: t, matchFail: map[string]bool{"match-fail-y": true}}
 	res := routing.EligibleCandidates(providers, ex, keyer, checker)
-	// Excluded provider MUST never reach match/context/tier2/quota.
+	// Excluded provider MUST never reach match/version_floor/context/tier2/quota.
 	for _, c := range checker.calls {
-		if c == "excluded-x/match" || c == "excluded-x/context" || c == "excluded-x/tier2" || c == "excluded-x/quota" {
+		if c == "excluded-x/match" || c == "excluded-x/version_floor" || c == "excluded-x/context" || c == "excluded-x/tier2" || c == "excluded-x/quota" {
 			t.Fatalf("excluded provider hit later gate: %q (full calls: %v)", c, checker.calls)
 		}
 	}
-	// match-fail-y reaches match but NOT context/tier2/quota.
+	// match-fail-y reaches match but NOT version_floor/context/tier2/quota.
 	for _, c := range checker.calls {
-		if c == "match-fail-y/context" || c == "match-fail-y/tier2" || c == "match-fail-y/quota" {
+		if c == "match-fail-y/version_floor" || c == "match-fail-y/context" || c == "match-fail-y/tier2" || c == "match-fail-y/quota" {
 			t.Fatalf("match-rejected provider hit later gate: %q", c)
 		}
 	}
@@ -255,12 +267,14 @@ func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T
 
 func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
 	// For a provider that passes every gate, the call sequence MUST
-	// be exactly match → context → tier2 → quota. FR-SR-18 order.
+	// be exactly match → version_floor → context → tier2 → quota.
+	// FR-SR-18 order, with the #768 per-model version floor inserted
+	// right after the model match (it is keyed BY model).
 	t.Parallel()
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/context", "p/tier2", "p/quota"}
+	want := []string{"p/match", "p/version_floor", "p/context", "p/tier2", "p/quota"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
 	}
@@ -276,7 +290,7 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/context"}
+	want := []string{"p/match", "p/version_floor", "p/context"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
 	}
@@ -307,5 +321,44 @@ func TestEligibleCandidates_EmptyInputEmptyResult(t *testing.T) {
 	}
 	if len(res.Counts) != 0 {
 		t.Errorf("empty input: want empty Counts, got %v", res.Counts)
+	}
+}
+
+// TestEligibleCandidates_ModelVersionFloorRejects covers the #768 gate inside
+// the composition loop: a below-floor provider is dropped with its own reason
+// rather than being folded into ReasonModelMismatch, so the caller can emit a
+// supply-VERSION 503 instead of a supply-VOLUME one.
+func TestEligibleCandidates_ModelVersionFloorRejects(t *testing.T) {
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("old"), mkProvider("new")}
+	checker := &stubChecker{versionFloorOK: map[string]bool{"old": false}}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if len(res.Eligible) != 1 || res.Eligible[0].ProviderID != "new" {
+		t.Fatalf("eligible = %+v, want only the above-floor provider", res.Eligible)
+	}
+	if got := res.Counts[routing.ReasonModelVersionFloor]; got != 1 {
+		t.Fatalf("ReasonModelVersionFloor = %d, want 1 (counts=%v)", got, res.Counts)
+	}
+	if got := res.Counts[routing.ReasonModelMismatch]; got != 0 {
+		t.Fatalf("ReasonModelMismatch = %d, want 0 — the floor must not be folded into the model gate", got)
+	}
+}
+
+// TestEligibleCandidates_OrderingVersionFloorRejectStopsBeforeContext pins the
+// gate order: the floor is keyed BY model, so it runs right after the model
+// match and short-circuits every later gate.
+func TestEligibleCandidates_OrderingVersionFloorRejectStopsBeforeContext(t *testing.T) {
+	t.Parallel()
+	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
+	checker := &recordingChecker{t: t, versionFloorFail: map[string]bool{"p": true}}
+	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	want := []string{"p/match", "p/version_floor"}
+	if len(checker.calls) != len(want) {
+		t.Fatalf("calls = %v, want exactly %v", checker.calls, want)
+	}
+	for i := range want {
+		if checker.calls[i] != want[i] {
+			t.Fatalf("call[%d] = %q, want %q (full: %v)", i, checker.calls[i], want[i], checker.calls)
+		}
 	}
 }

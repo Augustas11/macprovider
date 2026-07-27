@@ -802,6 +802,7 @@ func main() {
 		buyer.WithFailoverConfig(cfg.Routing.FailoverEnabled, time.Duration(cfg.Routing.FailoverTimeoutS)*time.Second),
 		buyer.WithRoutingConfig(cfg.Routing),
 		buyer.WithTier2Config(cfg.Tier2),
+		buyer.WithModelVersionFloors(cfg.CoordinatorAdvertisedVersion.PerModelRequiredBinaryVersion),
 		buyer.WithLimitsConfig(cfg.Limits),
 		buyer.WithTrustedProxies(mustParseTrustedProxies(cfg, logger)),
 		buyer.WithOperatorKey(cfg.Auth.OperatorKey),

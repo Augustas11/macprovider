@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/google/uuid"
@@ -753,6 +753,14 @@ func (s *Server) canaryBuyerServing(p pool.Provider) bool {
 		return false
 	}
 	if s.tier2WarmupExcluded(p) {
+		return false
+	}
+	// #768: a peer below the per-model version floor is not routable, so it
+	// must not count as a buyer-serving peer either. Silent, like the tier2
+	// predicate above it: this runs under the pool registry lock and can be
+	// evaluated repeatedly per provider, and the same exclusion is already
+	// logged once at the warmup gate.
+	if !s.modelVersionFloor(p).Allowed {
 		return false
 	}
 	return true
@@ -2630,64 +2638,47 @@ func (s *Server) checkOrRecordAdmission(hello Hello, pinned bool, record bool) (
 	return s.admission.CheckAdmit(hello, pinned, s.connectedProvisional())
 }
 
+// compareSemver is a thin alias for the coordinator's single version
+// comparator. The implementation moved to internal/versionfloor (#768) so the
+// per-model floors evaluated in internal/buyer and the global admission floor
+// enforced here cannot drift into two different orderings.
 func compareSemver(lhs, rhs string) (int, bool) {
-	left, okLeft := semverParts(lhs)
-	right, okRight := semverParts(rhs)
-	if !okLeft || !okRight {
-		return 0, false
-	}
-	n := len(left)
-	if len(right) > n {
-		n = len(right)
-	}
-	for i := 0; i < n; i++ {
-		var l, r int
-		if i < len(left) {
-			l = left[i]
-		}
-		if i < len(right) {
-			r = right[i]
-		}
-		switch {
-		case l < r:
-			return -1, true
-		case l > r:
-			return 1, true
-		}
-	}
-	return 0, true
+	return versionfloor.Compare(lhs, rhs)
 }
 
-func semverParts(value string) ([]int, bool) {
-	value = strings.TrimLeft(strings.TrimSpace(value), "vV")
-	if value == "" {
-		return nil, false
+// modelVersionFloor evaluates the per-model minimum-binary-version floor
+// (#768) for a pool provider. Same map, same helper, same verdict as the
+// buyer-side routing gates — see versionfloor.Check.
+func (s *Server) modelVersionFloor(p pool.Provider) versionfloor.Result {
+	return versionfloor.Check(
+		s.cfg.CoordinatorAdvertisedVersion.PerModelRequiredBinaryVersion,
+		p.ModelID,
+		p.BinaryVersion,
+	)
+}
+
+// belowModelVersionFloor is the warm-pool half of the #768 gate: a provider we
+// would refuse to route to must not be warmed or counted as a serving peer.
+func (s *Server) belowModelVersionFloor(p pool.Provider, gate string) bool {
+	result := s.modelVersionFloor(p)
+	if result.Allowed {
+		return false
 	}
-	parts := strings.Split(value, ".")
-	if len(parts) > 3 {
-		return nil, false
+	event := s.log.Info()
+	if result.Malformed {
+		event = s.log.Warn()
 	}
-	out := make([]int, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			return nil, false
-		}
-		for _, r := range part {
-			if r < '0' || r > '9' {
-				return nil, false
-			}
-		}
-		n, err := strconv.Atoi(part)
-		if err != nil {
-			return nil, false
-		}
-		out = append(out, n)
-	}
-	for len(out) < 3 {
-		out = append(out, 0)
-	}
-	return out, true
+	event.
+		Str("event", "model_version_floor_excluded").
+		Str("gate", gate).
+		Str("provider_id", p.ProviderID).
+		Str("assigned_id", p.AssignedID).
+		Str("model_id", p.ModelID).
+		Str("binary_version", p.BinaryVersion).
+		Str("required_binary_version", result.Floor).
+		Bool("binary_version_malformed", result.Malformed).
+		Msg("provider excluded by per-model binary version floor")
+	return true
 }
 
 // registerProviderSession installs the WS session in the registry +
@@ -3464,6 +3455,12 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 }
 
 func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool {
+	// #768 warm-pool candidate gate: we never warm a box we won't route to.
+	// Checked here (not in the WS-only branch) so the HTTP-forwarding path is
+	// covered by the same verdict.
+	if s.belowModelVersionFloor(provider, "warmup_gate") {
+		return false
+	}
 	body, err := json.Marshal(map[string]any{
 		"model": providerProbeModelID(provider),
 		"messages": []map[string]string{{
@@ -4921,6 +4918,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		RequestsActive           int    `json:"requests_active"`
 		Version                  string `json:"version"`
 		RecommendedBinaryVersion string `json:"recommended_binary_version"`
+		// RequiredBinaryVersion mirrors the hard admission floor so
+		// `macprovider-cli doctor` can tell an operator WHY a build is being
+		// closed with 4004 without inventing a new coordinator endpoint
+		// (#767). Empty when no floor is configured. Like the recommendation
+		// above it is NOT capability-gated: /healthz is an operator/monitoring
+		// mirror, and no legacy CLI code path reads it to drive an autoupdate
+		// — a floor is a rejection reason, never an update target.
+		RequiredBinaryVersion string `json:"required_binary_version,omitempty"`
 		// TrustAuthorityDegraded is true when the hardware-trust revalidation
 		// sweep has failed to read the trust store for trustSweepDegradedThreshold
 		// consecutive ticks (issue #582 FIX C). It signals operators that active
@@ -4942,6 +4947,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// field, which IS gated above. Gating this monitoring value would blind
 		// operators with no security benefit.
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:    strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
 		TrustAuthorityDegraded:   s.trustAuthorityDegraded.Load(),
 	}
 	for _, p := range providers {

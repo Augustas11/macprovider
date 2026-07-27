@@ -34,6 +34,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -73,7 +74,11 @@ var spec018RetryableByCode = map[string]bool{
 	"provisional_quota_exceeded": true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
 	"preflight_rejected":         true, // 503, all providers rejected/timed out during preflight
 	"idempotency_unavailable":    true, // 503, durable request logging unavailable
-	"rate_limited":               true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	// 503, #768: every candidate for the model is below its minimum binary
+	// version. Retryable — the fleet self-updates, so the same request can
+	// succeed once a provider upgrades and reconnects.
+	"model_version_floor_unmet": true,
+	"rate_limited":              true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"context_exceeds_capacity":                                false,
@@ -210,6 +215,10 @@ type Server struct {
 	requireGatewayContext bool
 	tier2Mu               sync.RWMutex
 	tier2                 config.Tier2Config
+	// modelVersionFloors is the #768 per-model minimum-binary-version map
+	// (model_id -> minimum version). Read-only after construction; nil/empty
+	// means no floors, which is byte-identical to pre-#768 routing.
+	modelVersionFloors    map[string]string
 	reqLog                requestLogInserter
 	reqLogStore           *requestlog.Store
 	provisionalWeight     float64
@@ -441,6 +450,60 @@ func WithStreamingMetricsMaxSamples(maxSamples int) Option {
 		s.streamingDowngrade = newStreamingDowngradeStoreWithLimit(maxSamples)
 		s.streamingTiming = newStreamingTimingCollectorWithLimit(maxSamples)
 	}
+}
+
+// WithModelVersionFloors installs the #768 per-model minimum-binary-version
+// map. Unset (or empty) keeps routing byte-identical to pre-#768 behavior.
+func WithModelVersionFloors(floors map[string]string) Option {
+	return func(s *Server) {
+		if len(floors) == 0 {
+			s.modelVersionFloors = nil
+			return
+		}
+		copied := make(map[string]string, len(floors))
+		for modelID, floor := range floors {
+			copied[modelID] = floor
+		}
+		s.modelVersionFloors = copied
+	}
+}
+
+// providerMeetsModelVersionFloor is the buyer-plane entry point to the ONE
+// #768 gate. Three call sites share it — the public routing filter
+// (eligibilityCtx.ProviderMeetsModelVersionFloor), the self-route / hard-pin
+// preflight path (validatePinnedProviderForRequest), and the slot-queue
+// candidate list — and internal/ws calls the same versionfloor.Check for the
+// warm-pool gates, so a box we would refuse to route to is never warmed.
+func (s *Server) providerMeetsModelVersionFloor(p pool.Provider) bool {
+	result := versionfloor.Check(s.modelVersionFloors, p.ModelID, p.BinaryVersion)
+	if result.Allowed {
+		return true
+	}
+	// A provider reporting an unparseable version while a floor is in force is
+	// suspect, not merely stale — that warns. An honestly-old build is routine
+	// and is evaluated per provider per request, so it stays at debug; the
+	// operator-visible signal for that case is the `model_version_floor_unmet`
+	// 503 envelope plus the per-request routing decision log.
+	event := s.log.Debug()
+	if result.Malformed {
+		event = s.log.Warn()
+	}
+	event.
+		Str("event", "model_version_floor_excluded").
+		Str("provider_id", p.ProviderID).
+		Str("assigned_id", p.AssignedID).
+		Str("model_id", p.ModelID).
+		Str("binary_version", p.BinaryVersion).
+		Str("required_binary_version", result.Floor).
+		Bool("binary_version_malformed", result.Malformed).
+		Msg("provider excluded by per-model binary version floor")
+	return false
+}
+
+// modelVersionFloorFor reports the configured floor for a provider's model,
+// empty when none applies. Used only to build operator-legible error text.
+func (s *Server) modelVersionFloorFor(p pool.Provider) string {
+	return versionfloor.Check(s.modelVersionFloors, p.ModelID, p.BinaryVersion).Floor
 }
 
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
@@ -5469,6 +5532,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		if result.Counts[routing.ReasonTier2Attestation] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_attestation_required", message: "No attested provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
+		// #768: the pool has boxes for this model, they are just too old to
+		// serve it. Distinct from generic no_provider_available so operators
+		// see a supply-version problem instead of a supply-volume one.
+		if result.Counts[routing.ReasonModelVersionFloor] > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "model_version_floor_unmet", message: "No provider running a new enough binary is available for model `" + req.Model + "`.", typ: "server_error"}
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
 	objective := s.objectiveForRequest(headers, class)
@@ -6154,6 +6223,17 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
+	// #768 self-route preflight gate. The pinned/self-route path bypasses
+	// routing.EligibleCandidates entirely, so the floor must be re-applied here
+	// or a hard pin would be a hole straight through the public routing gate.
+	if !s.providerMeetsModelVersionFloor(p) {
+		return pool.Provider{}, &routeError{
+			status:  http.StatusServiceUnavailable,
+			code:    "model_version_floor_unmet",
+			message: "Pinned provider `" + p.ProviderID + "` runs a binary below the minimum version required for model `" + p.ModelID + "` (>= " + s.modelVersionFloorFor(p) + ").",
+			typ:     "server_error",
+		}
+	}
 	if p.MaxContextTokens < estimatedTokens {
 		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
 	}
@@ -6304,6 +6384,13 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		// #768 audit R1 (security+architect MEDIUM): the waiter stores only
+		// providerID, so the provider polled here may not be the one that
+		// passed slotQueueCandidates — a same-ID reconnect below the
+		// per-model floor must not be served off the queue.
+		if !s.providerMeetsModelVersionFloor(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -6328,6 +6415,13 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 			continue
 		}
 		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {
+			continue
+		}
+		// The slot queue re-derives the public routing gate list by hand; the
+		// #768 floor has to be re-applied here or a below-floor provider would
+		// still be queued for (and eventually served) the model it is too old
+		// to run.
+		if !checker.ProviderMeetsModelVersionFloor(provider) {
 			continue
 		}
 		reason, _ := checker.Tier2Decision(provider)
@@ -6456,6 +6550,12 @@ type eligibilityCtx struct {
 // either failure as ReasonModelMismatch to preserve byte identity.
 func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
 	return c.s.providerMatchesRequest(p, c.model, c.class) && p.RoutingEligible()
+}
+
+// ProviderMeetsModelVersionFloor delegates to the shared #768 gate. See
+// Server.providerMeetsModelVersionFloor.
+func (c *eligibilityCtx) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
+	return c.s.providerMeetsModelVersionFloor(p)
 }
 
 func (c *eligibilityCtx) ProviderContextSufficient(p pool.Provider) bool {
