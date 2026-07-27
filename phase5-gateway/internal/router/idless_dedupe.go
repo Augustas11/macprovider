@@ -39,14 +39,32 @@ const (
 	// computed by an older build.
 	idlessDedupeFingerprintVersion = "mpg-idless-v1"
 
-	idlessDedupeMaxEntries    = 4096
-	idlessDedupeMaxEntryBytes = 1 << 20  // 1 MiB per cached response body
-	idlessDedupeMaxTotalBytes = 32 << 20 // 32 MiB of cached bodies overall
+	// Two separate caps, because the two things an entry holds cost wildly
+	// different amounts of memory and wildly different amounts of money when
+	// dropped.
+	//
+	// The BODY is the expensive part (up to 1 MiB) and losing it costs only
+	// UX: the retry still adopts attempt 1's request id and still lands on
+	// the durable 409. The fp→requestID MAPPING is ~100 bytes and losing it
+	// INSIDE the window costs money: the retry mints a fresh id, reserves
+	// independently, and bills twice. So memory pressure spends bodies first
+	// and keeps bare mapping stubs until the window expires.
+	idlessDedupeMaxBodies     = 4096      // entries still holding a response
+	idlessDedupeMaxMappings   = 65536     // fp→requestID stubs, body or not
+	idlessDedupeMaxEntryBytes = 1 << 20   // 1 MiB per cached response body
+	idlessDedupeMaxTotalBytes = 32 << 20  // 32 MiB of cached bodies overall
 	idlessDedupePruneInterval = time.Minute
 	// idlessDedupeMaxWaiters bounds how many concurrent identical attempts
 	// may park on one in-flight request. Waiters hold no quota reservation
 	// and no concurrency lease, but they do hold a server goroutine.
 	idlessDedupeMaxWaiters = 4
+	// idlessDedupeMaxInFlight bounds concurrently-claimed (not yet terminal)
+	// entries. The claim happens BEFORE ReserveQuota and AcquireConcurrency
+	// — that is what keeps a waiter from holding a reservation — so the
+	// account concurrency limiter does NOT bound this map. Past the cap the
+	// gateway skips dedupe for that request entirely rather than growing
+	// without limit: it proceeds exactly as it did pre-#762.
+	idlessDedupeMaxInFlight = 4096
 
 	// idlessDedupeHeader marks a replayed response so buyers (and the
 	// harness) can tell a cache replay from a fresh generation.
@@ -62,15 +80,31 @@ const (
 // catching retries that no real client emits. The coordinator's request
 // hashing takes the same position.
 //
-// Everything that changes the generated answer is either in those bytes
-// (model, messages, stream, max_tokens, response_format) or in the explicit
-// key parts below (tenant, demo token, sticky conversation). Transport-level
+// Components, in order, each NUL-terminated so no part can be shifted into
+// its neighbour:
+//
+//  1. idlessDedupeFingerprintVersion — the keying-scheme tag.
+//  2. accountID — the billed tenant.
+//  3. demoTokenHash — distinguishes two demo sessions behind one IP.
+//  4. conversationTag — X-MacProvider-Conversation, which selects sticky
+//     routing and therefore which provider answers.
+//  5. retryHint — X-MacProvider-Retry, which copyForwardHeaders forwards to
+//     the coordinator where it changes retry/failover behaviour. Two requests
+//     that differ only in this header are NOT the same dispatch.
+//  6. SHA-256 of the raw body bytes.
+//
+// Everything else that changes the generated answer is inside those bytes
+// (model, messages, stream, max_tokens, response_format). Transport-level
 // headers — Authorization, IP, User-Agent, Accept*, the id headers — are
 // deliberately excluded: they vary across a legitimate retry.
-func idlessRequestFingerprint(accountID, demoTokenHash, conversationTag string, body []byte) string {
+//
+// Adding a component is a keying change: bump idlessDedupeFingerprintVersion
+// when one is added to a build that is already deployed, so old and new
+// fingerprints cannot collide.
+func idlessRequestFingerprint(accountID, demoTokenHash, conversationTag, retryHint string, body []byte) string {
 	bodyDigest := sha256.Sum256(body)
 	h := sha256.New()
-	for _, part := range []string{idlessDedupeFingerprintVersion, accountID, demoTokenHash, conversationTag} {
+	for _, part := range []string{idlessDedupeFingerprintVersion, accountID, demoTokenHash, conversationTag, retryHint} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
@@ -125,12 +159,18 @@ type idlessDedupeIndex struct {
 	mu         sync.Mutex
 	entries    map[string]*idlessDedupeEntry
 	totalBytes int
+	// bodyCount and inFlight are derived counts kept incrementally so the
+	// hot path never scans the map to answer "am I over a cap".
+	bodyCount  int
+	inFlight   int
 	lastPruned time.Time
 
-	replayTotal       atomic.Int64
-	inflightWaitTotal atomic.Int64
-	conflictTotal     atomic.Int64
-	uncacheableTotal  atomic.Int64
+	replayTotal              atomic.Int64
+	inflightWaitTotal        atomic.Int64
+	conflictTotal            atomic.Int64
+	uncacheableTotal         atomic.Int64
+	mappingPressureEvictions atomic.Int64
+	inflightCapSkips         atomic.Int64
 }
 
 func newIdlessDedupeIndex() *idlessDedupeIndex {
@@ -138,8 +178,13 @@ func newIdlessDedupeIndex() *idlessDedupeIndex {
 }
 
 // claim registers requestID as the owner of fp, or reports that an earlier
-// attempt already owns it. adopted=true means the caller must NOT publish or
-// drop the entry; it either replays or falls through to the durable 409.
+// attempt already owns it.
+//
+//   - (entry, true)  — adopted: an earlier attempt owns fp. The caller must
+//     NOT publish or drop; it replays, or falls through to the durable 409.
+//   - (entry, false) — this request won the claim and owns the entry.
+//   - (nil, false)   — the in-flight cap is full. Dedupe is skipped entirely
+//     for this request; it proceeds as a fresh, independent request.
 func (x *idlessDedupeIndex) claim(fp, requestID string, now time.Time, window time.Duration) (*idlessDedupeEntry, bool) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -156,8 +201,13 @@ func (x *idlessDedupeIndex) claim(fp, requestID string, now time.Time, window ti
 		}
 	}
 	x.pruneForInsertLocked(now, window)
+	if x.inFlight >= idlessDedupeMaxInFlight {
+		x.inflightCapSkips.Add(1)
+		return nil, false
+	}
 	entry := &idlessDedupeEntry{requestID: requestID, done: make(chan struct{}), lastSeen: now}
 	x.entries[fp] = entry
+	x.inFlight++
 	return entry, false
 }
 
@@ -177,10 +227,12 @@ func (x *idlessDedupeIndex) publish(fp, requestID string, status int, contentTyp
 	if len(body) > 0 && len(body) <= idlessDedupeMaxEntryBytes {
 		entry.body = body
 		x.totalBytes += len(body)
+		x.bodyCount++
 	}
 	entry.completed = true
 	entry.terminalAt = now
 	entry.lastSeen = now
+	x.inFlight--
 	entry.closeLocked()
 	x.evictBodiesLocked()
 }
@@ -253,15 +305,33 @@ func (x *idlessDedupeIndex) replaySnapshot(entry *idlessDedupeEntry, now time.Ti
 
 func (x *idlessDedupeIndex) removeLocked(fp string, entry *idlessDedupeEntry) {
 	delete(x.entries, fp)
-	if entry.body != nil {
-		x.totalBytes -= len(entry.body)
-		entry.body = nil
+	if !entry.completed {
+		x.inFlight--
 	}
+	x.releaseBodyLocked(entry)
 	entry.closeLocked()
 }
 
+func (x *idlessDedupeIndex) releaseBodyLocked(entry *idlessDedupeEntry) {
+	if entry.body == nil {
+		return
+	}
+	x.totalBytes -= len(entry.body)
+	x.bodyCount--
+	entry.body = nil
+}
+
+// pruneForInsertLocked keeps the MAPPING table bounded. Note what it does not
+// do: it never evicts a window-valid mapping to make room for a body. Body
+// pressure is handled entirely by evictBodiesLocked, which downgrades entries
+// to stubs instead of deleting them.
+//
+// Deleting a window-valid mapping is a money event (the retry mints a fresh
+// id and bills again), so it happens only when the far larger mapping cap is
+// itself exhausted — 65536 live fingerprints inside one window — and is
+// counted as the documented residual.
 func (x *idlessDedupeIndex) pruneForInsertLocked(now time.Time, window time.Duration) {
-	if len(x.entries) < idlessDedupeMaxEntries {
+	if len(x.entries) < idlessDedupeMaxMappings {
 		if !x.lastPruned.IsZero() && now.Sub(x.lastPruned) < idlessDedupePruneInterval {
 			return
 		}
@@ -269,14 +339,15 @@ func (x *idlessDedupeIndex) pruneForInsertLocked(now time.Time, window time.Dura
 		return
 	}
 	x.pruneExpiredLocked(now, window)
-	for len(x.entries) >= idlessDedupeMaxEntries {
-		if !x.evictOldestLocked() {
+	for len(x.entries) >= idlessDedupeMaxMappings {
+		if !x.evictOldestMappingLocked() {
 			// Everything left is in flight: an owner is still running and
-			// waiters may be parked on it, so evicting would strand them.
-			// The map can only exceed the cap by the number of concurrent
-			// in-flight requests, which the concurrency limiter bounds.
+			// waiters may be parked on it, so evicting would strand them and
+			// silently void the owner's publish. idlessDedupeMaxInFlight is
+			// the cap that actually bounds this case.
 			return
 		}
+		x.mappingPressureEvictions.Add(1)
 	}
 }
 
@@ -289,9 +360,10 @@ func (x *idlessDedupeIndex) pruneExpiredLocked(now time.Time, window time.Durati
 	}
 }
 
-// evictOldestLocked drops the least recently seen COMPLETED entry. In-flight
-// entries are never evicted (see pruneForInsertLocked).
-func (x *idlessDedupeIndex) evictOldestLocked() bool {
+// evictOldestMappingLocked deletes the least recently seen COMPLETED entry
+// outright — mapping included. This is the money-losing eviction; see
+// pruneForInsertLocked for when it is allowed to run.
+func (x *idlessDedupeIndex) evictOldestMappingLocked() bool {
 	var oldestFP string
 	var oldest *idlessDedupeEntry
 	for fp, entry := range x.entries {
@@ -309,13 +381,13 @@ func (x *idlessDedupeIndex) evictOldestLocked() bool {
 	return true
 }
 
-// evictBodiesLocked enforces the total-bytes cap by dropping cached BODIES,
-// least recently seen first. The fingerprint→requestID mapping survives, so a
-// retry inside the window still adopts attempt 1's id and still gets the
-// durable 409 instead of a second bill — losing the replay costs UX, not
-// money.
+// evictBodiesLocked enforces the body caps (count and total bytes) by
+// downgrading entries to bare mapping stubs, least recently seen first. The
+// fingerprint→requestID mapping SURVIVES, so a retry inside the window still
+// adopts attempt 1's id and still gets the durable 409 instead of a second
+// bill — losing the replay costs UX, not money.
 func (x *idlessDedupeIndex) evictBodiesLocked() {
-	for x.totalBytes > idlessDedupeMaxTotalBytes {
+	for x.totalBytes > idlessDedupeMaxTotalBytes || x.bodyCount > idlessDedupeMaxBodies {
 		var oldest *idlessDedupeEntry
 		for _, entry := range x.entries {
 			if entry.body == nil {
@@ -328,8 +400,7 @@ func (x *idlessDedupeIndex) evictBodiesLocked() {
 		if oldest == nil {
 			return
 		}
-		x.totalBytes -= len(oldest.body)
-		oldest.body = nil
+		x.releaseBodyLocked(oldest)
 	}
 }
 
@@ -412,5 +483,11 @@ func (x *idlessDedupeIndex) prometheus() string {
 	b.WriteString("# HELP gateway_idless_dedupe_uncacheable_total Attempts whose terminal response was not replayable (non-2xx, truncated stream, buyer disconnect, oversize body).\n")
 	b.WriteString("# TYPE gateway_idless_dedupe_uncacheable_total counter\n")
 	fmt.Fprintf(&b, "gateway_idless_dedupe_uncacheable_total %d\n", x.uncacheableTotal.Load())
+	b.WriteString("# HELP gateway_idless_dedupe_mapping_pressure_evictions_total Window-valid fingerprint mappings deleted under mapping-table pressure; each one lets a later id-less retry bill again.\n")
+	b.WriteString("# TYPE gateway_idless_dedupe_mapping_pressure_evictions_total counter\n")
+	fmt.Fprintf(&b, "gateway_idless_dedupe_mapping_pressure_evictions_total %d\n", x.mappingPressureEvictions.Load())
+	b.WriteString("# HELP gateway_idless_dedupe_inflight_cap_skip_total Requests that bypassed dedupe because the in-flight claim cap was full.\n")
+	b.WriteString("# TYPE gateway_idless_dedupe_inflight_cap_skip_total counter\n")
+	fmt.Fprintf(&b, "gateway_idless_dedupe_inflight_cap_skip_total %d\n", x.inflightCapSkips.Load())
 	return b.String()
 }

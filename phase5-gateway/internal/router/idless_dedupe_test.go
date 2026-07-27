@@ -824,37 +824,111 @@ func TestIdlessDedupeIndex_ExpiredEntryIsReclaimedFresh(t *testing.T) {
 	}
 }
 
-func TestIdlessDedupeIndex_EvictsLRUCompletedButNeverInFlight(t *testing.T) {
+// Body pressure must spend BODIES, never window-valid mappings. A tenant
+// churning unique fingerprints past the body cap may cost everyone their
+// cached responses; it must not cost anyone their dedupe (and therefore their
+// second bill).
+func TestIdlessDedupeIndex_BodyPressureKeepsWindowValidMappings(t *testing.T) {
 	index := newIdlessDedupeIndex()
 	base := fixedNow()
 	window := time.Hour
 
-	// Fill the map with completed entries, oldest first.
-	for i := 0; i < idlessDedupeMaxEntries; i++ {
-		fp := "completed-" + strconv.Itoa(i)
-		at := base.Add(time.Duration(i) * time.Millisecond)
+	// The oldest entry: published first, never touched again, so it is the
+	// LRU victim for every body eviction that follows.
+	index.claim("victim", "req-victim", base, window)
+	index.publish("victim", "req-victim", http.StatusOK, "application/json", "", []byte("answer"), base)
+
+	// Churn well past the body cap with unique fingerprints.
+	for i := 0; i < idlessDedupeMaxBodies+64; i++ {
+		fp := "churn-" + strconv.Itoa(i)
+		at := base.Add(time.Duration(i+1) * time.Millisecond)
 		index.claim(fp, "req-"+strconv.Itoa(i), at, window)
 		index.publish(fp, "req-"+strconv.Itoa(i), http.StatusOK, "application/json", "", []byte("a"), at)
 	}
-	if got := len(index.entries); got != idlessDedupeMaxEntries {
-		t.Fatalf("entries=%d want %d", got, idlessDedupeMaxEntries)
-	}
-	index.claim("newcomer", "req-new", base.Add(time.Second), window)
-	if len(index.entries) > idlessDedupeMaxEntries {
-		t.Fatalf("entries=%d exceeds the cap %d", len(index.entries), idlessDedupeMaxEntries)
-	}
-	if _, exists := index.entries["completed-0"]; exists {
-		t.Fatal("the least recently seen completed entry survived eviction")
-	}
 
-	// In-flight entries are never evicted: a parked waiter would be stranded
-	// and its owner's publish would silently vanish.
-	inflight := newIdlessDedupeIndex()
-	for i := 0; i < idlessDedupeMaxEntries+2; i++ {
-		inflight.claim("inflight-"+strconv.Itoa(i), "req-"+strconv.Itoa(i), base, window)
+	if got := index.bodyCount; got > idlessDedupeMaxBodies {
+		t.Fatalf("bodyCount=%d exceeds the body cap %d", got, idlessDedupeMaxBodies)
 	}
-	if got := len(inflight.entries); got != idlessDedupeMaxEntries+2 {
-		t.Fatalf("in-flight entries=%d want %d (an in-flight owner was evicted)", got, idlessDedupeMaxEntries+2)
+	// The mapping — the money-bearing half — survived.
+	entry, adopted := index.claim("victim", "req-retry", base.Add(time.Second), window)
+	if !adopted {
+		t.Fatal("body pressure deleted a window-valid mapping: an id-less retry would now double-bill")
+	}
+	if entry.requestID != "req-victim" {
+		t.Fatalf("adopted requestID=%q want req-victim", entry.requestID)
+	}
+	if entry.body != nil {
+		t.Fatal("the victim kept its body; the test never exercised body eviction")
+	}
+	if got := index.mappingPressureEvictions.Load(); got != 0 {
+		t.Fatalf("mapping_pressure_evictions=%d want 0 (body pressure must not delete mappings)", got)
+	}
+}
+
+// Only exhausting the far larger MAPPING cap may delete a window-valid
+// mapping, and when it does it is counted as the documented residual.
+func TestIdlessDedupeIndex_MappingPressureEvictsOldestAndCounts(t *testing.T) {
+	index := newIdlessDedupeIndex()
+	base := fixedNow()
+	window := time.Hour
+
+	for i := 0; i < idlessDedupeMaxMappings; i++ {
+		fp := "m-" + strconv.Itoa(i)
+		at := base.Add(time.Duration(i) * time.Millisecond)
+		index.claim(fp, "req-"+strconv.Itoa(i), at, window)
+		// No body: this is purely mapping-table pressure.
+		index.publish(fp, "req-"+strconv.Itoa(i), http.StatusOK, "application/json", "", nil, at)
+	}
+	if got := len(index.entries); got != idlessDedupeMaxMappings {
+		t.Fatalf("entries=%d want %d", got, idlessDedupeMaxMappings)
+	}
+	index.claim("newcomer", "req-new", base.Add(time.Hour/2), window)
+	if got := len(index.entries); got > idlessDedupeMaxMappings {
+		t.Fatalf("entries=%d exceeds the mapping cap %d", got, idlessDedupeMaxMappings)
+	}
+	if _, exists := index.entries["m-0"]; exists {
+		t.Fatal("the least recently seen mapping survived eviction")
+	}
+	if got := index.mappingPressureEvictions.Load(); got < 1 {
+		t.Fatalf("mapping_pressure_evictions=%d want >= 1 (the residual must be observable)", got)
+	}
+}
+
+// In-flight entries are never evicted — a parked waiter would be stranded and
+// its owner's publish would silently vanish. The in-flight cap is what bounds
+// that map instead.
+func TestIdlessDedupeIndex_InFlightNeverEvictedAndCapped(t *testing.T) {
+	index := newIdlessDedupeIndex()
+	base := fixedNow()
+	window := time.Hour
+
+	for i := 0; i < idlessDedupeMaxInFlight; i++ {
+		if entry, _ := index.claim("inflight-"+strconv.Itoa(i), "req-"+strconv.Itoa(i), base, window); entry == nil {
+			t.Fatalf("claim %d was refused below the in-flight cap", i)
+		}
+	}
+	if got := len(index.entries); got != idlessDedupeMaxInFlight {
+		t.Fatalf("in-flight entries=%d want %d (an in-flight owner was evicted)", got, idlessDedupeMaxInFlight)
+	}
+	entry, adopted := index.claim("over-cap", "req-over", base, window)
+	if entry != nil || adopted {
+		t.Fatalf("claim past the in-flight cap returned (%v, %v); want (nil, false) = skip dedupe", entry, adopted)
+	}
+	if got := index.inflightCapSkips.Load(); got != 1 {
+		t.Fatalf("inflight_cap_skip_total=%d want 1", got)
+	}
+	// A terminal frees a slot.
+	index.publish("inflight-0", "req-0", http.StatusOK, "application/json", "", []byte("a"), base)
+	if index.inFlight != idlessDedupeMaxInFlight-1 {
+		t.Fatalf("inFlight=%d want %d after one terminal", index.inFlight, idlessDedupeMaxInFlight-1)
+	}
+	if entry, _ := index.claim("after-terminal", "req-after", base, window); entry == nil {
+		t.Fatal("a freed in-flight slot was not reusable")
+	}
+	// Dropping an in-flight entry frees its slot too.
+	index.drop("inflight-1", "req-1")
+	if index.inFlight != idlessDedupeMaxInFlight-1 {
+		t.Fatalf("inFlight=%d after a drop; the slot was not released", index.inFlight)
 	}
 }
 
@@ -904,15 +978,17 @@ func TestIdlessDedupeIndex_WaiterCapAndContextExpiry(t *testing.T) {
 }
 
 func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
-	base := idlessRequestFingerprint("acct", "demo-hash", "thread-1", []byte(`{"a":1}`))
+	base := idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
 	cases := map[string]string{
-		"same inputs":         idlessRequestFingerprint("acct", "demo-hash", "thread-1", []byte(`{"a":1}`)),
-		"other account":       idlessRequestFingerprint("acct2", "demo-hash", "thread-1", []byte(`{"a":1}`)),
-		"other demo token":    idlessRequestFingerprint("acct", "demo-hash-2", "thread-1", []byte(`{"a":1}`)),
-		"other conversation":  idlessRequestFingerprint("acct", "demo-hash", "thread-2", []byte(`{"a":1}`)),
-		"other body":          idlessRequestFingerprint("acct", "demo-hash", "thread-1", []byte(`{"a":2}`)),
-		"whitespace in body":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", []byte(`{"a": 1}`)),
-		"field-shifted parts": idlessRequestFingerprint("acc", "tdemo-hash", "thread-1", []byte(`{"a":1}`)),
+		"same inputs":         idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other account":       idlessRequestFingerprint("acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other demo token":    idlessRequestFingerprint("acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
+		"other conversation":  idlessRequestFingerprint("acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),
+		"retry hint present":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", "1", []byte(`{"a":1}`)),
+		"other retry hint":    idlessRequestFingerprint("acct", "demo-hash", "thread-1", "2", []byte(`{"a":1}`)),
+		"other body":          idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":2}`)),
+		"whitespace in body":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a": 1}`)),
+		"field-shifted parts": idlessRequestFingerprint("acc", "tdemo-hash", "thread-1", "", []byte(`{"a":1}`)),
 	}
 	for name, got := range cases {
 		if name == "same inputs" {
@@ -924,5 +1000,128 @@ func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
 		if got == base {
 			t.Fatalf("%s: fingerprint collided with the base request", name)
 		}
+	}
+	if cases["retry hint present"] == cases["other retry hint"] {
+		t.Fatal("two different X-MacProvider-Retry values produced the same fingerprint")
+	}
+}
+
+// failingAfterWriter is an http.ResponseWriter whose underlying writes start
+// failing after allowBytes bytes have been accepted — the buyer's socket
+// dying mid-stream while the handler is still emitting.
+type failingAfterWriter struct {
+	*httptest.ResponseRecorder
+	allowBytes int
+	written    int
+}
+
+func (f *failingAfterWriter) Write(b []byte) (int, error) {
+	if f.written >= f.allowBytes {
+		return 0, errors.New("injected buyer write failure")
+	}
+	n := len(b)
+	if f.written+n > f.allowBytes {
+		n = f.allowBytes - f.written
+	}
+	_, _ = f.ResponseRecorder.Write(b[:n])
+	f.written += n
+	if n < len(b) {
+		return n, errors.New("injected buyer write failure")
+	}
+	return n, nil
+}
+
+func (f *failingAfterWriter) Flush() {}
+
+// Audit R1 (security+code HIGH, finding 2): a mid-stream buyer write failure
+// after the 200 commit must poison the capture — the buyer never received the
+// full response, so publishing it would replay a partial/not-delivered stream
+// to the retry. The retry must re-dispatch.
+func TestIdlessDedupe_BuyerWriteFailureNotReplayed(t *testing.T) {
+	var hits atomic.Int32
+	client := idlessStreamingUpstream(&hits, func(pw *io.PipeWriter) {
+		_, _ = io.WriteString(pw, `data: {"id":"c","choices":[{"delta":{"content":"hello world"}}]}`+"\n\n")
+		_, _ = io.WriteString(pw, `data: {"id":"c","choices":[{"delta":{"content":"more"}}]}`+"\n\n")
+		_, _ = io.WriteString(pw, `data: [DONE]`+"\n\n")
+		_ = pw.Close()
+	})
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_idless_writefail")
+
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	// Accept only the first few bytes, then fail every buyer write.
+	fw := &failingAfterWriter{ResponseRecorder: httptest.NewRecorder(), allowBytes: 10}
+	h.ServeHTTP(fw, req)
+
+	second := postChat(t, h, key, body, nil)
+	assertNoDedupeReplay(t, second, "retry after a buyer write failure")
+	if second.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", second.Code, second.Body.String())
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream dispatches=%d want 2 (a partially-delivered 200 must not be cached)", got)
+	}
+}
+
+// panicWriter panics on the second buyer write — a mid-handler panic in the
+// handler goroutine after the 200 commit (the statusWriter methods run on the
+// handler goroutine, unlike upstream Body reads, which #760 moved to a reader
+// goroutine where a panic would be process-fatal for any request).
+type panicWriter struct {
+	*httptest.ResponseRecorder
+	writes int
+}
+
+func (p *panicWriter) Write(b []byte) (int, error) {
+	p.writes++
+	// Panic exactly once, on the second buyer write - later writes (the
+	// recovery middleware error body) must succeed or the middleware own
+	// recover would re-crash.
+	if p.writes == 2 {
+		panic("injected mid-handler panic")
+	}
+	return p.ResponseRecorder.Write(b)
+}
+
+func (p *panicWriter) Flush() {}
+
+// Audit R1 (architect LOW, finding 5): a mid-handler panic after the 200
+// commit unwinds through the owner's publish defer. The defer must DROP the
+// entry (never publish the partial capture) and re-panic so the recovery
+// middleware still handles it. The retry must re-dispatch.
+func TestIdlessDedupe_HandlerPanicDropsEntryAndRepanics(t *testing.T) {
+	var hits atomic.Int32
+	client := idlessStreamingUpstream(&hits, func(pw *io.PipeWriter) {
+		_, _ = io.WriteString(pw, `data: {"id":"c","choices":[{"delta":{"content":"one"}}]}`+"\n\n")
+		_, _ = io.WriteString(pw, `data: {"id":"c","choices":[{"delta":{"content":"two"}}]}`+"\n\n")
+		_, _ = io.WriteString(pw, `data: [DONE]`+"\n\n")
+		_ = pw.Close()
+	})
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_idless_panic")
+
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	pw := &panicWriter{ResponseRecorder: httptest.NewRecorder()}
+	// The dedupe defer must recover, drop, and re-panic; the recovery
+	// middleware then swallows it, so ServeHTTP returns normally.
+	h.ServeHTTP(pw, req)
+
+	second := postChat(t, h, key, body, nil)
+	assertNoDedupeReplay(t, second, "retry after a mid-handler panic")
+	if !strings.Contains(second.Body.String(), "data: [DONE]") {
+		t.Fatalf("retry did not stream a fresh completion: %.300q", second.Body.String())
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream dispatches=%d want 2 (a panicked attempt must be dropped, not cached)", got)
 	}
 }

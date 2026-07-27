@@ -275,10 +275,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			subject.AccountID,
 			subject.DemoTokenHash,
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
+			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
 			body,
 		)
 		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
-		if adopted {
+		switch {
+		case entry == nil:
+			// In-flight claim cap is full. Skip dedupe entirely rather than
+			// letting the map grow: this request behaves exactly as it did
+			// pre-#762 (its own id, its own reservation, its own bill).
+			dedupeFingerprint = ""
+		case adopted:
 			// Attempt 1 owns this entry. Clearing the fingerprint is
 			// load-bearing: it makes the terminal defer below a no-op, so
 			// only the claim winner can ever publish or drop.
@@ -292,11 +299,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			if s.replayIdlessDuplicate(w, r, subject, dailyQuota, entry, dedupeWindow, deadlines) {
 				return
 			}
-		} else {
+		default:
 			sw.armDedupeCapture(idlessDedupeMaxEntryBytes)
 			defer func() {
 				if dedupeFingerprint == "" {
 					return
+				}
+				// A panic unwinding through here has already written part of
+				// a 2xx in the streaming case; the recovery middleware will
+				// turn it into internal_error. Publishing that partial would
+				// cache a response no buyer ever completed, so drop it and
+				// re-panic so the middleware still sees and handles the
+				// panic exactly as before.
+				if recovered := recover(); recovered != nil {
+					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
+					panic(recovered)
 				}
 				// Publish is gated on a buyer-visible 2xx, not on settlement
 				// finality: a SPEC-022 hold is still a delivered answer, and
@@ -1026,6 +1043,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	settleCancelled := func() {
 		cancelCoordinator()
+		// #762: the buyer never received the whole stream — either they
+		// disconnected or a write to them failed. Poison explicitly rather
+		// than relying on r.Context().Err() being observable in the publish
+		// defer: a failed write does not necessarily cancel the context.
+		poisonDedupeCapture(w)
 		settleObservedContent("client_disconnect")
 	}
 	settleIdleTimeout := func() {
@@ -1078,6 +1100,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				}
 				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
 					terminalStructuredErrorCode = code
+					// #762: a 200 stream that ends in a SPEC-019 terminal
+					// error envelope is refunded, not an answer. Caching it
+					// would replay a stale provider error to a retry that
+					// deserves a fresh dispatch.
+					poisonDedupeCapture(w)
 					if _, err := w.Write(line); err != nil {
 						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
 						refundTerminalStructuredError()
@@ -1176,6 +1203,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+			// #762: explicit, even though settleCancelled poisons too — this
+			// is the exact path an audit flagged as publishing a partial,
+			// never-delivered 2xx.
+			poisonDedupeCapture(w)
 			settleCancelled()
 			return false
 		}
@@ -2642,17 +2673,28 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 		sw.statusCode = http.StatusOK
 		sw.flushed = true
 	}
-	if sw.captureArmed && !sw.overflowed {
-		if len(sw.capture)+len(b) > sw.captureCap {
+	// Capture what the buyer actually RECEIVED, which is what the underlying
+	// writer reports — not what we handed it. Capturing before the write let
+	// a failed or short write (buyer gone mid-stream) be published as a
+	// complete 2xx and replayed to the next retry.
+	n, err := sw.ResponseWriter.Write(b)
+	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
+		switch {
+		case err != nil:
+			// The buyer did not get all of this. Whatever we hold is a
+			// partial response; it must never be replayed.
+			sw.poisoned = true
+			sw.capture = nil
+		case len(sw.capture)+n > sw.captureCap:
 			// Oversize responses are not cached at all (rather than
 			// truncated): a partial replay would be a wrong answer.
 			sw.overflowed = true
 			sw.capture = nil
-		} else {
-			sw.capture = append(sw.capture, b...)
+		default:
+			sw.capture = append(sw.capture, b[:n]...)
 		}
 	}
-	return sw.ResponseWriter.Write(b)
+	return n, err
 }
 
 // Flush satisfies http.Flusher so SSE streaming through this wrapper still
