@@ -321,7 +321,18 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
         guard identity.modelSHA256 != nil else { return nil }         // identity_unavailable
         // Only the v1-allowlisted unquantized class is serializable; any other
         // cache class skips persistence (byte-identical hot behavior for it).
-        guard let caches = layers.layers as? [KVCacheSimple] else { return nil }
+        // MEDIUM-A/LOW/INFO: make that skip OBSERVABLE instead of a silent no-op. A
+        // tier-eligible request can legitimately hold a non-KVCacheSimple cache —
+        // model families that override `newCache` and ignore `maxKVSize` (gpt-oss,
+        // gemma-4, nemotron), hot-cache reuse of a rotating cache seeded by a
+        // relay/tier2 request, or mid-generation `kvBits` quantization. Emit a
+        // `disk_write_skipped(unsupported_cache_class)` carrying the runtime class
+        // name, then still fail safe to miss (return nil) as before.
+        guard let caches = layers.layers as? [KVCacheSimple] else {
+            let className = layers.layers.first.map { String(describing: type(of: $0)) } ?? "empty"
+            Task { [store] in await store.noteUnsupportedCacheClassSkipped(rawKey: conversationKey, cacheClass: className) }
+            return nil
+        }
 
         // HIGH-5 — estimate the decoded size from GEOMETRY (no byte copy) and skip an
         // oversized snapshot BEFORE the deep copy, so a huge cache can never be copied

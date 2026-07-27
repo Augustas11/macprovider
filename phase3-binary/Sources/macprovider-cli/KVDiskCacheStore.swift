@@ -1580,6 +1580,16 @@ actor KVDiskCacheStore {
         emit(.diskWriteSkipped, detail: .writeBudget, indexHashPrefix: identityPrefix(rawKey))
     }
 
+    /// MEDIUM-A/LOW/INFO (SPEC-037): emit `disk_write_skipped(detail=unsupported_cache_class)`
+    /// for a tier-eligible commit whose live cache is not the v1-allowlisted
+    /// `KVCacheSimple`. Carries the actual runtime cache class in `cache_class` so an
+    /// operator sees a skip reason instead of a silent no-op. The v1 allowlist limitation
+    /// is unchanged; only the SILENCE is removed. Index prefix is best-effort.
+    func noteUnsupportedCacheClassSkipped(rawKey: String, cacheClass: String) {
+        emit(.diskWriteSkipped, detail: .unsupportedCacheClass,
+             indexHashPrefix: identityPrefix(rawKey), fields: ["cache_class": cacheClass])
+    }
+
     private func identityPrefix(_ rawKey: String) -> String? {
         // `try?` flattens the throwing Optional; a nil epoch master ⇒ no prefix.
         guard let index = try? currentIndex(rawKey: rawKey) else { return nil }

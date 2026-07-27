@@ -2145,14 +2145,38 @@ actor ModelRuntime: ModelRuntimeServing {
                 }
                 // Only the v1-allowlisted unquantized class is serializable/persisted;
                 // any other runtime skips the seed exactly as it skips persistence.
-                guard let caches = kvCache as? [KVCacheSimple],
-                      let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
+                // MEDIUM-A: if the forced-simple warmup did NOT produce a KVCacheSimple,
+                // this loaded model's runtime does not support the disk tier at all
+                // (a model family that overrides `newCache` and ignores `maxKVSize`,
+                // e.g. gpt-oss/gemma-4/nemotron). Tell the operator ONCE at attach
+                // rather than leaving every eligible request to skip observably but
+                // silently at attach time. Log-only: the per-request observable skip in
+                // captureSnapshot still covers correctness.
+                guard let caches = kvCache as? [KVCacheSimple] else {
+                    let className = kvCache.first.map { String(describing: type(of: $0)) } ?? "empty"
+                    Self.logColdTierUnsupportedCacheClass(servedModelID: servedModelID, cacheClass: className)
+                    return nil
+                }
+                guard let payloads = KVCacheSerialization.snapshotLayers(caches) else { return nil }
                 return KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: payloads)
             }
         } ?? nil
         if let template, !template.isEmpty {
             adapter.seedTemplate(servedModelID: servedModelID, template: template)
         }
+    }
+
+    /// MEDIUM-A (SPEC-037) — warn ONCE at cold-tier attach when the loaded model's
+    /// forced-simple warmup produces a cache class outside the v1 serialization
+    /// allowlist (`KVCacheSimple`). Such a model cannot persist to the disk tier at
+    /// all; every eligible request will skip observably (unsupported_cache_class), so
+    /// this up-front line tells operators before the first request rather than only
+    /// per-request. Log-only — no eligibility-short-circuit plumbing.
+    private nonisolated static func logColdTierUnsupportedCacheClass(servedModelID: String, cacheClass: String) {
+        let line = "event=kv_disk_tier_unsupported_model served_model_id=\(servedModelID) "
+            + "cache_class=\(cacheClass) message=\"kv disk tier: model \(servedModelID) runtime produces "
+            + "\(cacheClass), not KVCacheSimple; disk survival will not persist for this model\"\n"
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     // MARK: - FR-KVP8 hot-tier (RAM) purge/status — independent of disk-tier enablement

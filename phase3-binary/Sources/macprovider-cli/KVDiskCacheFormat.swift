@@ -124,6 +124,14 @@ enum KVReasonDetail: String, Sendable, Equatable {
     /// (`write_staging_max_bytes`) is exhausted across all concurrent snapshots
     /// (Item 3, FR-KVP3 RAM-DoS bound).
     case writeBudget = "write_budget"
+    /// A commit for a tier-eligible request produced a cache class outside the v1
+    /// serialization allowlist (`{"KVCacheSimple"}`), so it cannot be persisted.
+    /// Sources: model families that override `newCache` and ignore `maxKVSize`
+    /// (e.g. gpt-oss, gemma-4, nemotron), hot-cache reuse of a rotating cache first
+    /// populated by a relay/tier2 request, or mid-generation `kvBits` quantization
+    /// replacing the layers. The v1 allowlist is by design; this makes the skip
+    /// OBSERVABLE instead of a silent no-op.
+    case unsupportedCacheClass = "unsupported_cache_class"
 }
 
 /// Read/promotion-phase result of manifest parse + envelope validation. `ok`
