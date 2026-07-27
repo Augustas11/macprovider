@@ -326,6 +326,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 						sw.dedupeCapture(), s.now())
 					return
 				}
+				// Audit R2 (code HIGH): a COMPLETE, delivered, billed 2xx
+				// whose body merely exceeded the replay cap must keep its
+				// fp->request_id mapping — dropping it would let an identical
+				// id-less retry mint a fresh id and bill again. Publish a
+				// body-less stub instead: the retry adopts the id and lands
+				// on the durable 409. Only poisoned attempts (partial or
+				// error content, failed buyer writes) and buyer disconnects
+				// drop, because those retries MUST re-dispatch.
+				if sw.dedupeDeliveredButUncacheable() && r.Context().Err() == nil {
+					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+						nil, s.now())
+					return
+				}
 				s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
 			}()
 		}
@@ -2640,6 +2654,15 @@ func (sw *statusWriter) armDedupeCapture(limit int) {
 // an identical id-less retry: a complete, buyer-visible 2xx that fit the cap.
 func (sw *statusWriter) dedupePublishable() bool {
 	return sw.captureArmed && !sw.poisoned && !sw.overflowed &&
+		sw.statusCode >= 200 && sw.statusCode < 300
+}
+
+// dedupeDeliveredButUncacheable reports a fully-delivered, unpoisoned 2xx
+// whose body exceeded the replay cap: the response reached the buyer and was
+// billed, so its fp->request_id mapping must survive as a body-less stub
+// even though replay is unavailable (audit R2, code HIGH).
+func (sw *statusWriter) dedupeDeliveredButUncacheable() bool {
+	return sw.captureArmed && !sw.poisoned && sw.overflowed &&
 		sw.statusCode >= 200 && sw.statusCode < 300
 }
 

@@ -1125,3 +1125,45 @@ func TestIdlessDedupe_HandlerPanicDropsEntryAndRepanics(t *testing.T) {
 		t.Fatalf("upstream dispatches=%d want 2 (a panicked attempt must be dropped, not cached)", got)
 	}
 }
+
+// Audit R2 (code HIGH): a COMPLETE, delivered, billed 2xx whose body merely
+// exceeded the 1 MiB replay cap must keep its fp->request_id mapping as a
+// body-less stub — the identical id-less retry adopts the id and lands on the
+// durable 409 (billed once). Dropping the mapping would let the retry mint a
+// fresh id, re-dispatch, and bill again.
+func TestIdlessDedupe_OversizedDelivered2xxKeepsMappingStub(t *testing.T) {
+	big := strings.Repeat("x", (1<<20)+4096) // > replay cap, < upstream body cap
+	bodyJSON := `{"id":"chatcmpl_big","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"` + big + `"},"finish_reason":"stop"}]}`
+	var hits atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/chat/completions" {
+			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+		}
+		hits.Add(1)
+		return responseWithBody(http.StatusOK,
+			http.Header{"Content-Type": []string{"application/json"}}, bodyJSON), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_idless_oversize")
+
+	body := `{"model":"llama","stream":false,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	first := postChat(t, h, key, body, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("attempt 1 status=%d", first.Code)
+	}
+
+	second := postChat(t, h, key, body, nil)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("retry of an oversized delivered 2xx must hit the durable 409 via the "+
+			"mapping stub, got %d body=%.200q", second.Code, second.Body.String())
+	}
+	assertErrorCode(t, second.Body.String(), "duplicate_request_id")
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream dispatches=%d want 1 (the mapping stub must prevent re-dispatch)", got)
+	}
+	if outcome, _ := usageEventOutcome(t, dbPath, "acct_idless_oversize"); outcome != "ok" {
+		t.Fatalf("usage outcome=%q want ok (billed exactly once, by attempt 1)", outcome)
+	}
+}
