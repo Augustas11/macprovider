@@ -866,3 +866,42 @@ func TestSettlementJournal_RecoveryRefundFailureRetriesBeforeSealing(t *testing.
 		t.Fatalf("still unsealed after healthy recovery")
 	}
 }
+
+// TestSettlementJournal_ConflictPathReleasesActiveHold pins the audit R2
+// architect MEDIUM: when the durable usage row conflicts with the journaled
+// payload, the money question goes to retry/quarantine — but the still-active
+// reservation hold must be released immediately, not left double-counting
+// against the buyer's quota until the reaper.
+func TestSettlementJournal_ConflictPathReleasesActiveHold(t *testing.T) {
+	srv, store, dbPath, jnl, _ := newJournalHarness(t, nil)
+	seedJournalReservation(t, store, "acct_confhold", "req-confhold", 100)
+	rec := journalSettleEffect("acct_confhold", "req-confhold")
+	if err := jnl.WriteEffect(rec); err != nil {
+		t.Fatalf("WriteEffect: %v", err)
+	}
+	// A conflicting durable row (different totals), reservation still ACTIVE.
+	if err := store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: "req-confhold", AccountID: "acct_confhold",
+		WindowDate: rec.WindowDate, PromptTokens: rec.PromptTokens,
+		CompletionTokens: rec.CompletionTokens + 1, TotalTokens: rec.TotalTokens + 1,
+		TokenSource: rec.TokenSource, Outcome: rec.Outcome, CreatedAt: fixedNow(),
+	}); err != nil {
+		t.Fatalf("EnsureUsageEvent seed: %v", err)
+	}
+
+	summary, err := srv.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RecoverSettlementJournal: %v", err)
+	}
+	if summary.Retried != 1 {
+		t.Fatalf("summary=%+v want the conflict to enter the retry path", summary)
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_confhold")
+	if snap.activeRows != 0 || snap.activeReserved != 0 {
+		t.Fatalf("conflict path left the hold active: %+v — quota double-counts until the reaper", snap)
+	}
+	// The money row stays operator-visible/unresolved: still unsealed.
+	if scan, _ := jnl.Scan(); len(scan.Unsealed) != 1 {
+		t.Fatalf("Unsealed=%d want 1 (conflict must not seal)", len(scan.Unsealed))
+	}
+}

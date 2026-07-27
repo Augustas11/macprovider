@@ -220,6 +220,19 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		if !errors.Is(err, storage.ErrUsageEventConflict) {
 			return "", err
 		}
+		// Audit R2 (architect MEDIUM): a conflicting durable row means SOME
+		// bill exists for this request — the money question goes to
+		// retry/quarantine below, but the quota HOLD must not keep
+		// double-counting against the buyer while it does. Best-effort
+		// release; already-terminal is the benign sentinel.
+		if refundErr := s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix()); refundErr != nil &&
+			!errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
+			slog.Warn("gateway settlement journal conflict-path refund failed; hold released on a later pass",
+				"account_id", rec.AccountID,
+				"request_id", rec.RequestID,
+				"error", refundErr,
+			)
+		}
 		attempts := s.journalAttempts.next(key)
 		if attempts < settlementJournalMaxConflictAttempts {
 			slog.Warn("gateway settlement journal re-drive conflicts with the durable usage row; retrying",
