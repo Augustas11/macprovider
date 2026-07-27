@@ -560,7 +560,7 @@
       ],
       "implementation_status": "partial",
       "production_status": "pending-verification",
-      "last_reconciled_commit": "e310e15c41e6449c70e8fd9f7dfc2f55abb1ae87",
+      "last_reconciled_commit": "91834bcf421324e9e042bd8639e9177294d9c605",
       "last_reconciled_at": "2026-07-26",
       "evidence": [],
       "requirement_id_migration": "pending",
@@ -568,7 +568,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Implementation and regression mappings now cover signed discovery, manual recovery, local integrity, launchd fencing, and rollback fencing after the closed updater-lifecycle fixes. SPEC-020 remains pending, not conformant, because release/update/restart/rollback behavior still needs mapped signed physical journey evidence under the #614 conformance ledger."
+        "rationale": "Implementation and regression mappings now cover signed discovery, manual recovery, local integrity, launchd fencing, and rollback fencing after the closed updater-lifecycle fixes. The physical journey contract is mapped, but SPEC-020 remains pending, not conformant, because release/update/restart/rollback behavior still needs captured signed physical journey evidence under the #614 conformance ledger."
       }
     },
     {
@@ -1240,13 +1240,15 @@
         "scripts/test-renew-release-discovery-head.sh:protected renewal workflow fails closed",
         "scripts/verify-v1855-discovery-bridge.sh:anonymous v1.8.55 bridge proof"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Append-only signed discovery, protected renewal, and anonymous v1.8.55 bridge verification are mapped to code and regression tests. The unresolved item is signed physical discovery-to-update journey evidence for the current production-base path, so conformance remains pending under #614."
+        "rationale": "Append-only signed discovery, protected renewal, and anonymous v1.8.55 bridge verification are mapped to code and regression tests, and the physical autoupdate journey contract is now mapped. The unresolved item is captured signed physical discovery-to-update evidence for the current production-base path, so conformance remains pending under #614."
       }
     },
     {
@@ -1268,13 +1270,15 @@
         "scripts/test-renew-release-discovery-head.sh:protected renewal workflow fails closed",
         "scripts/verify-v1855-discovery-bridge.sh:anonymous v1.8.55 bridge proof"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Manual signed-release recovery, append-only transport, protected renewal, and anonymous v1.8.55 bridge verification are mapped to code and regression tests. The unresolved item is signed physical recovery evidence independent of coordinator state for the current production-base path, so conformance remains pending under #614."
+        "rationale": "Manual signed-release recovery, append-only transport, protected renewal, and anonymous v1.8.55 bridge verification are mapped to code and regression tests, and the physical autoupdate journey contract is now mapped. The unresolved item is captured signed physical recovery evidence independent of coordinator state for the current production-base path, so conformance remains pending under #614."
       }
     },
     {
@@ -1295,13 +1299,15 @@
         "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testSuccessCleanupIsIdempotentAcrossCrashSteps",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testPreStagedSuccessSentinelMismatchDoesNotCleanupPendingOrBackup"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Local signed-set health, exact-set success binding, startup recovery, and rollback policy are mapped to code and regression tests. Unit and script coverage do not satisfy SPEC governance for release/update/restart/rollback behavior, so signed physical journey evidence is still pending under #614."
+        "rationale": "Local signed-set health, exact-set success binding, startup recovery, and rollback policy are mapped to code and regression tests, and the physical autoupdate journey contract is now mapped. Unit and script coverage do not satisfy SPEC governance for release/update/restart/rollback behavior, so captured signed physical journey evidence is still pending under #614."
       }
     },
     {
@@ -1374,13 +1380,15 @@
         "ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh:TEST_RELOAD_HELPER_INSPECTION_ERROR",
         "scripts/test-watchdog-inline-drift.sh:WATCHDOG_EOF"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, and legacy first-hop bridge regressions are mapped to code and tests. Legacy bridge checks remain compatibility evidence; conformance remains pending until the current production-base signed physical update and rollback journey is recorded under #614."
+        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, and legacy first-hop bridge regressions are mapped to code and tests, and the physical autoupdate journey contract is now mapped. Legacy bridge checks remain compatibility evidence; conformance remains pending until the current production-base signed physical update and rollback evidence is recorded under #614."
       }
     },
     {
