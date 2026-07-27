@@ -251,33 +251,48 @@ func TestHeartbeatOnlyStreamDiesAtProgressIdle(t *testing.T) {
 // content-progress timer, disarm the first-token phase, or hold a slot to the
 // stream ceiling while shipping nothing a client consumes.
 func TestUnknownDeltaKeyDoesNotCountAsProgress(t *testing.T) {
-	client := seamStreamingUpstreamCtx(endlessFrameStream(40*time.Millisecond,
-		`data: {"id":"c","choices":[{"delta":{"foo":"x"}}]}`+"\n\n"))
-	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-		cfg.Coordinator.BuyerURL = "http://coordinator.test"
-		cfg.Timeouts.StreamingIdleMS = 400
-		// Every other clock is left long: only the content-progress budget
-		// can end this stream.
-		cfg.Timeouts.CoordinatorRequestSeconds = 300
-		cfg.Timeouts.FirstTokenSeconds = 300
-		cfg.Timeouts.StreamCeilingFloorSeconds = 300
-		cfg.Timeouts.StreamCeilingMaxSeconds = 900
-	}, WithHTTPClient(client))
-	key := createAccountAndKey(t, store, cfg, "acct_unknown_delta")
-
-	start := time.Now()
-	resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
-	elapsed := time.Since(start)
-
-	if elapsed > 5*time.Second {
-		t.Fatalf("unknown-key delta stream ran %s — the classifier is counting non-allowlisted "+
-			"keys as generated output, so a provider can fabricate progress", elapsed)
+	cases := []struct {
+		name    string
+		account string
+		frame   string
+	}{
+		{"flat_unknown_key", "acct_unknown_delta",
+			`data: {"id":"c","choices":[{"delta":{"foo":"x"}}]}` + "\n\n"},
+		// R2 bypass class: allowlisted leaf smuggled under an unknown
+		// container must not count either.
+		{"allowlisted_leaf_under_unknown_container", "acct_nested_delta",
+			`data: {"id":"c","choices":[{"delta":{"foo":{"content":"x"}}}]}` + "\n\n"},
 	}
-	if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) {
-		t.Fatalf("want provider_timeout terminal after %s; body=%.400q", elapsed, resp.Body.String())
-	}
-	if outcome, _ := usageEventOutcome(t, dbPath, "acct_unknown_delta"); outcome != "provider_timeout" {
-		t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := seamStreamingUpstreamCtx(endlessFrameStream(40*time.Millisecond, tc.frame))
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Timeouts.StreamingIdleMS = 400
+				// Every other clock is left long: only the content-progress
+				// budget can end this stream.
+				cfg.Timeouts.CoordinatorRequestSeconds = 300
+				cfg.Timeouts.FirstTokenSeconds = 300
+				cfg.Timeouts.StreamCeilingFloorSeconds = 300
+				cfg.Timeouts.StreamCeilingMaxSeconds = 900
+			}, WithHTTPClient(client))
+			key := createAccountAndKey(t, store, cfg, tc.account)
+
+			start := time.Now()
+			resp := postChat(t, h, key, `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+			elapsed := time.Since(start)
+
+			if elapsed > 5*time.Second {
+				t.Fatalf("non-content delta stream ran %s — the classifier is counting "+
+					"non-output paths as generated output, so a provider can fabricate progress", elapsed)
+			}
+			if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) {
+				t.Fatalf("want provider_timeout terminal after %s; body=%.400q", elapsed, resp.Body.String())
+			}
+			if outcome, _ := usageEventOutcome(t, dbPath, tc.account); outcome != "provider_timeout" {
+				t.Fatalf("usage outcome=%q want provider_timeout", outcome)
+			}
+		})
 	}
 }
 
@@ -331,9 +346,15 @@ func TestDeltaClassifierAllowlist(t *testing.T) {
 		{"reasoning_content", `{"choices":[{"delta":{"reasoning_content":"abc"}}]}`, 3},
 		{"refusal", `{"choices":[{"delta":{"refusal":"no"}}]}`, 2},
 		{"tool_call_arguments", `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"f","arguments":"{\"a\":1}"}}]}}]}`, 7},
+		{"function_call_arguments", `{"choices":[{"delta":{"function_call":{"name":"f","arguments":"{\"a\":1}"}}}]}`, 7},
 		{"unknown_key", `{"choices":[{"delta":{"foo":"xxxxxxxx"}}]}`, 0},
 		{"role_only", `{"choices":[{"delta":{"role":"assistant"}}]}`, 0},
 		{"nested_unknown", `{"choices":[{"delta":{"metadata":{"blob":"xxxxxxxx"}}}]}`, 0},
+		// R2 bypass class: an allowlisted LEAF under an unknown container must
+		// not count — the classifier is path-aware, not key-aware.
+		{"allowlisted_leaf_under_unknown_container", `{"choices":[{"delta":{"foo":{"content":"xxxxxxxx"}}}]}`, 0},
+		{"arguments_under_unknown_container", `{"choices":[{"delta":{"metadata":{"arguments":"xxxxxxxx"}}}]}`, 0},
+		{"content_under_unknown_array", `{"choices":[{"delta":{"foo":[{"text":"xxxxxxxx"}]}}]}`, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

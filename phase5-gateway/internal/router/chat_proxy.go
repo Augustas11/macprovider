@@ -2283,54 +2283,50 @@ func streamingCompletionDeltaBytes(data string) (int64, bool, bool) {
 	return n, len(envelope.Choices) > 0, true
 }
 
+// generatedDeltaStringBytes counts the bytes of genuinely generated output in
+// one choice delta. It is PATH-aware, not key-aware: only the known
+// OpenAI-shape output paths count (delta.content, delta.reasoning_content,
+// delta.refusal, delta.text, delta.function_call.arguments,
+// delta.tool_calls[].function.arguments). This both bounds billing estimation
+// to real content and — since #760 — gates the streaming content-progress
+// deadline, so traversal must never descend through unknown containers: a
+// per-key allowlist would let delta:{"foo":{"content":"x"}} fabricate
+// progress and hold a slot to the stream ceiling (audit R2, code+security).
 func generatedDeltaStringBytes(raw json.RawMessage) (int64, bool) {
-	var delta any
+	var delta struct {
+		Content          *string `json:"content"`
+		ReasoningContent *string `json:"reasoning_content"`
+		Refusal          *string `json:"refusal"`
+		Text             *string `json:"text"`
+		FunctionCall     *struct {
+			Arguments *string `json:"arguments"`
+		} `json:"function_call"`
+		ToolCalls []struct {
+			Function *struct {
+				Arguments *string `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	}
 	if err := json.Unmarshal(raw, &delta); err != nil {
+		// Also rejects non-object deltas, preserving the previous
+		// "delta must be a JSON object" contract.
 		return 0, false
 	}
-	if _, ok := delta.(map[string]any); !ok {
-		return 0, false
-	}
-	return countGeneratedDeltaStrings("", delta), true
-}
-
-func countGeneratedDeltaStrings(key string, value any) int64 {
-	switch v := value.(type) {
-	case map[string]any:
-		var n int64
-		for childKey, childValue := range v {
-			n += countGeneratedDeltaStrings(childKey, childValue)
+	var n int64
+	for _, s := range []*string{delta.Content, delta.ReasoningContent, delta.Refusal, delta.Text} {
+		if s != nil {
+			n += int64(len(*s))
 		}
-		return n
-	case []any:
-		var n int64
-		for _, childValue := range v {
-			n += countGeneratedDeltaStrings(key, childValue)
-		}
-		return n
-	case string:
-		if !countDeltaStringKey(key) {
-			return 0
-		}
-		return int64(len(v))
-	default:
-		return 0
 	}
-}
-
-func countDeltaStringKey(key string) bool {
-	// Allowlist of delta keys that carry genuinely generated output. This
-	// both bounds billing estimation to real content and — since #760 —
-	// gates the streaming content-progress deadline, so it must not be a
-	// denylist: an unknown key (e.g. delta:{"foo":"x"}) would otherwise let
-	// a provider reset the progress timer and hold a slot to the stream
-	// ceiling without emitting anything a client consumes.
-	switch strings.ToLower(key) {
-	case "content", "reasoning_content", "refusal", "arguments", "text":
-		return true
-	default:
-		return false
+	if delta.FunctionCall != nil && delta.FunctionCall.Arguments != nil {
+		n += int64(len(*delta.FunctionCall.Arguments))
 	}
+	for _, tc := range delta.ToolCalls {
+		if tc.Function != nil && tc.Function.Arguments != nil {
+			n += int64(len(*tc.Function.Arguments))
+		}
+	}
+	return n, true
 }
 
 func sseDataValue(line string) (string, bool) {
