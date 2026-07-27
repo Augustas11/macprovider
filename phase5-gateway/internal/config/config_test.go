@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,146 @@ func TestSettlementReconcileConfigValidation(t *testing.T) {
 		"zero request timeout": {
 			mutate: func(cfg *Config) { cfg.Settlement.ReconcileRequestTimeoutSeconds = 0 },
 			want:   "settlement.reconcile_request_timeout_s must be > 0",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error=%v want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestSettlementJournalDefaults pins the #763 defaults, and with them the
+// BACK-COMPAT contract: Validate REQUIRES journal_enabled and journal_fsync,
+// so both must default to true or every pre-#763 gateway.yaml (which sets no
+// journal keys at all) would refuse to boot.
+func TestSettlementJournalDefaults(t *testing.T) {
+	cfg := Default()
+	if !cfg.Settlement.JournalEnabled {
+		t.Fatal("Settlement.JournalEnabled=false want true — a false default would break every existing config")
+	}
+	if !cfg.Settlement.JournalFsync {
+		t.Fatal("Settlement.JournalFsync=false want true")
+	}
+	if cfg.Settlement.JournalSegmentMaxBytes != 16<<20 {
+		t.Fatalf("JournalSegmentMaxBytes=%d want 16MiB", cfg.Settlement.JournalSegmentMaxBytes)
+	}
+	if cfg.Settlement.JournalMaxTotalBytes != 512<<20 {
+		t.Fatalf("JournalMaxTotalBytes=%d want 512MiB", cfg.Settlement.JournalMaxTotalBytes)
+	}
+	if cfg.Settlement.JournalRetentionHours != 168 {
+		t.Fatalf("JournalRetentionHours=%d want 168", cfg.Settlement.JournalRetentionHours)
+	}
+	if cfg.Settlement.JournalRecoveryIntervalSeconds != 30 {
+		t.Fatalf("JournalRecoveryIntervalSeconds=%d want 30", cfg.Settlement.JournalRecoveryIntervalSeconds)
+	}
+	if cfg.Settlement.JournalRecoveryBatchLimit != 100 {
+		t.Fatalf("JournalRecoveryBatchLimit=%d want 100", cfg.Settlement.JournalRecoveryBatchLimit)
+	}
+	if cfg.Settlement.JournalRecoveryGraceSeconds != 60 {
+		t.Fatalf("JournalRecoveryGraceSeconds=%d want 60", cfg.Settlement.JournalRecoveryGraceSeconds)
+	}
+	// A zero-value journal_dir derives a sibling of the sqlite file, so the
+	// journal always lands on the same volume as the DB it protects.
+	cfg.Storage.DBPath = "/var/lib/macprovider/gateway.db"
+	if got := cfg.SettlementJournalDir(); got != "/var/lib/macprovider/settlement-journal" {
+		t.Fatalf("SettlementJournalDir()=%q want the sqlite sibling", got)
+	}
+	cfg.Settlement.JournalDir = "/mnt/journal"
+	if got := cfg.SettlementJournalDir(); got != "/mnt/journal" {
+		t.Fatalf("SettlementJournalDir()=%q want the explicit override", got)
+	}
+}
+
+// TestSettlementJournalConfigBackCompat drives the real Load() path over a
+// config that predates #763: it must boot, with the journal on.
+func TestSettlementJournalConfigBackCompat(t *testing.T) {
+	yaml := `
+listen:
+  bind_address: 127.0.0.1
+  port: 9443
+public:
+  base_url: https://api.streamvc.live
+  account_path: /account
+coordinator:
+  buyer_url: http://127.0.0.1:8443
+  operator_url: http://127.0.0.1:8444
+  operator_key: operator-key
+  service_token: service-token
+  poolz_poll_interval_s: 10
+storage:
+  driver: sqlite
+  db_path: /var/lib/macprovider/gateway.db
+auth:
+  key_hash_secret: secret
+  github_oauth_enabled: false
+  demo:
+    signing_secret: demo-secret
+settlement:
+  reconcile_enabled: true
+  reconcile_interval_s: 30
+  reconcile_batch_limit: 100
+  reconcile_request_timeout_s: 10
+`
+	path := t.TempDir() + "/gateway.yaml"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("a pre-#763 config must still load: %v", err)
+	}
+	if !cfg.Settlement.JournalEnabled || !cfg.Settlement.JournalFsync {
+		t.Fatalf("journal defaults lost on a partial settlement block: %+v", cfg.Settlement)
+	}
+	if cfg.Settlement.ReconcileIntervalSeconds != 30 {
+		t.Fatalf("explicit reconcile keys were clobbered: %+v", cfg.Settlement)
+	}
+	if got := cfg.SettlementJournalDir(); got != "/var/lib/macprovider/settlement-journal" {
+		t.Fatalf("derived journal dir=%q", got)
+	}
+}
+
+func TestSettlementJournalConfigValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"disabled journal": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalEnabled = false },
+			want:   "settlement.journal_enabled must be true",
+		},
+		"fsync off": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalFsync = false },
+			want:   "settlement.journal_fsync must be true",
+		},
+		"zero segment cap": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalSegmentMaxBytes = 0 },
+			want:   "settlement.journal_segment_max_bytes must be > 0",
+		},
+		"total cap below segment cap": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalMaxTotalBytes = 1 << 10 },
+			want:   "settlement.journal_max_total_bytes",
+		},
+		"zero retention": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalRetentionHours = 0 },
+			want:   "settlement.journal_retention_hours must be > 0",
+		},
+		"zero recovery interval": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalRecoveryIntervalSeconds = 0 },
+			want:   "settlement.journal_recovery_interval_s must be > 0",
+		},
+		"oversized recovery batch": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalRecoveryBatchLimit = 501 },
+			want:   "settlement.journal_recovery_batch_limit must be between 1 and 500",
+		},
+		"negative grace": {
+			mutate: func(cfg *Config) { cfg.Settlement.JournalRecoveryGraceSeconds = -1 },
+			want:   "settlement.journal_recovery_grace_s must be >= 0",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

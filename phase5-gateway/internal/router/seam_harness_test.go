@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
+	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
 )
@@ -378,14 +379,26 @@ func TestSeamH4_NoPaidWhileTimedOut(t *testing.T) {
 		"cross-path race, testable only once a single-terminal-arbiter actor exists.")
 }
 
-// ---- H7 · settlement not crash-durable (INV-8) -----------------------------
-// EXPECTED: PASS = confirms the GAP. On the STREAMING after-commit path the buyer has
-// already received a committed 200 stream; if SettleReservation AND the EnsureUsageEvent
-// fallback both fail (a crash/DB pathology between reserve and settle), the gateway logs,
-// refunds, and DROPS the usage row (chat_proxy.go:1974-1993) — the buyer got the tokens,
-// nobody is billed, and there is no durable journal to reconcile from. (Non-streaming just
-// 500s the buyer, so the committed-success-with-dropped-row case is streaming-specific.)
-func TestSeamH7_SettlementNotCrashDurable(t *testing.T) {
+// ---- H7 · settlement is crash-durable via the journal (INV-8) --------------
+// EXPECTED: PASS = certifies the P1-2 FIX (issue #763). This test used to be
+// TestSeamH7_SettlementNotCrashDurable and asserted the buggy-today behavior: on the
+// STREAMING after-commit path the buyer has already received a committed 200 stream, and
+// when SettleReservation AND the EnsureUsageEvent fallback both failed the gateway logged,
+// refunded, and DROPPED the usage row — tokens delivered, nobody billed, nothing to
+// reconcile from. (Non-streaming just 500s the buyer, so the committed-success-with-
+// dropped-row case is streaming-specific.)
+//
+// The scenario is deliberately unchanged — same spy, same double failure, same in-band
+// outcome (the in-band drop was never the bug; the PERMANENCE was). What flipped is what
+// happens next: the settle effect was journaled BEFORE the attempt, so a later process
+// re-drives it into a durable bill. The test therefore runs the recovery the production
+// loop runs (RecoverSettlementJournal, cmd/gateway startup + ticker) against a SECOND
+// Server over the SAME store and the SAME journal directory, with no failure spy — i.e.
+// the pathology cleared, exactly as after a restart.
+//
+// A regression that stops journaling the effect, seals it prematurely, or breaks the
+// re-drive ladder turns this red again.
+func TestSeamH7_SettlementRecoveredFromJournal(t *testing.T) {
 	// Streaming upstream: a provider usage chunk then [DONE] → committed 200, settlement
 	// runs after commit via settleAfterCommit.
 	client := seamStreamingUpstream(func(pw *io.PipeWriter) {
@@ -397,9 +410,14 @@ func TestSeamH7_SettlementNotCrashDurable(t *testing.T) {
 	// build a fresh gateway over the SAME store/db (chat_proxy_retry_test.go:503-504 pattern).
 	_, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		// The recovery pass below acts on an effect written moments ago; the
+		// grace window has its own coverage in
+		// TestSettlementJournal_GraceWindowSkipsYoungEntries.
+		cfg.Settlement.JournalRecoveryGraceSeconds = 0
 	}, WithHTTPClient(client))
+	jnl := openTestJournal(t, cfg)
 	spy := &settleFailSpyStore{Store: store}
-	h := New(cfg, spy, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(client)).Handler()
+	h := New(cfg, spy, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(client), WithSettlementJournal(jnl)).Handler()
 	key := createAccountAndKey(t, store, cfg, "acct_h7")
 
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
@@ -408,18 +426,88 @@ func TestSeamH7_SettlementNotCrashDurable(t *testing.T) {
 		t.Fatalf("expected a committed 200 stream despite settle failure; got %d body=%s", resp.Code, resp.Body.String())
 	}
 
+	// IN-BAND: unchanged. The double failure still refunds and still writes no usage row
+	// in the request's own goroutine — there is nothing left to try in-band.
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_h7")
 	if got.usageRows != 0 {
-		t.Fatalf("expected the audit row to be DROPPED (INV-8 gap); usageRows=%d — if this is 1, "+
-			"settlement became crash-durable; update the audit", got.usageRows)
+		t.Fatalf("in-band usageRows=%d want 0 — the double-failure branch must NOT invent an "+
+			"in-band bill; the journal is what makes it recoverable", got.usageRows)
 	}
 	if got.refundedRows != 1 || got.activeRows != 0 || got.activeReserved != 0 {
-		t.Fatalf("expected clean refund after the drop; got %+v (want refunded=1 active=0 reserved=0)", got)
+		t.Fatalf("expected clean refund after the in-band drop; got %+v (want refunded=1 active=0 reserved=0)", got)
 	}
-	t.Logf("CONFIRMED FINDING (INV-8 gap): buyer received a committed 200 stream, but the "+
-		"settlement double-failure DROPPED the usage row (usageRows=0) and refunded — "+
-		"tokens delivered, nobody billed, no durable journal (chat_proxy.go:1974-1993; "+
-		"fix = a durable append-only settlement journal).")
+
+	// THE FIX: the effect is on disk, unsealed, with the full billing payload.
+	scan, err := jnl.Scan()
+	if err != nil {
+		t.Fatalf("journal Scan: %v", err)
+	}
+	if len(scan.Unsealed) != 1 {
+		t.Fatalf("REGRESSION (INV-8): journal holds %d unsealed effects, want exactly 1 — the "+
+			"after-commit settle was not armed, so the dropped bill is unrecoverable again", len(scan.Unsealed))
+	}
+	effect := scan.Unsealed[0]
+	if effect.AccountID != "acct_h7" || effect.RequestID != "77777777-7777-4777-8777-777777777777" {
+		t.Fatalf("journaled effect identity=%s/%s want acct_h7/7777…", effect.AccountID, effect.RequestID)
+	}
+	if effect.PromptTokens != 8 || effect.CompletionTokens != 12 || effect.TotalTokens != 20 ||
+		effect.TokenSource != "provider_reported" {
+		t.Fatalf("journaled payload=%+v want 8/12/20 provider_reported — the record must reproduce "+
+			"the usage row the settle would have written", effect)
+	}
+	if effect.WindowDate != fixedNow().UTC().Format("2006-01-02") {
+		t.Fatalf("journaled window_date=%q want the admission-time window %q",
+			effect.WindowDate, fixedNow().UTC().Format("2006-01-02"))
+	}
+
+	// RECOVERY: a second Server over the SAME store (no spy — the pathology cleared) and
+	// the SAME journal directory, running exactly what cmd/gateway runs at startup and on
+	// its ticker.
+	recovered := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithSettlementJournal(jnl))
+	summary, err := recovered.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RecoverSettlementJournal: %v", err)
+	}
+	if summary.Recovered != 1 || summary.Quarantined != 0 || summary.Errors != 0 {
+		t.Fatalf("recovery summary=%+v want recovered=1 quarantined=0 errors=0", summary)
+	}
+
+	after := gatewaySettlementSnapshot(t, dbPath, "acct_h7")
+	if after.usageRows != 1 {
+		t.Fatalf("REGRESSION (INV-8): after recovery usageRows=%d want 1 — the delivered request is "+
+			"still unbilled, which is the whole finding", after.usageRows)
+	}
+	if used := billedTokens(t, h, key); used != 20 {
+		t.Fatalf("recovered bill=%v want 20 (the tokens the buyer actually received)", used)
+	}
+	if after.refundedRows != 1 {
+		t.Fatalf("state=%+v want the original refund to STAND — recovery restores the audit row via the "+
+			"§ 17.7 fallback, it does not resurrect the reservation", after)
+	}
+	sealResult := ""
+	for _, rec := range journalRecords(t, jnl.Dir()) {
+		if rec.Kind == journal.KindSeal && rec.RequestID == "77777777-7777-4777-8777-777777777777" {
+			sealResult = rec.Result
+		}
+	}
+	if sealResult != journal.SealUsageEvent {
+		t.Fatalf("seal result=%q want %q", sealResult, journal.SealUsageEvent)
+	}
+
+	// IDEMPOTENCE: recovery runs on a ticker, so a second pass is the normal case.
+	second, err := recovered.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("second RecoverSettlementJournal: %v", err)
+	}
+	if second.Recovered != 0 || second.Scanned != 0 {
+		t.Fatalf("second pass summary=%+v want a no-op", second)
+	}
+	if rows, total := usageTokenTotals(t, dbPath, "acct_h7"); rows != 1 || total != 20 {
+		t.Fatalf("DOUBLE BILL on the second recovery pass: rows=%d total=%d", rows, total)
+	}
+	t.Logf("PASS (P1-2 FIXED, #763): the settlement double-failure still drops the row in-band, but "+
+		"the effect journaled before the attempt let a later pass restore it — usageRows=1, billed=20, "+
+		"refund intact, seal=%q, second pass a no-op.", sealResult)
 }
 
 // settleFailSpyStore forces the settleAfterCommit double-failure branch: SettleReservation

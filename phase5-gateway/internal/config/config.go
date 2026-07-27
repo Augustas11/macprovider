@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -171,6 +172,50 @@ type SettlementConfig struct {
 	ReconcileIntervalSeconds       int  `yaml:"reconcile_interval_s"`
 	ReconcileBatchLimit            int  `yaml:"reconcile_batch_limit"`
 	ReconcileRequestTimeoutSeconds int  `yaml:"reconcile_request_timeout_s"`
+
+	// Issue #763 durable settlement journal. Every knob defaults to a
+	// working value in Default(), and Load() decodes YAML ON TOP of
+	// Default(), so a pre-#763 config that sets none of these boots with the
+	// journal on — the same back-compat mechanism reconcile_enabled relies
+	// on.
+	//
+	// JournalEnabled mirrors ReconcileEnabled: Validate REQUIRES true. The
+	// journal is the only thing standing between an after-commit settle
+	// failure and an unbillable delivered request, so disabling it is not an
+	// operator-tunable posture.
+	JournalEnabled bool `yaml:"journal_enabled"`
+	// JournalDir defaults to <dir of storage.db_path>/settlement-journal.
+	// See Config.SettlementJournalDir.
+	JournalDir string `yaml:"journal_dir"`
+	// JournalFsync controls the per-effect fsync. Validate requires true:
+	// without it the journal survives a process crash but NOT a power loss,
+	// which is most of the point. The field exists as an escape hatch for
+	// throwaway environments that construct Config directly (tests,
+	// benchmarks) and never call Validate.
+	JournalFsync bool `yaml:"journal_fsync"`
+	// JournalSegmentMaxBytes bounds one segment file.
+	JournalSegmentMaxBytes int64 `yaml:"journal_segment_max_bytes"`
+	// JournalMaxTotalBytes is the HARD cap across all segments. Past it the
+	// journal refuses records with a CRITICAL log instead of filling the
+	// disk out from under sqlite (settlement still runs: journal writes are
+	// fail-open).
+	JournalMaxTotalBytes int64 `yaml:"journal_max_total_bytes"`
+	// JournalRetentionHours bounds how long a fully-sealed, quarantine-free
+	// segment is kept before pruning.
+	JournalRetentionHours int `yaml:"journal_retention_hours"`
+	// JournalRecoveryIntervalSeconds paces the recovery loop. It is
+	// deliberately its OWN knob rather than a reuse of
+	// reconcile_interval_s: the SPEC-022 reconciler talks to the
+	// coordinator, this pass only touches local disk plus the local DB.
+	JournalRecoveryIntervalSeconds int `yaml:"journal_recovery_interval_s"`
+	// JournalRecoveryBatchLimit bounds effects re-driven per pass. The store
+	// runs at MaxOpenConns=1, so an unbounded pass would stall the money
+	// path behind recovery work.
+	JournalRecoveryBatchLimit int `yaml:"journal_recovery_batch_limit"`
+	// JournalRecoveryGraceSeconds holds back effects written within the
+	// window, so recovery cannot race a settle that is still in flight on
+	// its request goroutine.
+	JournalRecoveryGraceSeconds int `yaml:"journal_recovery_grace_s"`
 }
 
 type CORSConfig struct {
@@ -281,6 +326,18 @@ func Default() Config {
 			ReconcileIntervalSeconds:       30,
 			ReconcileBatchLimit:            100,
 			ReconcileRequestTimeoutSeconds: 10,
+			// #763. journal_enabled must DEFAULT to true because Validate
+			// requires it: a pre-#763 gateway.yaml sets no journal keys, and
+			// a false default would refuse to boot every existing config.
+			JournalEnabled:                 true,
+			JournalDir:                     "", // derive from storage.db_path
+			JournalFsync:                   true,
+			JournalSegmentMaxBytes:         16 << 20,
+			JournalMaxTotalBytes:           512 << 20,
+			JournalRetentionHours:          168,
+			JournalRecoveryIntervalSeconds: 30,
+			JournalRecoveryBatchLimit:      100,
+			JournalRecoveryGraceSeconds:    60,
 		},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
@@ -558,6 +615,34 @@ func (c Config) Validate() error {
 	if c.Settlement.ReconcileRequestTimeoutSeconds <= 0 {
 		return fmt.Errorf("settlement.reconcile_request_timeout_s must be > 0 when settlement.reconcile_enabled is true")
 	}
+	// #763 durable settlement journal. Mirrors the reconcile_enabled rule:
+	// the money-path invariant it protects (a delivered request is always
+	// billable) is not an operator posture.
+	if !c.Settlement.JournalEnabled {
+		return fmt.Errorf("settlement.journal_enabled must be true (issue #763: without the journal an after-commit settle failure permanently drops the bill)")
+	}
+	if !c.Settlement.JournalFsync {
+		return fmt.Errorf("settlement.journal_fsync must be true (an unsynced journal survives a process crash but not a power loss)")
+	}
+	if c.Settlement.JournalSegmentMaxBytes <= 0 {
+		return fmt.Errorf("settlement.journal_segment_max_bytes must be > 0")
+	}
+	if c.Settlement.JournalMaxTotalBytes < c.Settlement.JournalSegmentMaxBytes {
+		return fmt.Errorf("settlement.journal_max_total_bytes (%d) must be >= settlement.journal_segment_max_bytes (%d)",
+			c.Settlement.JournalMaxTotalBytes, c.Settlement.JournalSegmentMaxBytes)
+	}
+	if c.Settlement.JournalRetentionHours <= 0 {
+		return fmt.Errorf("settlement.journal_retention_hours must be > 0")
+	}
+	if c.Settlement.JournalRecoveryIntervalSeconds <= 0 {
+		return fmt.Errorf("settlement.journal_recovery_interval_s must be > 0")
+	}
+	if c.Settlement.JournalRecoveryBatchLimit <= 0 || c.Settlement.JournalRecoveryBatchLimit > 500 {
+		return fmt.Errorf("settlement.journal_recovery_batch_limit must be between 1 and 500")
+	}
+	if c.Settlement.JournalRecoveryGraceSeconds < 0 {
+		return fmt.Errorf("settlement.journal_recovery_grace_s must be >= 0")
+	}
 	if c.Routing.StickyTTLS <= 0 {
 		return fmt.Errorf("routing.sticky_ttl_s must be > 0")
 	}
@@ -644,6 +729,17 @@ func requireURL(field, raw string) error {
 		return fmt.Errorf("%s must be an absolute URL", field)
 	}
 	return nil
+}
+
+// SettlementJournalDir resolves the #763 journal directory. An explicit
+// settlement.journal_dir wins; otherwise it is a sibling of the sqlite file,
+// which keeps the journal on the same volume as the database it protects (a
+// journal on a different, unmounted volume would fail open silently).
+func (c Config) SettlementJournalDir() string {
+	if dir := strings.TrimSpace(c.Settlement.JournalDir); dir != "" {
+		return dir
+	}
+	return filepath.Join(filepath.Dir(c.Storage.DBPath), "settlement-journal")
 }
 
 func (c Config) Address() string {

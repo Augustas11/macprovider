@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
+	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
@@ -2153,6 +2154,62 @@ func parseSettlementPendingDeadlineUnixMS(raw string) int64 {
 }
 
 func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string) {
+	// WINDOW: use the reservation window captured at admission time (not
+	// s.now()) so a stream that crosses UTC midnight settles against the SAME
+	// daily quota window the buyer's reservation was made against. ISS-187 R1
+	// architect+code MAJOR.
+	//
+	// Hoisted above the settle attempt by #763 so the journal record and the
+	// § 17.7 fallback below share ONE value. A journal record carrying a
+	// different window than the fallback would re-drive into an
+	// ErrUsageEventConflict against the row the fallback wrote.
+	window := reservationWindow
+	if window == "" {
+		window = s.now().UTC().Format("2006-01-02")
+	}
+	// ARM (#763 / seam finding P1-2): durably record the money effect BEFORE
+	// attempting it. Everything below this line — the settle, the fallback,
+	// the refund — can fail logically, crash the process, or lose power; the
+	// effect record survives all three and the recovery pass
+	// (settlement_journal_recovery.go) re-drives it.
+	//
+	// The reservation is the PRE-DISPATCH arm and already exists, so v1
+	// journals only this after-commit effect: it is the single point where
+	// the buyer has been served and the durable bill has not been written.
+	journalKey := journal.Key{
+		AccountID: subject.AccountID,
+		RequestID: requestID(r),
+		Effect:    journal.EffectSettle,
+	}
+	armed := true
+	if journalErr := s.journal.WriteEffect(journal.Record{
+		AccountID:        journalKey.AccountID,
+		RequestID:        journalKey.RequestID,
+		Effect:           journalKey.Effect,
+		WindowDate:       window,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      prompt + completion,
+		MaxTotalTokens:   maxTotal,
+		TokenSource:      source,
+		Outcome:          outcome,
+		DemoIdentity:     subject.DemoIdentity,
+		DemoTokenHash:    subject.DemoTokenHash,
+	}); journalErr != nil {
+		// FAIL-OPEN, deliberately. The buyer already has the bytes; refusing
+		// to settle because the journal is unavailable would turn a
+		// durability outage into a billing outage. The write-failure metric
+		// and this log are the signal that recovery coverage is degraded for
+		// this request. Pinned by TestSettlementJournal_WriteFailureDoesNotBlockSettle.
+		armed = false
+		slog.Error("gateway settlement journal effect write failed; settling anyway (recovery coverage lost for this request)",
+			"request_id", journalKey.RequestID,
+			"account_id", journalKey.AccountID,
+			"source", source,
+			"outcome", outcome,
+			"error", journalErr,
+		)
+	}
 	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
 		slog.Error("gateway settlement failed after response commit",
 			"request_id", requestID(r),
@@ -2176,15 +2233,9 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// coordinator request_log), so the SPEC-005 mirror is
 		// unaffected by this fix.
 		//
-		// WINDOW: use the reservation window captured at admission
-		// time (not s.now()) so a stream that crosses UTC midnight
-		// settles against the SAME daily quota window the buyer's
-		// reservation was made against. ISS-187 R1 architect+code
-		// MAJOR.
-		window := reservationWindow
-		if window == "" {
-			window = s.now().UTC().Format("2006-01-02")
-		}
+		// The window is computed once above the arm — see the comment
+		// there for why it is the admission-time window (#187) and why
+		// it must be shared with the journal record (#763).
 		ev := storage.UsageEvent{
 			RequestID:        requestID(r),
 			AccountID:        subject.AccountID,
@@ -2204,9 +2255,18 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			// collision detected via row-mismatch verify inside
 			// EnsureUsageEvent. Log loudly and release the
 			// reservation hold so the buyer's quota is not held
-			// forever. The audit row is lost; operators must
-			// reconcile from coordinator-side request_log.
-			slog.Error("gateway SPEC-006 § 17.7 fallback usage_events insert failed",
+			// forever.
+			//
+			// #763: this branch does NOT seal. The effect record
+			// armed above stays unsealed on purpose, so the
+			// recovery pass re-drives it once the underlying
+			// pathology clears. Pre-#763 the audit row was simply
+			// lost here and operators had to reconcile from the
+			// coordinator-side request_log; now that reconciliation
+			// is deferred to the settlement journal, with the
+			// request_log as the backstop for an effect that
+			// eventually quarantines.
+			slog.Error("gateway SPEC-006 § 17.7 fallback usage_events insert failed; audit row deferred to the settlement journal",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
 				"source", source,
@@ -2256,13 +2316,45 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// IS still active (e.g., settleRequest failed on a transient
 		// DB error, leaving the reservation row in 'active' state),
 		// the call releases the quota hold.
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		refundErr := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		// SEAL (#763): the durable bill exists (usage_events) and the hold is
+		// released, so the effect is complete and must never be re-driven.
+		//
+		// Sealing LAST — after the refund rather than immediately after
+		// EnsureUsageEvent — keeps every crash window recoverable: a crash
+		// before the seal re-drives into EnsureUsageEvent (payload matches →
+		// nil) and RefundReservation (no-op), which is exactly this branch
+		// again. Sealing before the refund would instead leave a quota hold
+		// that only the reaper clears. And the seal is GATED on the refund
+		// (audit R1, architect MEDIUM): sealing past a failed refund would
+		// suppress recovery's retry and leave DailyUsage double-counting the
+		// usage row plus the still-active hold until the reaper.
+		if refundErr != nil && !errors.Is(refundErr, storage.ErrReservationNotFound) &&
+			!errors.Is(refundErr, storage.ErrReservationTerminal) {
+			slog.Warn("gateway settlement §17.7 refund failed; leaving journal effect unsealed for recovery",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"error", refundErr.Error(),
+			)
+		} else if armed {
+			s.sealSettlementEffect(journalKey, journal.SealUsageEvent)
+		}
 		slog.Warn("gateway settlement used SPEC-006 § 17.7 fallback usage_events insert (settle_path failure)",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
 			"outcome", outcome,
 			"settle_error", err.Error(),
 		)
+		return
+	}
+	// The normal path: SettleReservation wrote the usage_events row and
+	// closed the reservation in one transaction. Seal the effect (#763).
+	// A seal lost to a crash here is harmless: the re-drive finds the
+	// reservation terminal, EnsureUsageEvent matches the row SettleReservation
+	// already wrote, and the effect seals then — no second bill. That is what
+	// TestSettlementJournal_SettleLandedButSealLost pins.
+	if armed {
+		s.sealSettlementEffect(journalKey, journal.SealSettled)
 	}
 }
 

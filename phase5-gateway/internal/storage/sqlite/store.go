@@ -1297,7 +1297,13 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 		return err
 	}
 	if status != "active" {
-		return fmt.Errorf("reservation %s is %s", settlement.RequestID, status)
+		// Wraps the sentinel exactly like SettleReservation does. A caller
+		// that CLASSIFIES the error (the #763 journal recovery ladder) must
+		// see a terminal demo reservation as terminal, or it would retry an
+		// already-settled effect forever instead of falling through to the
+		// idempotent usage-event rung. The settle path itself is unaffected:
+		// settleAfterCommit treats every settle error identically.
+		return fmt.Errorf("%w: reservation %s is %s", storage.ErrReservationTerminal, settlement.RequestID, status)
 	}
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()

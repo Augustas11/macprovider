@@ -1123,6 +1123,33 @@ func TestReservationErrorBranches(t *testing.T) {
 	}
 }
 
+// TestSettleDemoReservationTerminalWrapsSentinel: the demo twin must classify
+// like its non-demo sibling. The #763 journal recovery ladder branches on
+// ErrReservationTerminal to fall through to the idempotent usage-event rung;
+// an unwrapped error there would make it retry an already-settled demo
+// request on every pass, forever.
+func TestSettleDemoReservationTerminalWrapsSentinel(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_demo_terminal")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_demo_terminal", RequestID: "req_demo_terminal", WindowDate: "2026-05-29",
+		RequestedTokens: 5, DailyQuota: 100,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.RefundReservation(ctx, "acct_demo_terminal", "req_demo_terminal", fixedTime().Unix()); err != nil {
+		t.Fatalf("RefundReservation: %v", err)
+	}
+	err := store.SettleDemoReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_demo_terminal", RequestID: "req_demo_terminal", PromptTokens: 1,
+		TokenSource: "provider_reported", Outcome: "ok",
+	}, storage.DemoUsageEvent{RequestID: "req_demo_terminal", ClientIP: "203.0.113.7"})
+	if !errors.Is(err, storage.ErrReservationTerminal) {
+		t.Fatalf("SettleDemoReservation on refunded reservation err=%v, want ErrReservationTerminal", err)
+	}
+}
+
 func TestReservationSettlementRejectsInvalidTokenTotals(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
