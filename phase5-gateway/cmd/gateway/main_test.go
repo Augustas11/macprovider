@@ -5,12 +5,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/router"
+	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
+	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
 )
 
 func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
@@ -142,6 +146,118 @@ func TestRunSettlementReconcilerRunsOnInterval(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("settlement reconciler did not stop after interval test cancellation")
+	}
+}
+
+type fakeSettlementJournalRecoverer struct {
+	calls chan int
+}
+
+func (f *fakeSettlementJournalRecoverer) RecoverSettlementJournal(ctx context.Context, limit int) (router.SettlementJournalRecoverySummary, error) {
+	select {
+	case <-ctx.Done():
+		return router.SettlementJournalRecoverySummary{}, ctx.Err()
+	case f.calls <- limit:
+		return router.SettlementJournalRecoverySummary{Scanned: 1, Recovered: 1}, nil
+	}
+}
+
+func TestRunSettlementJournalRecoveryRunsImmediatelyAndOnInterval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &fakeSettlementJournalRecoverer{calls: make(chan int, 4)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSettlementJournalRecovery(ctx, fake, 10*time.Millisecond, 41, time.Second)
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-fake.calls:
+			if got != 41 {
+				t.Fatalf("recovery call %d limit=%d want 41", i+1, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("settlement journal recovery call %d did not arrive", i+1)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("settlement journal recovery did not stop after context cancellation")
+	}
+}
+
+// TestGatewayRouterCarriesSettlementJournal is the wiring tripwire for #763.
+//
+// The router falls back to a DISCARD journal when none is registered, and a
+// discard journal has no symptom: requests succeed, /metrics stays at zero,
+// and settlement durability is simply off. So the production assembly path is
+// exercised end to end — open the real journal, build the router the way
+// main() does, write an effect, and prove the Server can recover it. A
+// dropped WithSettlementJournal option turns this red.
+func TestGatewayRouterCarriesSettlementJournal(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Storage.DBPath = filepath.Join(dir, "gateway.db")
+	cfg.Settlement.JournalRecoveryGraceSeconds = 0
+
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+
+	settlementJournal, err := openSettlementJournal(cfg)
+	if err != nil {
+		t.Fatalf("openSettlementJournal: %v", err)
+	}
+	defer settlementJournal.Close()
+	if got := settlementJournal.Dir(); got != filepath.Join(dir, "settlement-journal") {
+		t.Fatalf("journal dir=%q want the sqlite sibling", got)
+	}
+
+	gatewayRouter := newGatewayRouter(cfg, store, store, nil, http.DefaultClient, settlementJournal)
+	if err := settlementJournal.WriteEffect(journal.Record{
+		AccountID:        "acct_wiring",
+		RequestID:        "req-wiring",
+		Effect:           journal.EffectSettle,
+		WindowDate:       "2026-05-29",
+		PromptTokens:     8,
+		CompletionTokens: 12,
+		TotalTokens:      20,
+		MaxTotalTokens:   20,
+		TokenSource:      "provider_reported",
+		Outcome:          "ok",
+	}); err != nil {
+		t.Fatalf("WriteEffect: %v", err)
+	}
+
+	summary, err := gatewayRouter.RecoverSettlementJournal(context.Background(), cfg.Settlement.JournalRecoveryBatchLimit)
+	if err != nil {
+		t.Fatalf("RecoverSettlementJournal: %v", err)
+	}
+	if summary.Scanned != 1 {
+		t.Fatalf("summary=%+v — the router did not see the journal main() opened; the real journal is not wired "+
+			"into router.New and settlement durability is silently disabled", summary)
+	}
+}
+
+// TestOpenSettlementJournalFailsClosed: main() exits when this errors, which
+// is the only thing standing between a misconfigured journal directory and a
+// gateway that serves with durability off.
+func TestOpenSettlementJournalFailsClosed(t *testing.T) {
+	locked := filepath.Join(t.TempDir(), "locked")
+	if err := os.Mkdir(locked, 0o500); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	cfg := config.Default()
+	cfg.Settlement.JournalDir = filepath.Join(locked, "settlement-journal")
+	if _, err := openSettlementJournal(cfg); err == nil {
+		t.Fatal("openSettlementJournal accepted an unwritable directory; main() would boot without durability")
 	}
 }
 

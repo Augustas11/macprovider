@@ -65,6 +65,12 @@ type Server struct {
 	// idlessDedupe backs the #762 id-less retry replay/coalesce cache. It is
 	// per-process and non-authoritative; see idless_dedupe.go.
 	idlessDedupe *idlessDedupeIndex
+	// journal is the durable settlement journal (#763). Never nil — New
+	// installs a discard implementation when cmd/gateway did not register a
+	// real one — so the money path can call it unguarded.
+	journal SettlementJournal
+	// journalAttempts bounds conflicted re-drives before quarantine.
+	journalAttempts *settlementJournalAttempts
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -171,6 +177,8 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		adminMetrics:     newAdminStateWriteMetrics(),
 		chatStartLimits:  newRequestRateLimiter(),
 		idlessDedupe:     newIdlessDedupeIndex(),
+		journal:          discardSettlementJournal{},
+		journalAttempts:  newSettlementJournalAttempts(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -238,6 +246,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(s.retry503Metrics.prometheus()))
 	_, _ = w.Write([]byte(s.adminMetrics.prometheus()))
 	_, _ = w.Write([]byte(s.idlessDedupe.prometheus()))
+	_, _ = w.Write([]byte(s.journal.MetricsSnapshot().Prometheus()))
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {

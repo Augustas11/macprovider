@@ -12,16 +12,22 @@ are deterministic and need no running server or credentials.
 Test files:
 - `phase5-gateway/internal/router/seam_harness_test.go`
 - `phase5-gateway/internal/router/idless_dedupe_test.go` (H5a's miss/bypass siblings, #762)
+- `phase5-gateway/internal/router/settlement_journal_recovery_test.go` (H7's recovery-ladder
+  siblings, #763)
+- `phase5-gateway/internal/settlement/journal/journal_test.go` (H7's durability siblings: the
+  per-effect fsync, torn tails, rotation/prune, reopen-after-close, the hard size cap)
 - `phase4-coordinator/internal/buyer/seam_h3_test.go`
 
 ## Run
 
 ```bash
 cd phase5-gateway     && go test ./internal/router/ -run TestSeam  -v
+cd phase5-gateway     && go test ./internal/router/ -run TestSettlementJournal -v   # H7 siblings (#763)
+cd phase5-gateway     && go test ./internal/settlement/... -v                       # journal durability (#763)
 cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 ```
 
-## Results (verified 2026-07-26) — 7 of 8 execute; only H4 is a documented skip
+## Results (verified 2026-07-27) — 7 of 8 execute; only H4 is a documented skip
 
 **Gateway suite**
 
@@ -32,7 +38,7 @@ cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 | **H5a** `IdlessRetryBillsOnce` | P1-1 | **PASS = certifies FIX** (#762) | two id-less calls bill 20 once; 2nd carries `X-MacProvider-Dedupe: replay` with attempt 1's exact body, upstream dispatched once |
 | **H5b** `StableRequestIDBillsOnce` | P1-1 | **PASS** (control) | same-UUID 2nd call → 409, billed once (20) |
 | **H6** `ProviderOverReportBoundedToDelivered` | — | **PASS** | provider `completion_tokens=100000` rejected → estimate, billed 24 not 100008 |
-| **H7** `SettlementNotCrashDurable` | P1-2 | **PASS = confirms GAP** | committed 200 stream + settle double-failure → usage row dropped, refunded, nobody billed |
+| **H7** `SettlementRecoveredFromJournal` | P1-2 | **PASS = certifies FIX** (#763) | committed 200 stream + settle double-failure → still dropped IN-BAND (refunded, `usageRows=0`), but the effect journaled before the attempt is re-driven by a second Server over the same store + journal into `usageRows=1` / 20 tokens, refund intact, seal `usage_event`; a second pass is a no-op |
 | H3 / H4 | P0-3 / P2-1 | pointer-SKIP | see coordinator suite |
 
 **Coordinator suite**
@@ -45,6 +51,9 @@ cd phase4-coordinator && go test ./internal/buyer/  -run TestSeamH -v
 
 The "confirms FAIL/GAP" tests pass by asserting the **buggy-today** behavior, so when a fix lands
 they flip to failing-until-the-assertion-is-updated — a durable regression tripwire per finding.
+As of #763 no gateway scenario is still in that state: H1, H5a and H7 have all been re-pointed at the
+shipped fix, with their scenarios (not their assertions) left untouched, so each one now guards a
+behavior instead of documenting a gap.
 
 ## Mechanism note (surfaced by wiring H1)
 
@@ -82,6 +91,25 @@ and lands on the existing `duplicate_request_id` 409. `idless_dedupe_test.go` ca
 outside-window resend, truncated stream, error terminal, waiter-cap overflow (asserting the adopted id
 on the 409), body eviction, both bypasses, and the `idless_dedupe_window_seconds: 0` kill switch — so
 "billed once" is proven on the miss paths and not only on the happy path.
+
+## Mechanism note (H7, post-#763)
+
+H7's scenario is untouched — same settle-failing spy, same double failure — and so is its IN-BAND
+outcome: the request goroutine still refunds and still writes no usage row, because at that point
+there is nothing left to try. What flipped is the PERMANENCE. The settle effect is journaled (one
+`write(2)` + `fsync`) BEFORE the settle attempt, to an append-only JSONL file that is deliberately
+NOT `gateway.db`: a table in the same sqlite file shares every failure mode with the write that just
+failed, so it would have turned H7 green while leaving the risk untouched.
+
+The tripwire therefore asserts BOTH halves — the in-band drop AND the recovery — and it runs the same
+`RecoverSettlementJournal` entry point `cmd/gateway` runs at startup and on its ticker. A regression
+that stops arming the effect, seals it before the durable bill exists, or breaks a rung of the
+re-drive ladder turns H7 red again. What H7 alone does NOT prove: that the record is durable across a
+power loss (`journal_test.go` pins the fsync call order through the real file), that a re-drive of an
+already-settled request cannot double-bill (`TestSettlementJournal_SettleLandedButSealLost`), or that
+a `#762` replay journals nothing (`TestSettlementJournal_ReplayedIdlessRetryWritesNoEffect`) — a
+replay performs no reserve and no settle, so a journal record there would describe a money effect
+that never happened.
 
 The companion clocks in the harness suite live in
 `phase5-gateway/internal/router/request_deadlines_test.go` (ceiling on an endless stream, heartbeat-only

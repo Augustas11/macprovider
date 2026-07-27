@@ -15,6 +15,7 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/router"
+	"github.com/augstar/macprovider-gateway/internal/settlement/journal"
 	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
 )
 
@@ -55,6 +56,21 @@ func main() {
 		}
 	}()
 
+	// #763: open the durable settlement journal next to the database it
+	// protects. FAIL-CLOSED: a gateway that cannot journal cannot recover a
+	// dropped settlement, and a silently-disabled journal is exactly the
+	// hole the router's discard implementation would create.
+	settlementJournal, err := openSettlementJournal(cfg)
+	if err != nil {
+		slog.Error("open settlement journal failed", "dir", cfg.SettlementJournalDir(), "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := settlementJournal.Close(); err != nil {
+			slog.Warn("close settlement journal failed", "error", err)
+		}
+	}()
+
 	// M2-4 / PERF-4: open a SECOND handle in read-only mode for the
 	// explorer + /v1/usage GET-only handlers. The primary handle is
 	// SetMaxOpenConns(1) so BEGIN IMMEDIATE writes serialize cleanly,
@@ -84,11 +100,37 @@ func main() {
 	coordinatorClient := newCoordinatorClient(cfg)
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
-	gatewayRouter := router.New(cfg, store, oauth,
-		router.WithHTTPClient(coordinatorClient),
-		router.WithVersion(version),
-		router.WithReadStore(readStore),
-	)
+	gatewayRouter := newGatewayRouter(cfg, store, readStore, oauth, coordinatorClient, settlementJournal)
+	// #763: drain whatever the previous process left unsealed BEFORE
+	// listening, then keep draining on a ticker. Startup alone is not
+	// enough — the H7 failure is a logical double-failure inside a running
+	// process, which nothing would ever restart the gateway to fix.
+	if cfg.Settlement.JournalEnabled {
+		recoverCtx, cancel := context.WithTimeout(ctx, settlementJournalRecoveryTimeout)
+		summary, err := gatewayRouter.RecoverSettlementJournal(recoverCtx, cfg.Settlement.JournalRecoveryBatchLimit)
+		cancel()
+		if err != nil {
+			// CRITICAL but not fatal: refusing to serve because recovery
+			// failed would turn a recoverable billing gap into an outage.
+			slog.Error("CRITICAL gateway settlement journal startup recovery failed; serving anyway",
+				"error", err)
+		} else if summary.Scanned > 0 || summary.Unsealed > 0 || summary.Malformed > 0 {
+			slog.Info("gateway settlement journal startup recovery completed",
+				"scanned", summary.Scanned,
+				"recovered", summary.Recovered,
+				"quarantined", summary.Quarantined,
+				"skipped", summary.Skipped,
+				"errors", summary.Errors,
+				"unsealed", summary.Unsealed,
+				"malformed", summary.Malformed,
+			)
+		}
+		go runSettlementJournalRecovery(ctx, gatewayRouter,
+			time.Duration(cfg.Settlement.JournalRecoveryIntervalSeconds)*time.Second,
+			cfg.Settlement.JournalRecoveryBatchLimit,
+			settlementJournalRecoveryTimeout,
+		)
+	}
 	if cfg.Settlement.ReconcileEnabled {
 		go runSettlementReconciler(ctx, gatewayRouter,
 			time.Duration(cfg.Settlement.ReconcileIntervalSeconds)*time.Second,
@@ -151,6 +193,98 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+}
+
+// openSettlementJournal builds the real #763 journal from config. It is a
+// named function so TestOpenSettlementJournal* can drive the same code path
+// production does (the wiring, not a re-implementation of it).
+func openSettlementJournal(cfg config.Config) (*journal.Journal, error) {
+	return journal.Open(journal.Options{
+		Dir:             cfg.SettlementJournalDir(),
+		Fsync:           cfg.Settlement.JournalFsync,
+		SegmentMaxBytes: cfg.Settlement.JournalSegmentMaxBytes,
+		MaxTotalBytes:   cfg.Settlement.JournalMaxTotalBytes,
+	})
+}
+
+// newGatewayRouter assembles the production router. Extracted from main so
+// TestGatewayRouterCarriesSettlementJournal can assert that the real journal
+// actually reaches the Server — a nil/discard journal here would disable
+// settlement durability with no other visible symptom.
+func newGatewayRouter(
+	cfg config.Config,
+	store router.Store,
+	readStore router.ReadStore,
+	oauth auth.OAuthProvider,
+	coordinatorClient *http.Client,
+	settlementJournal router.SettlementJournal,
+) *router.Server {
+	return router.New(cfg, store, oauth,
+		router.WithHTTPClient(coordinatorClient),
+		router.WithVersion(version),
+		router.WithReadStore(readStore),
+		router.WithSettlementJournal(settlementJournal),
+	)
+}
+
+// settlementJournalRecoveryTimeout bounds one recovery pass (startup and
+// periodic alike). Recovery shares the store's single write connection with
+// the money path, so a pass that cannot finish promptly must yield rather
+// than hold the connection.
+const settlementJournalRecoveryTimeout = 30 * time.Second
+
+type settlementJournalRecoverer interface {
+	RecoverSettlementJournal(context.Context, int) (router.SettlementJournalRecoverySummary, error)
+}
+
+// runSettlementJournalRecovery is modeled on runSettlementReconciler but is a
+// SEPARATE loop on purpose: the SPEC-022 reconciler round-trips the
+// coordinator for reservations that are still held, while this pass only
+// re-drives locally journaled effects — different failure modes, different
+// cadence, and folding them together would make one stall the other.
+func runSettlementJournalRecovery(ctx context.Context, recoverer settlementJournalRecoverer, interval time.Duration, limit int, requestTimeout time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if requestTimeout <= 0 {
+		requestTimeout = settlementJournalRecoveryTimeout
+	}
+	recoverPass := func() {
+		runCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+		summary, err := recoverer.RecoverSettlementJournal(runCtx, limit)
+		if err != nil {
+			slog.Warn("gateway settlement journal recovery failed", "error", err)
+			return
+		}
+		if summary.Scanned > 0 || summary.Errors > 0 || summary.Quarantined > 0 {
+			slog.Info("gateway settlement journal recovery completed",
+				"scanned", summary.Scanned,
+				"recovered", summary.Recovered,
+				"settled", summary.Settled,
+				"usage_events", summary.UsageEvents,
+				"quarantined", summary.Quarantined,
+				"retried", summary.Retried,
+				"skipped", summary.Skipped,
+				"errors", summary.Errors,
+				"pruned", summary.Pruned,
+			)
+		}
+	}
+	recoverPass()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			recoverPass()
+		}
 	}
 }
 

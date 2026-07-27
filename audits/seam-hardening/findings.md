@@ -96,12 +96,69 @@ conversation tag, byte-identical body, no ids, inside 60s of attempt 1's termina
 window, the five opt-outs, and the conflict counter — not by "did the buyer receive it", which the
 tripwire forecloses. Buyer-supplied `Idempotency-Key` dedupe on the coordinator path remains #200.
 
-**P1-2 · Settlement not crash-durable** — `money` — test `TestSeamH7`
-On the streaming after-commit path, if `SettleReservation` and the `EnsureUsageEvent` fallback both
-fail (`phase5-gateway/.../chat_proxy.go:1974-1993`), the gateway logs, refunds, and drops the usage
-row — the buyer already got a committed 200. Tokens delivered, nobody billed, no durable record.
-**Fix:** append-only settlement journal keyed by (account, request_id)+effect, written before dispatch,
-sealed on terminal, with a startup recovery scan. Reservation-before-dispatch already exists.
+**P1-2 · Settlement not crash-durable** — `money` — test `TestSeamH7` · issue #763
+**FIXED gateway-side (issue #763).** On the streaming after-commit path, if `SettleReservation` and
+the `EnsureUsageEvent` fallback both failed, the gateway logged, refunded, and dropped the usage row —
+the buyer already had a committed 200. Tokens delivered, nobody billed, no durable record. The
+refunded reservation carries `settlement_hold=0`, so it was invisible to the SPEC-022 reconciler
+(`ListSettlementHeldReservations` selects active + hold=1): nothing else would ever have found it.
+**Fix (shipped):** a durable append-only **JSONL settlement journal**
+(`phase5-gateway/internal/settlement/journal`), NOT a table in `gateway.db`. Same-DB storage would
+have produced a green test and an unchanged risk — every failure class that takes out the settle write
+(the `MaxOpenConns=1` write connection, a DB-file pathology, a torn WAL after power loss) takes the
+journal write out with it; a second sqlite file is the same driver and the same page cache. Segments
+`effects-<unixmilli>-<pid>.jsonl`, dir `0700` / files `0600`, records keyed
+`(account_id, request_id, effect)` in three kinds — `effect` / `seal` / `quarantine` — and **never**
+any prompt or response text.
+**Durability contract:** `WriteEffect` is one `write(2)` + `fsync` BEFORE returning, so the effect is
+on stable storage before the settle attempt begins (`TestSettlementJournal_EffectWriteFsyncs` pins the
+call order through the real file). Seals are deliberately NOT fsynced — a lost seal costs one
+idempotent re-drive, never a bill. Segment create/unlink fsync the parent directory.
+**Where it arms:** `settleAfterCommit` only — the single choke point every after-commit terminal
+funnels through, and the only place where the buyer has been served and the durable bill has not been
+written. The reservation IS the pre-dispatch arm, so v1 adds no second one: a pre-dispatch record
+would carry no token payload and would scale the journal with traffic rather than with settlements.
+Journal write failures are **fail-open** — the settle proceeds, an error log and
+`gateway_settlement_journal_write_failures_total` fire, and only recovery coverage is lost
+(`TestSettlementJournal_WriteFailureDoesNotBlockSettle`).
+**Recovery:** `RecoverSettlementJournal` (`internal/router/settlement_journal_recovery.go`) re-drives
+unsealed effects through the SAME ladder — `SettleReservation`/`SettleDemoReservation` → seal
+`settled`; reservation missing/terminal → `EnsureUsageEvent` (+`EnsureDemoUsageEvent`) →
+`RefundReservation` → seal `usage_event`; `ErrUsageEventConflict` → no seal, quarantine after 10
+attempts with a CRITICAL log + gauge. It runs BOTH as a bounded startup pass and on its own ticker
+(`settlement.journal_recovery_interval_s`, default 30s, separate from the SPEC-022 reconciler):
+startup alone would not help, because the H7 failure is a logical double failure inside a running
+process that nothing restarts. A 60s grace window keeps recovery off effects whose request may still
+be in flight; the batch limit (100) protects the single write connection; fully-sealed,
+quarantine-free segments prune after 168h. Every rung is idempotent, so a re-drive of an
+already-settled request matches the existing row and bills nothing
+(`TestSettlementJournal_SettleLandedButSealLost`).
+**Config:** `settlement.journal_{enabled,dir,fsync,segment_max_bytes,max_total_bytes,retention_hours,
+recovery_interval_s,recovery_batch_limit,recovery_grace_s}`. `journal_enabled` and `journal_fsync` are
+REQUIRED true by `Validate` (mirroring `reconcile_enabled`) and default true, so a pre-#763
+`gateway.yaml` that sets none of them still boots with the journal on. `journal_dir` defaults to a
+sibling of `storage.db_path`. `cmd/gateway` opens the journal right after `sqlite.Open` and exits on
+failure — a silently-disabled journal has no other symptom, which is why
+`TestGatewayRouterCarriesSettlementJournal` pins the wiring. Metrics:
+`gateway_settlement_journal_{effects,seals,quarantines,write_failures,recovered}_total`,
+`_unsealed`, `_quarantined`, `_bytes`.
+`TestSeamH7` flipped to `SettlementRecoveredFromJournal` (PASS = certifies the fix): the in-band drop
+is UNCHANGED (`usageRows=0`, refunded=1 — the in-band drop was never the bug, the PERMANENCE was), and
+a second Server over the same store and journal recovers the bill to `usageRows=1` / 20 tokens, refund
+intact, seal `usage_event`, second pass a no-op.
+**Deliberately NOT covered:** (a) **disk full** (failure class C6) — untestable locally; the hard
+`journal_max_total_bytes` cap refuses records with a CRITICAL log rather than filling the volume
+sqlite lives on, which is the lesser harm but still a coverage gap. (b) **A journal-write failure AND
+the settle double-failure in the same request** — metric-visible (`write_failures_total` plus the
+§ 17.7 error log) but unrecoverable by construction. (c) **Crash mid-stream before any terminal** — no
+effect is armed; the reservation reaper refunds, unchanged. (d) **The SPEC-022 hold-marker sibling
+leak** — the debit/hold terminals never call `settleAfterCommit`, so a lost hold marker is still only
+reconcilable coordinator-side; the `effect` key field is future-proofed for it, but it is NOT a v1
+effect kind. (e) **Multi-instance arbitration** — the journal is single-writer, matching today's
+single-gateway deployment; two gateways over one directory would each re-drive the other's effects.
+(f) **Non-streaming settles** — they run BEFORE the response and 500 the buyer on failure, so there is
+no delivered-but-unbilled window to journal. **Residual:** the conflict-attempt counter is
+process-local, so a restart resets it — that only delays a quarantine, it can never double-bill.
 
 **P1-3 · Capacity trusted blindly; no clamp, no tripwire** — `ranking`/`supply` (closes a slice-3 + slice-5 gap)
 **FIXED coordinator-side (issue #764).** Nothing gateway-side: the gateway never reads
@@ -208,5 +265,7 @@ timing side-channel. **Fix:** reconcile spec vs overlay; write the risk-acceptan
    **P1-4** landed with it (#765) but ships dormant behind
    `telemetry_drift.quarantine_missing_benchmark`; enabling it needs a live-fleet measurement of
    how many providers lack verified benchmarks.
-4. **P1-1 / P1-2** — money integrity before real buyer volume.
+4. ~~**P1-1 / P1-2**~~ — **DONE (#762, #763)**: money integrity before real buyer volume. #762 makes an
+   id-less retry bill once; #763 makes an after-commit settle recoverable. Both keep the durable
+   `(account_id, request_id)` key as the invariant — neither adds a second source of truth for money.
 5. P2 as debt burn-down.
