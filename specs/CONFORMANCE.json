@@ -568,7 +568,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Implementation and regression mappings now cover signed discovery, manual recovery, local integrity, launchd fencing, and rollback fencing after the closed updater-lifecycle fixes. The physical journey contract is mapped, but SPEC-020 remains pending, not conformant, because release/update/restart/rollback behavior still needs captured signed physical journey evidence under the #614 conformance ledger."
+        "rationale": "Implementation and regression mappings now cover signed discovery, manual recovery, local integrity, launchd fencing, and rollback fencing after the closed updater-lifecycle fixes. The physical journey contract is mapped, and 2026-07-27 evidence now proves Air5/Qwen v1.8.61 convergence after the Pearl advertised-version and hardware-trust blockers were removed. SPEC-020 remains pending, not conformant, until the signed journey-result contract exists and the ledger is explicitly promoted."
       }
     },
     {
@@ -1249,13 +1249,19 @@
           "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
           "captured_at": "2026-07-27",
           "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
         }
       ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Append-only signed discovery, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. A 2026-07-27 partial physical run now records 8GB Llama readiness, Air5/Qwen signed v1.8.61 package/catalog verification, rollback recovery, and buyer-serving Qwen proof. It also records why this is not conformant evidence: Pearl still advertises v1.8.60, the Air5 v1.8.56 updater fails closed on the current manifest shape, and the v1.8.61 GUI installer is blocked by hardware-evidence HTTP 429 before service start. The successful current production-base discovery-to-update path remains unproved under #614."
+        "rationale": "Append-only signed discovery, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama readiness, Air5/Qwen fail-closed rollback, and the original Pearl/Air5 blockers. The supplemental Air5 convergence artifact records Pearl advertising v1.8.61, M3 hardware-trust approval/verifier success, signed v1.8.61 package/catalog verification, Air5 ready/routing-eligible v1.8.61 admission, and target_not_newer coordinator observation. The remaining blocker is governance packaging: a signed journey-result contract and explicit conformance promotion, not the earlier Air5 operational blocker."
       }
     },
     {
@@ -1286,13 +1292,19 @@
           "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
           "captured_at": "2026-07-27",
           "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
         }
       ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Manual signed-release recovery, append-only transport, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. A 2026-07-27 partial physical run now records 8GB Llama manual update no-op at v1.8.61 and Air5/Qwen fail-closed behavior for the v1.8.56 updater plus installer rollback when SSH Keychain access is unavailable. It does not prove successful current production-base manual recovery while disconnected or coordinator-rejected, so conformance remains pending under #614."
+        "rationale": "Manual signed-release recovery, append-only transport, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama manual update no-op at v1.8.61 and Air5/Qwen fail-closed behavior for the v1.8.56 updater plus installer rollback when SSH Keychain access is unavailable. The supplemental Air5 convergence artifact records successful GUI manual recovery to v1.8.61 after coordinator hardware trust was unblocked. Disconnected or coordinator-rejected recovery still needs signed journey-result packaging before promotion."
       }
     },
     {
@@ -1322,13 +1334,19 @@
           "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
           "captured_at": "2026-07-27",
           "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
         }
       ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Local signed-set health, exact-set success binding, startup recovery, rollback policy, and the physical autoupdate journey contract are mapped. A 2026-07-27 partial physical run now records 8GB Llama local binary/discovery/update-lock state and Air5/Qwen rollback after required hardware-evidence admission returned HTTP 429 before service start. It does not prove a successful local success decision after a mutating current-base physical update or a controlled current-base rollback fault after committed target bytes, so conformance remains pending under #614."
+        "rationale": "Local signed-set health, exact-set success binding, startup recovery, rollback policy, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama local binary/discovery/update-lock state and Air5/Qwen rollback after required hardware-evidence admission returned HTTP 429 before service start. The supplemental Air5 convergence artifact records that the blocker was removed and that Air5 committed v1.8.61 bytes, exact CLI SHA-256, launchd activation, local model readiness, and Pearl ready admission. A controlled committed-target rollback fault and signed journey-result packaging remain open before promotion."
       }
     },
     {
@@ -1410,13 +1428,19 @@
           "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
           "captured_at": "2026-07-27",
           "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
         }
       ],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, legacy first-hop bridge regressions, and the physical autoupdate journey contract are mapped. A 2026-07-27 partial physical run now records Air5/Qwen launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. It does not prove successful current-base mutation-lock ownership, one-shot launchd helper fencing, listener-bound commit authorization, or rollback-entry cleanup on a committed current-base target, so conformance remains pending under #614."
+        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, legacy first-hop bridge regressions, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records Air5/Qwen launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. The supplemental Air5 convergence artifact records successful launchd service activation at v1.8.61, Pearl ready/routing-eligible admission, encrypted leg and hash verification, model_loaded telemetry, and an HTTP 200 buyer request routed to Air5. Signed journey-result packaging still needs to bind lock/fence/listener/cleanup evidence into a promotable conformance record."
       }
     },
     {
