@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 @testable import macprovider_cli
 import XCTest
 
@@ -695,17 +696,18 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertEqual(eligible.topP, base.topP)
     }
 
-    /// END-TO-END (MLX-gated) — the test that would have caught the shipped no-op. The
-    /// tier-eligible serve path drops `maxKVSize` (asserted) so `newCache` returns a
-    /// `KVCacheSimple`; once populated, the REAL adapter's `captureSnapshot` must produce
-    /// a non-nil snapshot — its `as? [KVCacheSimple]` cast succeeds where a RotatingKVCache
-    /// would have failed and no-op'd the commit.
+    /// MLX-gated commit-time serialization proof — verifies ONLY that the adapter's
+    /// `captureSnapshot` produces a non-nil snapshot for a POPULATED `KVCacheSimple`
+    /// (the `as? [KVCacheSimple]` cast succeeds and `snapshotLayers` serializes a real
+    /// one-token MLX state). It does NOT drive the serve `newCache` site — the cache is
+    /// constructed directly here, so this cannot catch a regression that reverts the
+    /// eligible branch to build a RotatingKVCache. That serve-site invariant is pinned
+    /// separately and headlessly by `testEligibleServeNewCacheProducesKVCacheSimple`.
     ///
     /// No model weights are loadable in the unit harness, so — exactly like
     /// `testSeededTemplateFromRealCachePromotesFirstRequestMLX` and `KVBridgeProbe` — we
-    /// construct the `KVCacheSimple` the eligible-path `newCache` returns and populate it
-    /// with a real one-token MLX state. Gated on KV_ENABLE_MLX_TESTS (MLX aborts the
-    /// process without a Metal library).
+    /// construct a `KVCacheSimple` and populate it with a real one-token MLX state.
+    /// Gated on KV_ENABLE_MLX_TESTS (MLX aborts the process without a Metal library).
     func testEligibleServeCacheCaptureSnapshotPersistsMLX() throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["KV_ENABLE_MLX_TESTS"] == "1",
                           "requires MLX Metal runtime (set KV_ENABLE_MLX_TESTS=1 on a capable host)")
@@ -736,5 +738,103 @@ final class KVConversationColdTierTests: XCTestCase {
             nowMillis: Int(Date().timeIntervalSince1970 * 1000))
         XCTAssertNotNil(snapshot,
             "eligible-path KVCacheSimple serializes → captureSnapshot non-nil (the cast a RotatingKVCache fails)")
+    }
+
+    /// PRIMARY SERVE-SITE GUARD (headless, ungated) — pins the exact `newCache`
+    /// cache-class invariant the eligible branch depends on, driven through a REAL
+    /// `LanguageModel.newCache`. A regression that reverts the eligible branch
+    /// (ModelRuntime.swift:1399/1860) to `newCache(parameters:)` — keeping `maxKVSize`
+    /// — would make `newCache` build a `RotatingKVCache`, `captureSnapshot`'s
+    /// `as? [KVCacheSimple]` cast fail, and the tier silently persist nothing. The fake
+    /// model uses the STOCK `KVCacheDimensionProvider` newCache (the same default real
+    /// catalog models such as Llama/Qwen3 inherit), so the class selection here is the
+    /// production one. Runs in normal CI: `newCache` is pure allocation, no Metal.
+    func testEligibleServeNewCacheProducesKVCacheSimple() {
+        let model = FakeDimensionModel(layers: 3)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+
+        // Eligible branch: cacheParameters(forceSimpleKV:true) drops maxKVSize → the
+        // params the eligible serve site passes → newCache builds [KVCacheSimple].
+        let eligibleCaches = model.newCache(
+            parameters: ModelRuntime.cacheParameters(base, forceSimpleKV: true))
+        XCTAssertNotNil(eligibleCaches as? [KVCacheSimple],
+            "eligible serve newCache must build [KVCacheSimple] so captureSnapshot's cast succeeds")
+        XCTAssertEqual(eligibleCaches.count, 3, "one cache per layer")
+
+        // Non-eligible branch keeps maxKVSize → RotatingKVCache (non-simple): the cast a
+        // captureSnapshot rejects, which is exactly why the eligible branch must differ.
+        let buyerCaches = model.newCache(
+            parameters: ModelRuntime.cacheParameters(base, forceSimpleKV: false))
+        XCTAssertNil(buyerCaches as? [KVCacheSimple],
+            "non-eligible serve newCache keeps maxKVSize → a rotating (non-simple) cache")
+        XCTAssertTrue(buyerCaches.allSatisfy { $0 is RotatingKVCache },
+            "non-eligible params must select RotatingKVCache")
+    }
+
+    /// SPEC-037 MEDIUM-A/LOW/INFO — a tier-eligible commit holding a NON-KVCacheSimple
+    /// cache must skip OBSERVABLY: `disk_write_skipped(detail=unsupported_cache_class)`
+    /// carrying the runtime class name, then still fail safe to a miss. Proves the
+    /// silence in `captureSnapshot`'s `as? [KVCacheSimple]` cast failure is gone (the
+    /// defect was the SILENCE, not the v1-allowlist limitation).
+    func testCaptureSnapshotEmitsObservableUnsupportedCacheClassSkip() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kvucc-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sink = KVRecordingEventSink()
+        let config = KVDiskCacheStoreConfig(
+            root: root, namespaceID: "ns-ucc",
+            maxBytes: 1 << 28, maxEntries: 16, maxEntryBytes: 1 << 26,
+            retentionSeconds: 3600, stagingMaxBytes: 1 << 28, writeStagingMaxBytes: 1 << 28,
+            minFreeBytes: 1 << 20, promotionMaxSeconds: 5, eligibilityTTLSeconds: 900)
+        let store = KVDiskCacheStore(config: config, keychain: KVInMemoryKeychain(), sink: sink)
+        let adapter = KVConversationColdTierAdapter(
+            store: store, namespaceID: "ns-ucc", eligibilityTTLSeconds: 900,
+            writeStagingMaxBytes: 1 << 28)
+
+        // A RotatingKVCache is a real non-allowlisted cache class — exactly what a
+        // gpt-oss/gemma-4/nemotron serve, a rotating hot-cache reuse, or a mid-generation
+        // kv-quantized run would leave a tier-eligible request holding.
+        let rotating = RotatingKVCache(maxSize: 256, keep: 4)
+        let snapshot = adapter.captureSnapshot(
+            conversationKey: "conv:kvs-synth:unsupported",
+            layers: ConversationCacheLayers([rotating]),
+            fullTokens: int32Range(0..<8),
+            sampledPurgeGeneration: 0,
+            identity: identity(),
+            nowMillis: Int(Date().timeIntervalSince1970 * 1000))
+        XCTAssertNil(snapshot, "a non-KVCacheSimple cache must still fail safe to a miss (nil)")
+
+        // The skip is emitted from a detached Task; poll briefly for the observable event.
+        var event: KVEvent?
+        for _ in 0..<200 {
+            if let e = sink.events.first(where: {
+                $0.code == .diskWriteSkipped && $0.detail == .unsupportedCacheClass
+            }) {
+                event = e
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let skip = try XCTUnwrap(event,
+            "captureSnapshot must emit disk_write_skipped(unsupported_cache_class), not swallow the skip")
+        XCTAssertEqual(skip.fields["cache_class"], "RotatingKVCache",
+            "the skip must surface the actual runtime cache class, not just a bare reason")
+    }
+
+    /// Minimal headless `LanguageModel` whose `newCache` is the stock
+    /// `KVCacheDimensionProvider` implementation (RotatingKVCache when `maxKVSize` is
+    /// set, KVCacheSimple when nil) — the same default real catalog models inherit.
+    /// Only `newCache` is exercised; `prepare` is never called (no weights, no Metal).
+    private final class FakeDimensionModel: Module, LanguageModel, KVCacheDimensionProvider {
+        let kvHeads: [Int]
+        init(layers: Int) {
+            self.kvHeads = Array(repeating: 1, count: layers)
+            super.init()
+        }
+        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+            fatalError("prepare is not exercised by the newCache cache-class invariant test")
+        }
     }
 }
