@@ -104,6 +104,11 @@ type QuotasConfig struct {
 	SignupAccountsPerIPPerDay   int   `yaml:"signup_accounts_per_ip_per_day"`
 	ReaperIntervalHours         uint  `yaml:"reaper_interval_hours"`
 	ReservationMaxAgeHours      uint  `yaml:"reservation_max_age_hours"`
+	// IdlessDedupeWindowSeconds bounds how long after attempt 1's terminal
+	// an identical, id-less re-send is treated as a retry of that attempt
+	// (issue #762). 0 DISABLES id-less dedupe entirely — the operator kill
+	// switch that restores the pre-#762 bill-every-attempt behavior.
+	IdlessDedupeWindowSeconds uint `yaml:"idless_dedupe_window_seconds"`
 }
 
 type LimitsConfig struct {
@@ -234,6 +239,11 @@ func Default() Config {
 			SignupAccountsPerIPPerDay:   3,
 			ReaperIntervalHours:         1,
 			ReservationMaxAgeHours:      24,
+			// #762: 60s covers the SDK/OpenRouter retry ladder (which
+			// re-sends within seconds) without turning the gateway into a
+			// general response cache. Longer windows widen the only real
+			// false-positive: a deliberate re-roll at temperature > 0.
+			IdlessDedupeWindowSeconds: 60,
 		},
 		Limits: LimitsConfig{
 			MaxTokensPerRequest:          4096,
@@ -466,6 +476,11 @@ func (c Config) Validate() error {
 	}
 	if c.Quotas.ReservationMaxAgeHours < 2 {
 		return fmt.Errorf("quotas.reservation_max_age_hours must be >= 2")
+	}
+	// 0 is legal (kill switch). The upper bound keeps a typo from turning the
+	// bounded retry-dedupe index into a long-lived response cache.
+	if c.Quotas.IdlessDedupeWindowSeconds > 3600 {
+		return fmt.Errorf("quotas.idless_dedupe_window_seconds must be <= 3600")
 	}
 	if c.Limits.MaxTokensPerRequest <= 0 || c.Limits.DemoMaxTokensPerRequest <= 0 || c.Limits.RequestBodyBytes <= 0 {
 		return fmt.Errorf("limits must be positive")

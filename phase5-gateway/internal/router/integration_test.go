@@ -200,11 +200,12 @@ func TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota(t *testing.T) {
 	}, WithHTTPClient(client))
 	demo := issueDemoToken(t, h, "1.2.3.4")
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
-	first := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"})
+	demoHeaders := map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"}
+	first := postChat(t, h, "", body, distinctRequestID(demoHeaders))
 	if first.Code != http.StatusOK {
 		t.Fatalf("first demo status=%d body=%s", first.Code, first.Body.String())
 	}
-	second := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"})
+	second := postChat(t, h, "", body, distinctRequestID(demoHeaders))
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second demo status=%d body=%s", second.Code, second.Body.String())
 	}
@@ -238,7 +239,7 @@ func TestAccountConcurrencyCap(t *testing.T) {
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
 	done := make(chan *httptest.ResponseRecorder, 2)
 	for i := 0; i < 2; i++ {
-		go func() { done <- postChat(t, h, key, body, nil) }()
+		go func() { done <- postChat(t, h, key, body, distinctRequestID(nil)) }()
 	}
 	for i := 0; i < 2; i++ {
 		select {
@@ -247,7 +248,7 @@ func TestAccountConcurrencyCap(t *testing.T) {
 			t.Fatal("timed out waiting for upstream request")
 		}
 	}
-	third := postChat(t, h, key, body, nil)
+	third := postChat(t, h, key, body, distinctRequestID(nil))
 	if third.Code != http.StatusTooManyRequests {
 		t.Fatalf("third status=%d body=%s", third.Code, third.Body.String())
 	}
@@ -297,13 +298,13 @@ func TestAccountRequestRateLimitRejectsBurstBeforeUpstream(t *testing.T) {
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
 
 	for i := 0; i < 2; i++ {
-		resp := postChat(t, h, key, body, nil)
+		resp := postChat(t, h, key, body, distinctRequestID(nil))
 		if resp.Code != http.StatusOK {
 			t.Fatalf("admitted request %d status=%d body=%s", i, resp.Code, resp.Body.String())
 		}
 	}
 	beforeReject := gatewaySettlementSnapshot(t, dbPath, "acct_request_rate_burst")
-	third := postChat(t, h, key, body, nil)
+	third := postChat(t, h, key, body, distinctRequestID(nil))
 	if third.Code != http.StatusTooManyRequests {
 		t.Fatalf("third request status=%d body=%s, want 429", third.Code, third.Body.String())
 	}
@@ -318,7 +319,7 @@ func TestAccountRequestRateLimitRejectsBurstBeforeUpstream(t *testing.T) {
 	}
 
 	now = now.Add(time.Second)
-	fourth := postChat(t, h, key, body, nil)
+	fourth := postChat(t, h, key, body, distinctRequestID(nil))
 	if fourth.Code != http.StatusOK {
 		t.Fatalf("request after refill status=%d body=%s", fourth.Code, fourth.Body.String())
 	}
@@ -349,7 +350,7 @@ func TestRunawayBuyerBurstGetsQuick429sAtGateway(t *testing.T) {
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
 
 	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- postChat(t, h, key, body, nil) }()
+	go func() { done <- postChat(t, h, key, body, distinctRequestID(nil)) }()
 	select {
 	case <-entered:
 	case <-time.After(2 * time.Second):
@@ -357,7 +358,7 @@ func TestRunawayBuyerBurstGetsQuick429sAtGateway(t *testing.T) {
 	}
 
 	for i := 0; i < 19; i++ {
-		resp := postChat(t, h, key, body, nil)
+		resp := postChat(t, h, key, body, distinctRequestID(nil))
 		if resp.Code != http.StatusTooManyRequests {
 			t.Fatalf("burst request %d status=%d body=%s, want 429", i+2, resp.Code, resp.Body.String())
 		}
@@ -457,7 +458,7 @@ func TestDemoConcurrencyCap(t *testing.T) {
 
 	done := make(chan *httptest.ResponseRecorder, 2)
 	for i := 0; i < 2; i++ {
-		go func() { done <- postChat(t, h, "", body, headers) }()
+		go func() { done <- postChat(t, h, "", body, distinctRequestID(headers)) }()
 	}
 	for i := 0; i < 2; i++ {
 		select {
@@ -466,7 +467,7 @@ func TestDemoConcurrencyCap(t *testing.T) {
 			t.Fatal("timed out waiting for upstream demo request to enter")
 		}
 	}
-	third := postChat(t, h, "", body, headers)
+	third := postChat(t, h, "", body, distinctRequestID(headers))
 	if third.Code != http.StatusTooManyRequests {
 		t.Fatalf("third demo request status=%d body=%s, want 429", third.Code, third.Body.String())
 	}

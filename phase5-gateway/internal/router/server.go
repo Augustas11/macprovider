@@ -62,6 +62,9 @@ type Server struct {
 	retry503Metrics *retry503Metrics
 	adminMetrics    *adminStateWriteMetrics
 	chatStartLimits *requestRateLimiter
+	// idlessDedupe backs the #762 id-less retry replay/coalesce cache. It is
+	// per-process and non-authoritative; see idless_dedupe.go.
+	idlessDedupe *idlessDedupeIndex
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -167,6 +170,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		retry503Metrics:  newRetry503Metrics(),
 		adminMetrics:     newAdminStateWriteMetrics(),
 		chatStartLimits:  newRequestRateLimiter(),
+		idlessDedupe:     newIdlessDedupeIndex(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -233,6 +237,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(s.retry503Metrics.prometheus()))
 	_, _ = w.Write([]byte(s.adminMetrics.prometheus()))
+	_, _ = w.Write([]byte(s.idlessDedupe.prometheus()))
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {
