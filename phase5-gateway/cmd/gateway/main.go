@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -80,21 +81,7 @@ func main() {
 	go runReservationReaper(ctx, store, time.Duration(cfg.Quotas.ReaperIntervalHours)*time.Hour)
 	go runOAuthStatePruner(ctx, store, time.Minute)
 
-	// coordinatorTransport clones the default transport and adds
-	// ResponseHeaderTimeout so buyers get a bounded failure if the coordinator
-	// holds the connection without sending headers. This timeout must be at
-	// least as long as coordinator_request_seconds — neither non-streaming
-	// (full-buffer) nor streaming (post-#92: first commit-worthy SSE event)
-	// coordinator responses commit headers earlier than provider work
-	// completion. A 60s default pre-#92 silently failed any non-streaming
-	// inference > 60s and now any streaming inference whose first valid event
-	// took > 60s; the new 300s default tracks the full request budget.
-	coordinatorTransport := http.DefaultTransport.(*http.Transport).Clone()
-	coordinatorTransport.ResponseHeaderTimeout = cfg.CoordinatorHeaderTimeout()
-	coordinatorClient := &http.Client{
-		Timeout:   cfg.CoordinatorTimeout(),
-		Transport: coordinatorTransport,
-	}
+	coordinatorClient := newCoordinatorClient(cfg)
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
 	gatewayRouter := router.New(cfg, store, oauth,
@@ -125,6 +112,36 @@ func main() {
 		slog.Warn("gateway shutdown error", "error", err)
 	}
 	slog.Info("gateway shutdown complete")
+}
+
+// newCoordinatorClient builds the coordinator-facing HTTP client.
+//
+// Client.Timeout is deliberately ZERO. Pre-#760 it was
+// coordinator_request_seconds, which made it a SECOND flat wall — one that
+// covers body reads, so it cut a healthy streaming generation at 300s no
+// matter what the request context allowed. The router's per-phase deadlines
+// (internal/router/request_deadlines.go) are the only request-level clock now;
+// leaving Client.Timeout set would silently override them and make the
+// decomposition a production no-op (the router tests inject a Timeout-less
+// client, so they cannot see this wall — hence this function exists to be
+// tested directly).
+//
+// The transport keeps two bounded budgets:
+//   - dial + TLS handshake = coordinator_connect_seconds. A hung TCP/TLS
+//     handshake is never legitimate work, so it fails fast.
+//   - ResponseHeaderTimeout = coordinator_header_timeout_seconds, UNCHANGED.
+//     It must NOT be lowered to the connect budget: neither non-streaming
+//     (full-buffer) nor streaming (post-#92: first commit-worthy SSE event)
+//     coordinator responses commit headers before provider work completes,
+//     and shortening it reintroduces the #92 / #171 regression where a
+//     slow-but-valid inference false-failed as coordinator_unavailable.
+func newCoordinatorClient(cfg config.Config) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = cfg.CoordinatorHeaderTimeout()
+	connect := cfg.CoordinatorConnectTimeout()
+	transport.DialContext = (&net.Dialer{Timeout: connect, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = connect
+	return &http.Client{Timeout: 0, Transport: transport}
 }
 
 func newHTTPServer(addr string, handler http.Handler) *http.Server {

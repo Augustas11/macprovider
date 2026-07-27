@@ -116,11 +116,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := s.now()
 	timing := newGatewayPhaseTiming(start)
 	// AC-V2-9: gateway-side first-byte-of-request is the SPEC-019 v0.2
-	// wall-clock zero-point. The 300s budget (`coordinator_request_seconds`
-	// by convention) measures from this point to provider terminal SSE frame
-	// emission. Pre-upstream gateway time counts against the budget.
-	upCtx, cancelUpstream := context.WithTimeout(r.Context(), s.cfg.CoordinatorTimeout())
-	defer cancelUpstream()
+	// wall-clock zero-point. Phases that bound the whole request are armed
+	// FROM this point, so pre-upstream gateway time (slow request-body read,
+	// quota/concurrency reservation) still counts against the budget.
+	//
+	// #760: this used to be one flat context.WithTimeout(CoordinatorTimeout())
+	// spanning admission + first token + the entire decode, which cut healthy
+	// long generations. It is now a single cancel funnel with re-armable
+	// per-phase budgets; the admission phase is armed here and narrowed or
+	// replaced once the request is parsed.
+	deadlines := newRequestDeadlines(r.Context())
+	defer deadlines.Stop()
+	deadlines.armPhaseFromStart(deadlinePhaseAdmission, s.cfg.CoordinatorAdmissionTimeout())
+	upCtx := deadlines.Context()
 	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
 	w = sw
 	// Issue #190 R1 security HIGH: chat-completion responses now
@@ -138,6 +146,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var accountID, model string
 	var streamMode bool
 	defer func() {
+		// deadline_phase names the clock that ended the request when one
+		// did (admission / first_token / stream_ceiling / decode_idle /
+		// non_stream_wall). Operator-facing ONLY: every buyer-visible
+		// terminal keeps its existing code (provider_timeout,
+		// coordinator_unavailable), so no error-code contract widens here.
 		attrs := []any{
 			"request_id", requestID(r),
 			"account_id", accountID,
@@ -145,6 +158,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"stream", streamMode,
 			"wall_ms", s.now().Sub(start).Milliseconds(),
 			"status", sw.statusCode,
+			"deadline_phase", deadlines.expiredPhase(),
 		}
 		attrs = append(attrs, timing.attrs(s.now())...)
 		slog.Info("chat completion", attrs...)
@@ -223,6 +237,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens_exceeded", "max_tokens exceeds configured limit")
 		return
 	}
+	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
+	// #760: max_tokens is now known, so the request's total bound can be
+	// armed. Streaming gets the derived safety ceiling (never shorter than
+	// the legacy flat wall); non-streaming KEEPS the flat wall, because the
+	// coordinator buffers the whole response and there is no intermediate
+	// phase to observe. Both are measured from gateway first byte of request
+	// (AC-V2-9), so this is not a budget extension for non-streaming.
+	requestBound := s.cfg.NonStreamRequestTimeout()
+	if chat.Stream {
+		requestBound = s.effectiveStreamCeiling(maxTokens, structuredStreaming)
+		deadlines.armCeiling(requestBound)
+	} else {
+		deadlines.armPhaseFromStart(deadlinePhaseNonStreamWall, requestBound)
+	}
 	promptEstimate := estimatePromptTokens(body)
 	promptReservation := promptCapTokens(body)
 	reservationTokens := promptReservation + maxTokens
@@ -289,9 +317,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		concurrencyErrCode = "demo_concurrency_exceeded"
 		concurrencyErrMsg = "Demo concurrency limit exceeded"
 	}
+	// #760 R4: the lease must outlive the request's own bound, or a long
+	// streaming generation releases its concurrency slot while still running
+	// and reopens the M1-8 / PERF-6 pool-saturation regression. requestBound
+	// is the streaming ceiling (or the non-streaming flat wall), so the
+	// lease scales with it instead of the fixed legacy wall.
 	concurrencyDecision, concurrencyErr := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
 		AccountID: subject.AccountID, RequestID: requestID(r), Limit: concurrencyLimit,
-		CreatedAt: s.now(), ExpiresAt: s.now().Add(s.cfg.CoordinatorTimeout() + time.Minute),
+		CreatedAt: s.now(), ExpiresAt: s.now().Add(requestBound + time.Minute),
 	})
 	if errors.Is(concurrencyErr, storage.ErrQuotaExceeded) {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -393,11 +426,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return upReq, nil
 	}
-	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
 	timing.markCoordinatorStart(s.now())
 	resp, retryExhausted, priorProviderDispatch, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
 	if err != nil {
-		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
+		// #760: upCtx is now cancel-with-cause, so upCtx.Err() reports
+		// context.Canceled on an expired phase budget and the legacy
+		// errors.Is(upCtx.Err(), context.DeadlineExceeded) check would
+		// silently stop matching. Ask the cause instead.
+		if _, phaseExpired := phaseDeadlineExceeded(upCtx); structuredStreaming && phaseExpired {
 			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
 				return
 			}
@@ -417,7 +453,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, cancelUpstream, upCtx, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, window)
@@ -719,7 +755,9 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+	upstreamCtx := deadlines.Context()
+	cancelUpstream := deadlines.Cancel
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -785,6 +823,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	// #760: the coordinator has committed streaming headers, which post-#92
+	// means it accepted the request and is relaying provider output. The
+	// admission budget is done; from here the first content-bearing delta is
+	// on its own clock, disarmed below the moment one arrives.
+	deadlines.armPhase(deadlinePhaseFirstToken, s.cfg.FirstTokenTimeout())
 	reader := bufio.NewReaderSize(resp.Body, maxStreamingLineBytes)
 	var cancelOnce sync.Once
 	cancelCoordinator := func() {
@@ -799,6 +842,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		case <-done:
 		}
 	}()
+	// #760: the streaming idle timer is now an absolute CONTENT-progress
+	// deadline rather than a per-read duration. It is re-based only when a
+	// frame carries generated text (see forwardLine), so a provider that
+	// keeps the socket warm with role-only or usage-only frames no longer
+	// holds the stream open forever. A zero deadline preserves the legacy
+	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
+	idleTimeout := s.cfg.StreamingIdleTimeout()
+	progressDeadline := streamingProgressDeadline(idleTimeout)
 	var emitted int64
 	var serializedEmitted int64
 	var reported *tokenUsage
@@ -960,6 +1011,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					return true
 				}
 				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
+				if deltaBytes > 0 {
+					// #760: CONTENT progress, not byte progress. Only a frame
+					// carrying generated text counts — role-only deltas, ids,
+					// keepalives and usage-only frames are exactly what a
+					// wedged provider keeps emitting, so letting them reset
+					// the idle timer made the timer unable to catch the
+					// failure it exists for. streamingCompletionDeltaBytes
+					// already excludes the role/id/type/name scaffolding keys.
+					progressDeadline = streamingProgressDeadline(idleTimeout)
+					// First content-bearing delta: the first-token phase is
+					// satisfied. Only the (never-re-armed) ceiling remains.
+					deadlines.disarmPhase()
+				}
 				frameBytes := boundedStreamingFallbackFrameBytes(line)
 				if !parseOK {
 					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
@@ -1043,7 +1107,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		return true
 	}
 	for {
-		line, err := readStreamingLineWithIdleTimeout(r.Context(), reader, s.cfg.StreamingIdleTimeout(), cancelCoordinator, resp.Body)
+		line, err := readStreamingLineWithIdleTimeout(r.Context(), reader, progressDeadline, cancelCoordinator, resp.Body)
 		if errors.Is(err, bufio.ErrBufferFull) {
 			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
 			// Gateway-side truncation due to oversized line — NOT a
@@ -1058,7 +1122,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		if errors.Is(err, errStreamingIdleTimeout) {
-			slog.Warn("streaming coordinator idle timeout", "request_id", requestID(r), "timeout_ms", s.cfg.Timeouts.StreamingIdleMS)
+			slog.Warn("streaming coordinator idle timeout",
+				"request_id", requestID(r),
+				"timeout_ms", s.cfg.Timeouts.StreamingIdleMS,
+				"deadline_phase", deadlineReasonDecodeIdle,
+			)
+			deadlines.noteReason(deadlineReasonDecodeIdle)
 			settleIdleTimeout()
 			return
 		}
@@ -1075,6 +1144,25 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if r.Context().Err() != nil {
 			settleCancelled()
+			return
+		}
+		// #760: a phase budget (first_token / stream_ceiling) expiring cancels
+		// the upstream, which surfaces here as a read error. That is a TIMEOUT,
+		// not a provider disconnect: it must settle through the same
+		// settleIdleTimeout funnel as the decode-idle timer so the buyer sees
+		// provider_timeout and the usage row records provider_timeout. Emitting
+		// provider_disconnected + settleTruncated here was the SPEC-019 AC-V2-9
+		// violation. settleIdleTimeout already handles the structured-output
+		// envelope and the already-forwarded-terminal-frame case, so this
+		// subsumes the former structuredStreaming-only DeadlineExceeded branch
+		// (which, post-cause-cancellation, would never match again anyway).
+		if phase, expired := phaseDeadlineExceeded(upstreamCtx); expired {
+			slog.Warn("streaming phase deadline exceeded",
+				"request_id", requestID(r),
+				"deadline_phase", phase,
+				"structured_streaming", structuredStreaming,
+			)
+			settleIdleTimeout()
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
@@ -1107,14 +1195,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// that lands, a buyer retrying after this envelope MAY incur
 		// a fresh reservation if the coordinator's idempotency-cache
 		// response isn't refund-honored on the gateway side.
-		if structuredStreaming && errors.Is(upstreamCtx.Err(), context.DeadlineExceeded) {
-			writeStructuredOutputTimeoutSSE(w, requestID(r))
-			if flusher != nil {
-				flusher.Flush()
-			}
-			settleObservedContent("provider_timeout")
-			return
-		}
 		writeProviderDisconnectedSSE(w)
 		if flusher != nil {
 			flusher.Flush()
@@ -1147,16 +1227,40 @@ type streamingReadResult struct {
 	err  error
 }
 
-func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader, idleTimeout time.Duration, cancelUpstream func(), body io.Closer) ([]byte, error) {
+// streamingProgressDeadline converts the configured idle budget into the
+// absolute content-progress deadline the read loop carries. It preserves the
+// legacy "no idle timeout" sentinel: a non-positive budget yields the zero
+// time, which readStreamingLineWithIdleTimeout treats as unbounded.
+func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 	if idleTimeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(idleTimeout)
+}
+
+// readStreamingLineWithIdleTimeout reads one SSE line, giving up at deadline.
+//
+// #760: the parameter is an absolute CONTENT-progress deadline, not a
+// per-read duration. The caller re-bases it only when a frame carried
+// generated text, so heartbeat/keepalive/usage-only frames consume the budget
+// instead of renewing it. A zero deadline means "no idle timeout" and matches
+// the pre-#760 `idleTimeout <= 0` sentinel.
+func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader, deadline time.Time, cancelUpstream func(), body io.Closer) ([]byte, error) {
+	if deadline.IsZero() {
 		return reader.ReadSlice('\n')
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		cancelUpstream()
+		_ = body.Close()
+		return nil, errStreamingIdleTimeout
 	}
 	ch := make(chan streamingReadResult, 1)
 	go func() {
 		line, err := reader.ReadSlice('\n')
 		ch <- streamingReadResult{line: line, err: err}
 	}()
-	timer := time.NewTimer(idleTimeout)
+	timer := time.NewTimer(remaining)
 	defer timer.Stop()
 	select {
 	case result := <-ch:

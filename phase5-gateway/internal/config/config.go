@@ -130,8 +130,32 @@ type CapacityConfig struct {
 type TimeoutsConfig struct {
 	CoordinatorRequestSeconds       int `yaml:"coordinator_request_seconds"`
 	CoordinatorHeaderTimeoutSeconds int `yaml:"coordinator_header_timeout_seconds"`
-	StreamingCancelMS               int `yaml:"streaming_cancel_ms"`
-	StreamingIdleMS                 int `yaml:"streaming_idle_ms"`
+	// Issue #760 per-phase deadlines. These replace the single flat
+	// request wall on the STREAMING path; the non-streaming path keeps a
+	// flat wall (non_stream_request_seconds). YAML-only by design — the
+	// env: resolver is secrets-only, so there are no env overrides here.
+	//
+	// CoordinatorConnectSeconds bounds TCP dial + TLS handshake to the
+	// coordinator (transport-level, per connection attempt).
+	CoordinatorConnectSeconds int `yaml:"coordinator_connect_seconds"`
+	// CoordinatorAdmissionSeconds bounds gateway first-byte-of-request to
+	// coordinator response headers, ACROSS the 503/502 retry loop.
+	CoordinatorAdmissionSeconds int `yaml:"coordinator_admission_seconds"`
+	// FirstTokenSeconds bounds response headers to the first
+	// content-bearing delta on a streaming response.
+	FirstTokenSeconds int `yaml:"first_token_seconds"`
+	// StreamCeiling* derive the hard streaming safety bound from the
+	// request's max_tokens: clamp(floor + max_tokens*per_token,
+	// >= coordinator_request_seconds, <= max).
+	StreamCeilingFloorSeconds int `yaml:"stream_ceiling_floor_seconds"`
+	StreamCeilingPerTokenMS   int `yaml:"stream_ceiling_per_token_ms"`
+	StreamCeilingMaxSeconds   int `yaml:"stream_ceiling_max_seconds"`
+	// NonStreamRequestSeconds is the flat wall retained for non-streaming
+	// requests, where the coordinator buffers the whole response and there
+	// are no intermediate phases to observe.
+	NonStreamRequestSeconds int `yaml:"non_stream_request_seconds"`
+	StreamingCancelMS       int `yaml:"streaming_cancel_ms"`
+	StreamingIdleMS         int `yaml:"streaming_idle_ms"`
 }
 
 type SettlementConfig struct {
@@ -219,7 +243,26 @@ func Default() Config {
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
-		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 300, StreamingCancelMS: 500, StreamingIdleMS: 10000},
+		Timeouts: TimeoutsConfig{
+			CoordinatorRequestSeconds:       300,
+			CoordinatorHeaderTimeoutSeconds: 300,
+			// #760 defaults. Connect 60s (NOT 15s) so a provider warmup
+			// window behind a cold coordinator does not 503 the buyer.
+			// Admission 120s fails a pre-header hang ~2.5x faster than the
+			// old 300s wall. First token 120s covers a slow prefill.
+			// Ceiling 60s + 250ms/token, capped at 900s and floored at
+			// coordinator_request_seconds so it is never shorter than the
+			// flat wall it replaces.
+			CoordinatorConnectSeconds:   60,
+			CoordinatorAdmissionSeconds: 120,
+			FirstTokenSeconds:           120,
+			StreamCeilingFloorSeconds:   60,
+			StreamCeilingPerTokenMS:     250,
+			StreamCeilingMaxSeconds:     900,
+			NonStreamRequestSeconds:     300,
+			StreamingCancelMS:           500,
+			StreamingIdleMS:             10000,
+		},
 		Settlement: SettlementConfig{
 			ReconcileEnabled:               true,
 			ReconcileIntervalSeconds:       30,
@@ -447,6 +490,40 @@ func (c Config) Validate() error {
 		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — see SPEC-002 FR-P11a (post-#92)",
 			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorRequestSeconds)
 	}
+	// Issue #760 per-phase deadline orderings.
+	if c.Timeouts.CoordinatorConnectSeconds <= 0 || c.Timeouts.CoordinatorAdmissionSeconds <= 0 ||
+		c.Timeouts.FirstTokenSeconds <= 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
+		c.Timeouts.StreamCeilingPerTokenMS <= 0 || c.Timeouts.StreamCeilingMaxSeconds <= 0 ||
+		c.Timeouts.NonStreamRequestSeconds <= 0 {
+		return fmt.Errorf("timeouts phase budgets must be positive")
+	}
+	if c.Timeouts.CoordinatorAdmissionSeconds < c.Timeouts.CoordinatorConnectSeconds {
+		return fmt.Errorf("timeouts.coordinator_admission_seconds (%d) must be >= timeouts.coordinator_connect_seconds (%d) — admission spans the connect attempt plus the retry loop",
+			c.Timeouts.CoordinatorAdmissionSeconds, c.Timeouts.CoordinatorConnectSeconds)
+	}
+	// Twin of the C2b rule above, for the first-token phase: the transport
+	// gives up on a header-less coordinator after coordinator_header_timeout_
+	// seconds, so a first_token budget beyond that can never be observed —
+	// streaming headers commit at the first commit-worthy SSE event (post-#92).
+	if c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.FirstTokenSeconds {
+		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.first_token_seconds (%d) — the transport header timeout bounds the first commit-worthy SSE event",
+			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.FirstTokenSeconds)
+	}
+	if c.Timeouts.StreamCeilingMaxSeconds < c.Timeouts.StreamCeilingFloorSeconds {
+		return fmt.Errorf("timeouts.stream_ceiling_max_seconds (%d) must be >= timeouts.stream_ceiling_floor_seconds (%d)",
+			c.Timeouts.StreamCeilingMaxSeconds, c.Timeouts.StreamCeilingFloorSeconds)
+	}
+	// Monotonicity invariant (#760): the derived streaming ceiling floors at
+	// coordinator_request_seconds, so a max BELOW it would make the clamp
+	// self-contradictory and hide a config that intended to SHORTEN the wall.
+	if c.Timeouts.StreamCeilingMaxSeconds < c.Timeouts.CoordinatorRequestSeconds {
+		return fmt.Errorf("timeouts.stream_ceiling_max_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — the per-phase streaming ceiling must never be shorter than the flat wall it replaces",
+			c.Timeouts.StreamCeilingMaxSeconds, c.Timeouts.CoordinatorRequestSeconds)
+	}
+	if c.Timeouts.NonStreamRequestSeconds < c.Timeouts.CoordinatorConnectSeconds {
+		return fmt.Errorf("timeouts.non_stream_request_seconds (%d) must be >= timeouts.coordinator_connect_seconds (%d)",
+			c.Timeouts.NonStreamRequestSeconds, c.Timeouts.CoordinatorConnectSeconds)
+	}
 	if !c.Settlement.ReconcileEnabled {
 		return fmt.Errorf("settlement.reconcile_enabled must be true")
 	}
@@ -585,4 +662,34 @@ func (c Config) CoordinatorHeaderTimeout() time.Duration {
 
 func (c Config) StreamingIdleTimeout() time.Duration {
 	return time.Duration(c.Timeouts.StreamingIdleMS) * time.Millisecond
+}
+
+// The accessors below back the issue #760 per-phase deadlines. See
+// TimeoutsConfig for what each phase bounds and
+// phase5-gateway/internal/router/request_deadlines.go for how they are armed.
+
+// CoordinatorConnectTimeout bounds TCP dial + TLS handshake on the
+// coordinator transport. It is deliberately NOT applied to response headers:
+// making the header timeout this short reintroduces the #92/#171 regression
+// where a slow-but-valid first SSE event false-failed as coordinator_unavailable.
+func (c Config) CoordinatorConnectTimeout() time.Duration {
+	return time.Duration(c.Timeouts.CoordinatorConnectSeconds) * time.Second
+}
+
+// CoordinatorAdmissionTimeout bounds gateway first byte of request to
+// coordinator response headers, across the whole 503/502 retry loop.
+func (c Config) CoordinatorAdmissionTimeout() time.Duration {
+	return time.Duration(c.Timeouts.CoordinatorAdmissionSeconds) * time.Second
+}
+
+// FirstTokenTimeout bounds response headers to the first content-bearing
+// streaming delta.
+func (c Config) FirstTokenTimeout() time.Duration {
+	return time.Duration(c.Timeouts.FirstTokenSeconds) * time.Second
+}
+
+// NonStreamRequestTimeout is the flat wall retained for non-streaming
+// requests (unchanged behavior: same 300s default as the legacy wall).
+func (c Config) NonStreamRequestTimeout() time.Duration {
+	return time.Duration(c.Timeouts.NonStreamRequestSeconds) * time.Second
 }

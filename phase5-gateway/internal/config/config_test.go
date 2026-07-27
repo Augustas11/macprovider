@@ -231,3 +231,88 @@ func validTestConfig() Config {
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	return cfg
 }
+
+// ---- issue #760: per-phase deadline config --------------------------------
+
+func TestPhaseDeadlineDefaults(t *testing.T) {
+	cfg := Default()
+	for _, tc := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"coordinator_connect_seconds", cfg.Timeouts.CoordinatorConnectSeconds, 60},
+		{"coordinator_admission_seconds", cfg.Timeouts.CoordinatorAdmissionSeconds, 120},
+		{"first_token_seconds", cfg.Timeouts.FirstTokenSeconds, 120},
+		{"stream_ceiling_floor_seconds", cfg.Timeouts.StreamCeilingFloorSeconds, 60},
+		{"stream_ceiling_per_token_ms", cfg.Timeouts.StreamCeilingPerTokenMS, 250},
+		{"stream_ceiling_max_seconds", cfg.Timeouts.StreamCeilingMaxSeconds, 900},
+		{"non_stream_request_seconds", cfg.Timeouts.NonStreamRequestSeconds, 300},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s=%d want %d", tc.name, tc.got, tc.want)
+		}
+	}
+	// The non-streaming wall must stay at the legacy flat wall so #760 is a
+	// no-op on that path.
+	if cfg.NonStreamRequestTimeout() != cfg.CoordinatorTimeout() {
+		t.Errorf("NonStreamRequestTimeout=%s must equal the legacy CoordinatorTimeout=%s (no behavior change on the non-streaming path)",
+			cfg.NonStreamRequestTimeout(), cfg.CoordinatorTimeout())
+	}
+	if err := validTestConfig().Validate(); err != nil {
+		t.Fatalf("default phase budgets must satisfy Validate(): %v", err)
+	}
+}
+
+func TestValidateRejectsInconsistentPhaseDeadlines(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Config)
+		wantSub string
+	}{
+		{
+			name:    "admission below connect",
+			mutate:  func(c *Config) { c.Timeouts.CoordinatorAdmissionSeconds = 30 },
+			wantSub: "coordinator_admission_seconds",
+		},
+		{
+			name:    "first token above header timeout",
+			mutate:  func(c *Config) { c.Timeouts.FirstTokenSeconds = 600 },
+			wantSub: "first_token_seconds",
+		},
+		{
+			name:    "ceiling max below floor",
+			mutate:  func(c *Config) { c.Timeouts.StreamCeilingFloorSeconds = 950 },
+			wantSub: "stream_ceiling_floor_seconds",
+		},
+		{
+			// Monotonicity invariant: an operator must not be able to make the
+			// derived streaming ceiling SHORTER than the flat wall it replaced.
+			name:    "ceiling max below legacy wall",
+			mutate:  func(c *Config) { c.Timeouts.StreamCeilingMaxSeconds = 120 },
+			wantSub: "stream_ceiling_max_seconds",
+		},
+		{
+			name:    "non-stream wall below connect budget",
+			mutate:  func(c *Config) { c.Timeouts.NonStreamRequestSeconds = 5 },
+			wantSub: "non_stream_request_seconds",
+		},
+		{
+			name:    "zero phase budget",
+			mutate:  func(c *Config) { c.Timeouts.FirstTokenSeconds = 0 },
+			wantSub: "phase budgets must be positive",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate() accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("Validate() error = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}

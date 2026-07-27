@@ -254,22 +254,32 @@ func TestSeamH2_BuyerDisconnectSettlesConsumerSide(t *testing.T) {
 		"non-streaming refunds — asymmetry per 02-macprovider-audit.md.", outcome, source, used)
 }
 
-// ---- H1 · flat wall kills a progressing stream (INV-1, INV-2) --------------
-// EXPECTED: FAIL today. One flat total wall (chat_proxy.go:122, CoordinatorTimeout)
-// spans the whole request, so a steadily-progressing stream is cut at the wall even
-// though it never hit the 10s decode-idle timer. Timeout shortened to 1s for the test.
+// ---- H1 · progressing stream survives the legacy wall (INV-1, INV-2) -------
+// EXPECTED: PASS = certifies the P0-2 FIX (issue #760). This test used to be
+// TestSeamH1_FlatWallKillsProgressingStream and asserted the buggy-today behavior:
+// one flat total wall (chat_proxy.go:122, CoordinatorTimeout) spanning the whole
+// request, cutting a steadily-progressing stream even though it never hit the decode
+// idle timer. Per-phase deadlines replaced that wall, so the SAME scenario — legacy
+// wall shortened to 1s, a healthy stream emitting for 3s — must now complete cleanly.
+//
+// The scenario is deliberately unchanged (including seamStreamingUpstreamCtx, which
+// honors the upstream request ctx exactly as the real transport does): what flipped
+// is the verdict, so the test remains a durable tripwire. A regression that
+// reintroduces any request-spanning flat wall — the ctx wall here, or the
+// http.Client.Timeout twin in cmd/gateway (see TestCoordinatorClientHasNoBodyTimeout)
+// — turns this red again.
 
-func TestSeamH1_FlatWallKillsProgressingStream(t *testing.T) {
+func TestSeamH1_ProgressingStreamSurvivesLegacyWall(t *testing.T) {
 	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
 		// Emit a token every 200ms (well under the 10s idle timer) for up to 3s,
-		// i.e. a HEALTHY, steadily-progressing stream. Honor the total-wall context
-		// exactly as the real transport does: when upCtx fires, abort the body.
+		// i.e. a HEALTHY, steadily-progressing stream. Honor the upstream request
+		// context exactly as the real transport does: if it fires, abort the body.
 		for i := 0; i < 15; i++ {
 			if _, err := pw.Write([]byte(`data: {"id":"c","choices":[{"delta":{"content":"x"}}]}` + "\n\n")); err != nil {
 				return
 			}
 			select {
-			case <-ctx.Done(): // total wall fired mid-stream → transport aborts the body
+			case <-ctx.Done(): // a deadline fired mid-stream → transport aborts the body
 				_ = pw.CloseWithError(ctx.Err())
 				return
 			case <-time.After(200 * time.Millisecond):
@@ -278,8 +288,11 @@ func TestSeamH1_FlatWallKillsProgressingStream(t *testing.T) {
 		_, _ = pw.Write([]byte(`data: [DONE]` + "\n\n"))
 		_ = pw.Close()
 	})
-	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		// The legacy flat wall. Post-#760 it only floors the derived streaming
+		// ceiling (clamp >= coordinator_request_seconds); it no longer bounds a
+		// progressing stream.
 		cfg.Timeouts.CoordinatorRequestSeconds = 1
 		cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 1
 	}, WithHTTPClient(client))
@@ -290,19 +303,32 @@ func TestSeamH1_FlatWallKillsProgressingStream(t *testing.T) {
 	r := postChat(t, h, key, body, map[string]string{"X-Request-ID": "44444444-4444-4444-8444-444444444444"})
 	elapsed := time.Since(start)
 
-	completedCleanly := strings.Contains(r.Body.String(), "data: [DONE]") &&
-		!strings.Contains(r.Body.String(), "provider_disconnected")
-	if elapsed < 2*time.Second && !completedCleanly {
-		t.Logf("CONFIRMED FINDING (INV-1/INV-2 FAIL): a progressing stream was cut at the "+
-			"flat %s wall after %s (never hit the 10s idle timer). Fix: decompose into "+
-			"per-phase leases (chat_proxy.go:122).", time.Second, elapsed.Round(10*time.Millisecond))
-		return
+	if r.Code != http.StatusOK {
+		t.Fatalf("stream status=%d want 200; body=%.300q", r.Code, r.Body.String())
 	}
-	if completedCleanly {
-		t.Fatalf("stream completed cleanly in %s despite a 1s total wall — the flat wall was "+
-			"FIXED (per-phase leases?); update the audit", elapsed)
+	if !strings.Contains(r.Body.String(), "data: [DONE]") {
+		t.Fatalf("REGRESSION (INV-1/INV-2): progressing stream did not reach [DONE] after %s "+
+			"— a request-spanning flat wall is back. body=%.300q",
+			elapsed.Round(10*time.Millisecond), r.Body.String())
 	}
-	t.Fatalf("inconclusive: elapsed=%s completedCleanly=%v body=%.200q", elapsed, completedCleanly, r.Body.String())
+	for _, forbidden := range []string{"provider_disconnected", "provider_timeout", "stream_truncated"} {
+		if strings.Contains(r.Body.String(), forbidden) {
+			t.Fatalf("REGRESSION (INV-1/INV-2): healthy stream emitted a %s terminal after %s; body=%.300q",
+				forbidden, elapsed.Round(10*time.Millisecond), r.Body.String())
+		}
+	}
+	// The mock upstream declares no settlement-finality trailer, so a cleanly
+	// completed stream settles on the legacy path, which relabels "ok" as
+	// "unverified_streaming". Both are clean-completion outcomes; what must
+	// never appear is a timeout/truncation outcome.
+	outcome, source := usageEventOutcome(t, dbPath, "acct_h1")
+	if outcome != "ok" && outcome != "unverified_streaming" {
+		t.Fatalf("REGRESSION (INV-1/INV-2): usage outcome=%q source=%q, want a clean-completion "+
+			"outcome for a stream that ran to [DONE]", outcome, source)
+	}
+	t.Logf("PASS (P0-2 FIXED, #760): a progressing stream ran %s past a %s legacy wall and "+
+		"completed with [DONE], outcome=%q source=%q.",
+		elapsed.Round(10*time.Millisecond), time.Second, outcome, source)
 }
 
 // ---- H3 · relay-timeout strikes provider on buyer-cancel (INV-3) -----------

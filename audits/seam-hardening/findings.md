@@ -34,12 +34,25 @@ key-custody (e.g. `nodes_key_attested`). Buyer prose already says "no hardware a
 the schema up to the prose. *Tripwire: none yet (add a pool-snapshot unit test).*
 
 **P0-2 · Single request wall-clock kills healthy long generations** — `ranking` — test `TestSeamH1`
-`upCtx = context.WithTimeout(r.Context(), CoordinatorTimeout())` (`phase5-gateway/.../chat_proxy.go:122`,
-default 300s) spans the whole request; enforced on a mid-stream generation via the transport closing
-the body on `upCtx` expiry (the read loop at `:1047` is on `r.Context()`+the 10s idle timer). A
-legitimate long stream that keeps emitting is cut at the wall → 5xx against our public error rate.
-**Fix:** decompose into admission/connect + first-token + decode-progress (the 10s idle timer) +
-a `max_tokens`-derived safety ceiling; coordinate with the coordinator per-attempt ctx.
+**FIXED gateway-side (issue #760).** `upCtx = context.WithTimeout(r.Context(), CoordinatorTimeout())`
+(`phase5-gateway/.../chat_proxy.go:122`, default 300s) spanned the whole request; it was enforced on a
+mid-stream generation via the transport closing the body on `upCtx` expiry (the read loop is on
+`r.Context()`+the idle timer). A legitimate long stream that kept emitting was cut at the wall → 5xx
+against our public error rate. The wall had a second, hidden copy in `http.Client.Timeout`
+(`cmd/gateway/main.go`), which also covers body reads.
+**Fix (shipped):** one cancel funnel (`context.WithCancelCause`) with per-phase budgets in
+`phase5-gateway/internal/router/request_deadlines.go` — `admission` (120s) → `first_token` (120s) →
+a never-re-armed `stream_ceiling` = clamp(60s + `max_tokens`×250ms, ≥ `coordinator_request_seconds`,
+≤ 900s) — plus the decode-idle timer converted from "any byte" to CONTENT progress, `Client.Timeout`
+dropped to 0 with the connect budget moved to dial/TLS, and the concurrency lease scaled to the
+effective ceiling. Non-streaming keeps a flat wall (`non_stream_request_seconds`, 300s, unchanged).
+`TestSeamH1` flipped to `ProgressingStreamSurvivesLegacyWall` (PASS = certifies the fix).
+**Residual (not fixed here):** the coordinator has the same flat-wall shape one hop up
+(`phase4-coordinator/internal/buyer/server.go` attempt ctx, `routing.request_timeout_s` 280s;
+`providerhttp/client.go` 300s), so buyer-visible improvement past ~280s needs the prod overlay raised
+to ≥ the gateway ceiling and `check-deploy-config.sh` C2/C2b retargeted at the streaming ceiling.
+Structured-output streams also keep a hard 300s sub-ceiling: SPEC-019 v0.2.4 §AC-V2-9 pins that
+number, and raising it is a contract change requiring a spec amendment.
 
 **P0-3 · Provider health struck on buyer/gateway cancellation** — `supply` — test `TestSeamH3`
 The `ErrRelayTimeout` branch (`phase4-coordinator/internal/buyer/server.go:2994-2996`) calls
