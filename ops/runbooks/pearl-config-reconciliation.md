@@ -65,3 +65,33 @@ Unknown: 0
 
 No remaining path is intentionally deferred for operator decision in this PR.
 Pearl production state is unchanged; this is a read-only classification update.
+
+## Release Alignment Before Deploy
+
+After reconciliation reports `Unknown: 0`, Pearl deploy still requires release
+identity proof. `deploy-pearl-vps.sh` may restart the installed
+coordinator/gateway pair, but it must not replace only the coordinator binary.
+Before retrying direct deploy, verify that the selected signed Pearl runtime
+release exists, has the required runtime assets, and binds to the exact reviewed
+source commit you intend to deploy:
+
+```bash
+git fetch origin --tags
+expected_commit="$(git rev-parse HEAD)"
+scripts/verify-pearl-runtime-release.sh \
+  --tag vX.Y.Z \
+  --expected-commit "$expected_commit"
+```
+
+If the tag exists but peels to a different commit, stop and select or cut a new
+reviewed release target. Do not move an existing public tag to make it fit. If
+the GitHub Release is missing `pearl-release.json`, `coordinator-linux-amd64`,
+`gateway-linux-amd64`, or the signed checksum/catalog assets, stop before
+`macprovider-pearl-update --apply`; the release is not a usable Pearl runtime
+release for this deploy.
+
+For issue #785, this check is the boundary between the solved config-drift
+blocker and the remaining signed-pair release blocker. The broader release-lane
+split is tracked separately in #792 and is not required before finishing #785,
+provided the selected Pearl runtime release passes this preflight and the
+updater's own plan/apply gates.

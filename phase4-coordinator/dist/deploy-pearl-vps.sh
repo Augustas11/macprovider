@@ -1718,6 +1718,7 @@ PY
     if [ ! -x "$coordinator_bin" ]; then
       echo "aborting deploy: $coordinator_bin is not present or not executable;" >&2
       echo "  install the signed coordinator/gateway pair (macprovider-pearl-update) before deploying" >&2
+      echo "  preflight the selected Pearl runtime release with scripts/verify-pearl-runtime-release.sh" >&2
       exit 12
     fi
     "$coordinator_bin" stats-migrate --check
@@ -2756,6 +2757,7 @@ $SSH "set -e
   # pair, but must not create a mixed release by replacing only coordinator.
   if [ ! -x /opt/macprovider/coordinator ] || ! cmp -s $DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator; then
     echo 'refusing coordinator-only replacement: install the signed coordinator/gateway pair with macprovider-pearl-update first' >&2
+    echo '  preflight the selected Pearl runtime release with scripts/verify-pearl-runtime-release.sh before retrying direct deploy' >&2
     exit 1
   fi
   # coordinator-cli is operator-facing, but remains part of the same release
