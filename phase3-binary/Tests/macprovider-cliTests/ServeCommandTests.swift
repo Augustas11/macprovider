@@ -1007,6 +1007,31 @@ final class ServeCommandTests: XCTestCase {
         }
     }
 
+    func testCoordinatorJoinAcceptsDefaultRateCardForCatalogBoundSnapshot() async throws {
+        try await assertCatalogBoundSnapshotPreflight(
+            runtimeStatus: "recommendable",
+            donorMode: false,
+            catalogKey: "test-model",
+            configuredModel: "test-model",
+            rateCardKey: "default"
+        )
+    }
+
+    func testCoordinatorJoinRejectsDefaultRateCardAsPublicModelForCatalogBoundSnapshot() async throws {
+        do {
+            try await assertCatalogBoundSnapshotPreflight(
+                runtimeStatus: "recommendable",
+                donorMode: false,
+                catalogKey: "test-model",
+                configuredModel: "default",
+                rateCardKey: "default"
+            )
+            XCTFail("default rate-card row must not become the served public model")
+        } catch {
+            // expected
+        }
+    }
+
     private func assertCatalogBoundSnapshotPreflight(runtimeStatus: String, donorMode: Bool) async throws {
         try await assertCatalogBoundSnapshotPreflight(
             runtimeStatus: runtimeStatus,

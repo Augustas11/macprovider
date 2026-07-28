@@ -1181,6 +1181,12 @@ struct RateCardProjection: Decodable, Equatable {
         if normalized != modelKey, normalized != "default", let row = rows[normalized] {
             return (normalized, row)
         }
+        // Match coordinator RateFor fallback semantics so a probe-feasible
+        // fresh install does not drop to donor-only while the rate card catches
+        // up to a newly recommendable catalog row.
+        if let row = rows["default"] {
+            return ("default", row)
+        }
         return nil
     }
 
@@ -1695,10 +1701,14 @@ struct AutotuneRecommendEngine {
             let shortageScore = demand.effectiveSupplyDeficitMultiplier
             let expectedEarningsScore = payoutScore * max(tps, 0) * demandScore * shortageScore
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
-            let confidence = confidence(warnings: warnings, benchmark: benchmark, benchGateDrift: benchGateDrift)
             let servedModel = rateMatch.map {
                 request.rateCard.servedModelKey(modelKey: modelKey, rateCardKey: $0.key)
             } ?? modelKey
+            var candidateWarnings = warnings
+            if rateMatch?.key == "default", modelKey != "default" {
+                candidateWarnings.insert(.rateCardDefaultTierUsed)
+            }
+            let confidence = confidence(warnings: candidateWarnings, benchmark: benchmark, benchGateDrift: benchGateDrift)
             return AutotuneCandidateScore(
                 rank: 0,
                 catalogKey: modelKey,
@@ -1941,6 +1951,7 @@ struct AutotuneRecommendEngine {
             || warnings.contains(.hardwareTierUnknown)
             || warnings.contains(.demandRankStale)
             || warnings.contains(.candidateCatalogStale)
+            || warnings.contains(.rateCardDefaultTierUsed)
             || !benchGateDrift.isEmpty {
             return "low"
         }

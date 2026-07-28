@@ -1,10 +1,15 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8
+version: v0.8.1
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-26
+last-locked: 2026-07-28
 
 ## Change log
+
+- **v0.8.1 (2026-07-28)** — Default-tier fresh-install recovery (#786).
+  1. **Coordinator default-rate semantics are restored for recommendation.** When exact and normalized rate-card lookup miss but the projection carries `rows.default`, the candidate remains rate-card-enabled and is priced against `default`.
+  2. **The served model stays the catalog model.** The `default` row is only the pricing row; `recommended_model` / selected candidate model stay on the catalog key so the provider loads the intended snapshot.
+  3. **Fallback is visible.** Recommendations that use this pricing fallback emit `rate_card_default_tier_used`. Specific exact or normalized rows still win and do not emit the warning.
 
 - **v0.8 (2026-07-26)** — Selection-quality amendment (#744).
   1. **Paid ranking is measured earning opportunity per second.** §4 preserves v0.6 buyer-coverage economics and makes throughput part of `raw_score`, not a tiebreaker: provider completion payout × locally measured sustained TPS × demand floor/weight × bounded supply-deficit multiplier.
@@ -298,7 +303,7 @@ The v0.1 rate-card JSON schema is:
 }
 ```
 
-`prompt_rate_per_mtok` and `completion_rate_per_mtok` are coordinator credits per million tokens, matching `phase4-coordinator/internal/billing/formula.go::RateCardEntry` semantics and ledger `*_rate_per_mtok` columns. `usd_per_million_credits` is the active `stats.rollup.usd_per_million_credits` conversion used for recommendation math; v0.1 expects `1.0` but the endpoint value is authoritative. A model is rate-card-enabled for recommendation only if lookup succeeds by exact key or by Wave 0b `normalizeModelKey`. Recommendation lookup MUST NOT use the coordinator `default` fallback unless the candidate key itself is literally `default`. Unknown/missing `provider_share_bps` is non-compliant for fetched rate-card rows; baked fallback rows may use `9000` only when the release snapshot explicitly records that fallback.
+`prompt_rate_per_mtok` and `completion_rate_per_mtok` are coordinator credits per million tokens, matching `phase4-coordinator/internal/billing/formula.go::RateCardEntry` semantics and ledger `*_rate_per_mtok` columns. `usd_per_million_credits` is the active `stats.rollup.usd_per_million_credits` conversion used for recommendation math; v0.1 expects `1.0` but the endpoint value is authoritative. A model is rate-card-enabled for recommendation if lookup succeeds by exact key, by Wave 0b `normalizeModelKey`, or by the coordinator `default` row after those specific lookups miss. When the `default` row is used for a non-`default` candidate, `recommended_model` remains the catalog model key and the CLI emits `rate_card_default_tier_used`. Unknown/missing `provider_share_bps` is non-compliant for fetched rate-card rows; baked fallback rows may use `9000` only when the release snapshot explicitly records that fallback.
 
 `version` is a recommendation-projection version, not the existing billing snapshot hash. It is the lowercase hex SHA-256 of the canonical projection bytes after config load:
 
@@ -438,7 +443,7 @@ A row is eligible only if every gate passes:
 2. `hardware_fits(model, mac)` passes.
 3. `local_autotune_passes(model, mac)` passes.
 4. The candidate catalog row has `runtime_status == "recommendable"`.
-5. The coordinator rate card has a row for the model either verbatim or through `normalizeModelKey`, using the recommendation-specific no-default lookup from §3.3.
+5. The coordinator rate card has a row for the model either verbatim, through `normalizeModelKey`, or through the §3.3 `default` fallback after those specific lookups miss.
 
 `hardware_fits(model, mac)` rules:
 
@@ -530,7 +535,7 @@ Schema rules:
   - `medium` when rate card, demand rank, or candidate catalog used a valid baked fallback, or the benchmark used a valid cache.
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
-- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`. Any integrity/update-required warning blocks a paid recommendation.
+- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`; v0.8.1 restores `rate_card_default_tier_used` as the visible signal for default-row pricing fallback. Any integrity/update-required warning blocks a paid recommendation.
 
 ## 7. Per-token payout semantics
 
@@ -702,7 +707,7 @@ AC-13 **[amended v0.2]**: A row whose benchmark misses `min_sustained_tps` or `m
 
 AC-14: A buyer/model string that matches the rate-card only after `normalizeModelKey` is treated as rate-card-enabled and records the normalized key in the candidate model field.
 
-AC-15: A candidate that would match only the coordinator `default` rate-card row is not rate-card-enabled for recommendation and cannot become `recommended_model`.
+AC-15 **[amended v0.8.1 / #786]**: A candidate that would match only the coordinator `default` rate-card row remains rate-card-enabled for recommendation after exact and normalized lookups miss. The recommendation MUST keep the candidate's catalog key as `recommended_model`, price the candidate with the `default` row, and emit `rate_card_default_tier_used`. Exact or normalized specific rows MUST win over `default` and MUST NOT emit the fallback warning.
 
 AC-16: Missing candidate metadata, missing immutable `model_revision`, or missing canonical `model_sha256` for a demand/rate-card row makes the row ineligible before model download or benchmark.
 
