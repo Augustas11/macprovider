@@ -45,5 +45,5 @@ rewards:
       prompt_credits_per_mtok: 500000
       completion_credits_per_mtok: 1000000
 coordinator_advertised_version:
-  latest_binary_version: "1.8.65"
+  latest_binary_version: "1.8.66"
   required_binary_version: "1.8.33"

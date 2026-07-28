@@ -49,7 +49,7 @@ class PearlConfigReconcileTest(unittest.TestCase):
         )
         self.assertIn(
             "coordinator_advertised_version.latest_binary_version: "
-            "value_mismatch: tracked='1.8.65' live='1.8.61'",
+            "value_mismatch: tracked='1.8.66' live='1.8.61'",
             result.stdout,
         )
         self.assertIn(
