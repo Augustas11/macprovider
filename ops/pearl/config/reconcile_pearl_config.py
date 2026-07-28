@@ -33,7 +33,7 @@ SECRET_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 ENV_ASSIGNMENT_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
-ENV_REFERENCE_RE = re.compile(r"^env:[A-Za-z_][A-Za-z0-9_]*$")
+ENV_REFERENCE_RE = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 REMOTE_MALFORMED_ENV_RE = re.compile(r"^__MACPROVIDER_MALFORMED_ENV_LINE_([1-9][0-9]*)=<MASKED>$")
 SECRET_VALUE_RE = re.compile(
     r"(?ix)"
@@ -64,6 +64,7 @@ class Finding:
     path: str
     message: str
     owner: str = ""
+    classification: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,12 @@ def value_matches(expected: Any, actual: Any) -> bool:
 
 def is_secret_path(path: str) -> bool:
     if path.endswith("catalog_public_key") or path.endswith("public_key"):
+        return False
+    if path.startswith("auth.credential_bootstrap_"):
+        return False
+    if path.startswith("autotune.public_keys."):
+        return False
+    if path == "referrals.current_key_id":
         return False
     return bool(SECRET_FIELD_RE.search(path))
 
@@ -239,6 +246,25 @@ def path_has_prefix(path: str, prefixes: list[str]) -> bool:
     return any(path == prefix or path.startswith(prefix + ".") for prefix in prefixes)
 
 
+def path_matches_rule_prefix(path: str, prefix: str) -> bool:
+    return (
+        path == prefix
+        or path.startswith(prefix + ".")
+        or path.startswith(prefix + "[")
+    )
+
+
+def overlay_rule_matches(path: str, rule: dict[str, Any]) -> bool:
+    path_regex = rule.get("path_regex")
+    if path_regex:
+        return bool(re.fullmatch(path_regex, path))
+    exact_path = rule.get("path")
+    if exact_path:
+        return path == exact_path
+    prefix = rule.get("path_prefix", "")
+    return bool(prefix and path_matches_rule_prefix(path, prefix))
+
+
 def owner_for_path(path: str, manifest: dict[str, Any]) -> str:
     if is_secret_path(path):
         return "pearl_operator_secrets"
@@ -294,6 +320,7 @@ def classify_config_drifts(
                     category=rule.get("category", "Evidence"),
                     path=drift.path,
                     owner=rule.get("owner", ""),
+                    classification=rule.get("classification", ""),
                     message=(
                         f"{drift.kind}: tracked={display_value(drift.path, drift.tracked)} "
                         f"live={display_value(drift.path, drift.live)}"
@@ -340,6 +367,7 @@ def classify_provider_rows(
                     category=live_only_category,
                     path=path,
                     owner=owner,
+                    classification="registered/static provider state",
                     message="live-only provider row is classified as Pearl registered/static provider posture",
                 )
                 if finding.category == "Evidence":
@@ -390,6 +418,7 @@ def classify_provider_rows(
                     category="Evidence",
                     path=path,
                     owner=owner,
+                    classification="registered/static provider state",
                     message="tracked provider row matches live",
                 )
             )
@@ -521,6 +550,7 @@ def classify_env_lines(lines: list[EnvLine], manifest: dict[str, Any]) -> tuple[
                     category="Evidence",
                     path=f"coordinator.env.{key}",
                     owner="pearl_operator_secrets",
+                    classification="secrets/env-owned setting",
                     message="key name is classified; value=<MASKED>",
                 )
             )
@@ -629,7 +659,89 @@ def summarize_exact_matches(tracked: dict[str, Any], live: dict[str, Any], manif
     ]
 
 
-def classify_overlay(live_overlay: Any, manifest: dict[str, Any]) -> tuple[list[Finding], list[Finding]]:
+def overlay_rule_for_path(
+    path: str,
+    value: Any,
+    manifest: dict[str, Any],
+    *,
+    present_env_keys: set[str] | None = None,
+) -> dict[str, Any] | None:
+    for rule in manifest.get("pearl_overlay_classifications", []):
+        if not overlay_rule_matches(path, rule):
+            continue
+        allowed_leaf_names = set(rule.get("allowed_leaf_names", []))
+        if allowed_leaf_names:
+            leaf_name = re.split(r"[.\[\]]", path)[-1]
+            if leaf_name not in allowed_leaf_names:
+                return {
+                    "category": "Unknown",
+                    "owner": rule.get("owner", "unclassified"),
+                    "classification": rule.get("classification", ""),
+                    "message": "overlay field leaf is not listed in source-of-truth manifest; value=<MASKED>",
+                }
+        dynamic_child_pattern = rule.get("dynamic_child_pattern")
+        if dynamic_child_pattern:
+            prefix = rule.get("path_prefix", "")
+            child = path[len(prefix) + 1 :] if path.startswith(prefix + ".") else ""
+            if not child or "." in child or "[" in child or "]" in child:
+                return {
+                    "category": "Unknown",
+                    "owner": rule.get("owner", "unclassified"),
+                    "classification": rule.get("classification", ""),
+                    "message": "overlay dynamic child path is not a single reviewed key segment; value=<MASKED>",
+                }
+            if not re.fullmatch(dynamic_child_pattern, child):
+                return {
+                    "category": "Unknown",
+                    "owner": rule.get("owner", "unclassified"),
+                    "classification": rule.get("classification", ""),
+                    "message": "overlay dynamic child key does not match source-of-truth pattern; value=<MASKED>",
+                }
+        if rule.get("require_env_reference"):
+            match = ENV_REFERENCE_RE.fullmatch(value) if isinstance(value, str) else None
+            if not match:
+                return {
+                    "category": "Unknown",
+                    "owner": rule.get("owner", "unclassified"),
+                    "classification": rule.get("classification", ""),
+                    "message": "overlay field is classified only when value is an env:NAME reference; value=<MASKED>",
+                }
+            env_key = match.group(1)
+            allowed = set(manifest.get("env_key_names", {}).get("allowed", []))
+            if env_key not in allowed:
+                return {
+                    "category": "Unknown",
+                    "owner": rule.get("owner", "unclassified"),
+                    "classification": rule.get("classification", ""),
+                    "message": "overlay env reference is not listed in source-of-truth manifest; value=<MASKED>",
+                }
+            if present_env_keys is not None and env_key not in present_env_keys:
+                return {
+                    "category": "Unknown",
+                    "owner": rule.get("owner", "unclassified"),
+                    "classification": rule.get("classification", ""),
+                    "message": "overlay env reference is absent from live coordinator.env inventory; value=<MASKED>",
+                }
+        if rule.get("expected_type") and not provider_value_matches_type(value, rule["expected_type"]):
+            return {
+                "category": "Unknown",
+                "owner": rule.get("owner", "unclassified"),
+                "classification": rule.get("classification", ""),
+                "message": (
+                    "overlay field does not match manifest type "
+                    f"{rule['expected_type']}; value=<MASKED>"
+                ),
+            }
+        return rule
+    return None
+
+
+def classify_overlay(
+    live_overlay: Any,
+    manifest: dict[str, Any],
+    *,
+    present_env_keys: set[str] | None = None,
+) -> tuple[list[Finding], list[Finding]]:
     evidence: list[Finding] = []
     unknown: list[Finding] = []
     if live_overlay is None or live_overlay == {} or live_overlay == []:
@@ -640,12 +752,34 @@ def classify_overlay(live_overlay: Any, manifest: dict[str, Any]) -> tuple[list[
     prefixes = manifest.get("pearl_overlay_owned_prefixes", [])
     for path in sorted(overlay_flat):
         finding_path = f"production_overlay.{path}"
-        if path_has_prefix(path, prefixes):
+        rule = overlay_rule_for_path(path, overlay_flat[path], manifest, present_env_keys=present_env_keys)
+        if rule and rule.get("category") == "Unknown":
+            unknown.append(
+                Finding(
+                    category="Unknown",
+                    path=finding_path,
+                    owner=rule.get("owner", "unclassified"),
+                    classification=rule.get("classification", ""),
+                    message=rule["message"],
+                )
+            )
+        elif rule:
+            evidence.append(
+                Finding(
+                    category=rule.get("category", "Evidence"),
+                    path=finding_path,
+                    owner=rule.get("owner", "pearl_production_overlay"),
+                    classification=rule.get("classification", "overlay-owned Pearl production setting"),
+                    message=rule.get("message", "live overlay field is classified; value=<MASKED>"),
+                )
+            )
+        elif path_has_prefix(path, prefixes):
             evidence.append(
                 Finding(
                     category="Evidence",
                     path=finding_path,
                     owner="pearl_production_overlay",
+                    classification="overlay-owned Pearl production setting",
                     message="live overlay field is classified; value=<MASKED>",
                 )
             )
@@ -680,9 +814,18 @@ def render_category(findings: list[Finding]) -> list[str]:
         return ["- none"]
     lines: list[str] = []
     for finding in findings:
-        owner = f" [{finding.owner}]" if finding.owner else ""
-        lines.append(f"- {render_safe_path(finding.path)}: {finding.message}{owner}")
+        qualifiers = []
+        if finding.owner:
+            qualifiers.append(finding.owner)
+        if finding.classification:
+            qualifiers.append(f"class={finding.classification}")
+        suffix = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
+        lines.append(f"- {render_safe_path(finding.path)}: {finding.message}{suffix}")
     return lines
+
+
+def present_env_key_names(lines: list[EnvLine]) -> set[str]:
+    return {line.key for line in lines if line.key}
 
 
 def reconcile(
@@ -734,7 +877,12 @@ def reconcile(
     inference.extend(provider_inference)
     unknown.extend(provider_unknown)
 
-    overlay_evidence, overlay_unknown = classify_overlay(live_overlay, manifest)
+    env_lines = parse_env_lines(live_env_text)
+    overlay_evidence, overlay_unknown = classify_overlay(
+        live_overlay,
+        manifest,
+        present_env_keys=present_env_key_names(env_lines),
+    )
     if not live_overlay_present:
         unknown.append(
             Finding(
@@ -757,7 +905,7 @@ def reconcile(
             )
         )
 
-    env_evidence, env_unknown = classify_env_lines(parse_env_lines(live_env_text), manifest)
+    env_evidence, env_unknown = classify_env_lines(env_lines, manifest)
     evidence.extend(env_evidence)
     unknown.extend(env_unknown)
 

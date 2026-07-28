@@ -50,20 +50,72 @@ tracked_base_owned_prefixes:
 fleet_version_policy_owned_prefixes:
   - coordinator_advertised_version
 
-pearl_overlay_owned_prefixes:
-  - coordinator.compatibility_set
-  - pool.canary_enabled
-  - malibu_emission
-  - opoi
-  - proof_of_weights
+pearl_overlay_owned_prefixes: []
 
 known_config_drift:
+  - path: auth.credential_bootstrap_identity_retention_s
+    drift_kind: tracked_only
+    tracked: 604800
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same bounded credential-bootstrap retention policy.
+  - path: auth.credential_bootstrap_mints_global_hour
+    drift_kind: tracked_only
+    tracked: 128
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same global credential-bootstrap rate limit.
+  - path: auth.credential_bootstrap_mints_per_id_hour
+    drift_kind: tracked_only
+    tracked: 3
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same identity-scoped credential-bootstrap rate limit.
+  - path: auth.credential_bootstrap_mints_per_ip_hour
+    drift_kind: tracked_only
+    tracked: 8
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same source-IP credential-bootstrap rate limit.
+  - path: auth.credential_bootstrap_outstanding_max
+    drift_kind: tracked_only
+    tracked: 64
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same outstanding bootstrap custody bound.
+  - path: auth.credential_bootstrap_token_ttl_s
+    drift_kind: tracked_only
+    tracked: 600
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same short-lived bootstrap token TTL.
+  - path: auth.credential_bootstrap_unconfirmed_max
+    drift_kind: tracked_only
+    tracked: 64
+    owner: base_product_defaults
+    category: Evidence
+    classification: intentional Pearl production posture
+    rationale: Live Pearl base config omits this newly explicit YAML field; the coordinator code default supplies the same unconfirmed bootstrap identity bound.
+  - path: autotune.public_keys.streamvc-autotune-static-v5
+    drift_kind: tracked_only
+    tracked: "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
+    owner: fleet_version_admission_policy
+    category: Evidence
+    classification: fleet/version-admission policy
+    rationale: Static-feed trust admission is controlled by reviewed fleet/version policy; Pearl live has not yet admitted the v5 public key in base config.
   - path: pool.heartbeat_interval_s
     drift_kind: value_mismatch
     tracked: 30
     live: 1
     owner: pearl_production_overlay
     category: Evidence
+    classification: intentional Pearl production posture
     rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
   - path: pool.warmup_gate_enabled
     drift_kind: value_mismatch
@@ -71,6 +123,7 @@ known_config_drift:
     live: false
     owner: pearl_production_overlay
     category: Evidence
+    classification: intentional Pearl production posture
     rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
   - path: coordinator_advertised_version.latest_binary_version
     drift_kind: value_mismatch
@@ -78,13 +131,358 @@ known_config_drift:
     live: "1.8.61"
     owner: fleet_version_admission_policy
     category: Evidence
+    classification: fleet/version-admission policy
     rationale: Capability-gated recommendation policy drift is classified for operator review.
   - path: coordinator_advertised_version.required_binary_version
     drift_kind: tracked_only
     tracked: "1.8.33"
     owner: fleet_version_admission_policy
     category: Evidence
+    classification: fleet/version-admission policy
     rationale: Hard admission floor exists in tracked source; absence live is classified until PR C.
+  - path: referrals.campaign
+    drift_kind: tracked_only
+    tracked: ""
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in default is campaign-empty; Pearl's live referral campaign, when enabled, is owned by the production overlay.
+  - path: referrals.challenge_ttl_s
+    drift_kind: tracked_only
+    tracked: 900
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in referral default is supplied by code defaults when omitted from live base; Pearl-specific campaign timing is overlay-owned.
+  - path: referrals.current_key_id
+    drift_kind: tracked_only
+    tracked: ""
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in default is intentionally empty; Pearl's active key id is overlay-owned and must not be inferred from base YAML absence.
+  - path: referrals.enable_join_links
+    drift_kind: tracked_only
+    tracked: false
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in public join-link gate stays default-off; Pearl's campaign gate posture is overlay-owned.
+  - path: referrals.enable_public_validation
+    drift_kind: tracked_only
+    tracked: false
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in validation gate stays default-off; Pearl's campaign gate posture is overlay-owned.
+  - path: referrals.enable_social_invite_bonus
+    drift_kind: tracked_only
+    tracked: false
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in social bonus gate stays default-off; Pearl's campaign gate posture is overlay-owned.
+  - path: referrals.grandfather_before
+    drift_kind: tracked_only
+    tracked: ""
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in default is no grandfather cutoff; Pearl's campaign cutoff, when present, is overlay-owned.
+  - path: referrals.hmac_keys
+    drift_kind: tracked_only
+    tracked: {}
+    owner: pearl_operator_secrets
+    category: Evidence
+    classification: secrets/env-owned setting
+    rationale: The checked-in base never carries referral HMAC material; Pearl secrets are env-owned and may be referenced by the overlay.
+  - path: referrals.join_base_url
+    drift_kind: tracked_only
+    tracked: "https://malibu.tech/j"
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in referral join authority is the product default; Pearl campaign overlay may restate the same authority.
+  - path: referrals.policy_version
+    drift_kind: tracked_only
+    tracked: "v1"
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in referral policy version is the product default; Pearl campaign overlay owns active campaign versioning.
+  - path: referrals.provider_base_uses
+    drift_kind: tracked_only
+    tracked: 1
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in referral base-use count is supplied by code defaults when omitted from live base; Pearl campaign use limits are overlay-owned.
+  - path: referrals.request_access_url
+    drift_kind: tracked_only
+    tracked: ""
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in default omits a request-access URL; Pearl campaign UX URL is overlay-owned when set.
+  - path: referrals.require_for_registration
+    drift_kind: tracked_only
+    tracked: false
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in registration gate stays default-off; Pearl's campaign gate posture is overlay-owned.
+  - path: referrals.social_bonus_uses
+    drift_kind: tracked_only
+    tracked: 2
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in social bonus count is supplied by code defaults when omitted from live base; Pearl campaign use limits are overlay-owned.
+  - path: referrals.social_verification_dwell_s
+    drift_kind: tracked_only
+    tracked: 1800
+    owner: base_product_defaults
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    rationale: The checked-in dwell default is supplied by code defaults when omitted from live base; Pearl campaign timing is overlay-owned.
+  - path: referrals.x_api_bearer_token
+    drift_kind: tracked_only
+    tracked: ""
+    owner: pearl_operator_secrets
+    category: Evidence
+    classification: secrets/env-owned setting
+    rationale: The checked-in base never carries the X API bearer credential; Pearl secrets are env-owned and may be referenced by the overlay.
+
+pearl_overlay_classifications:
+  - path: coordinator.compatibility_set.target_id
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: coordinator.compatibility_set.accepted_ids[0]
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path_regex: "pool\\.canary_challenges\\[[0-9]+\\]\\.(expected|max_ttft_ms|min_sustained_tps|prompt)"
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    message: live canary challenge field is classified; value=<MASKED>
+  - path: pool.canary_enabled
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: pool.canary_cold_start_grace_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: pool.canary_failure_threshold
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: pool.canary_interval_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: pool.canary_max_tokens
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: pool.canary_timeout_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path_regex: "pool\\.model_class_challenges\\.[^.\\[\\]]+\\[[0-9]+\\]\\.(expected|max_ttft_ms|min_sustained_tps|prompt)"
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    message: live model-class canary challenge field is classified; value=<MASKED>
+  - path_prefix: referrals.hmac_keys
+    owner: pearl_operator_secrets
+    category: Evidence
+    classification: secrets/env-owned setting
+    dynamic_child_pattern: "^[A-Za-z0-9_]{1,32}$"
+    require_env_reference: true
+    message: live referral HMAC key reference is classified; value=<MASKED>
+  - path: referrals.x_api_bearer_token
+    owner: pearl_operator_secrets
+    category: Evidence
+    classification: secrets/env-owned setting
+    require_env_reference: true
+    message: live referral X API bearer token reference is classified; value=<MASKED>
+  - path: referrals.campaign
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: referrals.challenge_ttl_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: referrals.current_key_id
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: referrals.enable_join_links
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: referrals.enable_public_validation
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: referrals.enable_social_invite_bonus
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: referrals.grandfather_before
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: referrals.join_base_url
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: referrals.policy_version
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: referrals.provider_base_uses
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: referrals.request_access_url
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: referrals.require_for_registration
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: referrals.social_bonus_uses
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: referrals.social_verification_dwell_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.enabled
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: malibu_emission.max_serializable_retries
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.provider_daily_cap_malibu
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.tick_interval_seconds
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.unlock_eval_interval_seconds
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.wallet_daily_cap_malibu
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.wallet_mirror_interval_seconds
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: malibu_emission.writer_dsn
+    owner: pearl_operator_secrets
+    category: Evidence
+    classification: secrets/env-owned setting
+    require_env_reference: true
+    message: live Malibu emission writer DSN reference is classified; value=<MASKED>
+  - path: proof_of_weights.autotune_evidence_ttl_days
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: proof_of_weights.require_autotune_hello_gate
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: proof_of_weights.telemetry_drift.alert_cooldown_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: proof_of_weights.telemetry_drift.enabled
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: proof_of_weights.telemetry_drift.hash_alert_on_artifact_drift
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: boolean
+  - path: proof_of_weights.telemetry_drift.hash_alert_on_status[0]
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: proof_of_weights.telemetry_drift.hash_alert_on_status[1]
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: string
+  - path: proof_of_weights.telemetry_drift.opoi_pass_rate_threshold
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: number
+  - path: proof_of_weights.telemetry_drift.opoi_pass_rate_window
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: proof_of_weights.telemetry_drift.tps_min_absolute
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: number
+  - path: proof_of_weights.telemetry_drift.tps_ratio_threshold
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: number
 
 provider_rows:
   tracked_static_provider_ids:
@@ -117,6 +515,7 @@ env_key_names:
     - CATALOG_CANARY_PROVIDER_ID
     - GATEWAY_SERVICE_TOKEN
     - MALIBU_EMISSION_WRITER_DSN
+    - MALIBU_EMISSION_WRITER_PASSWORD
     - MODEL_HASH_LEGACY_UNTIL
     - ONBOARDING_AUTH_POLICY_APPROVE_DSN
     - ONBOARDING_AUTH_POLICY_CUTOVER_DSN
@@ -127,9 +526,12 @@ env_key_names:
     - OPERATOR_AUTH_POLICY_A
     - OPERATOR_AUTH_POLICY_B
     - OPERATOR_KEY
+    - COORDINATOR_PARTNER_KEYS_ADMIN_DSN
+    - MAL_REFERRAL_HMAC_K1
     - STATS_PARTNER_KEYS_WRITER_DSN
     - STATS_READER_DSN
     - STATS_ROLLUP_DSN
+    - X_API_BEARER_TOKEN
   note: Only key names may be printed; values are always masked.
 
 rate_card:
