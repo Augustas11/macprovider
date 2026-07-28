@@ -231,6 +231,34 @@ Reconciliation deliberately does not depend on this credential, so an
 interrupted transaction can still roll back if alert delivery configuration is
 later lost.
 
+## Pearl runtime release preflight
+
+When rolling a specific tag, verify release identity before invoking the live
+updater. This prevents the operator from discovering too late that a tag exists
+without the Pearl runtime release assets, or that the tag/source identity does
+not match the reviewed deploy target:
+
+```bash
+git fetch origin --tags
+expected_commit="$(git rev-parse HEAD)"
+scripts/verify-pearl-runtime-release.sh \
+  --tag vX.Y.Z \
+  --expected-commit "$expected_commit"
+```
+
+This preflight checks the immutable git tag target, `pearl-release.json`,
+`coordinator-linux-amd64`, `gateway-linux-amd64`,
+`coordinator-cli-linux-amd64`, signed checksum controls, and the catalog files
+the Pearl updater needs. It is intentionally not a substitute for
+`macprovider-pearl-update`: the updater still performs signature verification,
+transaction staging, rollback, provider-drain protection, and serving gates
+before any live mutation.
+
+If the preflight fails because the GitHub Release is missing Pearl runtime
+assets, do not apply an older available release just because its plan succeeds.
+Select or cut a reviewed runtime release whose tag, metadata commit, and deploy
+source match. Do not move an existing public tag to repair identity drift.
+
 ## First production rollout
 
 1. Confirm the candidate release workflow and tests succeeded. Capture the
