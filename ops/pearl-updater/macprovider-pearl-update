@@ -3710,11 +3710,25 @@ class Updater:
             raise UpdateError(f"unsafe catalog pointer target: {target!r}")
 
     @staticmethod
+    def _catalog_release_content_digest(release: Release) -> str:
+        digest = hashlib.sha256()
+        for name in CATALOG_ASSETS:
+            asset_digest = release.catalog.files.get(name, "")
+            if not SHA256_RE.fullmatch(asset_digest):
+                raise UpdateError(f"catalog release {name} checksum is invalid")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(asset_digest.encode("ascii"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    @staticmethod
     def _catalog_release_directory_name(release: Release) -> str:
         manifest_digest = release.catalog.files.get("release.json", "")
         if not SHA256_RE.fullmatch(manifest_digest):
             raise UpdateError("catalog release manifest checksum is invalid")
-        return f"{release.catalog.release_id}-{manifest_digest[:16]}"
+        content_digest = Updater._catalog_release_content_digest(release)
+        return f"{release.catalog.release_id}-{content_digest[:16]}"
 
     def _current_tier2_catalog_path(self) -> Path:
         return self.install_root / "autotune" / "current" / "tier2-catalog.json"

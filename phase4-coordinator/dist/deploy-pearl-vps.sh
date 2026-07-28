@@ -517,12 +517,42 @@ import json, pathlib, sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["tier2-catalog.json"]["sha256"])
 PY
 )"
-AUTOTUNE_RELEASE_MANIFEST_SHA256="$(shasum -a 256 "$AUTOTUNE_RELEASE_MANIFEST" | awk '{print $1}')"
+AUTOTUNE_RELEASE_CONTENT_SHA256="$(python3 - \
+  "$AUTOTUNE_RELEASE_MANIFEST" \
+  "$AUTOTUNE_TRUSTED_KEYS" \
+  "$AUTOTUNE_TIER2_JSON" \
+  "$STATIC_AUTOTUNE_JSON" \
+  "$STATIC_AUTOTUNE_SIG" \
+  "$STATIC_DEMAND_JSON" \
+  "$STATIC_DEMAND_SIG" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+assets = (
+    ("release.json", pathlib.Path(sys.argv[1])),
+    ("trusted-keys.json", pathlib.Path(sys.argv[2])),
+    ("tier2-catalog.json", pathlib.Path(sys.argv[3])),
+    ("autotune-candidates.json", pathlib.Path(sys.argv[4])),
+    ("autotune-candidates.json.sig", pathlib.Path(sys.argv[5])),
+    ("demand-rank.json", pathlib.Path(sys.argv[6])),
+    ("demand-rank.json.sig", pathlib.Path(sys.argv[7])),
+)
+digest = hashlib.sha256()
+for name, path in assets:
+    asset_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest.update(name.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(asset_digest.encode("ascii"))
+    digest.update(b"\n")
+print(digest.hexdigest())
+PY
+)"
 if ! printf '%s' "$AUTOTUNE_RELEASE_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
   echo "invalid autotune release_id: $AUTOTUNE_RELEASE_ID" >&2
   exit 1
 fi
-AUTOTUNE_RELEASE_DIR_NAME="$AUTOTUNE_RELEASE_ID-$(printf '%s' "$AUTOTUNE_RELEASE_MANIFEST_SHA256" | cut -c1-16)"
+AUTOTUNE_RELEASE_DIR_NAME="$AUTOTUNE_RELEASE_ID-$(printf '%s' "$AUTOTUNE_RELEASE_CONTENT_SHA256" | cut -c1-16)"
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
