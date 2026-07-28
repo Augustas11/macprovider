@@ -1,15 +1,22 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.2 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out for the derived conversation_key)
-**Extends:** SPEC-002 v1.3.3 § 5 (routing algorithm)
+**Version:** 0.3.3 (2026-07-28, #784 SPEC-002 routing-eligibility composition reconciliation)
+**Extends:** SPEC-002 v1.5.5 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.9.8 (Pillar A gated on SPEC-006 v0.8; the v0.3.2 FR-SR-2 provider-visibility carve-out is coordinated with SPEC-006 v0.9.8 / SPEC-008 v0.4.1)
 
 SPEC-004 is additive. With every new `routing.*` key at its default value,
-the coordinator MUST preserve SPEC-002 v1.3.3 routing behavior, including
+the coordinator MUST preserve SPEC-002 routing behavior, including
 deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3.3 (2026-07-28)
+
+- **#784 SPEC-002 composition reconciliation.** Tightens FR-SR-18 so SPEC-004
+  routing features compose only after every current SPEC-002 eligibility gate
+  has passed, including FR-P8a warm-up admission, capacity, quota, context, and
+  FR-P11a breaker/recovery holds. No routing-key or provider-wire change.
 
 ### v0.3.2 (2026-07-12)
 
@@ -201,7 +208,7 @@ Ordered pipeline:
 With `sticky_enabled: false`, no `model_classes`, `max_retries: 0`,
 `tiebreak_randomize: false`, and default `tiebreak_epsilon`, the coordinator
 MUST make the same provider selections and return the same buyer-visible
-responses and headers as SPEC-002 v1.3.3 for the same pool snapshot, request,
+responses and headers as SPEC-002 for the same pool snapshot, request,
 and headers. SPEC-004 may add internal routing-decision logs. The
 default-config regression test MUST cover equal-metric providers and prove the
 existing `connected_at`-driven order remains unchanged.
@@ -522,9 +529,10 @@ starting an orphan attempt that cannot complete inside the coordinator budget.
 maximum wall-clock time the coordinator will allow a single SPEC-004 retry
 attempt to run, and it MUST be less than or equal to
 `routing.request_timeout_s`. The total request wall-clock budget MUST still be
-bounded by `routing.request_timeout_s`, which operators SHOULD keep strictly
-below the gateway's `coordinator_request_seconds` per SPEC-002 FR-P11a C2 so
-provider faults are observed before gateway cancellation.
+bounded by `routing.request_timeout_s`. Per SPEC-002 FR-P11a C2, operators MUST
+keep the coordinator request wall and provider HTTP wall at or above the
+gateway streaming ceiling so retry attempts cannot be truncated before the
+gateway's streaming deadline can fire.
 
 **FR-SR-16. Randomized epsilon tiebreak.**
 When `routing.tiebreak_randomize` is false, SPEC-002 deterministic ordering is
@@ -584,14 +592,14 @@ code plus public documentation as needed. Agents MUST NOT inspect d-inference
 ## 5. Config
 
 The following keys extend SPEC-002's `routing:` schema by reference. Defaults
-preserve SPEC-002 v1.3.3 behavior.
+preserve SPEC-002 behavior.
 
 ```yaml
 routing:
   # Existing SPEC-002 keys remain unchanged:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  request_timeout_s: 300
+  request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
 
@@ -763,14 +771,14 @@ fast mock providers.
 **AC-SR-1. Default config preserves SPEC-002 routing.**
 Given two same-model providers with identical metrics and different
 `connected_at`, with all SPEC-004 keys at defaults, the coordinator selects the
-earlier-connected provider exactly as SPEC-002 v1.3.3 does. The regression
+earlier-connected provider exactly as SPEC-002 does. The regression
 asserts identical provider selection and identical buyer-visible
 response/headers for default, `fast`, and `accurate` preference modes, allowing
 only additive internal routing-decision logs.
 
 The same default-config regression MUST cover the FR-R3 pin path:
 `X-MacProvider-Session` and `X-MacProvider-Provider` behave exactly as
-SPEC-002 v1.3.3, including the `503 session_ended` case for a non-matching
+SPEC-002, including the `503 session_ended` case for a non-matching
 `X-MacProvider-Session`. With `sticky_enabled: false`, sticky lookup Step 4 is
 a verified no-op: no sticky map read, no sticky map write, and no change to
 log order before provider selection.

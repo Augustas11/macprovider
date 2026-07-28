@@ -41,7 +41,10 @@ pool:
   degraded_max_retries: 3
   degraded_probe_after_502: true
   warmup_fallback_s: 60
-  warmup_gate_enabled: true    # STAGE 2: gate ON (live test)
+  # 2026-07-28 / #784: align the checked-in Pearl template with the live
+  # overlay's resolved posture. Re-enable only through a fresh live-pool
+  # survey + normal deploy path.
+  warmup_gate_enabled: false
   warmup_gate_timeout_s: 90
   warmup_gate_max_tokens: 2
   breaker_failure_threshold: 2
@@ -52,7 +55,10 @@ pool:
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  request_timeout_s: 280
+  # #760/#784: the gateway streaming ceiling is 900s; keep the coordinator
+  # request wall at least that high or healthy long streams are truncated here
+  # before the gateway ceiling can fire.
+  request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
   # PR #302 (2026-07-01) — sticky conversation affinity via X-MacProvider-Conversation.
@@ -62,7 +68,8 @@ routing:
   sticky_enabled: true
 
 provider_http:
-  timeout_s: 300  # 5 min provider HTTP forwarding timeout
+  # #760/#784 twin wall: must cover the gateway streaming ceiling.
+  timeout_s: 900
 
 limits:
   max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays

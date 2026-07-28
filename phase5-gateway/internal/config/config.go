@@ -554,17 +554,6 @@ func (c Config) Validate() error {
 	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 || c.Timeouts.StreamingIdleMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
-	// Post-#92 / PR #167: header timeout must be >= request budget so a
-	// slow-but-valid streaming first-event (or non-streaming completion)
-	// doesn't false-fail before the coordinator's own request_timeout_s
-	// runs out. The deploy gate at phase4-coordinator/dist/check-deploy-config.sh
-	// (C2b) enforces this at deploy time; this runtime check ensures a
-	// gateway started outside the deploy gate (direct `gateway -config` /
-	// `gateway -check`) also refuses an unsafe local config.
-	if c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.CoordinatorRequestSeconds {
-		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — see SPEC-002 FR-P11a (post-#92)",
-			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorRequestSeconds)
-	}
 	// Issue #760 per-phase deadline orderings.
 	if c.Timeouts.CoordinatorConnectSeconds <= 0 || c.Timeouts.CoordinatorAdmissionSeconds <= 0 ||
 		c.Timeouts.FirstTokenSeconds < 0 || c.Timeouts.StreamCeilingFloorSeconds <= 0 ||
@@ -576,14 +565,34 @@ func (c Config) Validate() error {
 		return fmt.Errorf("timeouts.coordinator_admission_seconds (%d) must be >= timeouts.coordinator_connect_seconds (%d) — admission spans the connect attempt plus the retry loop",
 			c.Timeouts.CoordinatorAdmissionSeconds, c.Timeouts.CoordinatorConnectSeconds)
 	}
+	// Post-#92 / PR #167, retargeted after #760/#784: the transport header
+	// timeout must cover every path that can legitimately defer coordinator
+	// response headers. Streaming headers commit at the first commit-worthy
+	// SSE event and are bounded by admission; non-streaming headers arrive only
+	// after the buffered response completes and are bounded by the effective
+	// non-streaming wall. The deploy gate at phase4-coordinator/dist/
+	// check-deploy-config.sh (C2b) enforces this at deploy time; this runtime
+	// check covers direct `gateway -config` / `gateway -check` starts outside
+	// the deploy gate.
+	effectiveNonStreamSeconds := c.Timeouts.CoordinatorRequestSeconds
+	if c.Timeouts.NonStreamRequestSeconds > 0 {
+		effectiveNonStreamSeconds = c.Timeouts.NonStreamRequestSeconds
+	}
+	requiredHeaderSeconds := c.Timeouts.CoordinatorAdmissionSeconds
+	if effectiveNonStreamSeconds > requiredHeaderSeconds {
+		requiredHeaderSeconds = effectiveNonStreamSeconds
+	}
+	if c.Timeouts.CoordinatorHeaderTimeoutSeconds < requiredHeaderSeconds {
+		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= max(timeouts.coordinator_admission_seconds (%d), effective timeouts.non_stream_request_seconds (%d)) — see SPEC-002 FR-P11a C2b",
+			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorAdmissionSeconds, effectiveNonStreamSeconds)
+	}
 	// Twin of the C2b rule above, for the first-token phase: the transport
 	// gives up on a header-less coordinator after coordinator_header_timeout_
 	// seconds, so a first_token budget beyond that can never be observed —
 	// streaming headers commit at the first commit-worthy SSE event (post-#92).
 	// Only an EXPLICIT first_token budget can conflict with the transport
-	// header timeout; the derived default (0) clamps itself to it, so a
-	// pre-#760 config with a short header timeout still boots (the CI
-	// integration fixtures use 60s, and prod configs are off-repo).
+	// header timeout; the derived default (0) clamps itself to it. Admission
+	// coverage is validated separately by the C2b relation above.
 	if c.Timeouts.FirstTokenSeconds > 0 && c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.FirstTokenSeconds {
 		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.first_token_seconds (%d) — the transport header timeout bounds the first commit-worthy SSE event; set first_token_seconds to 0 to derive it",
 			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.FirstTokenSeconds)
@@ -770,10 +779,11 @@ func (c Config) CoordinatorTimeout() time.Duration {
 //   - Streaming (post-#92): headers wait for the first commit-worthy SSE
 //     event from the provider; pre-event garbage no longer commits.
 //
-// Therefore this MUST be >= CoordinatorRequestSeconds so a slow-but-valid
-// provider does not false-fail as coordinator_unavailable before the
-// coordinator's own routing.request_timeout_s has elapsed. The deploy-time
-// guard at phase4-coordinator/dist/check-deploy-config.sh C2b enforces this.
+// Therefore this MUST be >= max(CoordinatorAdmissionSeconds, effective
+// NonStreamRequestSeconds) so a slow first-event stream or slow non-streaming
+// completion does not false-fail as coordinator_unavailable before its phase
+// budget has elapsed. The deploy-time guard at
+// phase4-coordinator/dist/check-deploy-config.sh C2b enforces this.
 func (c Config) CoordinatorHeaderTimeout() time.Duration {
 	return time.Duration(c.Timeouts.CoordinatorHeaderTimeoutSeconds) * time.Second
 }

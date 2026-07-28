@@ -27,15 +27,15 @@ func TestAccountAdmissionDefaults(t *testing.T) {
 	}
 }
 
-// Post-#92 (PR #167): header timeout must be >= the request budget so a
-// slow-but-valid streaming first-event (or non-streaming completion)
-// doesn't false-fail before the coordinator's own request_timeout_s
-// runs out. See SPEC-002 v1.4.0 §FR-P11a + check-deploy-config.sh C2b.
-func TestGatewayHeaderTimeoutDefaultCoversFullRequestBudget(t *testing.T) {
+// Post-#92 (PR #167), retargeted after #760/#784: header timeout must cover
+// the admission phase so a slow first-event stream does not false-fail before
+// the configured pre-header budget expires. See SPEC-002 FR-P11a C2b +
+// check-deploy-config.sh C2b.
+func TestGatewayHeaderTimeoutDefaultCoversAdmissionBudget(t *testing.T) {
 	cfg := Default()
-	if cfg.Timeouts.CoordinatorHeaderTimeoutSeconds < cfg.Timeouts.CoordinatorRequestSeconds {
-		t.Fatalf("CoordinatorHeaderTimeoutSeconds=%d MUST be >= CoordinatorRequestSeconds=%d (post-#92: streaming headers don't commit until first valid SSE event)",
-			cfg.Timeouts.CoordinatorHeaderTimeoutSeconds, cfg.Timeouts.CoordinatorRequestSeconds)
+	if cfg.Timeouts.CoordinatorHeaderTimeoutSeconds < cfg.Timeouts.CoordinatorAdmissionSeconds {
+		t.Fatalf("CoordinatorHeaderTimeoutSeconds=%d MUST be >= CoordinatorAdmissionSeconds=%d (post-#92/#760: streaming headers don't commit until first valid SSE event)",
+			cfg.Timeouts.CoordinatorHeaderTimeoutSeconds, cfg.Timeouts.CoordinatorAdmissionSeconds)
 	}
 }
 
@@ -49,23 +49,52 @@ func TestStreamingIdleTimeoutDefaultTerminatesBeforeBuyerHarnessTimeout(t *testi
 	}
 }
 
-// Validate must reject configs where CoordinatorHeaderTimeoutSeconds is
-// below CoordinatorRequestSeconds — this is the runtime backstop for the
-// deploy-time check-deploy-config.sh C2b gate. A gateway started outside
-// the deploy gate (direct `gateway -config` / `gateway -check`) MUST
-// still refuse the unsafe relation.
-func TestValidateRejectsHeaderTimeoutBelowRequestBudget(t *testing.T) {
+// Validate must reject configs where CoordinatorHeaderTimeoutSeconds is below
+// CoordinatorAdmissionSeconds — this is the runtime backstop for the deploy-time
+// check-deploy-config.sh C2b gate. A gateway started outside the deploy gate
+// (direct `gateway -config` / `gateway -check`) MUST still refuse the unsafe
+// relation.
+func TestValidateRejectsHeaderTimeoutBelowAdmissionBudget(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.Timeouts.CoordinatorRequestSeconds = 400
+	cfg.Timeouts.CoordinatorAdmissionSeconds = 400
 	cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 60
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("Validate() accepted header=60 < request=400; expected rejection per post-#92 SPEC-002 FR-P11a")
+		t.Fatal("Validate() accepted header=60 < admission=400; expected rejection per SPEC-002 FR-P11a C2b")
 	}
-	for _, want := range []string{"coordinator_header_timeout_seconds", "coordinator_request_seconds", "SPEC-002 FR-P11a"} {
+	for _, want := range []string{"coordinator_header_timeout_seconds", "coordinator_admission_seconds", "SPEC-002 FR-P11a"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("Validate() error = %q, missing substring %q (diagnostic must name both fields + spec ref)", err.Error(), want)
 		}
+	}
+}
+
+func TestValidateRejectsInheritedNonStreamBudgetAboveHeader(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Timeouts.CoordinatorRequestSeconds = 600
+	cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 300
+	cfg.Timeouts.CoordinatorAdmissionSeconds = 120
+	cfg.Timeouts.StreamCeilingMaxSeconds = 900
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted header=300 < inherited non-stream wall=600; expected rejection per SPEC-002 FR-P11a C2b")
+	}
+	for _, want := range []string{"coordinator_header_timeout_seconds", "non_stream_request_seconds", "SPEC-002 FR-P11a"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error = %q, missing substring %q", err.Error(), want)
+		}
+	}
+}
+
+func TestValidateAllowsExplicitNonStreamBudgetWithinHeader(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Timeouts.CoordinatorRequestSeconds = 600
+	cfg.Timeouts.NonStreamRequestSeconds = 300
+	cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 300
+	cfg.Timeouts.CoordinatorAdmissionSeconds = 120
+	cfg.Timeouts.StreamCeilingMaxSeconds = 900
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected explicit non-stream=300 with header=300 and stream ceiling=900: %v", err)
 	}
 }
 
@@ -417,8 +446,8 @@ func TestPhaseDeadlineDefaults(t *testing.T) {
 		t.Errorf("explicit non_stream_request_seconds must win over inheritance, got %s want 300s", got)
 	}
 	// Unset first_token_seconds derives min(120s, header timeout) so a
-	// short-header config (CI integration fixtures use 60s) still boots and
-	// gets a coherent budget instead of a Validate rejection (#760 CI red).
+	// short-header config gets a coherent accessor value. Validate separately
+	// rejects values below the admission phase budget.
 	if got := cfg.FirstTokenTimeout(); got != 120*time.Second {
 		t.Errorf("derived FirstTokenTimeout=%s want 120s under the default header timeout", got)
 	}

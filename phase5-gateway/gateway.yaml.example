@@ -89,17 +89,21 @@ timeouts:
   #     arrive at completion.
   #   - Streaming (post-#92): headers wait for the first commit-worthy SSE
   #     event from the provider; pre-event garbage no longer commits.
-  # In both cases, the coordinator can legitimately take up to
-  # coordinator_request_seconds before sending headers for slow large-model
-  # inference. Keep this >= coordinator_request_seconds so a slow-but-valid
-  # provider doesn't false-fail with coordinator_unavailable here, while the
-  # 300s total bound still fails fast on a truly hung coordinator.
-  coordinator_header_timeout_seconds: 300
+  # In both cases, the coordinator can legitimately take up to the configured
+  # phase budget before sending headers for slow large-model inference. Keep
+  # this >= max(coordinator_admission_seconds, non_stream_request_seconds) so
+  # a slow-but-valid provider doesn't false-fail with coordinator_unavailable.
+  # Pearl sets this above the coordinator 900s request wall so coordinator
+  # relay-timeout attribution wins before the gateway buyer wall.
+  coordinator_header_timeout_seconds: 960
   # --- issue #760: per-phase deadlines (streaming path) -------------------
   # coordinator_request_seconds above is no longer the streaming wall. It is
-  # kept as (a) the deploy-gate C2/C2b anchor and (b) the FLOOR of the derived
-  # streaming ceiling below, so decomposing the wall can only ever let a
-  # request live longer than it does today, never cut one that survives.
+  # kept as the FLOOR of the derived streaming ceiling below, so decomposing
+  # the wall can only ever let a request live longer than it does today, never
+  # cut one that survives. Deploy C2 now anchors the coordinator/provider
+  # upstream walls to stream_ceiling_max_seconds for streaming, and C2b anchors
+  # header transport timeout to max(coordinator_admission_seconds, effective
+  # non_stream_request_seconds).
   #
   # TCP dial + TLS handshake budget. A hung handshake is never legitimate
   # work. Deliberately NOT applied to response headers — shortening
@@ -125,10 +129,11 @@ timeouts:
   stream_ceiling_per_token_ms: 250
   stream_ceiling_max_seconds: 900
   # Non-streaming requests keep a single flat wall: the coordinator buffers
-  # the whole response, so there is no intermediate phase to observe.
-  # 0 (or unset) inherits coordinator_request_seconds — zero behavior change
-  # on that path, including configs that raised only the legacy wall.
-  non_stream_request_seconds: 0
+  # the whole response, so there is no intermediate phase to observe. Deploy
+  # C2 requires this wall to be greater than coordinator request_timeout_s;
+  # otherwise a gateway-side cancel can race/preempt coordinator relay-timeout
+  # attribution and hide FR-P11a breaker faults.
+  non_stream_request_seconds: 960
   streaming_cancel_ms: 500
   # Post-first-byte stream idle timeout. If the coordinator stops producing
   # SSE bytes, terminate with provider_timeout before buyer clients hit their

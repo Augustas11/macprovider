@@ -117,14 +117,6 @@ known_config_drift:
     category: Evidence
     classification: intentional Pearl production posture
     rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
-  - path: pool.warmup_gate_enabled
-    drift_kind: value_mismatch
-    tracked: true
-    live: false
-    owner: pearl_production_overlay
-    category: Evidence
-    classification: intentional Pearl production posture
-    rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
   - path: coordinator_advertised_version.latest_binary_version
     drift_kind: value_mismatch
     tracked: "1.8.66"

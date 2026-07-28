@@ -4,10 +4,10 @@ Epic #770, issue #769 (P2, hygiene). Everything below was verified against the
 **live** Pearl coordinator on 2026-07-27 — against the RUNNING process, whose
 cmdline is `--config /opt/macprovider/coordinator.yaml --config-overlay
 /etc/macprovider/coordinator.pearl-overlays.yaml` (per `ps`; overlay keys
-override base). Note two stale path citations in older runbooks: the
-production-exception-register greps `/etc/macprovider/coordinator.yaml`, which
-does not exist — base config is under `/opt/macprovider/`, and the overlay is
-the file that carries the gate posture (last modified 2026-07-22).
+override base). Older runbooks had stale `/etc/macprovider/coordinator.yaml`
+citations; #784 corrected the active production-exception checklist to inspect
+the `/opt/macprovider/` base plus the Pearl overlay that carries gate posture
+(last modified 2026-07-22).
 
 ## 1. Verified live posture
 
@@ -16,9 +16,10 @@ the file that carries the gate posture (last modified 2026-07-22).
 | `proof_of_weights.require_autotune_hello_gate` | absent | **explicit `false` in the overlay** (was `true` at the spec's 2026-07-11 baseline) | **OFF** |
 | `proof_of_weights.telemetry_drift.enabled` | absent | **explicit `true` in the overlay** | **ON (observe)** — so the #764/#765 `missing_benchmark` observe alerts fire live; `quarantine_missing_benchmark` absent → #765 quarantine stays dormant |
 | `pool.canary_enabled` | absent | **explicit `false` in the overlay**; canary-buyer timer `inactive`, enable-gate absent, `DISABLED` sentinel present | **OFF** |
-| `pool.warmup_gate_enabled` | `true` ("STAGE 2: gate ON") | **`false`** (same stale comment) | OFF — **drift, see §3** |
+| `pool.warmup_gate_enabled` | `false` as of #784 | **`false`** (same stale comment at capture time) | OFF — drift resolved repo-side by #784 |
 | `routing.sticky_enabled` | `true` | `true` | **ON — see §4** |
-| `provider_http.timeout_s` | 300 | 300 | (the #760 twin-wall follow-up input) |
+| `routing.request_timeout_s` | `900` as of #784 | 280 at 2026-07-27 capture | Apply through the reviewed field-scoped deploy path: `C2_TIMER_CONFIG_MIGRATION=1 CONFIG_MODE=preserve-live` |
+| `provider_http.timeout_s` | `900` as of #784 | 300 at 2026-07-27 capture | Apply through the reviewed field-scoped deploy path: `C2_TIMER_CONFIG_MIGRATION=1 CONFIG_MODE=preserve-live` |
 
 ## 2. Spec reconciliation (done in this PR)
 
@@ -39,24 +40,18 @@ should be read with that posture in mind. Not a new decision — recorded here
 because #769 asked for proof of the canary state, and the proof came back
 "off".
 
-## 3. Warmup-gate drift (surfaced, deliberately NOT auto-fixed)
+## 3. Warmup-gate drift (resolved repo-side by #784)
 
-Committed `phase4-coordinator/dist/coordinator.yaml:44` says
-`warmup_gate_enabled: true  # STAGE 2: gate ON (live test)`. The live file
-says `false` with the same comment — someone flipped the live value without
-updating the comment or back-porting to the committed template. Consequence:
-**the next deploy that syncs the committed template would silently flip the
-warmup gate ON in prod.**
+At 2026-07-27 capture, committed `phase4-coordinator/dist/coordinator.yaml`
+said `warmup_gate_enabled: true  # STAGE 2: gate ON (live test)` while live
+Pearl had `false`. #784 concluded the safe repo-side posture is to align the
+checked-in Pearl template to the current live value with a dated comment:
+`warmup_gate_enabled: false`.
 
-This runbook surfaces the drift; it does not resolve it, because the intent is
-unknowable from the config alone (was the STAGE 2 live test concluded-and-
-reverted, or is the live `false` the accident?). Resolution belongs to the
-operator with the STAGE 2 context. Options: (a) conclude the live test and set
-the committed template to `false` with a dated comment, or (b) restore `true`
-live via the normal deploy path. Until resolved, treat
-`ALLOW_CONFIG_DRIFT`-style deploys of this file as unsafe. (Same drift class
-as the 2026-07-02 sticky_enabled strip recorded in the committed file's own
-comments — this file has a history of live/committed divergence.)
+This does not claim a live Pearl mutation by itself. It removes the config-sync
+hazard where the next template deploy would silently flip the gate ON. Re-enable
+only through a fresh live-pool hardware/benchmark survey and the normal deploy
+path.
 
 ## 4. Sticky-routing same-account timing side-channel — RISK ACCEPTED
 
@@ -92,7 +87,12 @@ provider HTTP port to tenants (breaks the isolation predicate above).
 ## 5. Follow-ups (owned elsewhere, listed for traceability)
 
 - Coordinator twin-wall raise + C2/C2b deploy-gate retarget (P0-adjacent
-  follow-up from #760; `provider_http.timeout_s: 300` confirmed live above).
+  follow-up from #760): resolved repo-side by #784 with coordinator
+  `routing.request_timeout_s: 900`, `provider_http.timeout_s: 900`,
+  `TimeoutStopSec=960`, and deploy C2 streaming checks against
+  `timeouts.stream_ceiling_max_seconds`. Live Pearl still needs the normal
+  safe deploy/reconciliation path before these values are effective there.
 - Hello-gate enable-after-survey and #765 quarantine enable-after-survey share
   one prerequisite: a live-pool hardware-evidence/benchmark survey.
-- Warmup-gate drift resolution (§3) — operator decision.
+- Warmup-gate drift resolution (§3) — resolved repo-side by #784; any re-enable
+  remains an operator decision after survey.

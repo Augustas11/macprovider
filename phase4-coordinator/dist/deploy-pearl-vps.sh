@@ -51,7 +51,17 @@
 #                    from its respective runtime EnvironmentFile; never pass
 #                    raw credential values. Production computes these proofs
 #                    on Pearl and returns only the digests.
-#   SKIP_C2_CHECK    default: 0   skip C2 timer/header assertions only (development only)
+#   SKIP_C2_CHECK    unsupported; C2 timer/header assertions are mandatory.
+#   COORDINATOR_OVERLAY_CONFIG used only with --dry-run-local. Production
+#                    deploys validate the Pearl base config merged with
+#                    /etc/macprovider/coordinator.pearl-overlays.yaml. The
+#                    deploy creates an empty overlay if Pearl does not have one
+#                    so the installed systemd unit and C2 gate share one config
+#                    input contract.
+#   C2_TIMER_CONFIG_MIGRATION default: 0. Set to 1 for the reviewed #784
+#                    field-scoped Pearl config migration that raises only
+#                    routing.request_timeout_s and provider_http.timeout_s
+#                    to the tracked monotonic values before C2 validation.
 #   CONFIG_MODE      default: preserve-live
 #                    preserve-live: validate and keep Pearl's live
 #                    /opt/macprovider/coordinator.yaml; tracked dist/
@@ -138,6 +148,15 @@ case "$CONFIG_MODE" in
     exit 2
     ;;
 esac
+C2_TIMER_CONFIG_MIGRATION="${C2_TIMER_CONFIG_MIGRATION:-0}"
+case "$C2_TIMER_CONFIG_MIGRATION" in
+  0|1) ;;
+  *) echo "aborting deploy: C2_TIMER_CONFIG_MIGRATION must be 0 or 1, got: $C2_TIMER_CONFIG_MIGRATION" >&2; exit 5 ;;
+esac
+if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] && [ "$CONFIG_MODE" != "preserve-live" ]; then
+  echo "aborting deploy: C2_TIMER_CONFIG_MIGRATION=1 is only valid with CONFIG_MODE=preserve-live" >&2
+  exit 5
+fi
 if [ "${ALLOW_CONFIG_DRIFT:-0}" = "1" ]; then
   echo "aborting deploy: ALLOW_CONFIG_DRIFT=1 is no longer a safe deploy bypass." >&2
   echo "  Use CONFIG_MODE=preserve-live for code/catalog deploys that keep Pearl's live config." >&2
@@ -684,7 +703,15 @@ sanitize_live_config_for_local_validation() {
       next
     }
     { print }
-  ' | redact_dsn
+	  ' | redact_dsn
+}
+reject_redacted_install_candidate() {
+  local path="$1" label="$2"
+  if grep -Eq '(<MASKED>|postgres(ql)?://[^[:space:]]+:\*\*\*@)' "$path"; then
+    echo "aborting deploy: refusing to install redacted validation data as $label" >&2
+    echo "  C2 timer migration install candidates must come from raw 0600 live config copies, never sanitized validation copies." >&2
+    exit 5
+  fi
 }
 normalize_yaml() {
   # Mask any field whose name ends in _key / _secret / _token, then strip
@@ -793,7 +820,15 @@ trap '
   rm -f "${TMP_CATALOG_PUBKEY:-}"
   rm -f "${TMP_CATALOG_PINNED:-}"
   rm -f "${CATALOG_SMOKE_TMP:-}"
+  rm -f "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-}"
   rm -f "${LIVE_COORDINATOR_CONFIG_TMP:-}"
+  rm -f "${COORDINATOR_OVERLAY_CONFIG_RAW_TMP:-}"
+  rm -f "${COORDINATOR_OVERLAY_CONFIG_TMP:-}"
+  rm -f "${DEPLOY_EFFECTIVE_CONFIG_TMP:-}"
+  rm -f "${C2_TIMER_MIGRATED_CONFIG_TMP:-}"
+  rm -f "${C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP:-}"
+  rm -f "${C2_TIMER_MIGRATED_OVERLAY_TMP:-}"
+  rm -f "${C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   rm -rf "${STATIC_SMOKE_DIR:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
@@ -980,12 +1015,22 @@ log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # only through --dry-run-local and exits before any SSH mutation.
 CHECK_SCRIPT="$DIST_DIR/check-deploy-config.sh"
 C2C_PROOF_SCRIPT="$DIST_DIR/lib/c2c_runtime_proof.py"
+MERGE_OVERLAY_SCRIPT="$DIST_DIR/merge-yaml-overlay.py"
+C2_TIMER_MIGRATION_SCRIPT="$DIST_DIR/c2-timer-config-migration.py"
 if [ ! -x "$CHECK_SCRIPT" ]; then
   echo "aborting deploy: check-deploy-config.sh missing or not executable: $CHECK_SCRIPT" >&2
   exit 5
 fi
 if [ ! -r "$C2C_PROOF_SCRIPT" ]; then
   echo "aborting deploy: runtime credential proof helper missing or unreadable: $C2C_PROOF_SCRIPT" >&2
+  exit 5
+fi
+if [ ! -x "$MERGE_OVERLAY_SCRIPT" ]; then
+  echo "aborting deploy: YAML overlay merge helper missing or not executable: $MERGE_OVERLAY_SCRIPT" >&2
+  exit 5
+fi
+if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] && [ ! -x "$C2_TIMER_MIGRATION_SCRIPT" ]; then
+  echo "aborting deploy: C2 timer migration helper missing or not executable: $C2_TIMER_MIGRATION_SCRIPT" >&2
   exit 5
 fi
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
@@ -997,17 +1042,28 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
     echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml>." >&2
     exit 5
   fi
+  CHECK_ARGS=("$CONFIG" "$GATEWAY_CONFIG")
+  if [ -n "${COORDINATOR_OVERLAY_CONFIG:-}" ]; then
+    if [ ! -f "$COORDINATOR_OVERLAY_CONFIG" ]; then
+      echo "aborting deploy dry-run: local coordinator overlay not found ($COORDINATOR_OVERLAY_CONFIG)." >&2
+      exit 5
+    fi
+    CHECK_ARGS+=("$COORDINATOR_OVERLAY_CONFIG")
+  fi
   C2C_COORD_OPERATOR_KEY_SHA256="${C2C_COORD_OPERATOR_KEY_SHA256:-}" \
   C2C_COORD_SERVICE_TOKEN_SHA256="${C2C_COORD_SERVICE_TOKEN_SHA256:-}" \
   C2C_GATEWAY_SERVICE_TOKEN_SHA256="${C2C_GATEWAY_SERVICE_TOKEN_SHA256:-}" \
   C2C_GATEWAY_OPERATOR_KEY_SHA256="${C2C_GATEWAY_OPERATOR_KEY_SHA256:-}" \
-    bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_CONFIG" || {
+    bash "$CHECK_SCRIPT" "${CHECK_ARGS[@]}" || {
     echo "aborting deploy dry-run: config-drift check failed" >&2; exit 5;
   }
   echo "  local dry-run C2 check passed"
   exit 0
 else
   if [ "$CONFIG_MODE" = "preserve-live" ]; then
+    LIVE_COORDINATOR_CONFIG_RAW_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-config-raw.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for raw installed coordinator config copy" >&2; exit 5;
+    }
     LIVE_COORDINATOR_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-config.XXXXXXXX)" || {
       echo "aborting deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
     }
@@ -1016,8 +1072,12 @@ else
       exit 5
     }
     $SSH 'test -f /opt/macprovider/coordinator.yaml || { echo "missing installed coordinator config: /opt/macprovider/coordinator.yaml" >&2; exit 1; }; cat /opt/macprovider/coordinator.yaml' \
-      | sanitize_live_config_for_local_validation > "$LIVE_COORDINATOR_CONFIG_TMP" || {
+      > "$LIVE_COORDINATOR_CONFIG_RAW_TMP" || {
       echo "aborting deploy: could not read installed coordinator config from Pearl" >&2
+      exit 5
+    }
+    sanitize_live_config_for_local_validation < "$LIVE_COORDINATOR_CONFIG_RAW_TMP" > "$LIVE_COORDINATOR_CONFIG_TMP" || {
+      echo "aborting deploy: could not sanitize installed coordinator config for local validation" >&2
       exit 5
     }
     LIVE_COORDINATOR_CONFIG_SHA=$(shasum -a 256 "$LIVE_COORDINATOR_CONFIG_TMP" | awk '{print $1}')
@@ -1029,9 +1089,83 @@ else
     DEPLOY_CONFIG="$CONFIG"
     echo "  CONFIG_MODE=apply-tracked — validating tracked coordinator config: $CONFIG"
   fi
+  if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
+    C2_TIMER_MIGRATED_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-config.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for C2 timer migrated coordinator config" >&2; exit 5;
+    }
+    C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-config-validation.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for sanitized C2 timer migrated coordinator config" >&2; exit 5;
+    }
+    python3 "$C2_TIMER_MIGRATION_SCRIPT" "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-$DEPLOY_CONFIG}" "$CONFIG" > "$C2_TIMER_MIGRATED_CONFIG_TMP" || {
+      echo "aborting deploy: could not render reviewed C2 timer config migration" >&2
+      exit 5
+    }
+    reject_redacted_install_candidate "$C2_TIMER_MIGRATED_CONFIG_TMP" "coordinator.yaml"
+    sanitize_live_config_for_local_validation < "$C2_TIMER_MIGRATED_CONFIG_TMP" > "$C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP" || {
+      echo "aborting deploy: could not sanitize C2 timer migrated coordinator config for local validation" >&2
+      exit 5
+    }
+    DEPLOY_CONFIG="$C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP"
+    echo "  C2_TIMER_CONFIG_MIGRATION=1 — validating reviewed field-scoped timer raise"
+  fi
+  COORDINATOR_REMOTE_OVERLAY="/etc/macprovider/coordinator.pearl-overlays.yaml"
+  C2_TIMER_MIGRATION_OVERLAY_ACTIVE=0
+  COORDINATOR_EFFECTIVE_OVERLAY_TMP=""
+  if $SSH "test -f '$COORDINATOR_REMOTE_OVERLAY'"; then
+    COORDINATOR_OVERLAY_CONFIG_RAW_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-overlay-raw.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for raw installed coordinator overlay copy" >&2; exit 5;
+    }
+    COORDINATOR_OVERLAY_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-overlay.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for installed coordinator overlay copy" >&2; exit 5;
+    }
+    $SSH "cat '$COORDINATOR_REMOTE_OVERLAY'" > "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" || {
+      echo "aborting deploy: could not read installed coordinator overlay from Pearl: $COORDINATOR_REMOTE_OVERLAY" >&2
+      exit 5
+    }
+    sanitize_live_config_for_local_validation < "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" > "$COORDINATOR_OVERLAY_CONFIG_TMP" || {
+      echo "aborting deploy: could not sanitize installed coordinator overlay for local validation" >&2
+      exit 5
+    }
+    COORDINATOR_OVERLAY_CONFIG_SHA=$(shasum -a 256 "$COORDINATOR_OVERLAY_CONFIG_TMP" | awk '{print $1}')
+    echo "  validating effective coordinator config with Pearl overlay: $COORDINATOR_REMOTE_OVERLAY sha256=$COORDINATOR_OVERLAY_CONFIG_SHA"
+    COORDINATOR_EFFECTIVE_OVERLAY_TMP="$COORDINATOR_OVERLAY_CONFIG_TMP"
+    if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
+      C2_TIMER_MIGRATED_OVERLAY_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-overlay.XXXXXXXX)" || {
+        echo "aborting deploy: mktemp failed for C2 timer migrated coordinator overlay" >&2; exit 5;
+      }
+      C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-overlay-validation.XXXXXXXX)" || {
+        echo "aborting deploy: mktemp failed for sanitized C2 timer migrated coordinator overlay" >&2; exit 5;
+      }
+      python3 "$C2_TIMER_MIGRATION_SCRIPT" --only-existing "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" "$CONFIG" > "$C2_TIMER_MIGRATED_OVERLAY_TMP" || {
+        echo "aborting deploy: could not render reviewed C2 timer overlay migration" >&2
+        exit 5
+      }
+      reject_redacted_install_candidate "$C2_TIMER_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"
+      if ! cmp -s "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" "$C2_TIMER_MIGRATED_OVERLAY_TMP"; then
+        C2_TIMER_MIGRATION_OVERLAY_ACTIVE=1
+        sanitize_live_config_for_local_validation < "$C2_TIMER_MIGRATED_OVERLAY_TMP" > "$C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP" || {
+          echo "aborting deploy: could not sanitize C2 timer migrated coordinator overlay for local validation" >&2
+          exit 5
+        }
+        COORDINATOR_EFFECTIVE_OVERLAY_TMP="$C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP"
+        echo "  C2_TIMER_CONFIG_MIGRATION=1 — Pearl overlay carries timer fields and will be migrated field-scope"
+      fi
+    fi
+    DEPLOY_EFFECTIVE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-effective-config.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for effective coordinator config" >&2; exit 5;
+    }
+    python3 "$MERGE_OVERLAY_SCRIPT" "$DEPLOY_CONFIG" "$COORDINATOR_EFFECTIVE_OVERLAY_TMP" > "$DEPLOY_EFFECTIVE_CONFIG_TMP" || {
+      echo "aborting deploy: could not merge coordinator base config with Pearl overlay" >&2
+      exit 5
+    }
+    DEPLOY_CONFIG="$DEPLOY_EFFECTIVE_CONFIG_TMP"
+  else
+    echo "  no Pearl coordinator overlay found at $COORDINATOR_REMOTE_OVERLAY; validating base coordinator config"
+  fi
   assert_stats_required_matches_effective_config
   if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
-    echo "  SKIP_C2_CHECK=1 set — skipping timer/header assertions only; credential proof remains mandatory" >&2
+    echo "aborting deploy: SKIP_C2_CHECK=1 is no longer supported; fix C2/C2b config instead" >&2
+    exit 5
   fi
   GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
     echo "aborting deploy: mktemp failed for installed gateway config copy" >&2; exit 5;
@@ -2533,6 +2667,10 @@ $SSH "set -e
   snapshot_node /opt/macprovider/coordinator.yaml.prev coordinator.yaml.prev had-config-prev
   printf '%s' 'coordinator.yaml.bak-$BACKUP_TS' > \"\$_rollback_stage/config-backup-name\"
   snapshot_node /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS coordinator-dated-backup had-config-dated-backup
+  snapshot_node /etc/macprovider/coordinator.pearl-overlays.yaml coordinator.pearl-overlays.yaml had-overlay
+  snapshot_node /etc/macprovider/coordinator.pearl-overlays.yaml.prev coordinator.pearl-overlays.yaml.prev had-overlay-prev
+  printf '%s' 'coordinator.pearl-overlays.yaml.bak-$BACKUP_TS' > \"\$_rollback_stage/overlay-config-backup-name\"
+  snapshot_node /etc/macprovider/coordinator.pearl-overlays.yaml.bak-$BACKUP_TS coordinator-overlay-dated-backup had-overlay-dated-backup
   snapshot_node /opt/macprovider-stats/stats-inventory-sync stats-inventory-sync had-stats-inventory-binary
   snapshot_node /opt/macprovider-stats/stats-billing-mirror stats-billing-mirror had-stats-billing-binary
   snapshot_node /opt/macprovider-stats/stats-hardware-verifier stats-hardware-verifier had-stats-hardware-binary
@@ -2677,6 +2815,11 @@ $SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billi
 $SCP "$STATS_HARDWARE_VERIFIER_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-hardware-verifier-linux-amd64"
 if [ "$CONFIG_MODE" = "apply-tracked" ]; then
   $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
+elif [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
+  $SCP "$C2_TIMER_MIGRATED_CONFIG_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.c2-timer-migration.yaml"
+  if [ "${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
+    $SCP "$C2_TIMER_MIGRATED_OVERLAY_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml"
+  fi
 else
   log "  CONFIG_MODE=preserve-live — not uploading tracked coordinator.yaml"
 fi
@@ -2724,7 +2867,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$TMP_CATALOG_PUBKEY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.pub"
 fi
 
-if [ "$CONFIG_MODE" = "apply-tracked" ]; then
+if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
   # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
   # BEFORE we overwrite it. Step 1b already aborted on drift, but the audit
   # also calls for a persistent remote-side backup so a bad deploy can be
@@ -2738,6 +2881,14 @@ if [ "$CONFIG_MODE" = "apply-tracked" ]; then
           echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
         else
           echo '  no live coordinator.yaml — first deploy, skipping backup'
+        fi
+        if [ '${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
+          install -d -o root -g macprovider -m 0750 /etc/macprovider
+          if [ -f /etc/macprovider/coordinator.pearl-overlays.yaml ]; then
+            install -o root -g macprovider -m 0640 /etc/macprovider/coordinator.pearl-overlays.yaml /etc/macprovider/coordinator.pearl-overlays.yaml.prev
+            install -o root -g macprovider -m 0640 /etc/macprovider/coordinator.pearl-overlays.yaml /etc/macprovider/coordinator.pearl-overlays.yaml.bak-$BACKUP_TS
+            echo '  remote-overlay backup saved at /etc/macprovider/coordinator.pearl-overlays.yaml.bak-$BACKUP_TS'
+          fi
         fi"
 else
   log "  CONFIG_MODE=preserve-live — skipping coordinator.yaml backup because no config overwrite will occur"
@@ -2793,8 +2944,22 @@ $SSH "set -e
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-hardware-verifier-linux-amd64 /opt/macprovider-stats/stats-hardware-verifier
   if [ '$CONFIG_MODE' = 'apply-tracked' ]; then
     install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
+  elif [ '$C2_TIMER_CONFIG_MIGRATION' = '1' ]; then
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.c2-timer-migration.yaml /opt/macprovider/coordinator.yaml
+    if [ '${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
+      install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml /etc/macprovider/coordinator.pearl-overlays.yaml
+    fi
   else
     echo '  preserving live /opt/macprovider/coordinator.yaml'
+  fi
+  install -d -o root -g macprovider -m 0750 /etc/macprovider
+  if [ -e /etc/macprovider/coordinator.pearl-overlays.yaml ] && [ ! -f /etc/macprovider/coordinator.pearl-overlays.yaml ]; then
+    echo 'refusing unsafe coordinator overlay path: /etc/macprovider/coordinator.pearl-overlays.yaml' >&2
+    exit 1
+  fi
+  if [ ! -f /etc/macprovider/coordinator.pearl-overlays.yaml ]; then
+    printf '{}\n' > $DEPLOY_TMP/coordinator.pearl-overlays.empty.yaml
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.pearl-overlays.empty.yaml /etc/macprovider/coordinator.pearl-overlays.yaml
   fi
   install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.service /etc/systemd/system/stats-inventory-sync.service

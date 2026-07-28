@@ -20,7 +20,7 @@
       "expiry_unknown_reason": "Live Pearl overlay still has proof_of_weights.require_autotune_hello_gate=false (verified 2026-07-22T10:38Z). No finite flip deadline until #582 stranger / no-exception onboarding physical proof lands; do not invent an expiry.",
       "scope": "Pearl production provider onboarding while overlay keeps require_autotune_hello_gate=false; fleet includes known providers mac / augustass-macbook-air / air5 and referral cohort. Must not be read as a global permanent disable outside Pearl production.",
       "removal_condition": "Pearl admits fresh/restored providers through durable hardware-trust approval and strict hello-gate evidence without global gate disabling.",
-      "rollback_command": "ssh pearl 'sudo grep -A20 \"^proof_of_weights:\" /etc/macprovider/coordinator.yaml'; then restore the reviewed overlay value with `require_autotune_hello_gate: true` through the existing coordinator deploy/restart procedure.",
+      "rollback_command": "ssh pearl 'sudo grep -A20 \"^proof_of_weights:\" /opt/macprovider/coordinator.yaml; sudo grep -A20 \"^proof_of_weights:\" /etc/macprovider/coordinator.pearl-overlays.yaml'; then restore the reviewed overlay value with `require_autotune_hello_gate: true` through the existing coordinator deploy/restart procedure.",
       "post_removal_validation": "Confirm `/poolz` and coordinator logs show the provider admitted with verified in-window autotune evidence and no `autotune_evidence_required` bypass or relaxed hello-gate setting.",
       "blocks_stable_promotion": true,
       "evidence": [
@@ -232,7 +232,7 @@
       "expiry_unknown_reason": "Live Pearl /opt/macprovider/coordinator.yaml autotune block has catalog paths/public keys only; no enforce_provider_admission / provider_admission_bridge_deadline keys present in the deployed file. Coordinator binary remains v1.8.49 / latest_binary_version=1.8.49. Operator poolz legacy_bridge count could not be scraped in this lane without a non-canary operator token; keep active until pool evidence proves zero legacy_bridge.",
       "scope": "Known v1.8.40 recovery cohort and any remaining metadata-free Pearl providers; must not widen to arbitrary providers.",
       "removal_condition": "Every production provider emits direct final-version catalog/admission telemetry and buyer-serves without `legacy_bridge`; strict provider admission is re-enabled.",
-      "rollback_command": "ssh pearl 'sudo grep -A20 \"^autotune:\" /etc/macprovider/coordinator.yaml; curl -fsS --header \"Authorization: Bearer <OPERATOR_TOKEN>\" http://127.0.0.1:8444/poolz' # placeholders only; then restore strict admission through reviewed deploy.",
+      "rollback_command": "ssh pearl 'sudo grep -A20 \"^autotune:\" /opt/macprovider/coordinator.yaml; sudo grep -A20 \"^autotune:\" /etc/macprovider/coordinator.pearl-overlays.yaml; curl -fsS --header \"Authorization: Bearer <OPERATOR_TOKEN>\" http://127.0.0.1:8444/poolz' # placeholders only; then restore strict admission through reviewed deploy.",
       "post_removal_validation": "`/poolz` reports zero `legacy_bridge` sessions, `autotune.enforce_provider_admission` is true, and physical upgrade/reboot evidence under #613/#585 remains buyer-serving.",
       "blocks_stable_promotion": true,
       "evidence": [
@@ -268,7 +268,7 @@
       "expiry_unknown_reason": "Pending Pearl enablement and physical first-hop evidence; activate with a finite bridge window once the overlay is live.",
       "scope": "Exact public v1.8.48 set only; must not overlap accepted_ids or equal target_id; must not widen arbitrary unaccepted sets.",
       "removal_condition": "Zero production providers remain on the v1.8.48 set, physical #610 journeys pass, and `first_hop_bridge_ids` is emptied through reviewed deploy.",
-      "rollback_command": "ssh pearl 'sudo grep -A30 \"compatibility_set:\" /etc/macprovider/coordinator.yaml' # read-only; remove first_hop_bridge_ids via reviewed overlay deploy/restart.",
+      "rollback_command": "ssh pearl 'sudo grep -A30 \"compatibility_set:\" /opt/macprovider/coordinator.yaml; sudo grep -A30 \"compatibility_set:\" /etc/macprovider/coordinator.pearl-overlays.yaml' # read-only; remove first_hop_bridge_ids via reviewed overlay deploy/restart.",
       "post_removal_validation": "No `compatibility_set_first_hop_bridge` events, no `update_bridge` pool rows, and provider recovery uses signed discovery on CLI \u22651.8.49 without the bridge list.",
       "blocks_stable_promotion": true,
       "evidence": [

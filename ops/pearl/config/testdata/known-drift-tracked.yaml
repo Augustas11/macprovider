@@ -2,7 +2,7 @@ listen:
   buyer_port: 8443
 pool:
   heartbeat_interval_s: 30
-  warmup_gate_enabled: true
+  warmup_gate_enabled: false
 routing:
   request_timeout_s: 280
 auth:

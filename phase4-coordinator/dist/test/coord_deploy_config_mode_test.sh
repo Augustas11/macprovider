@@ -20,7 +20,7 @@ grep -q 'ALLOW_CONFIG_DRIFT=1 is no longer a safe deploy bypass' "$DEPLOY_SH" ||
 grep -q 'LIVE_COORDINATOR_CONFIG_TMP=.*macprovider-coordinator-live-config' "$DEPLOY_SH" ||
   fail "preserve-live mode must read Pearl live coordinator config into a temp validation copy"
 
-grep -q 'sanitize_live_config_for_local_validation > "$LIVE_COORDINATOR_CONFIG_TMP"' "$DEPLOY_SH" ||
+grep -q 'sanitize_live_config_for_local_validation < "$LIVE_COORDINATOR_CONFIG_RAW_TMP" > "$LIVE_COORDINATOR_CONFIG_TMP"' "$DEPLOY_SH" ||
   fail "live coordinator config temp copy must be sanitized before local validation"
 
 sanitizer_tmp="$(mktemp)"
@@ -113,6 +113,9 @@ esac
 
 grep -q 'DEPLOY_CONFIG="$LIVE_COORDINATOR_CONFIG_TMP"' "$DEPLOY_SH" ||
   fail "preserve-live mode must validate against the live coordinator config copy"
+grep -q 'LIVE_COORDINATOR_CONFIG_RAW_TMP=' "$DEPLOY_SH" &&
+  grep -q 'sanitize_live_config_for_local_validation < "$LIVE_COORDINATOR_CONFIG_RAW_TMP" > "$LIVE_COORDINATOR_CONFIG_TMP"' "$DEPLOY_SH" ||
+  fail "preserve-live mode must keep separate raw install input and sanitized validation config"
 
 stats_guard_line=$(grep -nF 'assert_stats_required_matches_effective_config' "$DEPLOY_SH" | tail -n1 | cut -d: -f1)
 deploy_config_line=$(grep -nF 'DEPLOY_CONFIG="$LIVE_COORDINATOR_CONFIG_TMP"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
@@ -124,6 +127,8 @@ upload_line=$(grep -nF '$SCP "$BINARY"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
 
 grep -q 'rm -f "${LIVE_COORDINATOR_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap must clean the sanitized live coordinator config temp copy"
+grep -q 'rm -f "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap must clean the raw live coordinator config temp copy"
 
 grep -q 'CONFIG_MODE=preserve-live — not uploading tracked coordinator.yaml' "$DEPLOY_SH" ||
   fail "preserve-live mode must not upload tracked coordinator.yaml"

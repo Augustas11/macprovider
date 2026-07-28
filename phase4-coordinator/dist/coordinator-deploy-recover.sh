@@ -5,6 +5,7 @@ ROOT=${MACPROVIDER_ROOT:-/opt/macprovider}
 STATS_ROOT=${MACPROVIDER_STATS_ROOT:-/opt/macprovider-stats}
 SYSTEMD_ROOT=${MACPROVIDER_SYSTEMD_ROOT:-/etc/systemd/system}
 NGINX_ROOT=${MACPROVIDER_NGINX_ROOT:-/etc/nginx}
+ETC_MACPROVIDER_ROOT=${MACPROVIDER_ETC_ROOT:-/etc/macprovider}
 SYSTEMCTL=${MACPROVIDER_SYSTEMCTL:-systemctl}
 FLOCK=${MACPROVIDER_FLOCK:-flock}
 PYTHON=${MACPROVIDER_PYTHON:-python3}
@@ -25,6 +26,7 @@ RECOVERY_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-recovery.service"
 WATCHDOG_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-watchdog.service"
 GUARD_DROPIN="$SYSTEMD_ROOT/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf"
 TIER2_CATALOG="$ROOT/tier2-catalog.json"
+OVERLAY="$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml"
 MODE=${1:---recover}
 
 case "$MODE" in
@@ -182,8 +184,20 @@ case "$config_backup_name" in
   coordinator.yaml.bak-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
     restore_regular had-config-dated-backup coordinator-dated-backup "$ROOT/$config_backup_name"
     ;;
-  *) echo "invalid rollback config backup name: $config_backup_name" >&2; exit 1 ;;
+	  *) echo "invalid rollback config backup name: $config_backup_name" >&2; exit 1 ;;
 esac
+mkdir -p "$ETC_MACPROVIDER_ROOT"
+restore_regular had-overlay coordinator.pearl-overlays.yaml "$OVERLAY"
+restore_regular had-overlay-prev coordinator.pearl-overlays.yaml.prev "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.prev"
+if [ -f "$ROLLBACK/overlay-config-backup-name" ]; then
+  overlay_config_backup_name=$(cat "$ROLLBACK/overlay-config-backup-name" 2>/dev/null || true)
+  case "$overlay_config_backup_name" in
+    coordinator.pearl-overlays.yaml.bak-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+      restore_regular had-overlay-dated-backup coordinator-overlay-dated-backup "$ETC_MACPROVIDER_ROOT/$overlay_config_backup_name"
+      ;;
+    *) echo "invalid rollback overlay backup name: $overlay_config_backup_name" >&2; exit 1 ;;
+  esac
+fi
 restore_regular had-tier2-catalog tier2-catalog.json "$TIER2_CATALOG"
 restore_regular had-stats-inventory-binary stats-inventory-sync "$STATS_ROOT/stats-inventory-sync"
 restore_regular had-stats-billing-binary stats-billing-mirror "$STATS_ROOT/stats-billing-mirror"

@@ -46,7 +46,7 @@ pool:
   heartbeat_miss_threshold_s: 90
   wake_gap_threshold_s: 120
   warmup_fallback_s: 60
-  warmup_gate_enabled: true
+  warmup_gate_enabled: false
   warmup_gate_timeout_s: 90
   warmup_gate_max_tokens: 2
   degraded_backoff_s: 30
@@ -86,11 +86,10 @@ pool:
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  # C2 (SPEC-002 FR-P11a): keep STRICTLY BELOW the gateway's
-  # timeouts.coordinator_request_seconds (default 300) so the coordinator's
-  # relay-timeout fires first and is provider-attributable. check-deploy-config.sh
-  # warns if this ordering is violated.
-  request_timeout_s: 280
+  # C2 (SPEC-002 FR-P11a, #760/#784): keep this at least as high as the
+  # gateway's timeouts.stream_ceiling_max_seconds so the coordinator does not
+  # truncate healthy long streams before the gateway streaming ceiling fires.
+  request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
   tiebreak_randomize: false
@@ -112,7 +111,8 @@ routing:
   model_classes: {}
 
 provider_http:
-  timeout_s: 300  # 5 min provider HTTP forwarding timeout
+  # Must cover the gateway streaming ceiling for HTTP-forwarded providers.
+  timeout_s: 900
 
 limits:
   max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays

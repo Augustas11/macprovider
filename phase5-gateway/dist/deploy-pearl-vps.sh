@@ -42,6 +42,8 @@
 #                    coordinator deploy config.
 #   COORD_REMOTE_CONFIG  installed coordinator config path on Pearl.
 #                    Default: /opt/macprovider/coordinator.yaml.
+#   COORD_REMOTE_OVERLAY  installed coordinator overlay path on Pearl.
+#                    Default: /etc/macprovider/coordinator.pearl-overlays.yaml.
 #   C2C_COORD_OPERATOR_KEY_SHA256, C2C_COORD_SERVICE_TOKEN_SHA256,
 #   C2C_GATEWAY_SERVICE_TOKEN_SHA256, C2C_GATEWAY_OPERATOR_KEY_SHA256
 #                    required by --dry-run-local when either config uses
@@ -138,12 +140,14 @@ GATEWAY_CONFIG_DEFAULT="$DIST_DIR/gateway.yaml"
 GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
 GATEWAY_REMOTE_CONFIG="${GATEWAY_REMOTE_CONFIG:-/opt/macprovider/gateway.yaml}"
 COORD_REMOTE_CONFIG="${COORD_REMOTE_CONFIG:-/opt/macprovider/coordinator.yaml}"
+COORD_REMOTE_OVERLAY="${COORD_REMOTE_OVERLAY:-/etc/macprovider/coordinator.pearl-overlays.yaml}"
 
 COORD_CONFIG_DEFAULT="$DIST_DIR/../../phase4-coordinator/dist/coordinator.yaml"
 COORD_CONFIG="${COORD_CONFIG:-$COORD_CONFIG_DEFAULT}"
 
 CHECK_SCRIPT="$DIST_DIR/../../phase4-coordinator/dist/check-deploy-config.sh"
 C2C_PROOF_SCRIPT="$DIST_DIR/../../phase4-coordinator/dist/lib/c2c_runtime_proof.py"
+MERGE_OVERLAY_SCRIPT="$DIST_DIR/../../phase4-coordinator/dist/merge-yaml-overlay.py"
 
 for f in "$BINARY" "$SERVICE" "$NGINX_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
@@ -179,9 +183,19 @@ case "$COORD_REMOTE_CONFIG" in
   /*) ;;
   *) echo "aborting deploy: COORD_REMOTE_CONFIG must be an absolute path" >&2; exit 5 ;;
 esac
+case "$COORD_REMOTE_OVERLAY" in
+  /*) ;;
+  *) echo "aborting deploy: COORD_REMOTE_OVERLAY must be an absolute path" >&2; exit 5 ;;
+esac
 case "$COORD_REMOTE_CONFIG" in
   *[!A-Za-z0-9._/-]*)
     echo "aborting deploy: COORD_REMOTE_CONFIG contains unsupported characters: $COORD_REMOTE_CONFIG" >&2
+    exit 5
+    ;;
+esac
+case "$COORD_REMOTE_OVERLAY" in
+  *[!A-Za-z0-9._/-]*)
+    echo "aborting deploy: COORD_REMOTE_OVERLAY contains unsupported characters: $COORD_REMOTE_OVERLAY" >&2
     exit 5
     ;;
 esac
@@ -200,6 +214,8 @@ esac
 trap '
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   rm -f "${COORD_REMOTE_CONFIG_TMP:-}"
+  rm -f "${COORD_REMOTE_OVERLAY_TMP:-}"
+  rm -f "${COORD_EFFECTIVE_CONFIG_TMP:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
@@ -263,12 +279,10 @@ python3 "$EXCEPTION_CHECK" gate --mode=deploy || {
 }
 
 log "step 0/8: pre-deploy C2 cross-component config check"
-# M1-6 follow-up (codex audits 2026-06-11): require real configs for C2,
-# or an explicit SKIP_C2_CHECK=1 override. The previous "best-effort"
-# path treated missing inputs as a warning, which weakened a deploy gate
-# the audit called out as mandatory.
-# NOTE: SKIP_C2_CHECK skips only the C2 timer/header relation — not the #615
-# gate above and not the credential pairing/runtime proof below.
+# M1-6 follow-up (codex audits 2026-06-11): require real configs for C2.
+# The previous "best-effort" path treated missing inputs as a warning, which
+# weakened a deploy gate the audit called out as mandatory. SKIP_C2_CHECK is
+# now refused by the shared gate and by this wrapper before any deploy read.
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  --dry-run-local set — validating local GATEWAY_CONFIG and exiting before deploy" >&2
   if [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
@@ -289,26 +303,55 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   exit 5
 elif [ -x "$CHECK_SCRIPT" ]; then
   if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
-    echo "  SKIP_C2_CHECK=1 set — skipping timer/header assertions only; credential proof remains mandatory" >&2
-  fi
-  COORD_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-installed-config.XXXXXXXX)" || {
-    echo "aborting gateway deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
-  }
-  $SSH "test -f '$COORD_REMOTE_CONFIG' || { echo 'missing installed coordinator config: $COORD_REMOTE_CONFIG' >&2; exit 1; }; cat '$COORD_REMOTE_CONFIG'" > "$COORD_REMOTE_CONFIG_TMP" || {
-    echo "aborting gateway deploy: could not read installed coordinator config from Pearl: $COORD_REMOTE_CONFIG" >&2
+    echo "aborting gateway deploy: SKIP_C2_CHECK=1 is no longer supported; fix C2/C2b config instead" >&2
     exit 5
-  }
-  GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
-    echo "aborting gateway deploy: mktemp failed for installed config copy" >&2; exit 5;
-  }
+  fi
+	  COORD_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-installed-config.XXXXXXXX)" || {
+	    echo "aborting gateway deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
+	  }
+  $SSH "test -f '$COORD_REMOTE_CONFIG' || { echo 'missing installed coordinator config: $COORD_REMOTE_CONFIG' >&2; exit 1; }; cat '$COORD_REMOTE_CONFIG'" > "$COORD_REMOTE_CONFIG_TMP" || {
+	    echo "aborting gateway deploy: could not read installed coordinator config from Pearl: $COORD_REMOTE_CONFIG" >&2
+	    exit 5
+	  }
+	  CHECK_ARGS=("$COORD_REMOTE_CONFIG_TMP")
+	  COORD_C2C_CONFIG_TMP="$COORD_REMOTE_CONFIG_TMP"
+	  if $SSH "test -f '$COORD_REMOTE_OVERLAY'"; then
+	    if [ ! -x "$MERGE_OVERLAY_SCRIPT" ]; then
+	      echo "aborting gateway deploy: YAML overlay merge helper missing or not executable: $MERGE_OVERLAY_SCRIPT" >&2
+	      exit 5
+	    fi
+	    COORD_REMOTE_OVERLAY_TMP="$(umask 077 && mktemp -t macprovider-coordinator-installed-overlay.XXXXXXXX)" || {
+	      echo "aborting gateway deploy: mktemp failed for installed coordinator overlay copy" >&2; exit 5;
+	    }
+	    $SSH "cat '$COORD_REMOTE_OVERLAY'" > "$COORD_REMOTE_OVERLAY_TMP" || {
+	      echo "aborting gateway deploy: could not read installed coordinator overlay from Pearl: $COORD_REMOTE_OVERLAY" >&2
+	      exit 5
+	    }
+	    COORD_EFFECTIVE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-effective-config.XXXXXXXX)" || {
+	      echo "aborting gateway deploy: mktemp failed for effective coordinator config copy" >&2; exit 5;
+	    }
+	    python3 "$MERGE_OVERLAY_SCRIPT" "$COORD_REMOTE_CONFIG_TMP" "$COORD_REMOTE_OVERLAY_TMP" > "$COORD_EFFECTIVE_CONFIG_TMP" || {
+	      echo "aborting gateway deploy: could not merge installed coordinator base config with overlay" >&2
+	      exit 5
+	    }
+	    CHECK_ARGS+=("$COORD_REMOTE_OVERLAY_TMP")
+	    COORD_C2C_CONFIG_TMP="$COORD_EFFECTIVE_CONFIG_TMP"
+	  fi
+	  GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
+	    echo "aborting gateway deploy: mktemp failed for installed config copy" >&2; exit 5;
+	  }
   $SSH "test -f '$GATEWAY_REMOTE_CONFIG' || { echo 'missing installed gateway config: $GATEWAY_REMOTE_CONFIG' >&2; exit 1; }; cat '$GATEWAY_REMOTE_CONFIG'" > "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting gateway deploy: could not read installed gateway config from Pearl: $GATEWAY_REMOTE_CONFIG" >&2
     exit 5
   }
-  GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
-  COORD_REMOTE_CONFIG_SHA=$(shasum -a 256 "$COORD_REMOTE_CONFIG_TMP" | awk '{print $1}')
-  echo "  validating installed Pearl coordinator config: $COORD_REMOTE_CONFIG sha256=$COORD_REMOTE_CONFIG_SHA"
-  echo "  validating installed Pearl gateway config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
+	  GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
+	  COORD_REMOTE_CONFIG_SHA=$(shasum -a 256 "$COORD_REMOTE_CONFIG_TMP" | awk '{print $1}')
+	  echo "  validating installed Pearl coordinator config: $COORD_REMOTE_CONFIG sha256=$COORD_REMOTE_CONFIG_SHA"
+	  if [ -n "${COORD_REMOTE_OVERLAY_TMP:-}" ]; then
+	    COORD_REMOTE_OVERLAY_SHA=$(shasum -a 256 "$COORD_REMOTE_OVERLAY_TMP" | awk '{print $1}')
+	    echo "  validating installed Pearl coordinator overlay: $COORD_REMOTE_OVERLAY sha256=$COORD_REMOTE_OVERLAY_SHA"
+	  fi
+	  echo "  validating installed Pearl gateway config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
 
   # PR #172 C2c: the gateway will restart and consume gateway.env, while the
   # coordinator keeps its current process environment. Prove that exact
@@ -331,8 +374,8 @@ elif [ -x "$CHECK_SCRIPT" ]; then
       *) printf '%s' - ;;
     esac
   }
-  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_REMOTE_CONFIG_TMP" auth operator_key)")" || exit 5
-  _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_REMOTE_CONFIG_TMP" auth gateway_service_token)")" || exit 5
+	  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_C2C_CONFIG_TMP" auth operator_key)")" || exit 5
+	  _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$COORD_C2C_CONFIG_TMP" auth gateway_service_token)")" || exit 5
   _gateway_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator service_token)")" || exit 5
   _gateway_op_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator operator_key)")" || exit 5
   _c2c_proofs="$($SSH python3 - gateway-deploy "$_coord_op_name" "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
@@ -345,18 +388,16 @@ EOF
   C2C_COORD_OPERATOR_KEY_SHA256="$C2C_COORD_OPERATOR_KEY_SHA256" \
   C2C_COORD_SERVICE_TOKEN_SHA256="$C2C_COORD_SERVICE_TOKEN_SHA256" \
   C2C_GATEWAY_SERVICE_TOKEN_SHA256="$C2C_GATEWAY_SERVICE_TOKEN_SHA256" \
-  C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
-  SKIP_C2_CHECK="${SKIP_C2_CHECK:-0}" \
-    bash "$CHECK_SCRIPT" "$COORD_REMOTE_CONFIG_TMP" "$GATEWAY_REMOTE_CONFIG_TMP" || {
-    echo "aborting gateway deploy: config-drift check failed" >&2; exit 5;
-  }
+	  C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
+	    bash "$CHECK_SCRIPT" "${CHECK_ARGS[0]}" "$GATEWAY_REMOTE_CONFIG_TMP" "${CHECK_ARGS[@]:1}" || {
+	    echo "aborting gateway deploy: config-drift check failed" >&2; exit 5;
+	  }
 else
   echo "aborting gateway deploy: cannot run C2 cross-check." >&2
   echo "  check-deploy-config.sh: $CHECK_SCRIPT $( [ -x "$CHECK_SCRIPT" ] || echo '(missing or not executable)')" >&2
   echo "  installed coordinator config on Pearl: $COORD_REMOTE_CONFIG" >&2
   echo "  installed gateway config on Pearl: $GATEWAY_REMOTE_CONFIG" >&2
-  echo "  SKIP_C2_CHECK=1 can skip timer/header assertions, but credential proof still requires both configs." >&2
-  echo "  Local gateway.yaml files are intentionally NOT accepted in production deploy mode." >&2
+  echo "  SKIP_C2_CHECK=1 is no longer supported; local gateway.yaml files are intentionally NOT accepted in production deploy mode." >&2
   exit 5
 fi
 if [ -z "${GATEWAY_REMOTE_CONFIG_TMP:-}" ]; then

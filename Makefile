@@ -85,6 +85,8 @@ test-dist:
 	bash -n phase4-coordinator/dist/deploy-opoi-v0-pearl.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
+	bash phase4-coordinator/dist/test/c2_timer_config_migration_test.sh
+	bash phase4-coordinator/dist/test/coord_deploy_c2_precheck.test.sh
 	bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_api_perf_tuning_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh

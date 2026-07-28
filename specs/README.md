@@ -10,9 +10,9 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC | Title | Version | Lifecycle | ID migration | Conformance | Link |
 |---|---|---|---|---|---|---|
 | SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.2 | normative | pending | pending corpus migration | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
-| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.5.4 | normative | pending | pending corpus migration | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
+| SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.5.5 | normative | pending | pending corpus migration | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.11.0 | normative | pending | pending corpus migration | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
-| SPEC-004 | Smart Router | 0.3.2 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
+| SPEC-004 | Smart Router | 0.3.3 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6 | normative | pending | pending corpus migration | [SPEC-005-billing.md](SPEC-005-billing.md) |
 | SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.12 | normative | pending | pending corpus migration | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
@@ -26,7 +26,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-015 | Verifiable inference receipts | 0.4.2 | normative | pending | pending corpus migration | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.20 | draft | pending | pending corpus migration | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.1.8 | normative | pending | pending corpus migration | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
-| SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.5 | normative | pending | pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
+| SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.6 | normative | pending | pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.11 | normative | pending | pending: 4 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.0 | draft | pending | pending corpus migration | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |

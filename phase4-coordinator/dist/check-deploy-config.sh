@@ -5,31 +5,35 @@
 #   - a sanitized/placeholder operator_key that would break /poolz + /admin auth
 #   - a heartbeat-miss threshold below the heartbeat interval (reaps live providers)
 #   - missing Phase 7 keys (silent fallback to defaults the operator didn't choose)
-#   - the FR-P11a "C2" cross-component timer relation: coordinator
-#     routing.request_timeout_s should be strictly BELOW the gateway
-#     timeouts.coordinator_request_seconds, else a gateway-timeout cancel races
-#     the coordinator relay-timeout and a slow non-streaming provider can escape
-#     breaker attribution.
+#   - the FR-P11a "C2" cross-component timer relations:
+#     coordinator routing.request_timeout_s and provider_http.timeout_s must
+#     cover the gateway's streaming ceiling, else the coordinator truncates a
+#     healthy long stream before the gateway's #760 ceiling has any effect.
+#     The gateway response-header transport timeout must cover both the gateway
+#     admission phase and the effective non-streaming request wall, else slow
+#     first-token streams or slow non-streaming completions can false-fail
+#     before their configured budgets expire.
 #
-# Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>
+# Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml> [coordinator-overlay.yaml]
 # Exit 1 on HARD failure; 0 otherwise (WARN/note lines are non-blocking).
 #
 # M1-6 / DEVE-4: the gateway config is REQUIRED. The C2 cross-component
 # timer relation caught a real past production incident, and PR #172 also made
 # this gate the deploy-time proof for gateway/coordinator credential pairing.
-# SKIP_C2_CHECK=1 may skip only timer/header assertions after both configs are
-# loaded; it must not turn this into a coordinator-only credential check.
+# SKIP_C2_CHECK=1 is no longer supported. The C2 timer/header relations caught
+# real deploy hazards and must be proven on every deploy-gate invocation.
 
 set -uo pipefail
-COORD="${1:?usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>}"
+COORD="${1:?usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml> [coordinator-overlay.yaml]}"
 GW="${2:-}"
+COORD_OVERLAY="${3:-}"
 
 if [ -z "$GW" ]; then
   echo "FAIL: gateway.yaml argument missing." >&2
   echo "  Credential pairing proof requires both coordinator.yaml AND gateway.yaml." >&2
-  echo "  SKIP_C2_CHECK=1 skips only timer/header assertions after credential" >&2
-  echo "  proof runs; it does not allow a coordinator-only deploy gate." >&2
-  echo "  Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>" >&2
+  echo "  SKIP_C2_CHECK=1 is no longer supported and cannot allow a" >&2
+  echo "  coordinator-only deploy gate." >&2
+  echo "  Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml> [coordinator-overlay.yaml]" >&2
   exit 1
 fi
 
@@ -43,12 +47,51 @@ esac
 case "$GW" in
   *.example) echo "FAIL: sample gateway config ($GW) is not deploy input" >&2; exit 1;;
 esac
+case "$COORD_OVERLAY" in
+  *.example) echo "FAIL: sample coordinator overlay config ($COORD_OVERLAY) is not deploy input" >&2; exit 1;;
+esac
 
-python3 - "$COORD" "$GW" <<'PY'
+python3 - "$COORD" "$GW" "$COORD_OVERLAY" <<'PY'
 import datetime, hashlib, math, os, re, sys
 
-coord = open(sys.argv[1]).read()
-gw = open(sys.argv[2]).read() if len(sys.argv) > 2 and sys.argv[2] else ""
+def read_text(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+def merge_yaml_text(base_text, overlay_text, overlay_path):
+    if not overlay_text:
+        return base_text
+    try:
+        import yaml
+    except ImportError as exc:
+        print("  FAIL: coordinator overlay provided, but PyYAML is unavailable; cannot validate effective coordinator config")
+        raise SystemExit(1) from exc
+
+    def merge(base, overlay):
+        out = dict(base)
+        for key, value in overlay.items():
+            if isinstance(value, dict) and isinstance(out.get(key), dict):
+                out[key] = merge(out[key], value)
+            else:
+                out[key] = value
+        return out
+
+    try:
+        base_doc = yaml.safe_load(base_text) or {}
+        overlay_doc = yaml.safe_load(overlay_text) or {}
+    except yaml.YAMLError as exc:
+        print(f"  FAIL: could not parse coordinator overlay {overlay_path}: {exc.__class__.__name__}")
+        raise SystemExit(1) from exc
+    if not isinstance(base_doc, dict) or not isinstance(overlay_doc, dict):
+        print("  FAIL: coordinator base and overlay must both be YAML mappings")
+        raise SystemExit(1)
+    return yaml.safe_dump(merge(base_doc, overlay_doc), sort_keys=False, default_flow_style=False)
+
+coord = read_text(sys.argv[1])
+gw = read_text(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else ""
+coord_overlay_path = sys.argv[3] if len(sys.argv) > 3 else ""
+if coord_overlay_path:
+    coord = merge_yaml_text(coord, read_text(coord_overlay_path), coord_overlay_path)
 
 KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:\s+.*)?$")
 
@@ -161,8 +204,8 @@ def ok(m):   print(f"  ok:   {m}")
 # run on Pearl with the env file sourced) do we also validate the resolved
 # secret. A bare unresolved `env:NAME` is NOT a failure — hex-validating the
 # literal string "env:NAME" was a false fail-closed gate that pressured
-# operators into SKIP_C2_CHECK=1, which also skipped the genuinely load-bearing
-# C2 timer check (observed 2026-06-17 on a gateway deploy to Pearl).
+# operators toward the former SKIP_C2_CHECK=1 escape hatch. That hatch is now
+# refused; C2 timer/header assertions are mandatory.
 ENV_REF = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 PLACEHOLDER = re.compile(r"REPLACE|change-me|<required>|placeholder|xxx", re.I)
 WEAK_DENYLIST = {"changeme", "placeholder", "test", "secret", "password", "admin"}
@@ -268,9 +311,9 @@ check_hex_secret("coordinator gateway_service_token",
                  g_section(coord, "auth", "gateway_service_token"))
 
 # --- gateway credentials (same hazard class as the coordinator key) ---
-# Only checkable when the gateway config is present (not coordinator-only
-# SKIP_C2_CHECK mode). Both operator_key (for /poolz proxying) and
-# service_token (for /internal/* upstream calls) are REQUIRED by gateway
+# Only checkable when the gateway config is present. Both operator_key (for
+# /poolz proxying) and service_token (for /internal/* upstream calls) are
+# REQUIRED by gateway
 # config.go Validate() after PR #172. The gateway runtime fails
 # closed on an unset/empty env:NAME or an empty token; the residual gap
 # this gate catches is an INLINE placeholder, which is non-empty and so
@@ -617,6 +660,7 @@ else:
 hi = g_section(coord, "pool", "heartbeat_interval_s")
 hm = g_section(coord, "pool", "heartbeat_miss_threshold_s")
 rt = g_section(coord, "routing", "request_timeout_s")
+pht = g_section(coord, "provider_http", "timeout_s")
 if hm is None:
     warn("heartbeat_miss_threshold_s absent -> coordinator default (90s) applies")
 elif hi and int(hm) <= int(hi):
@@ -627,61 +671,97 @@ for k in ("warmup_gate_enabled", "breaker_failure_threshold", "breaker_window_s"
     if g_section(coord, "pool", k) is None:
         warn(f"{k} absent -> coordinator default applies (operator did not choose it)")
 
-# --- C2 cross-component timer relation (needs gateway config) ---
+# --- C2 cross-component timer relations (needs gateway config) ---
 if gw and os.environ.get("SKIP_C2_CHECK") == "1":
-    warn("SKIP_C2_CHECK=1 — skipped C2 timer/header assertions only; credential pairing proof still ran")
-elif gw:
-    gwt = g_section(gw, "timeouts", "coordinator_request_seconds")
-    if gwt is None:
-        hard("C2: gateway timeouts.coordinator_request_seconds is ABSENT — "
-             "cannot verify coordinator routing.request_timeout_s is below the gateway timeout.")
+    hard("SKIP_C2_CHECK=1 is no longer supported; C2 timer/header assertions are mandatory")
+
+if gw:
+    stream_max = g_section(gw, "timeouts", "stream_ceiling_max_seconds")
+    if stream_max is None:
+        hard("C2: gateway timeouts.stream_ceiling_max_seconds is ABSENT — "
+             "cannot verify coordinator/provider walls cover the gateway streaming ceiling.")
     elif rt is None:
         hard("C2: coordinator routing.request_timeout_s is ABSENT — "
-             "cannot verify it is below the gateway timeout.")
+             "cannot verify it covers the gateway streaming ceiling.")
     else:
-        if int(rt) >= int(gwt):
-            hard(f"C2: coordinator request_timeout_s ({rt}) is NOT strictly below gateway "
-                 f"coordinator_request_seconds ({gwt}). A gateway-timeout cancel can race the "
-                 f"coordinator relay-timeout; a slow non-streaming provider may escape breaker "
-                 f"attribution (SPEC-002 FR-P11a C2). Set coordinator < gateway.")
+        if int(rt) < int(stream_max):
+            hard(f"C2: coordinator request_timeout_s ({rt}) is BELOW gateway "
+                 f"stream_ceiling_max_seconds ({stream_max}). The coordinator will truncate "
+                 f"healthy long streams before the gateway streaming ceiling can fire "
+                 f"(SPEC-002 FR-P11a / issue #760 follow-up). Set coordinator >= stream ceiling.")
         else:
-            ok(f"C2 timer ordering: coordinator {rt}s < gateway {gwt}s")
+            ok(f"C2 streaming ceiling: coordinator request {rt}s >= gateway stream ceiling {stream_max}s")
+
+    if stream_max is not None:
+        if pht is None:
+            hard("C2: coordinator provider_http.timeout_s is ABSENT — "
+                 "cannot verify provider HTTP forwarding covers the gateway streaming ceiling.")
+        elif int(pht) < int(stream_max):
+            hard(f"C2: coordinator provider_http.timeout_s ({pht}) is BELOW gateway "
+                 f"stream_ceiling_max_seconds ({stream_max}). Provider HTTP forwarding will "
+                 f"truncate healthy long streams before the gateway streaming ceiling can fire. "
+                 f"Set provider_http.timeout_s >= stream ceiling.")
+        else:
+            ok(f"C2 streaming ceiling: provider HTTP {pht}s >= gateway stream ceiling {stream_max}s")
 
     # C2b cross-component check (added post-#92):
     # gateway coordinator_header_timeout_seconds bounds how long the gateway
     # waits for response headers from the coordinator. Post-#92, the
     # coordinator commits streaming headers only after the first valid SSE
-    # event arrives; combined with non-streaming headers always arriving at
-    # completion, this header timeout must be >= the gateway request budget
-    # OR a class of slow-but-valid first-event scenarios will false-fail as
-    # coordinator_unavailable before the coordinator's own request_timeout_s
-    # has elapsed. (See issue #92 architect-lane audit + follow-up #171.)
+    # event arrives; non-streaming headers arrive only when the buffered
+    # response is complete. Therefore the header timeout must be >= the
+    # admission phase budget AND >= the effective non-streaming request wall,
+    # or slow-but-valid work can false-fail as coordinator_unavailable before
+    # its configured budget has elapsed. (See issue #92 architect-lane audit +
+    # follow-up #171, and #784 re-audit.)
     #
-    # Skip when gwt is None: the C2 absent-request hard() above already
-    # emitted the diagnostic, and evaluating int(gwt) here would Traceback.
-    # Absent header treated as effective 300 (the gateway runtime default at
-    # phase5-gateway/internal/config/config.go:183). The compare-against-effective
-    # logic catches the edge case where coordinator_request_seconds is raised
-    # above 300 without also setting coordinator_header_timeout_seconds.
-    if gwt is not None:
-        ght = g_section(gw, "timeouts", "coordinator_header_timeout_seconds")
-        effective_ght = int(ght) if ght is not None else 300
-        if int(gwt) > effective_ght:
-            if ght is None:
-                hard(f"C2b: gateway timeouts.coordinator_header_timeout_seconds is ABSENT — "
-                     f"runtime default 300 < coordinator_request_seconds ({gwt}). Set "
-                     f"coordinator_header_timeout_seconds >= {gwt} explicitly.")
-            else:
-                hard(f"C2b: gateway coordinator_header_timeout_seconds ({ght}) is BELOW gateway "
-                     f"coordinator_request_seconds ({gwt}). Slow-but-valid streaming/non-streaming "
-                     f"providers will false-fail with coordinator_unavailable before the request "
-                     f"budget is exhausted. Set coordinator_header_timeout_seconds >= "
-                     f"coordinator_request_seconds (typically equal).")
+    # The pre-#760 gate compared streaming headers against
+    # coordinator_request_seconds. That field is now only the legacy floor for
+    # derived streaming ceilings, but it remains the inherited flat wall for
+    # non-streaming when non_stream_request_seconds is unset/0. Compare the
+    # transport header timeout to max(admission, effective non-stream wall).
+    # Absent values use gateway runtime defaults from
+    # phase5-gateway/internal/config/config.go.
+    ght = g_section(gw, "timeouts", "coordinator_header_timeout_seconds")
+    admission = g_section(gw, "timeouts", "coordinator_admission_seconds")
+    gw_request = g_section(gw, "timeouts", "coordinator_request_seconds")
+    non_stream = g_section(gw, "timeouts", "non_stream_request_seconds")
+    effective_ght = int(ght) if ght is not None else 300
+    effective_admission = int(admission) if admission is not None else 120
+    effective_request = int(gw_request) if gw_request is not None else 300
+    effective_non_stream = int(non_stream) if non_stream is not None and int(non_stream) > 0 else effective_request
+    required_header = max(effective_admission, effective_non_stream)
+    if rt is not None and effective_non_stream <= int(rt):
+        hard(f"C2: gateway effective non_stream_request_seconds ({effective_non_stream}) is NOT GREATER THAN "
+             f"coordinator request_timeout_s ({rt}). A gateway-side non-stream timeout/cancel can race or "
+             f"precede the coordinator relay timeout and suppress FR-P11a breaker attribution. Set "
+             f"non_stream_request_seconds > coordinator request_timeout_s, and keep "
+             f"coordinator_header_timeout_seconds >= effective non_stream_request_seconds.")
+    if required_header > effective_ght:
+        if ght is None:
+            hard(f"C2b: gateway timeouts.coordinator_header_timeout_seconds is ABSENT — "
+                 f"runtime default 300 < required header budget ({required_header}; "
+                 f"max admission {effective_admission}, non-stream {effective_non_stream}). Set "
+                 f"coordinator_header_timeout_seconds >= max(coordinator_admission_seconds, "
+                 f"effective non_stream_request_seconds) explicitly.")
+        elif effective_non_stream >= effective_admission:
+            hard(f"C2b: gateway coordinator_header_timeout_seconds ({ght}) is BELOW gateway "
+                 f"effective non_stream_request_seconds ({effective_non_stream}). Slow "
+                 f"non-streaming completions will false-fail with coordinator_unavailable "
+                 f"before the non-streaming request budget is exhausted. Set "
+                 f"coordinator_header_timeout_seconds >= effective non_stream_request_seconds.")
         else:
-            if ght is None:
-                ok(f"C2b header timeout: absent -> default 300 >= gateway request {gwt}s")
-            else:
-                ok(f"C2b header timeout: gateway header {ght}s >= gateway request {gwt}s")
+            hard(f"C2b: gateway coordinator_header_timeout_seconds ({ght}) is BELOW gateway "
+                 f"coordinator_admission_seconds ({effective_admission}). Slow first-event streams "
+                 f"will false-fail with coordinator_unavailable before the admission budget is "
+                 f"exhausted. Set coordinator_header_timeout_seconds >= coordinator_admission_seconds.")
+    else:
+        if ght is None:
+            ok(f"C2b header timeout: absent -> default 300 >= required header budget {required_header}s "
+               f"(admission {effective_admission}s, non-stream {effective_non_stream}s)")
+        else:
+            ok(f"C2b header timeout: gateway header {ght}s >= required header budget {required_header}s "
+               f"(admission {effective_admission}s, non-stream {effective_non_stream}s)")
 else:
     print("  note: gateway.yaml not provided -> skipped C2 timer cross-check")
 

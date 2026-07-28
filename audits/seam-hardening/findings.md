@@ -47,10 +47,15 @@ a never-re-armed `stream_ceiling` = clamp(60s + `max_tokens`×250ms, ≥ `coordi
 dropped to 0 with the connect budget moved to dial/TLS, and the concurrency lease scaled to the
 effective ceiling. Non-streaming keeps a flat wall (`non_stream_request_seconds`, 300s, unchanged).
 `TestSeamH1` flipped to `ProgressingStreamSurvivesLegacyWall` (PASS = certifies the fix).
-**Residual (not fixed here):** the coordinator has the same flat-wall shape one hop up
+**Residual closed repo-side by #784:** the coordinator had the same flat-wall shape one hop up
 (`phase4-coordinator/internal/buyer/server.go` attempt ctx, `routing.request_timeout_s` 280s;
-`providerhttp/client.go` 300s), so buyer-visible improvement past ~280s needs the prod overlay raised
-to ≥ the gateway ceiling and `check-deploy-config.sh` C2/C2b retargeted at the streaming ceiling.
+`providerhttp/client.go` 300s), so buyer-visible improvement past ~280s needed the prod template raised
+to ≥ the gateway ceiling and `check-deploy-config.sh` C2/C2b retargeted away from the legacy flat wall.
+#784 raises the checked-in coordinator request/provider HTTP walls to 900s, extends systemd
+`TimeoutStopSec` to 960s, and makes the deploy gate prove those walls cover
+`timeouts.stream_ceiling_max_seconds`; C2b now compares gateway header transport timeout against
+`coordinator_admission_seconds`, not the old flat `coordinator_request_seconds`. Live Pearl still needs
+the normal safe deploy/reconciliation path before this repo-side fix is effective in production.
 Structured-output streams also keep a hard 300s sub-ceiling: SPEC-019 v0.2.4 §AC-V2-9 pins that
 number, and raising it is a contract change requiring a spec amendment.
 
@@ -339,12 +344,13 @@ sets `require_autotune_hello_gate: false` (revised 2026-07-22; SPEC-032 v0.2-dra
 prod-on claims — accurate at the 2026-07-11 baseline, drifted since) and `telemetry_drift.enabled:
 true` (observe — #764/#765 missing_benchmark alerts fire live; quarantine dormant); canary OFF
 (explicit overlay false + timer inactive + DISABLED sentinel — the accepted P0 #584 exception);
-`warmup_gate_enabled` false live vs true committed (DRIFT — surfaced, operator decision, not
-auto-fixed); `sticky_enabled` true →
+`warmup_gate_enabled` false live vs true committed at capture time (DRIFT — resolved repo-side by
+#784 by aligning the checked-in Pearl template to `false`; re-enable remains a surveyed operator
+decision); `sticky_enabled` true →
 the same-account TTFT side-channel risk-acceptance is written, with an explicit MUST-re-evaluate
 trigger before OpenRouter enrollment (a marketplace credential collapses "same account" into "same
 marketplace"). All in `ops/runbooks/seam-769-gate-posture-2026-07-27.md`. **Residual:** hello-gate
-enable-after-survey shares the #765 live-pool survey prerequisite; warmup drift unresolved by design.
+enable-after-survey shares the #765 live-pool survey prerequisite.
 
 ---
 
