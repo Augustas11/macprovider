@@ -21,8 +21,10 @@ observe variant), derive the cap via `ResolveMaxAdmission(LatestVerified(...))`
 (`internal/autotune/gate.go:18-58`), and alert on drift. This is buildable
 because the inputs exist regardless of the gate — evidence submission is
 default-on and the `stats-hardware-verifier` worker produces `verified` rows on
-its own timer. Where a provider has **no** verified evidence, A5 still alerts on
-any switch to an uncatalogued/unresolved model — loud, not silent.
+its own timer. Where a provider has **no** verified evidence (no cap can be derived), A5 must
+emit a `missing_admission_cap` alert on **any** heartbeat model change —
+including to a *catalogued* model — since without a cap even a catalogued-larger
+switch is otherwise silent. The failure is loud in every branch.
 
 ## Change
 Persist `MaxAdmittedMinRAMGB` on `pool.Provider` (does not exist today — only
