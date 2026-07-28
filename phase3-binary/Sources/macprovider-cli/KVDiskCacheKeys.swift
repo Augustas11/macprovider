@@ -328,7 +328,7 @@ struct KVSecItemKeychain: KVKeychain {
     let accessGroup: String
 
     init(accessGroup: String? = nil) {
-        self.accessGroup = SecureEnclaveIdentity.resolveAccessGroup(accessGroup)
+        self.accessGroup = MacProviderKeychainAccessGroup.resolve(accessGroup)
     }
 
     private func nonInteractiveBase(service: String) -> [String: Any] {
