@@ -6271,12 +6271,20 @@ provider_process_pid() {
   command -v lsof >/dev/null 2>&1 || return 1
   executable_output="$(lsof -a -p "$candidate" -d txt -Fn 2>/dev/null)" || return 1
   command_paths="$(printf "%s\n" "$executable_output" | awk 'substr($0, 1, 1) == "n" && length($0) > 1 { print substr($0, 2) }')"
-  [ "$(printf "%s\n" "$command_paths" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] || return 1
-  command_path="$command_paths"
-  if command -v realpath >/dev/null 2>&1 && [ -e "$command_path" ]; then
-    command_path="$(realpath "$command_path" 2>/dev/null || printf "%s" "$command_path")"
-  fi
-  [ "$command_path" = "$expected" ] || return 1
+  found_expected=""
+  while IFS= read -r command_path; do
+    [ -n "$command_path" ] || continue
+    if command -v realpath >/dev/null 2>&1 && [ -e "$command_path" ]; then
+      command_path="$(realpath "$command_path" 2>/dev/null || printf "%s" "$command_path")"
+    fi
+    if [ "$command_path" = "$expected" ]; then
+      found_expected=1
+      break
+    fi
+  done <<EOF
+$command_paths
+EOF
+  [ "$found_expected" = 1 ] || return 1
   printf "%s" "$candidate"
 }
 

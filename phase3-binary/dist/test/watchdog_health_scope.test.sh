@@ -85,7 +85,11 @@ EOF
 cat > "$TMP/bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *'-d txt -Fn'*) printf 'n%s\n' "$HOME/macprovider/macprovider-cli" ;;
+  *'-d txt -Fn'*)
+    printf 'n%s\n' "/usr/lib/dyld"
+    printf 'n%s\n' "$HOME/macprovider/macprovider-cli"
+    printf 'n%s\n' "$HOME/Library/Application Support/macprovider/provider.sqlite-shm"
+    ;;
   *) echo 4242 ;;
 esac
 EOF
@@ -149,7 +153,10 @@ EOF
 cat > "$TMP/bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *'-d txt -Fn'*) printf 'n%s\n' "$HOME/macprovider/macprovider-cli" ;;
+  *'-d txt -Fn'*)
+    printf 'n%s\n' "/usr/lib/dyld"
+    printf 'n%s\n' "$HOME/macprovider/macprovider-cli"
+    ;;
   *) echo 9999 ;;
 esac
 EOF
