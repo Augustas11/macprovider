@@ -5,6 +5,12 @@ written to stand alone as a GitHub issue. They came out of the audit in
 [`../RESEARCH-TRUST-MINIMIZED-BENCHMARK-CATALOG-ROADMAP.md`](../RESEARCH-TRUST-MINIMIZED-BENCHMARK-CATALOG-ROADMAP.md)
 (the analysis and evidence live there; the pieces live here).
 
+**Re-verified 2026-07-28** against `origin/main` @ `51a60c23` (17 commits past the
+`8a39c636` base the roadmap was built on) — see
+[VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). No piece is obsolete;
+A2 shrank (its SPEC-032 item shipped in #769), A8 widened to 3 rows, A4/B4
+changed shape, and line refs were refreshed.
+
 Why split: four review rounds never drove the single bundled roadmap to zero
 findings because the *bundle* was the defect — it coupled cheap independent
 fixes with a large speculative trust subsystem resting on buyer-traffic volume

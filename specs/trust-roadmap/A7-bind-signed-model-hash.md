@@ -2,10 +2,12 @@
 
 **Type**: ship-now · **Size**: S (~3-5 operator hours) · **Dependencies**: none
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
+
 ## Problem (roadmap §4, tier2 audit)
 The SE attestation already signs `claimed.model_hash` and the coordinator
 discards it — `pillar_c.go` references `Claimed` only to hash it into an audit
-digest, never comparing it to the catalog.
+digest (`pillar_c.go:433,437,449,460`), never comparing it to the catalog.
 
 ## Change
 Compare the SE-signed `claimed.model_hash` against the catalog row in

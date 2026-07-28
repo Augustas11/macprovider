@@ -2,6 +2,8 @@
 
 **Type**: deferred design brief — a FUTURE separate SPEC with its own three-lane audit loop. Analysis, not a commitment.
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **SHAPE — harder, must integrate #763 bill-once journal**.
+
 **Gated on**: G0 + a pricing/settlement design. The largest brief; must NOT be bundled with anything. Design sketch: roadmap §6.
 
 ## Shape the SPEC must resolve (before any code)
@@ -15,6 +17,9 @@
    `internal/billing/`, `phase5-gateway/` (`usage_events`, `ReservationSettlement`),
    and a SPEC-022/005/006 amendment. Candidate direction: bill the buyer full,
    escrow the provider share, release on promotion / forfeit on demotion.
+   **Harder since the roadmap (#763)**: billing now has a durable bill-once
+   settlement journal with idempotency uniqueness (`store.go:100,144,233`); any
+   discount/unbilled path must integrate with it, not a naive recording seam.
 3. **An absolute numeric exposure budget** — relative caps give zero dilution at
    `pool_size: 1`.
 4. **Anti-self-dealing that binds** — the "≥2 payer accounts" rule is a

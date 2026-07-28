@@ -2,6 +2,8 @@
 
 **Type**: ship-now · **Size**: S (~2-3 operator hours) · **Dependencies**: none
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
+
 ## Problem
 `README.md:22` and `docs/using-macprovider-with-openai-sdk.md:202` present
 provider-self-reported model identity as a shipping guarantee ("the verified

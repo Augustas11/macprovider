@@ -2,10 +2,12 @@
 
 **Type**: ship-now · **Size**: S (~3-5 operator hours) · **Dependencies**: none
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
+
 ## Problem (roadmap §4.4)
 `swap_detected` is a paid-recommendation hard veto client-side (#742) but is
 decoded and then **ignored** coordinator-side — `benchmarkPassesGate` never
-checks it (`internal/autotune/gate.go:104-106`). A provider that edits
+checks it (`internal/autotune/gate.go:88,107`). A provider that edits
 `last-recommendation.json`, or simply serves a swapping model, is not stopped.
 
 ## Change

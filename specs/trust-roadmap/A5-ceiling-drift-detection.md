@@ -2,8 +2,10 @@
 
 **Type**: ship-now · **Size**: M (~12-18 operator hours) · **Dependencies**: none (two contract touches below)
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
+
 ## Problem (roadmap §4.5, SPEC-032 FR-HG7 — silent half)
-A heartbeat model switch is applied unconditionally (`pool/provider.go:1851`)
+A heartbeat model switch is applied unconditionally (`pool/provider.go:1908`)
 and emits no `SwapEvent` when it skips the loading transition (`:1899-1916`).
 The live hash chain (`require_hash_verified`) is re-checked per heartbeat, so a
 switch to an *uncatalogued* model is caught — but a switch to a *catalogued
@@ -26,9 +28,11 @@ emit a `missing_admission_cap` alert on **any** heartbeat model change —
 including to a *catalogued* model — since without a cap even a catalogued-larger
 switch is otherwise silent. The failure is loud in every branch.
 
+**New since the roadmap (#765)**: `BenchmarkQuarantined` (`provider.go:188-194,446-457`) already route-excludes providers with *no verified benchmark*. A5's no-evidence branch should build on that flag rather than duplicate it; and #764's `capacity_clamp` clamps concurrency/slots, **not** the model-RAM ceiling A5 targets — they are distinct.
+
 ## Change
 Persist `MaxAdmittedMinRAMGB` on `pool.Provider` (does not exist today — only
-`MaxAdmittedModelKey:200`/`MaxAdmittedModelID:201`; `HelloGateDecision` computes
+`MaxAdmittedModelKey:214`/`MaxAdmittedModelID:215`; `HelloGateDecision` computes
 the RAM value then drops it, `gate.go:13`), populated from the observe-mode
 lookup. On `modelIDChanged`, compare **in memory** and emit a provider event +
 operator alert. **Detection only — no routing exclusion, no eviction.**

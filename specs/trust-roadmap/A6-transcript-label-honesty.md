@@ -2,14 +2,16 @@
 
 **Type**: ship-now · **Size**: S-M (~4-8 operator hours) · **Dependencies**: none
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
+
 ## Problem (roadmap §4.9, from F9 / §8)
 - The `autotune --recommend` human transcript surfaces none of #772's
   `confidence`/provenance/drift (JSON-only) and prints "Benchmarked N" where N
-  is the *eligible* count, not the benchmarked count (`AutotuneRecommend.swift:2057`).
+  is the *eligible* count, not the benchmarked count (`AutotuneRecommend.swift:2068`).
 - The donor message asserts a `$0.0050/hr` gate SPEC-023 v0.4 deleted
   (`AutotuneCommand.swift:958`).
 - `/v1/stats/overview` publishes chip-table capacity constants
-  (`ProviderHardwareSummary.swift:48-105`) unlabeled.
+  (`ProviderHardwareSummary.swift:56-108`) unlabeled.
 
 ## Change
 Render `confidence`/provenance/drift in the transcript (the

@@ -2,15 +2,20 @@
 
 **Type**: ship-now · **Size**: S (~3-5 operator hours) · **Dependencies**: none (shares SPEC-023 with A2/A4)
 
+> **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **SHAPE — now 3 disagreeing rows**.
+
 ## Problem (roadmap §4.13, F13)
-`SPEC-023 v0.8` is `status: LOCKED`, yet its normative row table disagrees with
-the **live signed** catalog on 6 of 7 shared rows. Most starkly
-`google-gemma-4-26b-a4b-it`: the spec lists it `blocked` (`SPEC-023:259-267`) and
-says "blocked rows are never … recommended by default" (`:269`), while
-`phase3-binary/dist/static/autotune-candidates.json` serves it
-`runtime_status: "recommendable"`. §7 rule 2 is already violated against the
-normative spec. This is exactly the governance-correctness gap the document's
-thesis targets — a signed artifact contradicting a locked spec.
+`SPEC-023` is now `v0.8.1`, `status: LOCKED`, and its normative row table still
+disagrees with the **live signed** catalog on **3 rows** (all live rows are
+`recommendable`):
+- `google-gemma-4-26b-a4b-it` — spec **blocked** (`SPEC-023:271`), and "blocked
+  rows are never … recommended by default";
+- `qwen3-32b` — spec **listed** (`:268`);
+- `qwen2.5-coder-32b-instruct` — spec **listed** (`:270`).
+Two live rows (`llama-3.2-3b`, `qwen3-8b`) have no spec-table counterpart. §7
+rule 2 is violated against the normative spec — a signed artifact contradicting
+a locked spec, the exact governance gap the document's thesis targets. The
+v0.8.1 amendment did not reconcile it.
 
 ## Change
 Reconcile the two. The signed, serving catalog is the operational reality; bring
