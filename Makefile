@@ -74,6 +74,7 @@ test-dist:
 	bash scripts/test-tier2-provider-release.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_tier2_enforcement_watchdog.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl/config/test_pearl_config_reconcile.py
 	bash scripts/test-tier2-enforcement-safety.sh
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh

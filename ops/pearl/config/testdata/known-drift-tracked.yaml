@@ -1,0 +1,22 @@
+listen:
+  buyer_port: 8443
+pool:
+  heartbeat_interval_s: 30
+  warmup_gate_enabled: true
+routing:
+  request_timeout_s: 280
+auth:
+  operator_key: env:OPERATOR_KEY
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+providers:
+  - provider_id: mac
+    endpoint_url: ""
+    display_name: Pearl Mac provider
+rewards:
+  rate_card:
+    default:
+      prompt_credits_per_mtok: 500000
+      completion_credits_per_mtok: 1000000
+coordinator_advertised_version:
+  latest_binary_version: "1.8.65"
+  required_binary_version: "1.8.33"
