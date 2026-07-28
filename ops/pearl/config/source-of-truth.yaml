@@ -127,7 +127,7 @@ known_config_drift:
     rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
   - path: coordinator_advertised_version.latest_binary_version
     drift_kind: value_mismatch
-    tracked: "1.8.65"
+    tracked: "1.8.66"
     live: "1.8.61"
     owner: fleet_version_admission_policy
     category: Evidence
