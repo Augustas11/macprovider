@@ -616,8 +616,11 @@ smaller box), which is why v0.1 ships no automatic probation.
   DISABLED sentinel (the accepted P0 #584 exception);
   `telemetry_drift.enabled: true` live (observe mode — #764/#765
   missing_benchmark observe alerts fire; quarantine stays dormant);
-  `warmup_gate_enabled` false live vs true committed (drift; surfaced in
-  `ops/runbooks/seam-769-gate-posture-2026-07-27.md`, not silently "fixed").
+  `warmup_gate_enabled` false live vs true committed Pearl template at capture
+  time; #784 aligned the checked-in Pearl deploy templates to match Pearl's
+  false posture while leaving the generic SPEC-002/code default unchanged, with
+  the original capture preserved in
+  `ops/runbooks/seam-769-gate-posture-2026-07-27.md`.
   Sticky routing IS enabled live; the same-account timing-side-channel
   risk-acceptance note required by #769 lives in the same runbook.
 

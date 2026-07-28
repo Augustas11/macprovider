@@ -15,12 +15,14 @@ ROOT="$TMP/opt/macprovider"
 STATS_ROOT="$TMP/opt/macprovider-stats"
 SYSTEMD="$TMP/etc/systemd/system"
 NGINX_ROOT="$TMP/etc/nginx"
+ETC_MACPROVIDER_ROOT="$TMP/etc/macprovider"
 ROLLBACK="$ROOT/.coordinator-deploy-rollback"
 SYSTEMCTL_LOG="$TMP/systemctl.log"
 SETFACL_LOG="$TMP/setfacl.log"
 mkdir -p "$ROOT/autotune/releases/new" "$STATS_ROOT" \
   "$SYSTEMD/multi-user.target.wants" "$SYSTEMD/timers.target.wants" \
-  "$NGINX_ROOT/conf.d" "$NGINX_ROOT/sites-available" "$NGINX_ROOT/sites-enabled" "$TMP/bin"
+  "$NGINX_ROOT/conf.d" "$NGINX_ROOT/sites-available" "$NGINX_ROOT/sites-enabled" \
+  "$ETC_MACPROVIDER_ROOT" "$TMP/bin"
 
 cat >"$TMP/bin/systemctl" <<'SH'
 #!/bin/sh
@@ -78,9 +80,10 @@ chmod +x "$TMP/bin/systemctl" "$TMP/bin/flock-free" "$TMP/bin/flock-busy" \
 run_recover() {
   MACPROVIDER_ROOT="$ROOT" \
   MACPROVIDER_STATS_ROOT="$STATS_ROOT" \
-  MACPROVIDER_SYSTEMD_ROOT="$SYSTEMD" \
-  MACPROVIDER_NGINX_ROOT="$NGINX_ROOT" \
-  MACPROVIDER_SYSTEMCTL="$TMP/bin/systemctl" \
+	  MACPROVIDER_SYSTEMD_ROOT="$SYSTEMD" \
+	  MACPROVIDER_NGINX_ROOT="$NGINX_ROOT" \
+	  MACPROVIDER_ETC_ROOT="$ETC_MACPROVIDER_ROOT" \
+	  MACPROVIDER_SYSTEMCTL="$TMP/bin/systemctl" \
   MACPROVIDER_SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
   MACPROVIDER_SYSTEMCTL_FAIL_STOP="${MACPROVIDER_SYSTEMCTL_FAIL_STOP:-0}" \
   MACPROVIDER_FLOCK="${MACPROVIDER_FLOCK_OVERRIDE:-$TMP/bin/flock-free}" \
@@ -103,8 +106,11 @@ seed_transaction() {
     "$SYSTEMD/macprovider-coordinator-deploy-watchdog.service" \
     "$SYSTEMD/multi-user.target.wants/macprovider-coordinator.service" \
     "$ROOT/autotune/current" "$ROOT/autotune/.previous-target" \
-    "$ROOT/tier2-catalog.json" "$ROOT/coordinator-cli" "$ROOT/coordinator.prev" \
-    "$ROOT/coordinator.yaml.prev" "$ROOT/coordinator.yaml.bak-20260711T120000Z" \
+	    "$ROOT/tier2-catalog.json" "$ROOT/coordinator-cli" "$ROOT/coordinator.prev" \
+	    "$ROOT/coordinator.yaml.prev" "$ROOT/coordinator.yaml.bak-20260711T120000Z" \
+	    "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml" \
+	    "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.prev" \
+	    "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.bak-20260711T120000Z" \
     "$STATS_ROOT/stats-inventory-sync" "$STATS_ROOT/stats-billing-mirror" "$STATS_ROOT/stats-hardware-verifier" \
     "$SYSTEMD/stats-inventory-sync.service" "$SYSTEMD/stats-inventory-sync.timer" \
     "$SYSTEMD/stats-billing-mirror.service" "$SYSTEMD/stats-billing-mirror.timer" \
@@ -125,10 +131,15 @@ seed_transaction() {
   printf old-cli >"$ROLLBACK/coordinator-cli"
   touch "$ROLLBACK/had-coordinator-cli"
   printf old-coordinator-prev >"$ROLLBACK/coordinator.prev"
-  printf old-config-prev >"$ROLLBACK/coordinator.yaml.prev"
-  printf old-dated-backup >"$ROLLBACK/coordinator-dated-backup"
-  printf coordinator.yaml.bak-20260711T120000Z >"$ROLLBACK/config-backup-name"
-  touch "$ROLLBACK/had-coordinator-prev" "$ROLLBACK/had-config-prev" "$ROLLBACK/had-config-dated-backup"
+	  printf old-config-prev >"$ROLLBACK/coordinator.yaml.prev"
+	  printf old-dated-backup >"$ROLLBACK/coordinator-dated-backup"
+	  printf coordinator.yaml.bak-20260711T120000Z >"$ROLLBACK/config-backup-name"
+	  touch "$ROLLBACK/had-coordinator-prev" "$ROLLBACK/had-config-prev" "$ROLLBACK/had-config-dated-backup"
+	  printf old-overlay >"$ROLLBACK/coordinator.pearl-overlays.yaml"
+	  printf old-overlay-prev >"$ROLLBACK/coordinator.pearl-overlays.yaml.prev"
+	  printf old-overlay-dated-backup >"$ROLLBACK/coordinator-overlay-dated-backup"
+	  printf coordinator.pearl-overlays.yaml.bak-20260711T120000Z >"$ROLLBACK/overlay-config-backup-name"
+	  touch "$ROLLBACK/had-overlay" "$ROLLBACK/had-overlay-prev" "$ROLLBACK/had-overlay-dated-backup"
   for artifact in stats-inventory-sync stats-billing-mirror stats-hardware-verifier; do
     printf 'old-%s' "$artifact" >"$ROLLBACK/$artifact"
   done
@@ -172,10 +183,13 @@ seed_transaction() {
   printf new-binary >"$ROOT/coordinator"
   printf new-cli >"$ROOT/coordinator-cli"
   printf new-coordinator-prev >"$ROOT/coordinator.prev"
-  printf new-config-prev >"$ROOT/coordinator.yaml.prev"
-  printf new-dated-backup >"$ROOT/coordinator.yaml.bak-20260711T120000Z"
-  printf new-config >"$ROOT/coordinator.yaml"
-  printf new-tier2-catalog >"$ROOT/tier2-catalog.json"
+	  printf new-config-prev >"$ROOT/coordinator.yaml.prev"
+	  printf new-dated-backup >"$ROOT/coordinator.yaml.bak-20260711T120000Z"
+	  printf new-config >"$ROOT/coordinator.yaml"
+	  printf new-overlay >"$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml"
+	  printf new-overlay-prev >"$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.prev"
+	  printf new-overlay-dated-backup >"$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.bak-20260711T120000Z"
+	  printf new-tier2-catalog >"$ROOT/tier2-catalog.json"
   printf new-unit >"$SYSTEMD/macprovider-coordinator.service"
   printf new-watchdog-unit >"$SYSTEMD/macprovider-coordinator-deploy-watchdog.service"
   for artifact in stats-inventory-sync stats-billing-mirror stats-hardware-verifier; do
@@ -210,6 +224,9 @@ run_recover
 [ "$(cat "$ROOT/coordinator.prev")" = old-coordinator-prev ] || fail "coordinator convenience backup was not restored"
 [ "$(cat "$ROOT/coordinator.yaml.prev")" = old-config-prev ] || fail "config convenience backup was not restored"
 [ "$(cat "$ROOT/coordinator.yaml.bak-20260711T120000Z")" = old-dated-backup ] || fail "dated config backup collision was not restored"
+[ "$(cat "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml")" = old-overlay ] || fail "overlay was not restored"
+[ "$(cat "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.prev")" = old-overlay-prev ] || fail "overlay convenience backup was not restored"
+[ "$(cat "$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml.bak-20260711T120000Z")" = old-overlay-dated-backup ] || fail "dated overlay backup collision was not restored"
 [ "$(cat "$STATS_ROOT/stats-inventory-sync")" = old-stats-inventory-sync ] || fail "stats inventory binary was not restored"
 [ "$(cat "$STATS_ROOT/stats-billing-mirror")" = old-stats-billing-mirror ] || fail "stats billing binary was not restored"
 [ "$(cat "$STATS_ROOT/stats-hardware-verifier")" = old-stats-hardware-verifier ] || fail "stats hardware binary was not restored"

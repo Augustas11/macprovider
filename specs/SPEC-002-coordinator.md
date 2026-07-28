@@ -1,7 +1,20 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.4 (2026-07-15, R-3.X.6 `seenModels` union MAY→MUST — cross-spec 404 reconciliation, runbook item 22)
+**Version:** 1.5.5 (2026-07-28, #784 C2 streaming-ceiling retarget)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.5 (2026-07-28, issue #784 — C2 streaming-ceiling retarget):**
+- Retargets the deploy-time C2 timer relation after gateway #760 decomposed
+  streaming deadlines. `routing.request_timeout_s` and `provider_http.timeout_s`
+  now MUST cover the gateway's `timeouts.stream_ceiling_max_seconds`; otherwise
+  the coordinator/provider HTTP wall truncates healthy long streams before the
+  gateway streaming ceiling can fire. C2 also requires the effective gateway
+  `timeouts.non_stream_request_seconds` wall to be strictly greater than
+  coordinator `routing.request_timeout_s`, so coordinator relay-timeout
+  attribution wins before gateway buyer cancellation on slow non-streaming
+  work. C2b now checks gateway header transport timeout against
+  max(`timeouts.coordinator_admission_seconds`, effective
+  `timeouts.non_stream_request_seconds`). No wire-protocol change.
 
 **Change log v1.5.4 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
 - R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST union declared `Provider.SupportedModels` into `seenModels`, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific rule, matching shipped behavior; #555). No dispatch-outcome change; the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model on default routing (404 `model_not_found` → 503 `no_provider_available`). §7.2 "404 vs 503 split" + the HTTP-status 404 row now name declared `supported_models` alongside served/seen as "known". Paired with SPEC-006 §17.2. Docs-only; no coordinator behavior change.
@@ -1137,18 +1150,26 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   twice, never B.
 - **Excluded (MUST NOT count):** preflight rejection/timeout (FR-P7),
   graceful drain, and genuine buyer cancellation / client hangup.
-  **Cancel-vs-timeout race rule (C2):** because the gateway's
-  `coordinator_request_seconds` and the coordinator's `request_timeout_s` may
-  be equal (both default 300s), a buyer-side context cancellation can race
-  the relay timeout. The coordinator MUST use the observed relay error to
+  **Cancel-vs-timeout race rule (C2):** because multiple components enforce
+  related timeout budgets, a buyer-side context cancellation can race relay
+  timeout attribution. The coordinator MUST use the observed relay error to
   disambiguate: a provider-side `relay-timeout-mid-inference` counts, while a
   buyer-context cancellation is excluded in both streaming and non-streaming
-  paths, even if no chunks have been received yet. Operators SHOULD set the
-  coordinator `request_timeout_s` strictly below the gateway
-  `coordinator_request_seconds` so the coordinator's relay-timeout fires
-  first and is unambiguously provider-attributable; with equal timers a
-  gateway-initiated cancel can pre-empt the coordinator's timeout and an
-  unfit provider may escape detection until a non-cancelled request times out.
+  paths, even if no chunks have been received yet. After gateway #760, the
+  streaming path is no longer bounded by `timeouts.coordinator_request_seconds`;
+  operators MUST set coordinator `routing.request_timeout_s` and
+  `provider_http.timeout_s` greater than or equal to gateway
+  `timeouts.stream_ceiling_max_seconds`, so healthy long streams are bounded by
+  the gateway streaming ceiling rather than truncated one hop earlier. For
+  non-streaming work, the effective gateway `timeouts.non_stream_request_seconds`
+  MUST be strictly greater than coordinator `routing.request_timeout_s`, so the
+  coordinator relay timeout, not gateway buyer cancellation, determines FR-P11a
+  breaker attribution for a slow provider. Gateway header transport timeout MUST
+  cover both
+  `timeouts.coordinator_admission_seconds` and the effective
+  `timeouts.non_stream_request_seconds` wall, so a slow first valid streaming
+  event or a slow non-streaming completion is bounded by its own gateway budget,
+  not by an unrelated transport default.
 - **Trip condition:** when a provider accumulates
   `pool.breaker_failure_threshold` (default 2) qualifying faults within a
   rolling `pool.breaker_window_s` (default 120s), the coordinator marks it
@@ -1370,7 +1391,7 @@ connection. The following rules are normative:
 
 3. **Cleanup.** The coordinator removes a `request_id` from its active
    map after receiving `inference_response_end` OR after
-   `routing.request_timeout_s` expires (default 300 s).
+   `routing.request_timeout_s` expires (default 900 s).
 
 See also SPEC-001 v1.2.4 § 6.6 "Request ID lifecycle and error
 handling" for the provider-side rules.
@@ -1385,7 +1406,7 @@ memory budget. Buffer absorbs brief TCP congestion.
 
 **FR-P20. WS-tunneled response timeout.**
 Per outstanding `inference_request`, coordinator starts a timer of
-`routing.request_timeout_s` (default 300 s). On timeout: send
+`routing.request_timeout_s` (default 900 s). On timeout: send
 `cancel_request`, return HTTP 504 to buyer, free slot. The timeout counts
 as a `relay-timeout-mid-inference` fault toward the **FR-P11a** circuit-breaker,
 which (as of v1.2.0) is the single source of truth for timeout-driven
@@ -1465,10 +1486,15 @@ line without body, a single byte, an SSE comment-only event, a
 arbitrary-key delta/message — is NOT committed; the coordinator MUST
 return `wsForwardProviderDisconnected` and failover (subject to the
 same `failover_enabled` + pin rules). The buyer-visible consequence
-is that HTTP response headers wait for the first commit-worthy event;
-buyer clients MUST tolerate up to `coordinator_request_seconds` of
-TTFT and gateway `coordinator_header_timeout_seconds` MUST be set
-accordingly (>= `coordinator_request_seconds`). Explicit `X-MacProvider-Provider` and
+  is that streaming HTTP response headers wait for the first commit-worthy
+  event and non-streaming headers wait for the buffered response to complete.
+  Buyer clients MUST tolerate the configured phase budget: streaming pre-header
+  work is bounded by the gateway admission/streaming-ceiling composition, and
+  non-streaming work is bounded by the effective `non_stream_request_seconds`
+  wall. That non-streaming wall MUST be strictly greater than coordinator
+  `routing.request_timeout_s`, and gateway `coordinator_header_timeout_seconds` MUST cover
+  max(`coordinator_admission_seconds`, effective `non_stream_request_seconds`).
+  Explicit `X-MacProvider-Provider` and
 `X-MacProvider-Session` pins MUST NOT fail over because the buyer
 requested that provider/session. The buyer MUST receive one coherent
 response or one clean OpenAI-compatible error envelope; the buyer MUST
@@ -3979,9 +4005,15 @@ verify the intended ordering, not merely that both are "set." Reference
 example: coordinator `routing.request_timeout_s` and gateway
 `timeouts.coordinator_request_seconds` were both 300s; equal timers let a
 gateway-initiated cancel race the coordinator relay-timeout, so a slow
-non-streaming provider could escape FR-P11a breaker attribution (the C2
-finding). The coordinator value SHOULD be strictly below the gateway value.
-A deploy-time assertion (`dist/check-deploy-config.sh`) now flags this.
+non-streaming provider could escape FR-P11a breaker attribution (the original
+C2 finding). After gateway #760, streaming has a derived ceiling instead of one
+flat wall; the deploy-time assertion (`dist/check-deploy-config.sh`) now checks
+the streaming relation directly: coordinator `routing.request_timeout_s` and
+`provider_http.timeout_s` MUST cover gateway `timeouts.stream_ceiling_max_seconds`,
+gateway effective `timeouts.non_stream_request_seconds` MUST be strictly greater
+than coordinator `routing.request_timeout_s`, and gateway
+`coordinator_header_timeout_seconds` MUST cover
+max(`coordinator_admission_seconds`, effective `non_stream_request_seconds`).
 
 **AC-1 through AC-10 must ALL pass for the coordinator to be considered
 build-complete. No partial passes. No operator waivers without an
@@ -4704,9 +4736,12 @@ pool:
 routing:
   preflight_threshold_tokens: 4096   # Skip preflight for prompts under this size
   preflight_timeout_s: 5
-  request_timeout_s: 300
+  request_timeout_s: 900             # Must cover gateway stream_ceiling_max_seconds (C2)
   failover_enabled: true
   failover_timeout_s: 5
+
+provider_http:
+  timeout_s: 900                     # Must cover gateway stream_ceiling_max_seconds (C2)
 
 auth:
   operator_key: "<required>"   # Bearer token for /poolz and /admin/blacklist

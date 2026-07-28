@@ -73,6 +73,12 @@ grep -q 'restore_regular had-coordinator coordinator' "$RECOVER_SH" ||
 
 grep -q 'restore_regular had-config coordinator.yaml' "$RECOVER_SH" ||
   fail "catalog rollback must restore the previous coordinator config"
+grep -q 'snapshot_node /etc/macprovider/coordinator.pearl-overlays.yaml coordinator.pearl-overlays.yaml had-overlay' "$DEPLOY_SH" &&
+  grep -q 'restore_regular had-overlay coordinator.pearl-overlays.yaml' "$RECOVER_SH" ||
+  fail "catalog rollback must restore the previous coordinator overlay"
+grep -q 'overlay-config-backup-name' "$DEPLOY_SH" &&
+  grep -q 'overlay-config-backup-name' "$RECOVER_SH" ||
+  fail "catalog rollback must preserve overlay dated backup collisions"
 
 grep -q 'COORDINATOR_DEPLOY_ARMED=1' "$DEPLOY_SH" ||
   fail "deploy must arm rollback before replacing live coordinator files"

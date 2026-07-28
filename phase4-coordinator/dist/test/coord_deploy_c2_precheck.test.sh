@@ -20,13 +20,31 @@ grep -q "validating installed Pearl gateway config: .*sha256=" "$DEPLOY_SH" ||
 grep -q 'cat '"'"'\$GATEWAY_REMOTE_CONFIG'"'" "$DEPLOY_SH" ||
   fail "deploy script does not read installed Pearl gateway config over SSH"
 
-local_count=$(grep -c 'bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_CONFIG"' "$DEPLOY_SH" || true)
+local_count=$(grep -c 'bash "$CHECK_SCRIPT" "${CHECK_ARGS\[@\]}"' "$DEPLOY_SH" || true)
 if [ "$local_count" != "1" ]; then
   fail "local GATEWAY_CONFIG C2 path should appear exactly once inside --dry-run-local, got $local_count"
 fi
 
 grep -q 'bash "$CHECK_SCRIPT" "$DEPLOY_CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP"' "$DEPLOY_SH" ||
   fail "production C2 path does not validate the effective coordinator config with the installed Pearl gateway config copy"
+grep -q 'COORDINATOR_REMOTE_OVERLAY="/etc/macprovider/coordinator.pearl-overlays.yaml"' "$DEPLOY_SH" ||
+  fail "production C2 path does not look for the Pearl coordinator overlay"
+grep -q -- '--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml' "$SCRIPT_DIR/../macprovider-coordinator.service" ||
+  fail "coordinator service unit must load the same Pearl overlay that production C2 validates"
+grep -q 'python3 "$MERGE_OVERLAY_SCRIPT" "$DEPLOY_CONFIG" "$COORDINATOR_EFFECTIVE_OVERLAY_TMP"' "$DEPLOY_SH" ||
+  fail "production C2 path does not merge live coordinator base + overlay before validation"
+grep -q 'C2_TIMER_CONFIG_MIGRATION="${C2_TIMER_CONFIG_MIGRATION:-0}"' "$DEPLOY_SH" ||
+  fail "deploy script does not declare the reviewed C2 timer migration switch"
+grep -q 'python3 "$C2_TIMER_MIGRATION_SCRIPT" "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-$DEPLOY_CONFIG}" "$CONFIG"' "$DEPLOY_SH" ||
+  fail "production C2 path does not render the field-scoped base timer migration from raw config input"
+grep -q 'python3 "$C2_TIMER_MIGRATION_SCRIPT" --only-existing "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" "$CONFIG"' "$DEPLOY_SH" ||
+  fail "production C2 path does not render the field-scoped overlay timer migration from raw overlay input"
+grep -q 'reject_redacted_install_candidate "$C2_TIMER_MIGRATED_CONFIG_TMP" "coordinator.yaml"' "$DEPLOY_SH" ||
+  fail "production C2 path does not reject redacted base install candidates"
+grep -q 'reject_redacted_install_candidate "$C2_TIMER_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"' "$DEPLOY_SH" ||
+  fail "production C2 path does not reject redacted overlay install candidates"
+grep -q 'coordinator.c2-timer-migration.yaml' "$DEPLOY_SH" ||
+  fail "deploy script does not stage the migrated coordinator config for remote install"
 
 for proof in C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256; do
   grep -q "$proof=\"\$$proof\"" "$DEPLOY_SH" ||
@@ -44,7 +62,23 @@ grep -q 'python3 - coordinator-deploy' "$DEPLOY_SH" ||
 [ -r "$SCRIPT_DIR/../lib/c2c_runtime_proof.py" ] ||
   fail "shared runtime proof helper is missing or unreadable"
 
+grep -q 'rm -f "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean raw installed coordinator config temp copy"
 grep -q 'rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean installed gateway config temp copy"
+grep -q 'rm -f "${COORDINATOR_OVERLAY_CONFIG_RAW_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean raw installed coordinator overlay temp copy"
+grep -q 'rm -f "${COORDINATOR_OVERLAY_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean installed coordinator overlay temp copy"
+grep -q 'rm -f "${DEPLOY_EFFECTIVE_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean merged effective coordinator temp copy"
+grep -q 'rm -f "${C2_TIMER_MIGRATED_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean C2 timer migrated coordinator temp copy"
+grep -q 'rm -f "${C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean sanitized C2 timer migrated coordinator temp copy"
+grep -q 'rm -f "${C2_TIMER_MIGRATED_OVERLAY_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean C2 timer migrated overlay temp copy"
+grep -q 'rm -f "${C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP:-}"' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean sanitized C2 timer migrated overlay temp copy"
 
 echo "PASS: coordinator deploy C2 precheck reads installed VPS gateway config by default"

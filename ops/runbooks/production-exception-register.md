@@ -91,7 +91,7 @@ Always invoked by:
 
 - `phase4-coordinator/dist/check-deploy-config.sh`
 - `phase5-gateway/dist/deploy-pearl-vps.sh` (runs **before** any
-  `SKIP_C2_CHECK` branch; that opt-out skips only C2 timers)
+  deploy mutation; `SKIP_C2_CHECK` is no longer supported)
 
 ```bash
 python3 scripts/check-production-exceptions.py gate --mode=deploy
@@ -200,9 +200,9 @@ ssh pearl 'sudo -u postgres psql <DB_NAME> -c "select provider_id, kind, signatu
 Hello-gate and catalog/admission bridge config:
 
 ```bash
-ssh pearl 'sudo grep -A30 "^proof_of_weights:" /etc/macprovider/coordinator.yaml'
-ssh pearl 'sudo grep -A30 "^autotune:" /etc/macprovider/coordinator.yaml'
-ssh pearl 'sudo grep -E "MODEL_HASH_LEGACY_UNTIL|PROVIDER_ADMISSION|AUTOTUNE" /etc/macprovider/coordinator.env'
+ssh pearl 'sudo grep -A30 "^proof_of_weights:" /opt/macprovider/coordinator.yaml; sudo test -f /etc/macprovider/coordinator.pearl-overlays.yaml && sudo grep -A30 "^proof_of_weights:" /etc/macprovider/coordinator.pearl-overlays.yaml || true'
+ssh pearl 'sudo grep -A30 "^autotune:" /opt/macprovider/coordinator.yaml; sudo test -f /etc/macprovider/coordinator.pearl-overlays.yaml && sudo grep -A30 "^autotune:" /etc/macprovider/coordinator.pearl-overlays.yaml || true'
+ssh pearl 'sudo systemctl show -p ExecStart macprovider-coordinator; sudo grep -E "MODEL_HASH_LEGACY_UNTIL|PROVIDER_ADMISSION|AUTOTUNE" /etc/macprovider/coordinator.env'
 ```
 
 Canary containment:
@@ -220,7 +220,7 @@ ssh pearl 'curl -fsS --header "Authorization: Bearer <OPERATOR_TOKEN>" http://12
 Entry 172 referral flags:
 
 ```bash
-ssh pearl 'sudo grep -A20 "^referrals:" /etc/macprovider/coordinator.yaml'
+ssh pearl 'sudo grep -A20 "^referrals:" /opt/macprovider/coordinator.yaml; sudo test -f /etc/macprovider/coordinator.pearl-overlays.yaml && sudo grep -A20 "^referrals:" /etc/macprovider/coordinator.pearl-overlays.yaml || true'
 ```
 
 Record only names, booleans, timestamps, counts, issue links, and redacted

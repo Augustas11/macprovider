@@ -43,10 +43,7 @@ class PearlConfigReconcileTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Evidence:", result.stdout)
         self.assertIn("pool.heartbeat_interval_s: value_mismatch: tracked=30 live=1", result.stdout)
-        self.assertIn(
-            "pool.warmup_gate_enabled: value_mismatch: tracked=True live=False",
-            result.stdout,
-        )
+        self.assertNotIn("pool.warmup_gate_enabled", result.stdout)
         self.assertIn(
             "coordinator_advertised_version.latest_binary_version: "
             "value_mismatch: tracked='1.8.66' live='1.8.61'",
