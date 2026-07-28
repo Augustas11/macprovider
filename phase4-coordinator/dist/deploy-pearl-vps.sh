@@ -148,6 +148,22 @@ _validate_catalog_canary_auth_token() {
   esac
 }
 
+_catalog_canary_auth_token_sha256() {
+  printf '%s' "$1" | shasum -a 256 | awk '{print tolower($1)}'
+}
+
+_catalog_canary_auth_token_matches_operator_key() {
+  local token="$1" operator_key_sha="$2" token_sha operator_sha_lc
+  _validate_catalog_canary_auth_token "$token" || return 1
+  case "$operator_key_sha" in
+    ""|*[!0-9a-fA-F]*) return 1 ;;
+  esac
+  [ "${#operator_key_sha}" -eq 64 ] || return 1
+  token_sha="$(_catalog_canary_auth_token_sha256 "$token")" || return 1
+  operator_sha_lc="$(printf '%s' "$operator_key_sha" | tr 'A-F' 'a-f')"
+  [ "$token_sha" = "$operator_sha_lc" ]
+}
+
 _run_with_deadline_alarm() {
   local timeout_s="$1"
   shift
@@ -934,6 +950,12 @@ else
   read -r C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256 <<EOF
 $_c2c_proofs
 EOF
+  if ! _catalog_canary_auth_token_matches_operator_key "$CATALOG_CANARY_AUTH_TOKEN" "$C2C_COORD_OPERATOR_KEY_SHA256"; then
+    echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN must be the coordinator operator key" >&2
+    echo "  /v1/pool/check?details=deployment is operator-only; service tokens cannot satisfy deployment evidence." >&2
+    echo "  Update the operator-held canary token source before retrying; no secret material was copied from Pearl." >&2
+    exit 5
+  fi
   C2C_COORD_OPERATOR_KEY_SHA256="$C2C_COORD_OPERATOR_KEY_SHA256" \
   C2C_COORD_SERVICE_TOKEN_SHA256="$C2C_COORD_SERVICE_TOKEN_SHA256" \
   C2C_GATEWAY_SERVICE_TOKEN_SHA256="$C2C_GATEWAY_SERVICE_TOKEN_SHA256" \

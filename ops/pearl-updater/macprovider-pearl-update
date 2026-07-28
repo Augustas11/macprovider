@@ -4274,6 +4274,15 @@ class Updater:
         ).strip()
         if not re.fullmatch(r"[A-Za-z0-9._~-]{32,512}", token):
             raise UpdateError("catalog canary authorization token is invalid")
+        operator_token = self.coordinator_operator_token()
+        if not secrets.compare_digest(
+            hashlib.sha256(token.encode()).digest(),
+            hashlib.sha256(operator_token.encode()).digest(),
+        ):
+            raise UpdateError(
+                "catalog canary authorization token must be the coordinator operator key; "
+                "service tokens cannot satisfy details=deployment evidence"
+            )
         return provider_id, token
 
     def prove_catalog_canary_mac(

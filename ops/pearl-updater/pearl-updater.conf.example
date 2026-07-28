@@ -53,8 +53,9 @@ PEARL_UPDATER_DEADMAN_HEARTBEAT_ID=
 PEARL_UPDATER_DEADMAN_API_TOKEN_FILE=/etc/macprovider/pearl-updater.betterstack-token
 
 # Required exact provider admission and independent on-Mac proof. The bearer
-# token must authorize details=deployment. Both secret files are root-owned 0600;
-# the SSH host key must already be present in root's known_hosts.
+# token is the coordinator operator key for operator-only details=deployment;
+# service tokens are rejected. Both secret files are root-owned 0600; the SSH
+# host key must already be present in root's known_hosts.
 PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID=
 PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE=/etc/macprovider/pearl-updater.catalog-canary-token
 PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET=
