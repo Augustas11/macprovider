@@ -1,6 +1,6 @@
 # RESEARCH — Trust-Minimized Benchmark & Catalog Roadmap
 
-Date: 2026-07-27 (r4 — revised after three adversarial rounds + codex security/architect audits)
+Date: 2026-07-27 (r5 — decomposed after the audit history showed the bundled roadmap could not converge; see §10 preamble)
 Status: research document (non-normative; basis for GitHub issues and implementation tracking)
 Scope: catalog, benchmark, hardware verification, provider admission, routing, buyer/provider UX trust model
 Related: #744, #745 (closed, fixed by #751), #742 (closed, fixed by #748), #687, #584, #582, PR #772, SPEC-002, SPEC-004, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-013, SPEC-017, SPEC-022, SPEC-023 (v0.8), SPEC-027, SPEC-029, SPEC-030, SPEC-031, SPEC-032, SPEC-033, SPEC-034, SPEC-036
@@ -19,18 +19,19 @@ Evidence tags:
 
 **One measurement decides whether this roadmap's central thesis is executable.** The thesis (§1.5) is that coordinator-observed buyer-path performance should replace provider self-report as the authority for privileges. Every high-value item consumes per-(provider, model, workload-bucket) observed aggregates. Nobody has checked that current buyer demand produces enough requests to fill those buckets. At 1–2 providers and prebeta demand, splitting traffic across (provider × model × workload class × concurrency) plausibly yields single-digit or zero samples per bucket — in which case the observed-evidence machinery degrades to its own fallbacks and the operator has bought a timer.
 
-**R0 (§10) is therefore the first item: query the existing `request_log` for requests/day per (provider, model) and per candidate bucket.** It costs an afternoon, uses data already persisted, and it gates R4/R5/R9. Do not schedule the probation block before that number exists.
+**Gate G0 (§10) is therefore the first item: query the existing `request_log` for requests/day per (provider, model) and per candidate bucket.** It costs an afternoon, uses data already persisted, and it gates every deferred brief (Plane C). Do not schedule the probation brief before that number exists.
+
+**The structure of §10** (see its preamble for why): the work is split into **Plane A — ship-now independent pieces** (each its own issue, resting only on existing data), **Gate G0 — the one measurement**, and **Plane C — deferred design briefs** (each a future SPEC with its own audit loop, gated on G0). This document commits only to Plane A + G0; Plane C is analysis, not an approved plan.
 
 **The committed minimum path, if nothing else ships** (~12–20 operator hours, no open questions blocking any of it):
 
 | | Item | Why it is unconditional |
 |---|---|---|
-| 1 | **R2** — overclaim remediation (`README.md:22`, SDK doc) | Violates SPEC-006:343's own normative rule; buyer-facing; no dependencies |
-| 2 | **R3a** — ceiling-drift *detection* (persist `MaxAdmittedMinRAMGB`, alert on heartbeat model switch) | Closes the one Tier-0 technical hazard — a silent switch invalidating the only live integrity chain — without routing exclusion, so §11's sole-provider questions do not block it |
-| 3 | **R1a** — nullable `ttft_ms`/`decode_ms` columns on `request_log` | Only item whose value strictly increases with earlier start; columns only, no classifier |
-| 4 | **R0** — the demand-volume query | Decides everything downstream |
+| 1 | **A1** — overclaim remediation (`README.md:22`, SDK doc) | Violates SPEC-006:343's own normative rule; buyer-facing; no dependencies |
+| 2 | **A5** — ceiling-drift *detection* (persist `MaxAdmittedMinRAMGB`, alert on heartbeat model switch) | Closes the one genuine technical hazard — a silent switch invalidating the only live integrity chain — without routing exclusion, so §11's sole-provider questions do not block it |
+| 3 | **G0** — the demand-volume query | Decides everything in Plane C |
 
-Everything past that line is **conditional on R0's answer** and is presented as analysis, not as an approved plan.
+Everything in Plane C is **conditional on G0's answer** and is presented as analysis, not as an approved plan. The other Plane-A pieces (A2/A3/A4/A6/A7) are all independently shippable and add to this minimum in any order.
 
 ---
 
@@ -48,7 +49,7 @@ MacProvider today has a **strong integrity chain over the wrong root**. The cata
 
 **The upgrade question** (required finding): the answer is **not** "lock the provider to the first model at hello" — that blocks legitimate upgrades and invites identity churn. §6 defines the alternative, with the load-bearing correction from review: **observed latency/throughput can only *demote*, and can only gate capacity *within an already-proven model class*.** It cannot authorize a cross-class ceiling raise, because model substitution scores *better* on every latency metric than honest service of the larger model. Cross-class raises need a model-discriminating signal, not a speed signal (§3.3, §6.3 Step 4).
 
-**What this roadmap deliberately does not do**: it does not gate supply growth on adversarial defenses the current cohort has never needed. Every incident in the log has been honest-system error, not attack (§9.1). The scarce resource is providers. r3/r4 accordingly **shrink** the committed plan (§0), gates the expensive block on a measurement (R0), cuts one item outright (former R6), and marks the probation design as conditional analysis rather than approved work.
+**What this roadmap deliberately does not do**: it does not gate supply growth on adversarial defenses the current cohort has never needed. Every incident in the log has been honest-system error, not attack (§9.1). The scarce resource is providers. r3/r4 accordingly **shrink** the committed plan (§0), gates the expensive block on a measurement (Gate G0), cuts one item outright (former R6), and marks the probation design as a deferred brief (§10 Brief B4) rather than approved work.
 
 ---
 
@@ -75,6 +76,7 @@ MacProvider today has a **strong integrity chain over the wrong root**. The cata
 | Losslessness (SPEC-030) | `internal/ws/losslessness.go` | TV-distance between plain/speculative arms of the same provider | Shipped, disabled, verdict fn test-only |
 | Compute-integrity (SPEC-036) | spec only | Would compare served distributions against a coordinator-held reference | **Zero code** |
 | Attestation (Pillar C) | `internal/tier2/pillar_c*.go`, `ws/server.go:1778` | SE P-256 = key custody + session binding; `AttestationTierHardware` never emitted | Live, non-load-bearing |
+| Provider registration / credential bootstrap | `internal/onboarding/apptrack.go` (`provider_id` bound to `identity_pubkey`, `:313, :340`), `internal/ws/admission.go` | Mints `provider_id` from a client-supplied Ed25519 identity key; TOFU-binds it; issues the bearer credential. **Open**: `referrals.require_for_registration: false` (`dist/coordinator.yaml:108-112`) — a fresh keypair mints a fresh identity anonymously. Load-bearing for any sanction-durability claim (§4.11, Brief B6) | Live, registration open |
 
 ### 2.2 Production posture
 
@@ -87,7 +89,7 @@ MacProvider today has a **strong integrity chain over the wrong root**. The cata
 | `pool.losslessness_probe.enabled` | false | `config.go:994` [E-code] |
 | `tier2.require_attestation` | false | `config.go:1078` [E-code] |
 | `settlement.verified_model_settlement_mode` | `observe` (default; overlay unknown) | `config.go:1120` [E-code, I] |
-| `referrals.require_for_registration` | **false** | `dist/coordinator.yaml:108-112` — referral gating is **not** today's admission control, and registration is open (§9.3, R7) [E-code] |
+| `referrals.require_for_registration` | **false** | `dist/coordinator.yaml:108-112` — referral gating is **not** today's admission control, and registration is open (§9.3, Brief B6) [E-code] |
 
 ### 2.3 The Pearl-DB facts from the triggering session, reconciled
 
@@ -134,14 +136,14 @@ An early draft asserted this class is unforgeable. That is **false**, in three d
 
 **Limit 2 — buffering.** A provider can buffer generation and flush quickly, shifting work into TTFT and making decode throughput look better without better service. Ranking on decode throughput alone is therefore gameable; any floor or ranking must combine TTFT with decode, or use end-to-end latency and streaming cadence.
 
-**Limit 3 — sample volume.** Per-bucket percentiles need samples. Whether prebeta demand produces them is **unmeasured** (§0, R0). Until it is, every design resting on per-bucket observation is provisional.
+**Limit 3 — sample volume.** Per-bucket percentiles need samples. Whether prebeta demand produces them is **unmeasured** (§0, Gate G0). Until it is, every design resting on per-bucket observation is provisional.
 
 **Design consequence:** observed data is valid authority for *demotion* and for capacity decisions *within an already-proven model class*. It is **not** valid authority for a cross-model-class ceiling raise.
 
 ### 3.4 What `operator_approved_identity` actually anchors
 
 1. **The hardware anchor is rotatable — but rotation is not an escape.** `hardware_identity_hash` derives from `~/.config/macprovider/autotune-hmac-secret` (`AutotuneRecommend.swift:213-266`, constant `:1599`). Deleting it mints a *fresh, unapproved* tuple. Because the only enforcement path keyed to that hash is `trust_revalidation.go:92-102, 235, 241`, which **evicts** a session whose admitted tuple lost its trust root, rotation costs the provider its admission rather than buying a clean slate. An earlier revision of this document claimed HMAC rotation washes sanctions; that claim was **wrong** and is withdrawn (§4.11).
-2. **Provider-account rotation is the real wash.** `provider_id` is bound to `identity_pubkey` (`internal/onboarding/apptrack.go:313`) and to the validated credential at hello (`internal/ws/server.go:2162`). Sanctions are keyed to `provider_id` alone and durably persisted (`pool/provider.go:558, 665, 696, 1359`; `internal/ws/canary_store.go:14-18`) — correct design. But a **new keypair yields a new `provider_id`**, and `referrals.require_for_registration: false` leaves registration open, so a sanctioned operator can re-register clean. The gap is registration policy, not sanction keying (§4.11, R7).
+2. **Provider-account rotation is the real wash.** `provider_id` is bound to `identity_pubkey` (`internal/onboarding/apptrack.go:313`) and to the validated credential at hello (`internal/ws/server.go:2162`). Sanctions are keyed to `provider_id` alone and durably persisted (`pool/provider.go:558, 665, 696, 1359`; `internal/ws/canary_store.go:14-18`) — correct design. But a **new keypair yields a new `provider_id`**, and `referrals.require_for_registration: false` leaves registration open, so a sanctioned operator can re-register clean. The gap is registration policy, not sanction keying (§4.11, Brief B6).
 3. **The memory value is provider-submitted.** Migration 019 derives the tuple server-side from the job row (`019:17`), but that row's `unified_memory_gb` came from the provider's own evidence (`hardware_evidence.go:69`). The tuple's strength equals **whatever the operator physically verified at first approval** — fine while the operator installs each Mac, and precisely what fails when the cohort opens.
 
 ---
@@ -169,7 +171,7 @@ Every live row omits `bench_gate.provenance`; values come from a hardcoded backf
 ### 4.5 F5 — Admission is one-shot with a documented CRITICAL bypass, and it is off
 
 - `require_autotune_hello_gate: false` (verified 2026-07-22); SPEC-032:553 claims the opposite. [E-spec]
-- **FR-HG7**: `MaxAdmittedModelKey/ID` is consumed only by `providerProbeModelID` (`ws/server.go:3442-3447`), which has **two** callers — the warm-up gate (`:3423`, **live**) and the canary (`:3734`, disabled). It appears nowhere in `RoutingEligible()` or buyer matching. `applyHeartbeatLocked` overwrites `ModelID` unconditionally (`pool/provider.go:1851`); a switch without a loading transition emits no `SwapEvent` (`:1899-1916`). **Note also that `HelloGateDecision.MaxAdmittedMinRAMGB` (`gate.go:13`) is computed and then dropped — `pool.Provider` stores only key/id (`provider.go:200-201`)**, so the RAM value R3 needs does not currently survive admission. [E-code, E-spec]
+- **FR-HG7**: `MaxAdmittedModelKey/ID` is consumed only by `providerProbeModelID` (`ws/server.go:3442-3447`), which has **two** callers — the warm-up gate (`:3423`, **live**) and the canary (`:3734`, disabled). It appears nowhere in `RoutingEligible()` or buyer matching. `applyHeartbeatLocked` overwrites `ModelID` unconditionally (`pool/provider.go:1851`); a switch without a loading transition emits no `SwapEvent` (`:1899-1916`). **Note also that `HelloGateDecision.MaxAdmittedMinRAMGB` (`gate.go:13`) is computed and then dropped — `pool.Provider` stores only key/id (`provider.go:200-201`)**, so the RAM value ceiling-drift detection (A5) and enforcement (B2) need does not currently survive admission. [E-code, E-spec]
 - **FR-HG6**: no mid-session *evidence-TTL* recheck. Trust-root revocation **is** covered (`trust_revalidation.go:12-23, 121, 149-159`). [E-code]
 
 ### 4.6 F6 — Every capability input to routing is self-reported
@@ -206,7 +208,7 @@ SPEC-032 posture inverted (`:553`). SPEC-033 roster omits migration 019 and `pro
 
 **Correction (r4).** Earlier revisions claimed sanction state is erasable by rotating the HMAC secret. That is false: `canarySanctions` is keyed by `providerID` alone (`pool/provider.go:558`, written `:665, :1359`, read `:696, :1313, :1569`) and durably persisted through `CanarySanctionStore` (`internal/ws/canary_store.go:14-18`), and rotating the HMAC secret only invalidates the *admitted tuple*, which triggers eviction (`trust_revalidation.go:92-102`). Existing sanction keying is correct and needs no repair.
 
-The real, narrower gap: `provider_id` derives from `identity_pubkey` (`apptrack.go:313`), and registration is open (`dist/coordinator.yaml:108-112`), so re-registering with a fresh keypair yields an unsanctioned identity. **Sanctions are durable against everything except identity re-registration** — which is a registration-policy question, not a sanction-storage one (R7, §11 Q5). Any new probation state must be keyed the same way `canarySanctions` already is; that is a design note for R5, not a work item. [E-code]
+The real, narrower gap: `provider_id` derives from `identity_pubkey` (`apptrack.go:313`), and registration is open (`dist/coordinator.yaml:108-112`), so re-registering with a fresh keypair yields an unsanctioned identity. **Sanctions are durable against everything except identity re-registration** — which is a registration-policy question, not a sanction-storage one (Brief B6, §11 Q5). Any new probation state must be keyed the same way `canarySanctions` already is; that is a design note for Brief B4, not a work item. [E-code]
 
 ### 4.13 F13 — A LOCKED spec contradicts the live signed catalog on the fields this document is about
 
@@ -240,7 +242,7 @@ The gemma row is the sharpest: SPEC-023:269 states blocked rows "are never downl
 
 | Layer | Contents | Authority granted |
 |---|---|---|
-| **Trusted** | Signed catalog bytes; release ledger/tombstones; operator trust tuples (identity only, §3.4 limits); provider credentials | Defines the *universe* of servable models and who may connect. Never asserts performance — **with one named, bounded exception**: until R12 ships a model-discriminating signal, an operator MAY grant a cross-model-class ceiling raise that observation cannot authorize (§3.3 Limit 1). Each such grant must be individually logged, revocable, counted against a hard cap, and reported in the §8 provenance surface as `operator_granted`. This is a deliberate carve-out from §4.8's boundary, not an oversight; R12 retires it. |
+| **Trusted** | Signed catalog bytes; release ledger/tombstones; operator trust tuples (identity only, §3.4 limits); provider credentials | Defines the *universe* of servable models and who may connect. Never asserts performance — **with one named, bounded exception**: until Brief B9 ships a model-discriminating signal, an operator MAY grant a cross-model-class ceiling raise that observation cannot authorize (§3.3 Limit 1). Each such grant must be individually logged, revocable, counted against a hard cap, and reported in the §8 provenance surface as `operator_granted`. This is a deliberate carve-out from §4.8's boundary, not an oversight; Brief B9 retires it. |
 | **Claimed** | Benchmarks, model hash, weights manifest, RAM/context/concurrency/TPS estimate, hardware summary, `bench_gate` values | May *lower* the provider's own privileges immediately. May grant **only capped, revocable, probationary serving** (§6). May never grant unrestricted paid serving, set enforced thresholds, or rank the routing objective. |
 | **Observed** | Per-request TTFT, decode time, tokens, error/fault/breaker events; canary results when enabled | **Demotion**: always authoritative. **Promotion**: within an already-proven model class only, and only above a sample floor. **Ranking**: the correct input, replacing F12's self-report. |
 
@@ -264,7 +266,7 @@ The gemma row is the sharpest: SPEC-023:269 states blocked rows "are never downl
 
 Floors must be evaluated **within matched buckets** (prompt-token range × concurrency), never against a raw global p95, and never against a catalog `max_4k_ttft_ms` derived from a fixed 4k single-replicate probe. An absolute network-wide TTFT ceiling systematically penalizes large models — the supply the network most lacks.
 
-SPEC-029 supplies the workload-class *vocabulary* (`short_chat`, `medium_with_system`, `long_context`, `code_completion`, `agent_style` — `scripts/catalog-release.py:163`). **It is not a drop-in**: SPEC-029 is explicitly a sweep-output partition that "does not introduce runtime request classification," its keys are workload-name × RAM-tier, and `workload_profiles` is intentionally absent from the live catalog. Runtime bucketing is **new work with an undecided shape** (§11 Q4), which is why R1 splits into columns-now (R1a) and classifier-later (R1b). [E-spec]
+SPEC-029 supplies the workload-class *vocabulary* (`short_chat`, `medium_with_system`, `long_context`, `code_completion`, `agent_style` — `scripts/catalog-release.py:163`). **It is not a drop-in**: SPEC-029 is explicitly a sweep-output partition that "does not introduce runtime request classification," its keys are workload-name × RAM-tier, and `workload_profiles` is intentionally absent from the live catalog. Runtime bucketing is **new work with an undecided shape** (§11 Q4), which is why the observed-timing work splits into columns-now (Brief B1) and classifier-later (folded into Brief B3). [E-spec]
 
 ### 5.5 What stays advisory
 
@@ -278,7 +280,7 @@ A post-#745 measurement, in-band signed provenance, and — for any gate *gainin
 
 ## 6. Provider Model Upgrade Flow
 
-> **Status: conditional analysis, not approved work.** Everything past §6.2 depends on R0's volume answer and on unresolved money-path design (§6.3 Step 3). §6.1–§6.2 stand on their own; the flow below should be read as "the shape a solution must have," not as a specification ready to implement.
+> **Status: design sketch feeding Brief B4 (§10), not approved work.** This section is the input to a *future separate SPEC* (Plane C, Brief B4), gated on Gate G0. Read §6.3's steps as proposals the B4 SPEC must resolve — their appearance in §11 as open questions is therefore correct, not a contradiction. §6.1–§6.2 (the requirement, and the capacity-vs-performance separation) stand on their own and are what any solution must respect; everything past §6.2 depends on G0's volume answer and on the money-path design B4 must produce.
 
 ### 6.1 The requirement (and the anti-requirement)
 
@@ -296,7 +298,7 @@ Freezing providers to the first hello model is rejected: it punishes honest upgr
 - **"May this Mac physically host this row?"** — `min_ram_gb` vs the operator-verified `unified_memory_gb` (§6.3 Step 2). Static, needs no traffic, closes the pure-fabrication ceiling raise **to the strength of the operator's first-approval physical verification** (§3.4 limit 3).
 - **"Does this Mac serve this row acceptably?"** — continuous observed floors (§5.3.4), which apply to *every* provider on *every* model.
 
-Probation therefore buys exactly one thing: **bounded exposure between a capacity claim and the first observed data point.** **Falsification test, to be run before R5 is scheduled:** if R0 shows that window is not measurably shorter than the maximum probation window — i.e. if observed data does not arrive fast enough to end probation on evidence rather than on a timer — then probation collapses into §5.3.4 and this section reduces to Steps 0–2. r3 does not claim to have passed this test; R0 supplies the input.
+Probation therefore buys exactly one thing: **bounded exposure between a capacity claim and the first observed data point.** **Falsification test, to be run before Brief B4 is scheduled:** if G0 shows that window is not measurably shorter than the maximum probation window — i.e. if observed data does not arrive fast enough to end probation on evidence rather than on a timer — then probation collapses into §5.3.4 and this section reduces to Steps 0–2. This document does not claim to have passed this test; Gate G0 supplies the input.
 
 ### 6.3 The flow (conditional)
 
@@ -314,7 +316,7 @@ The safety margin is not optional: the shipped client already enforces `model.mi
 
 - **Not `pool.TierProvisional`.** r2 proposed extending it; that is wrong twice over. `Tier` is a **per-provider scalar** (`pool/provider.go:119`), so it cannot express per-(provider, model) state; and `TierProvisional` already *means* "canary-sanctioned — escalate to ban on next trip" (`pool/provider.go:1352-1355` sets `StateUnavailable`, where pinned providers only degrade). Overloading it would make every probationary provider strictly harsher-treated than an established one. (A third, unrelated `TierProvisional` exists in `internal/rewards/rewards.go:25` governing withdrawal cooldown — any spec text must say which namespace it means.) Probation needs a **new per-(provider, model) state** with its own persistence across reconnect. This is a `pool.Provider` schema change, not an extension.
 - **Absolute exposure budget, not relative share.** Relative downweighting gives zero dilution when the provider is the only holder of that model — the live condition. The budget must be absolute and numeric: max concurrent slots, max requests before first floor evaluation, and — once pricing is settled — max cumulative billed value (a dimension that only exists if probation traffic is billed at all, which Step 3 leaves open).
-- **Pricing is UNRESOLVED and is the item's largest risk.** r2 said "discounted or unbilled." That is wrong as stated: provider payout derives from `provider_credits`, and `payout.go:118-128` **voids a payout row when `payableProvider < minPayoutCredits`** — so unbilled probation makes the provider serve for free and can void the payout outright, on a network whose scarce resource is providers. No discount mechanism exists (the only `discount` in billing is the cached-prompt-token one; the only unbilled path is the SPEC-022 `model_hash: null` *error* path). The candidate direction is **bill the buyer at full rate, escrow the provider's share, release on promotion and forfeit on demotion** — but that is new money-path work spanning `internal/billing/`, `phase5-gateway/` (`usage_events`, `ReservationSettlement`), and a SPEC-022/SPEC-005/SPEC-006 amendment. **Until that design exists, R5 cannot be scoped.** Also invariant: probation pricing must never be buyer-selectable or buyer-visible pre-request, or a discount would attract buyers *to* unproven providers and distort the very data used to promote them.
+- **Pricing is UNRESOLVED and is the item's largest risk.** r2 said "discounted or unbilled." That is wrong as stated: provider payout derives from `provider_credits`, and `payout.go:118-128` **voids a payout row when `payableProvider < minPayoutCredits`** — so unbilled probation makes the provider serve for free and can void the payout outright, on a network whose scarce resource is providers. No discount mechanism exists (the only `discount` in billing is the cached-prompt-token one; the only unbilled path is the SPEC-022 `model_hash: null` *error* path). The candidate direction is **bill the buyer at full rate, escrow the provider's share, release on promotion and forfeit on demotion** — but that is new money-path work spanning `internal/billing/`, `phase5-gateway/` (`usage_events`, `ReservationSettlement`), and a SPEC-022/SPEC-005/SPEC-006 amendment. **Until that design exists, Brief B4 cannot be scoped.** Also invariant: probation pricing must never be buyer-selectable or buyer-visible pre-request, or a discount would attract buyers *to* unproven providers and distort the very data used to promote them.
 - **No buyer opt-out claim.** Tier-2 knobs are coordinator-global config; the only per-request surface is a 503.
 
 **Step 4 — promotion, scoped by class.**
@@ -322,12 +324,12 @@ The safety margin is not optional: the shipped client already enforces `model.mi
 - **Within a proven class**: observed floors suffice, above a **minimum sample floor**. Promote after N observed requests in matched buckets over ≥T elapsed time with no breaker trips.
 - **Never promote on absence of evidence.** If the maximum window expires without meeting the sample floor, the outcome is **"remains probationary, operator notified"** — for both first-model and upgrade cases. A time-only path would void every other control at thin traffic, which is precisely the expected condition.
 - **Anti-self-dealing is weak and must be labeled so.** A "≥2 distinct payer accounts" rule is a two-account speed bump: nothing gates buyer-account creation, and `request_log.account_id` is explicitly nullable — "empty for direct legacy buyer calls without the header" (`internal/requestlog/store.go:60-66`) — so the rule is simply unevaluable on that path unless those requests are excluded from the promotion count. It is worth having as friction, not as a control. (r2 cited `internal/canarycorr/` FR-CAN23 as prior art; that citation is **withdrawn** — that package is provider-side Sybil containment via observed-serving capacity residual and contains no payer or account concept.) Real anti-Sybil requires independent payment instruments, which is its own item.
-- **Across model classes**: observed latency is **not** sufficient (§3.3 Limit 1). Until R12 supplies a model-discriminating signal, a cross-class raise rests on Step 2 capacity **plus an operator grant under the named §5.2 carve-out** — logged per grant, revocable, hard-capped in number, and surfaced to buyers as `operator_granted`. r4 resolves this in §5.2 rather than leaving it as a standing contradiction between the target model and the flow; the residual judgment (cap value, or refusing cross-class raises entirely until R12) is §11 Q6.
+- **Across model classes**: observed latency is **not** sufficient (§3.3 Limit 1). Until Brief B9 supplies a model-discriminating signal, a cross-class raise rests on Step 2 capacity **plus an operator grant under the named §5.2 carve-out** — logged per grant, revocable, hard-capped in number, and surfaced to buyers as `operator_granted`. r4 resolves this in §5.2 rather than leaving it as a standing contradiction between the target model and the flow; the residual judgment (cap value, or refusing cross-class raises entirely until R12) is §11 Q6.
 - **Floors are per-(model, RAM-tier) and bucketed**, combining TTFT with decode.
 
 **Step 5 — demotion symmetry**, subject to §5.3.6 (health floors only; integrity violations fail closed). Promotion is durable until demoted.
 
-**Step 6 — sanction durability.** Probation/demotion state must be keyed to `provider_id`, as `canarySanctions` already is (`pool/provider.go:558`); so keyed, it survives reconnects, HMAC-secret rotation, and hardware re-approval. The one bypass is **re-registration under a fresh keypair** while registration is open (R7). Earlier revisions overstated this as general erasability; see §4.11.
+**Step 6 — sanction durability.** Probation/demotion state must be keyed to `provider_id`, as `canarySanctions` already is (`pool/provider.go:558`); so keyed, it survives reconnects, HMAC-secret rotation, and hardware re-approval. The one bypass is **re-registration under a fresh keypair** while registration is open (Brief B6). Earlier revisions overstated this as general erasability; see §4.11.
 
 **Settlement non-retroactivity.** Ceiling and probation state are **non-retroactive for settlement**: requests served before an enforcement change are not retroactively repriced or clawed back, and in-flight requests at demotion complete and settle normally. This must be stated in the SPEC amendment so two implementers do not build opposite behaviors.
 
@@ -354,7 +356,7 @@ trusted_provider_matrix                                            (promotable t
 1. **Provenance lives in the signed bytes.** Next release carries `bench_gate.provenance` in-band; backfill and nil-acceptance retire with it. `require_provenance` added to **every** `validate_candidate` call site (`catalog-release.py:1324, 1589, 1649, 1697, 1721`).
 2. **No gate value changes without a post-#745 measurement** of that row (Entry 196).
 3. **Advisory by default, per row.** A gate gains enforcement power only at `trusted_provider_matrix`, and then under a **new field name** (`hard_min_sustained_tps`, per SPEC-023:71-74), so the advisory wire field never silently changes meaning.
-4. **Promotion arithmetic** (#687 Stage 4): recompute from ≥N verified providers' post-#745 measurements on ≥M hardware classes, cross-checked against observed serving data; drop the oMLX seed. N ≥ 3, M ≥ 2 as floors. **Unbuildable at current fleet size**, and the >32 GB rows remain unmeasurable pending #584 — hence R8's split.
+4. **Promotion arithmetic** (#687 Stage 4): recompute from ≥N verified providers' post-#745 measurements on ≥M hardware classes, cross-checked against observed serving data; drop the oMLX seed. N ≥ 3, M ≥ 2 as floors. **Unbuildable at current fleet size**, and the >32 GB rows remain unmeasurable pending #584 — hence the split of in-band provenance (A4, buildable now) from re-derivation tooling (Brief B7, deferred).
 5. **`recommendable` is orthogonal to measurement, but never to disclosure.** (Note there are two distinct fields with this name: the `runtime_status` enum on a candidate row (`catalog-release.py:264`) and the boolean on a demand-rank row (`:362-375`). Eligibility requires both; this rule concerns the candidate-row status.) A row may be `recommendable` at any provenance class **provided its class is rendered at the point of choice** (§8). This is a deliberate **narrowing** of #687's invariant, justified by gates being advisory; if gates ever become enforcing under rule 3, #687's stricter form applies.
 6. **Unsigned inputs off the money path**: sign the rate card or fold it into the signed release unit.
 
@@ -382,14 +384,13 @@ trusted_provider_matrix                                            (promotable t
 - **Signed catalog pinning + Tier-2 Pillar A + `require_hash_verified`** — closes misconfiguration/drift, the *actual* observed failure mode. Every incident in the log (#742 swap selection, #745 mislabeled benchmarks, Entry 198 chip-profile gap) was honest-system error.
 - **SPEC-022 observe mode**, **advisory gates + client-side vetoes**, **manual operator response** in place of the disabled canary (Entry 195's posture).
 
-### 9.2 Three tiers
+### 9.2 What must be done, and when
 
-- **Tier N — supply-neutral, do now, no trigger**: R0, R1a, R8a, R10. None slows onboarding; all are cheap; R1a's value increases with earlier start.
-- **Tier 0 — blocks continued operation**: R2 (the two normative overclaim violations) and R3a (ceiling-drift **detection** — a silent heartbeat switch invalidates the one integrity chain that is live). Tier 0 items are also do-now; the distinction from Tier N is that these are *unacceptable to leave undone*, not merely cheap.
-- **Tier 1 — must complete before the first non-personally-installed provider connects**: R3b (enforcement), R1b, R4, R5 (if R0 justifies it), R7. **This is a lead-time requirement, not an event trigger**: Tier 1 is multi-week work, so it must be *started* when the operator forecasts a stranger within a quarter and *completed* before that provider connects. r2's "N=5 providers" is withdrawn — provider count is unrelated to what any Tier-1 item needs, and it conflicted with §9.3's own qualitative trigger.
-- **Tier 2 — follows**: R8b, R9, R11, R12.
+The r1–r4 "Tier N/0/1/2" vocabulary is retired (it was itself a recurring audit finding for inconsistency). The §10 decomposition — **Plane A** ship-now pieces, **Gate G0**, **Plane C** deferred briefs — is the only taxonomy. Mapped to *when*:
 
-Every R item carries exactly one tier; R3 and R1 are tiered per half (R3a/R3b, R1a/R1b), which is why they appear split throughout §10.
+- **Do now, unconditional** (Plane A): the seven A-pieces, all supply-neutral or overclaim fixes, none of which slows onboarding. The two that are *unacceptable to leave undone* (not merely cheap) are **A1** (the SPEC-006:343 overclaim violations) and **A5** (ceiling-drift detection — a silent heartbeat switch invalidates the one integrity chain that is live). **G0** runs alongside.
+- **Before the first non-personally-installed provider connects** (the Plane-C briefs that gate opening): **B1→B2→B3→B4**, plus **B5** and **B6**. **This is a lead-time requirement, not an event trigger** — the block is multi-week, so it must be *started* when the operator forecasts a stranger within a quarter (§9.3) and *completed* before that provider connects. r2's "N=5 providers" is withdrawn: provider count is unrelated to what any of these briefs needs, and it conflicted with §9.3's qualitative trigger. Each brief must clear its own SPEC-audit loop first, and B4 additionally waits on G0.
+- **Follows** (post-opening hardening): **B7, B8, B9**.
 
 ### 9.3 The trigger is a qualitative event, not a flag
 
@@ -397,130 +398,133 @@ Every R item carries exactly one tier; R3 and R1 are tiered per half (R3a/R3b, R
 
 ### 9.4 Explicitly not blocking, with the tension named
 
-SPEC-036, MDA device rooting, losslessness enforcement. The one genuine carried risk is §5.2's named cross-class operator carve-out, which R12 retires. r3's broader "sanctions are deterrents, not controls" acceptance is **withdrawn** — it rested on the F11 error corrected in r4; sanctions are durable against everything except identity re-registration, which R7 addresses as a registration-policy question.
+SPEC-036, MDA device rooting, losslessness enforcement. The one genuine carried risk is §5.2's named cross-class operator carve-out, which Brief B9 retires. r3's broader "sanctions are deterrents, not controls" acceptance is **withdrawn** — it rested on the F11 error corrected in r4; sanctions are durable against everything except identity re-registration, which Brief B6 addresses as a registration-policy question.
 
 ---
 
 ## 10. Roadmap / Issue Breakdown
 
-**Effort calibration.** Sizes below are re-baselined after review flagged r2's estimates as 2–4× optimistic. Reference points from this repo: SPEC-037's IMPL landed at 16,536 insertions across 75 files (`d53e8650`) for one flag-gated, default-off feature; house rules require three-lane codex audits to 0 C/H/M per slice; SPEC-036 took 14 rounds; items needing a SPEC amendment require **two** audit loops (spec, then IMPL) plus a governance declaration plus the antfleet-ops-approves → Augustas11-merges sequence. "Operator hours" includes reading and re-firing audit lanes, which dominates. Items whose parameters are unknown are marked **unsizeable** rather than given a placeholder.
+### Why this section is a decomposition, not a ranked list
+
+This document went through four review rounds (r1→r4; two adversarial + two product-design Claude lanes, then codex security + architect). Each round the audit tally fell, but never to zero: every rewrite of the *single* roadmap spawned fresh CRITICAL/HIGH/MEDIUM findings. The findings were not wording — they were structural, and they clustered on one signature: **the plan bundled a handful of small, independently-valuable, independently-verifiable fixes together with a large speculative trust subsystem (observed-performance routing + probationary admission) that rests on buyer-traffic volume nobody has measured.** Bundling them meant every audit found interaction defects — a probation state that the pool data model cannot express, a settlement path with no billing owner, a routing swap that misses a second self-report code path, an event taxonomy with no schema — and no amount of re-ranking a coupled list removes coupling.
+
+The resolution is to stop presenting one roadmap. The work splits cleanly into **three planes** by what each piece depends on:
+
+- **Plane A — ship-now pieces.** Each is independently shippable (no ordering dependency on a sibling), independently valuable (worth doing alone), small enough to audit in one pass, and rests only on data and mechanisms that already exist. Each becomes its own GitHub issue and its own PR with its own audit loop. Issue-ready stubs are inline below. *These are the pieces this document commits to.*
+- **Gate G0 — one measurement.** The single query that decides whether Plane C's central assumption holds.
+- **Plane C — deferred design briefs.** Each is a *future separate SPEC* with its own audit loop, gated on G0. They are presented as briefs, not plans: their open questions are expected and are not defects of this document. Nothing in Plane C should be scheduled until G0 returns a number and the relevant brief has been through its own SPEC-audit loop.
+
+The four-level "Tier N/0/1/2" vocabulary of earlier revisions is retired — it was itself a recurring audit finding. Plane A / Gate / Plane C is the whole taxonomy.
+
+**Effort calibration** (unchanged from r4, applies to both planes): reference points from this repo — SPEC-037's IMPL landed at 16,536 insertions across 75 files (`d53e8650`) for one flag-gated feature; SPEC-036 took 14 audit rounds; any SPEC amendment is **two** audit loops (spec + IMPL) plus a governance declaration plus the antfleet-ops→Augustas11 merge sequence. "Operator hours" includes reading and re-firing audit lanes, which dominates.
 
 ---
 
-### R0 — Measure buyer demand per (provider, model, bucket) · **Tier N** · Size XS (~2-4 operator hours)
+### Plane A — Ship-now pieces (each an independent issue; commit to these)
 
-- **Problem**: The entire coordinator-observed thesis assumes sample volume nobody has measured. R4, R5, and R9 all consume per-bucket aggregates; at prebeta demand those buckets may be empty.
-- **Impact**: Decides whether R4/R5/R9 are executable or are a bet on demand that has not arrived. Also supplies the §6.2 falsification input.
-- **Change**: one read-only SQL pass over the existing coordinator `request_log`: requests/day per `(provider_assigned_id, model)`, and the same split by prompt-token range and concurrency proxy. Report median and p10 days.
+Every Plane-A piece below states an explicit **Non-goals** line. The non-goals are load-bearing: they are the boundary that keeps the piece auditable in one pass and stops it re-acquiring the coupling this decomposition removed.
+
+#### A1 — Overclaim remediation · Size S (~2-3 operator hours) · no dependencies
+
+- **Problem**: `README.md:22` and `docs/using-macprovider-with-openai-sdk.md:202` present verified model identity as a shipping guarantee ("the verified model hash … Verifiable inference"), violating the repo's own normative rule `SPEC-006:343`.
+- **Change**: apply the `phase7-verify/README.md:129` pattern — state what the signature proves, enumerate what it does not.
+- **Files**: `README.md`, `docs/using-macprovider-with-openai-sdk.md`.
+- **Tests/evidence**: `SPEC-006:3659`'s audit-cycle language check over the diff.
+- **Non-goals**: no code, no API, no other doc surface (the transcript/stats-label fixes are A6).
+- **Issue stub**: *"Fix two buyer-facing overclaims that present provider-self-reported model identity as verified. README.md:22 and docs/using-macprovider-with-openai-sdk.md:202 both state 'verifiable inference' unconditionally; SPEC-006:343 forbids exactly this. Rewrite both to the phase7-verify/README.md:129 pattern (what the signature proves vs does not). Docs-only."*
+
+#### A2 — Spec/doc drift reconciliation · Size S · no dependencies
+
+- **Problem**: §4.10 — SPEC-032's production-posture section is inverted (`:553` says the hello gate is on; it is off); SPEC-033's roster omits migration 019; SPEC-013 NFR-4 ("nothing leaves the machine") contradicts three live egress paths; `ops/runbooks/spec-drift-remediation.md:132` contradicts the 2026-07-22 overlay read.
+- **Change**: correct §4.10's list; add a "what the catalog signature does not prove" section to SPEC-023 (mirroring the SPEC-015 receipts negative-list); amend SPEC-013 NFR-4 to enumerate the egress it omits (hardware-evidence POST, `/v1/rate-card`, signed static-feed fetches — the HF pre-warm carve-out is already at `SPEC-013:1280-1281`).
+- **Files**: `specs/SPEC-032`, `SPEC-033`, `SPEC-013`, `SPEC-023`, `SPEC-008-tier2.md`, `ops/runbooks/spec-drift-remediation.md`.
+- **Non-goals**: no behavior change; governance-only paths, so the PR declaration is `behavior_change: "none"`.
+- **Issue stub**: *"Reconcile trust-surface spec drift catalogued in the research roadmap §4.10: SPEC-032 posture inverted, SPEC-033 roster incomplete, SPEC-013 NFR-4 egress list wrong, one runbook contradicting the live overlay. Add a signature-does-not-prove section to SPEC-023. Docs/spec-only."*
+
+#### A3 — Coordinator-side swap veto · Size S (~3-5 operator hours) · no dependencies
+
+- **Problem**: `swap_detected` is a paid-recommendation hard veto client-side (#742) but is decoded and then ignored coordinator-side — `benchmarkPassesGate` never checks it (`internal/autotune/gate.go:104-106`; §4.4). A provider that edits `last-recommendation.json`, or simply serves a swapping model, is not stopped.
+- **Change**: reject a benchmark with `swap_detected == true` in `benchmarkPassesGate`, symmetric with the client rule.
+- **Files**: `internal/autotune/gate.go`; test in `internal/autotune/`.
+- **Non-goals**: does **not** touch the ceiling, routing, or the hello-gate flag; it hardens one existing predicate. Pulled out of the former R3b specifically because it is standalone and needs none of the enforcement machinery.
+- **Issue stub**: *"benchmarkPassesGate (internal/autotune/gate.go) decodes swap_detected but never checks it, so the coordinator admits a swapping benchmark the client would veto (#742 asymmetry). Add the swap==true rejection + test. Self-contained; money-path-adjacent → three-lane audit."*
+
+#### A4 — In-band signed provenance · Size S · no dependencies
+
+- **Problem**: F3 — provenance ships as an unsigned client-side backfill table; the coordinator accepts nil; `require_provenance` is enforced only in `generate`, not at the four other `validate_candidate` call sites (`catalog-release.py:1324, 1589, 1649, 1697, 1721`).
+- **Change**: next catalog release carries `bench_gate.provenance` in-band; add `require_provenance` at every `validate_candidate` call site; adopt §7's ladder including `omlx_seeded`, retiring the client backfill and coordinator nil-acceptance with that release.
+- **Files**: `scripts/catalog-release.py`, catalog JSONs, `AutotuneStrictJSON.swift`/`AutotuneRecommend.swift`, `autotune_feeds.go`, SPEC-023 amendment.
+- **Non-goals**: does **not** change any gate's advisory status, and does **not** re-derive any gate value (that is Brief B7, and is unbuildable at current fleet size). Provenance stays metadata about an advisory field.
+- **Issue stub**: *"Ship bench_gate.provenance in the signed catalog bytes (today it is a hardcoded client backfill the signature does not cover) and enforce require_provenance at all five validate_candidate call sites, not just generate. Catalog + SPEC-023 amendment. Does not touch gate enforcement."*
+
+#### A5 — Ceiling-drift detection (with its event taxonomy) · Size M (~10-14 operator hours) · no dependencies
+
+- **Problem**: FR-HG7's silent half — a heartbeat model switch is applied unconditionally (`pool/provider.go:1851`) and emits no `SwapEvent` when it skips the loading transition (`:1899-1916`). The one live integrity chain (`require_hash_verified`) is re-checked per heartbeat, but the capacity ceiling is not, and the switch is invisible.
+- **Change**: persist `MaxAdmittedMinRAMGB` on `pool.Provider` (the field does **not** exist today — only `MaxAdmittedModelKey:200`/`MaxAdmittedModelID:201`, and `HelloGateDecision` computes the RAM value then drops it, `gate.go:13`). On `modelIDChanged`, compare **in memory** against that ceiling and emit a provider event + operator alert. **Detection only — no routing exclusion, no eviction.** This is the piece the product-design lane endorsed as the genuine Tier-0 hazard closure at a fraction of full enforcement's cost.
+- **Included, not deferred**: the provider-event taxonomy/schema entry for the new alert kind (`internal/providerevents/taxonomy.go`, `store.go`) — flagged by the architect lane as omitted; folded in here because A5 is ship-now and must therefore be complete.
+- **Plumbing note**: `min_ram_gb` for the new model needs the `autotune.Catalog` on `ws.Server` (`s.autotuneCatalog`, `server.go:912`), not the pool. Resolve the row on the `ws` side and pass the resolved integer into the pool, or mirror a model→`min_ram_gb` map into the registry — do not read Postgres under `Registry.mu`.
+- **Files**: `internal/pool/provider.go`, `internal/ws/server.go`, `internal/providerevents/taxonomy.go` + `store.go`.
+- **Non-goals**: emits an alert; changes **no** routing decision. Enforcement is Brief B2. Splitting detection from enforcement is what lets A5 ship without the sole-provider-floor design (§11) blocking it.
+- **Issue stub**: *"Persist MaxAdmittedMinRAMGB on pool.Provider (computed at hello, currently dropped) and alert when a heartbeat switches a provider to a model above its admitted ceiling — today that switch is silent (pool/provider.go:1851). Detection + a new provider-event kind only; no routing change. Closes the observable half of SPEC-032 FR-HG7."*
+
+#### A6 — Transcript/label honesty · Size S-M (~4-8 operator hours) · no dependencies
+
+- **Problem**: §4.9 — the `autotune --recommend` human transcript surfaces none of #772's `confidence`/provenance/drift (JSON-only); prints "Benchmarked N" where N is the *eligible* count; the donor message asserts a `$0.0050/hr` gate SPEC-023 v0.4 deleted; `/v1/stats/overview` publishes chip-table constants unlabeled.
+- **Change**: render `confidence`/provenance/drift in the transcript (the `RecommendationEmitter.swift:169-177` style is the house standard); fix "Benchmarked N"; delete the `$0.0050/hr` string; label the stats-overview synthetic capacity fields as estimates.
+- **Files**: `AutotuneRecommend.swift` (`humanTranscript`), `AutotuneCommand.swift:958`, `internal/stats/handlers.go` + `poolsnapshot.go`; a small SPEC-017 note for the label.
+- **Non-goals**: no new evidence, no scale-triggered `source` object (that is a larger SPEC-017 change deferred with the buyer-decision-support surfaces per §8's reframe).
+- **Issue stub**: *"Bring the autotune --recommend human transcript up to its JSON: show confidence/provenance/drift, fix the 'Benchmarked N' mislabel, delete the dead $0.0050/hr donor string, label the synthetic stats-overview capacity fields as estimates. CLI/stats strings."*
+
+#### A7 — Free hash-chain hardening · Size S (~3-5 operator hours) · no dependencies
+
+- **Problem**: the SE attestation already signs `claimed.model_hash` and the coordinator discards it (`pillar_c.go`); the rate card — the actual money input to earnings ranking — is fetched unsigned (F2).
+- **Change**: compare the SE-signed `claimed.model_hash` against the catalog row in `pillar_c.go`; sign the rate card (or fold it into the signed release unit).
+- **Files**: `internal/tier2/pillar_c.go`, `internal/buyer/rate_card.go`, release scripts.
+- **Non-goals**: does **not** attempt to re-derive the model hash from loaded tensors (out of reach without SPEC-036); `weights_manifest_sha256` — decide *separately* whether to compare or stop collecting; do not bundle it here if it needs a catalog schema field.
+- **Issue stub**: *"Two independent low-cost hardenings: (1) compare the already-SE-signed claimed.model_hash against the catalog in pillar_c.go (today discarded); (2) sign /v1/rate-card, the only unsigned input on the earnings path. Split into two PRs if the manifest question complicates either."*
+
+**Plane A sequencing**: none required — all seven are independent. Suggested first three (the committed minimum, §0): **A1** (overclaim), **A5** (ceiling-drift detection), plus **G0** below. A2/A3/A4/A6/A7 follow in any order as operator time allows.
+
+---
+
+### Gate G0 — Measure buyer demand per (provider, model, bucket) · Size XS (~2-4 operator hours)
+
+- **Why it is a gate, not a Plane-A piece**: it produces no change; it produces the *number that decides whether Plane C is executable at all*. The entire coordinator-observed thesis (§1.5) assumes enough buyer requests exist to fill per-(provider, model, workload-bucket) aggregates. At 1–2 providers and prebeta demand, splitting traffic across (provider × model × workload class × concurrency) plausibly yields single-digit or zero samples per bucket — in which case every Plane-C item that consumes observed aggregates degrades to its own fallback and the operator has bought a timer.
+- **Change**: one read-only SQL pass over the existing `request_log`: requests/day per `(provider_assigned_id, model)`, and the same split by prompt-token range and a concurrency proxy. Report median and p10 days per candidate bucket.
 - **Files**: none (operator query); optionally a `scripts/` helper.
-- **Evidence required**: a number, in the issue, before R4/R5 are scheduled.
-- **Blocks**: R1b, R4's threshold choice, R5 entirely.
+- **Output**: a number, recorded in the Plane-C tracking issue, **before any Plane-C brief is scheduled**.
 
-### R1a — Persist per-request TTFT and decode time · **Tier N** · Size S-M (~6-10 operator hours)
+---
 
-- **Problem**: True TTFT/decode measured on every request and discarded (F7).
-- **Change**: nullable `ttft_ms` and `decode_ms` columns on `request_log`, populated from `requestPhaseTiming` across all 8 relay paths. **Columns only — no classifier, no aggregate.**
-- **Contract note (missed in r2)**: this is a **governed schema change**, not an internal detail. SPEC-002 owns the `request_log` column table (`specs/SPEC-002-coordinator.md:1666-1690`) and SPEC-005 declares it read-only to billing (`specs/SPEC-005-billing.md:526-534`). Requires a SPEC-002 amendment + migration entry and consumer notes for SPEC-005/SPEC-007.
-- **Files**: `internal/requestlog/store.go` (+ migration), `internal/buyer/phase_timing.go`, `internal/buyer/server.go`, `specs/SPEC-002-coordinator.md`.
-- **Tests**: population across streaming/non-streaming/WS-tunnel; null-when-unmeasured; migration up/down.
-- **Blocks**: Tier N — do first regardless; its value strictly increases with earlier start.
+### Plane C — Deferred design briefs (each its own future SPEC + audit loop; gated on G0)
 
-### R1b — Runtime workload bucketing + aggregate · **Tier 1** · Size M, **gated on R0**
+These are analysis, not commitments. Each names what its own SPEC must resolve; the open questions inside them are expected. **None should be built until G0 returns a number and the brief has passed its own three-lane SPEC-audit loop.**
 
-- **Problem**: Unbucketed floors are unfair and gameable (§5.4).
-- **Change**: runtime classifier (prompt-token range × concurrency) borrowing SPEC-029 vocabulary — **new work**, since SPEC-029 explicitly excludes runtime classification — plus the per-(provider, model, bucket) aggregate.
-- **Open**: the classifier's shape is undecided (§11 Q4); R0 decides whether buckets can be populated at all.
+- **B1 — Persist per-request TTFT/decode columns** (was R1a). Nullable `ttft_ms`/`decode_ms` on `request_log`, populated from `requestPhaseTiming` across all 8 relay paths. *This one is nearly Plane-A* — columns only, value strictly increases with earlier start — **except** it is a governed schema change: SPEC-002 owns the `request_log` table (`SPEC-002:1666-1690`) and SPEC-005 declares it read-only (`SPEC-005:526-534`), so it needs a SPEC-002 amendment + migration + consumer notes. Promote it to Plane A only after that amendment is drafted; until then it carries the amendment as its gate. No classifier, no aggregate — those are B3.
+- **B2 — Ceiling enforcement** (was R3b). Turns A5's alert into action: over-ceiling/uncatalogued → routing-ineligible for that model; evidence-TTL added to the 30 s `trust_revalidation.go` sweep. **Its SPEC must resolve** the sole-provider case honestly (§5.3.6): integrity violations fail **closed** even when that empties the pool — the `CanaryTripFloorHeld` floor stays scoped to canary/health uncertainty, never to capacity/catalog/hash violations (the security lane's fail-open finding). Also: warm-up probe-target behavior when the ceiling changes (`providerProbeModelID` is the live consumer). Flips SPEC-032 AC-F1/AC-F2.
+- **B3 — Rank routing on observed throughput** (was R4). **Its SPEC must cover *both* self-report code paths**, not one: `EffectiveThroughput` in the "fast" objective (`routing/objective.go`, `candidate.go:80`) **and** `BalancedScores` in the "balanced" objective, which reads `p.ThroughputTPSEstimate` directly at a 0.4 weight (`routing/class.go:46`). Below the sample threshold use a conservative constant or randomized placement — **never** the provider's claimed number, which preserves the cold-start attack for exactly the new/rotated providers that warrant caution (security lane). Rank on combined TTFT+decode, not decode alone, since decode rate is inflatable by buffering-then-flushing (security lane, §3.3 Limit 2). Gated on B1 data + G0 volume.
+- **B4 — Probationary admission** (was R5). The largest brief and the one that must **not** be bundled with anything. Its SPEC must resolve, before any code: (1) a **new per-(provider, model) probation state** — `pool.Tier` is a per-provider scalar *and already the canary sanction state* (`pool/provider.go:1352`, `TierProvisional`→ban), and there is a *second* unrelated `rewards.TierProvisional`; neither can be reused; (2) a **pricing + settlement design** — probation traffic is proposed discounted/unbilled, but unbilled traffic yields zero `provider_credits` and can void payout under `minPayoutCredits` (`payout.go`), and no discount mechanism exists; this spans `internal/billing/`, `phase5-gateway/` (`usage_events`, `ReservationSettlement`), and a SPEC-022/005/006 amendment; (3) an **absolute** numeric exposure budget (§11 Q1) — relative caps give zero dilution at `pool_size: 1`; (4) anti-self-dealing that actually binds — the "≥2 payer accounts" rule is a two-account speed bump while registration is open (see B6), and the cited canarycorr prior art is provider-side, not payer-side; (5) grandfathering — existing providers are not retroactively placed in probation. The §6 flow is the *design sketch* feeding this brief; its Steps 0b/3/4 are proposals, and their appearance in §11 as open questions is correct, not a contradiction.
+- **B5 — Hello-gate-on, sandbox form** (survivor of the cut R6). Turning `require_autotune_hello_gate` on is a one-line ops flip, but naively it makes dual-control operator approval a hard admission gate on a one-operator team. The surviving design: unapproved providers may connect and receive **synthetic/internal probes only, never buyer traffic** — *not* the routable `admitted_but_unapproved` state r2 proposed, which the security lane showed reintroduces the exact admission bypass the gate exists to close. **Preconditions**: config-reload-without-restart (a single-provider-pool restart is a documented multi-hour outage, incident 2026-07-10); and the registered exception's `removal_condition` amended first (it currently demands admission "through durable hardware-trust approval … without global gate disabling"). Gated on B2.
+- **B6 — Close the identity re-registration wash** (was R7, re-scoped). Sanction *storage* is already correct (`provider_id`-keyed, durably persisted — the earlier F11 "erasable by `rm`" framing was wrong and was reversed in r4). The real gap: a sanctioned operator re-registers with a fresh keypair for a new `provider_id`, because registration is open (`referrals.require_for_registration: false`). This is a **policy** question, not a storage one: gate registration (invite/operator approval) or bind sanctions to a durable admission root above the credential. §11 Q5 frames the cost: does closing registration lose more supply than the wash costs in abuse?
+- **B7 — Gate re-derivation tooling** (was R8b). Stage-4 promotion arithmetic from ≥N verified providers × ≥M hardware classes. **Explicitly unbuildable until ≥3 verified providers exist**, and the >32 GB rows remain unmeasurable pending #584. Deferred by physics, not choice.
+- **B8 — Observed data into drift** (was R9). Feed B1/B3 aggregates in as the drift baseline; replace the provider-supplied `ModelLoadTimeMs` Pillar D threshold with observed history; add the RAM-self-report vs verified-tuple tripwire. Gated on B1 + G0.
+- **B9 — SPEC-036 compute-integrity (observe mode)** (was R12, post-beta). The only mechanism that would make a **cross-model-class** ceiling raise observation-backed rather than capacity+operator-backed — the named closure for B4's acknowledged weak spot (§3.3: latency cannot distinguish honest large-model service from cheaper substituted work). Enforce is unreachable at current supply (SPEC-036 §6.1); observe mode is the ceiling.
 
-### R2 — Overclaim remediation · **Tier 0** · Size S (~2-3 operator hours)
-
-- **Problem**: `README.md:22` and `docs/using-macprovider-with-openai-sdk.md:202` promise verified model identity as shipping, violating SPEC-006:343.
-- **Change**: apply the `phase7-verify/README.md:129` pattern.
-- **Tests**: SPEC-006:3659's audit-cycle language check over the diff.
-- **Blocks**: Tier 0. Unconditional, no dependencies.
-
-### R3a — Ceiling-drift detection · **Tier 0** · Size M (~8-12 operator hours)
-
-- **Problem**: FR-HG7's silent half — a heartbeat model switch is applied unconditionally and emits no event when it skips the loading transition.
-- **Change**: persist `MaxAdmittedMinRAMGB` on `pool.Provider` — the field does **not** exist today (only `MaxAdmittedModelKey` `:200` and `MaxAdmittedModelID` `:201`), and `HelloGateDecision` computes the value then drops it (§4.5). On `modelIDChanged`, compare **in memory** against that ceiling; emit a provider event + operator alert. **No routing exclusion, no eviction.**
-- **Plumbing note**: resolving the new model's `min_ram_gb` needs the `autotune.Catalog`, which lives on `ws.Server` (`s.autotuneCatalog`, `server.go:912`), not in `pool`. Either resolve the row on the `ws` side and pass the resolved integer into the pool, or mirror a minimal model→`min_ram_gb` map into the registry. Removing the Postgres read from under `Registry.mu` (an earlier fix) does not by itself make the comparison buildable where r3 placed it.
-- **Why split from R3b**: detection alone closes the Tier-0 hazard without touching sole-provider semantics, so nothing in §11 blocks it.
-- **Files**: `internal/pool/provider.go`, `internal/ws/server.go`.
-- **Tests**: heartbeat-switch emits the event; no routing behavior change.
-
-### R3b — Ceiling enforcement · **Tier 1** · Size L (~20-30 operator hours)
-
-- **Change**: over-ceiling/uncatalogued → routing-ineligible for that model; add evidence-TTL to the 30 s `trust_revalidation.go` sweep; enforce `swap_detected` in `benchmarkPassesGate`. **Integrity violations fail closed even when that empties the pool** (§5.3.6) — the sole-provider floor stays scoped to canary/health.
-- **Files**: `internal/pool/provider.go`, `internal/ws/trust_revalidation.go`, `internal/autotune/gate.go`, `internal/routing/filter.go`, SPEC-032 amendment.
-- **Tests**: SPEC-032 AC-F1/AC-F2 flipped to pass; fail-closed-on-empty-pool test; sweep TTL-expiry.
-- **Open**: warm-up probe-target behavior when the ceiling changes (`providerProbeModelID` is the live consumer).
-
-### R4 — Rank routing on observed throughput · **Tier 1** · Size M, **gated on R0**
-
-- **Problem**: F12 — the "fast" objective ranks on a provider-authored number.
-- **Change**: substitute R1a/R1b's observed aggregate for `ThroughputTPSEstimate` in `EffectiveThroughput`. **Below the sample threshold, use a conservative constant or randomized placement — never the provider's claimed throughput**, which would preserve the cold-start ranking attack for exactly the new or rotated providers that most warrant caution. Combine TTFT with decode rather than ranking on decode alone (§3.3 Limit 2).
-- **Files**: `internal/routing/candidate.go`, `internal/routing/objective.go`, wiring in `internal/buyer/server.go`; SPEC-002/SPEC-004 amendment.
-- **Tests**: inflated self-report gains no rank; cold-start fallback is conservative.
-
-### R5 — Probationary admission · **Tier 1** · **UNSIZEABLE — do not schedule yet**
-
-- **Blocked on three inputs**: (1) R0's volume answer and the §6.2 falsification test; (2) a probation **pricing and settlement design** (§6.3 Step 3) — the escrow direction spans `internal/billing/`, `phase5-gateway/` (`usage_events`, `ReservationSettlement`), and a SPEC-022/SPEC-005/SPEC-006 amendment, and no discount mechanism exists today; (3) the numeric exposure budget (§11 Q1), without which the item's own adversarial test cannot be written.
-- **Scope corrections already settled**: a **new per-(provider, model) probation state** — not `pool.TierProvisional`, which is a per-provider scalar *and* already the canary sanction state; absolute rather than relative exposure caps; never promote on absence of evidence; withdraw the canarycorr anti-Sybil citation; fold the former R6's `admitted_but_unapproved` here **only in a no-buyer-traffic form** (see below).
-- **Thin-traffic path — resolved, not open.** §6.3 Steps 0b/4 adopt the canary-free path: elapsed-time bootstrap **conditioned on a minimum observed-sample floor**, never auto-promotion on absence of evidence. R5 therefore carries **no** dependency on SPEC-031 canary re-enable. Earlier revisions left this as an either/or in R5 while §6 had already chosen; the choice stands and the either/or is withdrawn.
-- **Grandfathering.** Providers already serving when R5 lands are **not** retroactively placed in probation (consistent with the settlement non-retroactivity rule in §6.3). Step 0b's "no exemption" governs providers admitted after R5, not the existing pool — otherwise at `pool_size: 1` the network's only provider would enter capped, repriced serving on the day the feature ships.
-- **Recommended next action**: a time-boxed spike whose deliverable is the pricing design and the budget numbers, not an implementation.
-
-### R6 — **CUT.** Hello-gate flip folded into R3b + R5
-
-r2 proposed `admitted_but_unapproved` as a routable pre-approval state. Two independent findings killed it: it **reintroduces the admission bypass the hello gate exists to close** (a provider without active trusted hardware identity becomes routable), and it conflicts with the existing evidence model — `LatestVerified` returns only `status='verified'` rows with active trust (`internal/autotune/evidence_pg.go:70-92`), while `waiting_trust` is parked by design (`hardwareverify/verify.go:240-245`). It also would not clear its own registered exception, whose `removal_condition` requires admitting providers "through durable hardware-trust approval … without global gate disabling" and whose `expiry_unknown_reason` names #582 stranger onboarding.
-
-What survives: unapproved providers may connect and receive **synthetic/internal probes only, never buyer traffic**, as a sandbox contract inside R5. The flag flip itself is a one-line ops task gated on R3b + config-reload-without-restart (a coordinator restart on a single-provider pool is a documented multi-hour outage — incident 2026-07-10). The exception's removal condition should be **amended before** designing to it.
-
-### R7 — Close the identity re-registration wash · **Tier 1** · Size S-M (re-scoped in r4)
-
-- **Problem** (narrowed): F11's earlier framing was wrong — sanction keying is already correct (`provider_id`-keyed, durably persisted). The remaining gap is that a sanctioned operator can **re-register with a fresh keypair** for a new `provider_id`, because `referrals.require_for_registration: false` leaves registration open.
-- **Change**: gate registration (invite/referral or operator approval) so a new `provider_id` cannot be minted anonymously, **or** bind sanctions to a durable admission root above the credential (invite code, payment-account identity). No sanction-storage rework is needed.
-- **Design note for R5, not a work item**: key any new probation state to `provider_id` exactly as `canarySanctions` already does (`pool/provider.go:558`); do **not** key it to the hardware tuple.
-- **Honest framing**: absent a registration gate this item does not exist — there is nothing to harden on the storage side. The question is a policy one (§11 Q5): does closing registration cost more supply than the wash costs in abuse?
-
-### R8a — In-band signed provenance · **Tier 2** · Size S
-
-Next release ships in-band provenance; `require_provenance` at all five `validate_candidate` call sites; adopt §7's ladder including `omlx_seeded`.
-
-### R8b — Gate re-derivation tooling · **Tier 2** · Size L, **unbuildable until ≥3 verified providers exist**
-
-Stage-4 promotion arithmetic; >32 GB rows remain unmeasurable pending #584.
-
-### R9 — Observed data into drift · **Tier 2** · Size M, gated on R0/R1b
-
-Feed aggregates in as the drift baseline; replace `ModelLoadTimeMs`-derived Pillar D thresholds; add the RAM self-report vs verified-tuple tripwire.
-
-### R10 — Spec/doc drift · **Tier N** · Size S
-
-Fix §4.10's list; add a "what the catalog signature does not prove" section to SPEC-023; amend SPEC-013 NFR-4 to enumerate the egress paths it currently omits — the hardware-evidence POST, `/v1/rate-card`, and signed static-feed fetches (the HF pre-warm carve-out is already present at `SPEC-013:1280-1281`).
-
-### R11 — Low-cost hash-chain hardening · **Tier 2** · Size M
-
-Compare the SE-signed `claimed.model_hash` against the catalog in `pillar_c.go` (already signed, currently discarded); define an expected source for `weights_manifest_sha256` or stop collecting it; sign the rate card.
-
-### R12 — SPEC-036 compute-integrity (observe) · **Tier 2, post-beta** · Size XL
-
-The named closure for §6.3 Step 4's carried operator exception. Enforce is unreachable at current supply (SPEC-036 §6.1).
-
-**Sequencing**: Tier 0 and Tier N run together first — `R2 ∥ R3a` (Tier 0) alongside `R0 ∥ R1a ∥ R8a ∥ R10` (Tier N). Then Tier 1: `R3b`, and — **only if R0 justifies them** — `R1b → R4 → R5`; `R7` joins when a non-personally-installed provider is forecast. Tier 2 (`R8b`, `R9`, `R11`, `R12`) follows. No Tier-1 item precedes a Tier-0 item.
+**Plane-C ordering** (only after G0, and each after its own SPEC audit): `B1 → B2 → B3 → B4`, with `B5` after `B2`, `B6` when a non-personally-installed provider is forecast, and `B7/B8/B9` last. This ordering is advisory; the gating facts (G0's number, each brief's own audit) govern, not the arrows.
 
 ---
 
 ## 11. Open Questions
 
-1. **Probation exposure budget and pricing** (R5): numeric caps; and the escrow-vs-discount settlement design, without which R5 is unsizeable. Largest single unknown in the document.
-2. **Quorum for `trusted_provider_matrix`** (R8b): N providers, M hardware classes; rows only one provider ever serves; whether #584's unblock changes the answer.
-3. **Lead-time forecasting** (§9.2): how far ahead can the operator actually forecast the first non-personally-installed provider? If the answer is "no warning," Tier 1 must start unconditionally.
-4. **Runtime bucketing shape** (R1b): prompt-token ranges alone, or is concurrency a day-one dimension? Gated on R0.
-5. **Registration gating** (R7): closing registration is the only thing that stops a sanctioned operator re-registering a fresh `provider_id`. Does that cost more supply than the wash costs in abuse? This is the whole of R7.
-6. **Cross-class raise cap** (§5.2 carve-out, §6.3 Step 4): what is the hard cap on outstanding operator-granted cross-class raises — or should cross-class upgrades simply be refused until R12?
-7. **Sample floor vs stalled providers** (R5): if R0 shows buckets cannot fill, "never promote on absence of evidence" means honest providers stall on upgrades. Operator-granted promotion under the §5.2 carve-out, or the upgrade path stays closed until demand grows?
-8. **SPEC-022 enforce timing**: interacts with R5's settlement story.
-9. **Rate-card signing mechanics** (R11): sidecar vs folded into the release unit.
+1. **Probation exposure budget and pricing** (Brief B4): numeric caps; and the escrow-vs-discount settlement design, without which Brief B4 is unsizeable. Largest single unknown in the document.
+2. **Quorum for `trusted_provider_matrix`** (Brief B7): N providers, M hardware classes; rows only one provider ever serves; whether #584's unblock changes the answer.
+3. **Lead-time forecasting** (§9.2): how far ahead can the operator actually forecast the first non-personally-installed provider? If the answer is "no warning," the opening-gate briefs (§9.2) must start unconditionally.
+4. **Runtime bucketing shape** (Brief B3): prompt-token ranges alone, or is concurrency a day-one dimension? Gated on Gate G0.
+5. **Registration gating** (Brief B6): closing registration is the only thing that stops a sanctioned operator re-registering a fresh `provider_id`. Does that cost more supply than the wash costs in abuse? This is the whole of Brief B6.
+6. **Cross-class raise cap** (§5.2 carve-out, §6.3 Step 4): what is the hard cap on outstanding operator-granted cross-class raises — or should cross-class upgrades simply be refused until Brief B9?
+7. **Sample floor vs stalled providers** (Brief B4): if G0 shows buckets cannot fill, "never promote on absence of evidence" means honest providers stall on upgrades. Operator-granted promotion under the §5.2 carve-out, or the upgrade path stays closed until demand grows?
+8. **SPEC-022 enforce timing**: interacts with Brief B4's settlement story.
+9. **Rate-card signing mechanics** (A7): sidecar vs folded into the release unit.
 
 ---
 
@@ -561,7 +565,7 @@ The named closure for §6.3 Step 4's carried operator exception. Enforce is unre
 - `[E-session]` Pearl-DB claims in §2.3 — read-only SSH re-verification attempted and blocked by session policy; semantics are code-verified and Entry 198 documents one live instance.
 - Live overlay values are from committed 2026-07-22/23 artifacts, not a fresh read.
 - `[E-issue]` contents are not in-repo and are not version-pinned by this document.
-- **R0's demand numbers do not exist yet.** Every claim in this document about whether observed-evidence machinery is *executable* (as distinct from *correct*) is provisional until R0 runs.
+- **Gate G0's demand numbers do not exist yet.** Every claim in this document about whether observed-evidence machinery is *executable* (as distinct from *correct*) is provisional until G0 runs.
 
 ### 12.4 Review history
 
@@ -600,3 +604,7 @@ The named closure for §6.3 Step 4's carried operator exception. Enforce is unre
   - **§6.3 Step 2 corrected** — the capacity check now includes the 4 GB safety margin the shipped client already enforces (SPEC-023:447, AC-11 `:697`, `AutotuneRecommend.swift:1599, 1824`); without it the coordinator check was looser than the provider binary it backstops.
   - **§5.3.6 hardened** — a held sole-provider floor must degrade to the smallest admitted model, never no-op; and the floor predicate keys on a self-reported `ModelID` a provider can set to gain immunity, so post-R3a floors must key on the admitted identity.
   - **Consistency and citation fixes** — R-number crosswalk added; tier labels reconciled across §9.2 and §10 (every item has exactly one tier; no Tier-1 item precedes a Tier-0 item); canary thin-traffic either/or withdrawn (§6 had already chosen); R5 grandfathering rule added; `runtime_validated_only` given a ladder rung; SPEC-029 class names corrected to their actual identifiers; `spec-drift-remediation.md` line corrected to `:130`; R3a plumbing note added (`autotune.Catalog` lives on `ws.Server`, not `pool`); `account_id` nullability noted as making the ≥2-payer rule unevaluable on legacy paths; NFR-4 remedy narrowed to the three paths it actually omits.
+
+- **r5 — decomposition** (this revision), prompted by the observation that four review rounds never reached 0 C/H/M because the *bundle* was the defect, not the wording (see §10 preamble). The single ranked roadmap is replaced by **Plane A (ship-now independent pieces) / Gate G0 / Plane C (deferred briefs)**, and the four-level Tier N/0/1/2 vocabulary — itself a recurring audit finding — is retired. This is a re-partition, not new analysis: every r4 item maps to a Plane-A piece, the gate, or a Plane-C brief, per the crosswalk below. The change that makes the document *converge* is structural: the speculative trust subsystem (observed-routing + probation + hello-gate-on + identity gating) is moved out of the committed plan into deferred briefs, each a future SPEC with its own audit loop, so their unresolved design questions are expected properties of a brief rather than defects of an approved plan. §6 is relabeled the design sketch feeding Brief B4. Directly resolves the residual codex findings: the tier-label inconsistency (vocabulary retired), the R4 second-self-report-path miss (`class.go:46` `BalancedScores` now named as required scope in Brief B3), probation under-scoping (Brief B4, expected), the R3a event-taxonomy omission (folded into ship-now piece A5), and the system-map registration gap (row added to §2.1).
+
+  **r4 → r5 crosswalk**: `R0 → G0`; `R1a → B1` (needs the SPEC-002 amendment before it can join Plane A); `R1b → folded into B3`; `R2 → A1`; `R3a → A5`; `R3b → B2`; `R4 → B3`; `R5 → B4`; former `R6 → B5` (sandbox form); `R7 → B6`; `R8a → A4`; `R8b → B7`; `R9 → B8`; `R10 → A2`; `R11 → A7`; `R12 → B9`. New in r5: `A3` (coordinator swap veto) pulled out of R3b as an independent ship-now piece.
