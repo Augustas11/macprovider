@@ -62,6 +62,20 @@ private func osStatus(from cfError: Unmanaged<CFError>?) -> OSStatus {
     return OSStatus(nsError.code)
 }
 
+enum MacProviderKeychainAccessGroup {
+    static func resolve(_ override: String?) -> String {
+        if let override { return override }
+        if let env = ProcessInfo.processInfo.environment["MACPROVIDER_KEYCHAIN_ACCESS_GROUP"],
+           !env.isEmpty { return env }
+        // Production value: replace TEAMID with the 10-char Apple Developer Team ID.
+        // The keychain-access-groups entitlement must list this group.
+        // During local dev/CI, set MACPROVIDER_KEYCHAIN_ACCESS_GROUP to a signed
+        // test group or leave unset — loadOrCreate will throw missingEntitlement,
+        // which the generator treats as graceful SE-unavailable.
+        return "REPLACEME.live.streamvc.macprovider"
+    }
+}
+
 // MARK: - SecureEnclaveIdentity
 
 #if arch(arm64)
@@ -193,15 +207,7 @@ final class SecureEnclaveIdentity: @unchecked Sendable {
     // MARK: - Access Group Resolution
 
     static func resolveAccessGroup(_ override: String?) -> String {
-        if let override { return override }
-        if let env = ProcessInfo.processInfo.environment["MACPROVIDER_KEYCHAIN_ACCESS_GROUP"],
-           !env.isEmpty { return env }
-        // Production value: replace TEAMID with the 10-char Apple Developer Team ID.
-        // The keychain-access-groups entitlement must list this group.
-        // During local dev/CI, set MACPROVIDER_KEYCHAIN_ACCESS_GROUP to a signed
-        // test group or leave unset — loadOrCreate will throw missingEntitlement,
-        // which the generator treats as graceful SE-unavailable.
-        return "REPLACEME.live.streamvc.macprovider"
+        MacProviderKeychainAccessGroup.resolve(override)
     }
 
     // MARK: - Private Helpers
