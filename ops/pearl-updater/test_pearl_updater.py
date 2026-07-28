@@ -800,6 +800,33 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.assertFalse((install / "tier2-catalog.json").exists())
 
+    def test_catalog_directory_identity_includes_keyring_digest(self):
+        release = self.stage(self.verify())
+        changed_files = dict(release.catalog.files)
+        changed_files["trusted-keys.json"] = "f" * 64
+        rebound_keyring = updater_module.Release(
+            release.tag,
+            release.version,
+            release.commit,
+            release.provider_advertised_version,
+            release.coordinator,
+            release.gateway,
+            updater_module.CatalogRelease(
+                release.catalog.release_id,
+                release.catalog.policy_version,
+                changed_files,
+            ),
+            release.provider_admission_rollout,
+            release.directory,
+        )
+
+        original_name = self.updater._catalog_release_directory_name(release)
+        rebound_name = self.updater._catalog_release_directory_name(rebound_keyring)
+
+        self.assertNotEqual(original_name, rebound_name)
+        self.assertTrue(original_name.startswith(f"{release.catalog.release_id}-"))
+        self.assertTrue(rebound_name.startswith(f"{release.catalog.release_id}-"))
+
     def test_catalog_install_repairs_existing_release_permissions_for_service(self):
         release = self.stage(self.verify())
         install = self.updater.install_root

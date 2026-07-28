@@ -20,6 +20,11 @@ bash -n "$RECOVER_SH"
 grep -q '_autotune_release=\\$_autotune_root/releases/$AUTOTUNE_RELEASE_DIR_NAME' "$DEPLOY_SH" ||
   fail "deploy must stage a content-addressed immutable catalog envelope"
 
+grep -q 'AUTOTUNE_RELEASE_CONTENT_SHA256=' "$DEPLOY_SH" &&
+  grep -q 'trusted-keys.json' "$DEPLOY_SH" &&
+  grep -q 'asset_digest = hashlib.sha256(path.read_bytes()).hexdigest()' "$DEPLOY_SH" ||
+  fail "deploy must content-address catalog envelopes by the full catalog asset set"
+
 grep -q 'install .*tier2-catalog.json \\$_autotune_stage/tier2-catalog.json' "$DEPLOY_SH" &&
   grep -q 'verify-directory --directory \\$_autotune_stage --tier2-public-key-file' "$DEPLOY_SH" ||
   fail "deploy must stage and authenticate Tier-2 inside the release envelope"

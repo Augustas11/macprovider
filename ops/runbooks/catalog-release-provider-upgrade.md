@@ -49,9 +49,12 @@ when its release metadata and both existing feed records remain byte-for-byte
 identical; no new two-feed row or later Tier-2 removal is accepted.
 
 Pearl release directories are content-addressed as
-`<release_id>-<release.json sha256 prefix>`, so a three-feed publication never
-overwrites the older two-feed directory that may share its release ID. After
-Entry 190, the coordinator reads Tier-2 only from
+`<release_id>-<catalog asset-set sha256 prefix>`, where the digest binds every
+signed catalog envelope member (`release.json`, `trusted-keys.json`, all three
+feed files, and detached feed signatures). A keyring-only or signature-only
+catalog change therefore creates a new immutable directory instead of
+overwriting an existing directory with the same release ID. After Entry 190,
+the coordinator reads Tier-2 only from
 `/opt/macprovider/autotune/current/tier2-catalog.json`. Updater and direct
 deploy stage all three signed feeds inside the immutable release directory,
 then atomically switch the single `autotune/current` pointer. During the

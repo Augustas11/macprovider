@@ -15,7 +15,7 @@ enable gate, the buyer-canary timer, and
 Abort before mutation unless all facts below are freshly true:
 
 - coordinator and gateway v1.8.60 are active and healthy;
-- the active signed catalog is
+- the active signed catalog is the legacy `release.json`-addressed directory
   `releases/published-2026-07-10-catalog-recovery-v1-386803eac2069a37`;
 - active and legacy Tier-2 SHA-256 are both
   `ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92`;
