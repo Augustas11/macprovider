@@ -15,3 +15,4 @@
 | **#540 AEAD rekey** | [`540-aead-rekey-oneshot.md`](./540-aead-rekey-oneshot.md) | Isolated, approved, no-retry request/age rekey evidence |
 | **#584 emergency-disable drill** | [`584-emergency-disable-drill.md`](./584-emergency-disable-drill.md) | Pearl kill-switch drill paper; never re-enables timer/gates |
 | **#584 physical baselines** | [`584-physical-baseline-matrix.md`](./584-physical-baseline-matrix.md) | Per-tier floors + thermal/memory collection matrix before re-enable |
+| **#785 Pearl config reconciliation** | [`pearl-config-reconciliation.md`](./pearl-config-reconciliation.md) | Read-only source-of-truth drift classification before coordinator deploys |

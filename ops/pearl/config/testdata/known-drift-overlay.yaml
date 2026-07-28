@@ -1,0 +1,7 @@
+coordinator:
+  compatibility_set:
+    target_id: "Augustas11/macprovider:v1.8.61@example"
+    accepted_ids:
+      - "Augustas11/macprovider:v1.8.61@example"
+pool:
+  canary_enabled: false

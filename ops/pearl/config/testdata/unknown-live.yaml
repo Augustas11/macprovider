@@ -1,0 +1,25 @@
+listen:
+  buyer_port: 8443
+pool:
+  heartbeat_interval_s: 1
+  warmup_gate_enabled: false
+routing:
+  request_timeout_s: 999
+diagnostics:
+  debug_label: sk-redaction-sentinel-not-for-output
+auth:
+  operator_key: env:inline-redaction-sentinel-not-for-output
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  operator_keys:
+    alice: inline-redaction-sentinel-not-for-output
+providers:
+  - provider_id: mac
+    endpoint_url: ""
+    display_name: Pearl Mac provider
+rewards:
+  rate_card:
+    default:
+      prompt_credits_per_mtok: 600000
+      completion_credits_per_mtok: 1000000
+coordinator_advertised_version:
+  latest_binary_version: "1.8.61"

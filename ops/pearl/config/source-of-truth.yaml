@@ -1,0 +1,139 @@
+schema_version: pearl-config-source-v1
+issue: 785
+description: >
+  Pearl coordinator config source-of-truth classification for read-only drift
+  reconciliation. This manifest classifies ownership; it is not a migration
+  plan and must not be used to overwrite live production config.
+
+pearl:
+  ssh_target: pearl
+  files:
+    base_product_defaults:
+      repo_path: phase4-coordinator/dist/coordinator.yaml
+      live_path: /opt/macprovider/coordinator.yaml
+      owner: base_product_defaults
+    production_overlay:
+      live_path: /etc/macprovider/coordinator.pearl-overlays.yaml
+      owner: pearl_production_overlay
+      repo_mirror: manifest-only
+      note: >
+        Overlay contents can contain production-only posture. PR B tracks
+        ownership here without checking a non-secret mirror into the repo.
+    secrets_env:
+      live_path: /etc/macprovider/coordinator.env
+      owner: pearl_operator_secrets
+      values: never_log
+
+tracked_base_owned_prefixes:
+  - listen
+  - coordinator.require_gateway_context
+  - pool
+  - routing
+  - provider_http
+  - limits
+  - relay
+  - auth.require_provider_tokens
+  - auth.allow_tokenless_provisional_bootstrap
+  - referrals
+  - explorer
+  - stats
+  - onboarding
+  - storage
+  - logging
+  - autotune
+  - rewards.rate_card
+  - rewards.global_multiplier
+  - rewards.provider_share
+  - admission
+  - tier2
+
+fleet_version_policy_owned_prefixes:
+  - coordinator_advertised_version
+
+pearl_overlay_owned_prefixes:
+  - coordinator.compatibility_set
+  - pool.canary_enabled
+  - malibu_emission
+  - opoi
+  - proof_of_weights
+
+known_config_drift:
+  - path: pool.heartbeat_interval_s
+    drift_kind: value_mismatch
+    tracked: 30
+    live: 1
+    owner: pearl_production_overlay
+    category: Evidence
+    rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
+  - path: pool.warmup_gate_enabled
+    drift_kind: value_mismatch
+    tracked: true
+    live: false
+    owner: pearl_production_overlay
+    category: Evidence
+    rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
+  - path: coordinator_advertised_version.latest_binary_version
+    drift_kind: value_mismatch
+    tracked: "1.8.65"
+    live: "1.8.61"
+    owner: fleet_version_admission_policy
+    category: Evidence
+    rationale: Capability-gated recommendation policy drift is classified for operator review.
+  - path: coordinator_advertised_version.required_binary_version
+    drift_kind: tracked_only
+    tracked: "1.8.33"
+    owner: fleet_version_admission_policy
+    category: Evidence
+    rationale: Hard admission floor exists in tracked source; absence live is classified until PR C.
+
+provider_rows:
+  tracked_static_provider_ids:
+    - mac
+  pearl_registered_static_provider_ids:
+    - augustass-macbook-air
+  registered_provider_field_types:
+    provider_id: string
+    endpoint_url: string
+    display_name: string
+    model: string
+    model_id: string
+    status: string
+    priority: integer
+    weight: number
+    max_concurrent_requests: integer
+    tags: string_list
+  live_only_registered_provider_category: Inference
+  owner: registered_static_providers
+  source_note: >
+    Provider rows are config posture, not secrets. Token material remains in
+    coordinator.env or databases and must never be mirrored here.
+
+env_key_names:
+  allowed:
+    - APPLE_TEAM_ID
+    - C2C_COORD_OPERATOR_KEY_SHA256
+    - C2C_COORD_SERVICE_TOKEN_SHA256
+    - CATALOG_CANARY_AUTH_TOKEN
+    - CATALOG_CANARY_PROVIDER_ID
+    - GATEWAY_SERVICE_TOKEN
+    - MALIBU_EMISSION_WRITER_DSN
+    - MODEL_HASH_LEGACY_UNTIL
+    - ONBOARDING_AUTH_POLICY_APPROVE_DSN
+    - ONBOARDING_AUTH_POLICY_CUTOVER_DSN
+    - ONBOARDING_AUTH_POLICY_REQUEST_DSN
+    - ONBOARDING_HARDWARE_TRUST_APPROVE_DSN
+    - ONBOARDING_HARDWARE_TRUST_REQUEST_DSN
+    - ONBOARDING_POSTGRES_DSN
+    - OPERATOR_AUTH_POLICY_A
+    - OPERATOR_AUTH_POLICY_B
+    - OPERATOR_KEY
+    - STATS_PARTNER_KEYS_WRITER_DSN
+    - STATS_READER_DSN
+    - STATS_ROLLUP_DSN
+  note: Only key names may be printed; values are always masked.
+
+rate_card:
+  source: phase4-coordinator/dist/coordinator.yaml
+  path: rewards.rate_card
+  owner: tracked_rate_card_source
+  policy: Live rate-card drift is unknown unless a future manifest revision explicitly classifies it.

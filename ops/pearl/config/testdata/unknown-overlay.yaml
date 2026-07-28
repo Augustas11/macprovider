@@ -1,0 +1,5 @@
+coordinator:
+  compatibility_set:
+    target_id: "Augustas11/macprovider:v1.8.61@example"
+unexpected:
+  private_key: redaction-sentinel-not-for-output
