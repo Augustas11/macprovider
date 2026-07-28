@@ -25,8 +25,8 @@ if [ "$local_count" != "1" ]; then
   fail "local GATEWAY_CONFIG C2 path should appear exactly once inside --dry-run-local, got $local_count"
 fi
 
-grep -q 'bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP"' "$DEPLOY_SH" ||
-  fail "production C2 path does not validate the installed Pearl gateway config copy"
+grep -q 'bash "$CHECK_SCRIPT" "$DEPLOY_CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP"' "$DEPLOY_SH" ||
+  fail "production C2 path does not validate the effective coordinator config with the installed Pearl gateway config copy"
 
 for proof in C2C_COORD_OPERATOR_KEY_SHA256 C2C_COORD_SERVICE_TOKEN_SHA256 C2C_GATEWAY_SERVICE_TOKEN_SHA256 C2C_GATEWAY_OPERATOR_KEY_SHA256; do
   grep -q "$proof=\"\$$proof\"" "$DEPLOY_SH" ||

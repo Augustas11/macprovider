@@ -52,7 +52,15 @@
 #                    raw credential values. Production computes these proofs
 #                    on Pearl and returns only the digests.
 #   SKIP_C2_CHECK    default: 0   skip C2 timer/header assertions only (development only)
-#   ALLOW_CONFIG_DRIFT default: 0 push local coordinator.yaml over live one
+#   CONFIG_MODE      default: preserve-live
+#                    preserve-live: validate and keep Pearl's live
+#                    /opt/macprovider/coordinator.yaml; tracked dist/
+#                    coordinator.yaml is not uploaded or installed.
+#                    apply-tracked: install tracked dist/coordinator.yaml only
+#                    when it already matches live. Broad ALLOW_CONFIG_DRIFT=1
+#                    is rejected; use a reviewed config migration instead.
+#   ALLOW_CONFIG_DRIFT deprecated: broad local-over-live config replacement is
+#                    refused by this script.
 #   SKIP_TCP_TUNING default: 0    skip Pearl TCP sysctl install/apply step
 #   MODEL_HASH_LEGACY_UNTIL is read from /etc/macprovider/coordinator.env
 #                    when the production config declares the bounded
@@ -122,6 +130,20 @@ CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
 CATALOG_CANARY_SSH_TARGET="${CATALOG_CANARY_SSH_TARGET:-}"
 CATALOG_CANARY_SSH_KEY="${CATALOG_CANARY_SSH_KEY:-$HOME/.ssh/macprovider_canary_ed25519}"
 CATALOG_CANARY_INSTALL_DIR="${CATALOG_CANARY_INSTALL_DIR:-macprovider/catalog-release}"
+CONFIG_MODE="${CONFIG_MODE:-preserve-live}"
+case "$CONFIG_MODE" in
+  preserve-live|apply-tracked) ;;
+  *)
+    echo "aborting deploy: CONFIG_MODE must be preserve-live or apply-tracked, got: $CONFIG_MODE" >&2
+    exit 2
+    ;;
+esac
+if [ "${ALLOW_CONFIG_DRIFT:-0}" = "1" ]; then
+  echo "aborting deploy: ALLOW_CONFIG_DRIFT=1 is no longer a safe deploy bypass." >&2
+  echo "  Use CONFIG_MODE=preserve-live for code/catalog deploys that keep Pearl's live config." >&2
+  echo "  Use a reviewed field-scoped config migration for production config changes." >&2
+  exit 2
+fi
 
 # Issue #244 R1 SEC HIGH-1 / CODE MED-2 / ARCH HIGH-2 — validate operator-
 # overridable values up front so they cannot inject shell metacharacters
@@ -401,6 +423,7 @@ STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
 STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
 STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
+DEPLOY_CONFIG="$CONFIG"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 DEPLOY_RECOVER="$DIST_DIR/coordinator-deploy-recover.sh"
 DEPLOY_GUARD="$DIST_DIR/systemd/macprovider-coordinator-deploy-guard.conf"
@@ -560,7 +583,7 @@ yaml_tier2_value() {
 # query e.g. `stats.enabled` in addition to `tier2.catalog_path`. Same
 # scoping rule: read keys until the next top-level block.
 yaml_block_value() {
-  yaml_file_block_value "$CONFIG" "$1" "$2"
+  yaml_file_block_value "$DEPLOY_CONFIG" "$1" "$2"
 }
 
 yaml_file_block_value() {
@@ -586,18 +609,109 @@ yaml_file_block_value() {
   ' "$file"
 }
 
+# Local validation may need to read Pearl's live coordinator.yaml in
+# CONFIG_MODE=preserve-live. Preserve env:NAME references because later gates
+# prove those runtime variables on Pearl; mask inline secret material before it
+# can land in a local temp file or logs.
+redact_dsn() {
+  sed -E 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+@#\1***@#g'
+}
+sanitize_live_config_for_local_validation() {
+  awk '
+    function indent_of(s) {
+      match(s, /^[[:space:]]*/)
+      return RLENGTH
+    }
+    function mask_scalar(s) {
+      sub(/:.*/, ": <MASKED>", s)
+      return s
+    }
+    function suppress_secret_continuation(s) {
+      skip_secret_block = 1
+      secret_block_indent = indent_of(s)
+    }
+    function mask_secret_scalar(s) {
+      suppress_secret_continuation(s)
+      return mask_scalar(s)
+    }
+    skip_secret_block && $0 ~ /^[[:space:]]*(#|$)/ { next }
+    skip_secret_block {
+      if (indent_of($0) > secret_block_indent) {
+        next
+      }
+      skip_secret_block = 0
+    }
+    /^[^[:space:]#][^:]*:[[:space:]]*/ {
+      in_auth = ($0 ~ /^auth:[[:space:]]*(#.*)?$/)
+      in_referrals = ($0 ~ /^referrals:[[:space:]]*(#.*)?$/)
+      in_secret_map = 0
+    }
+    in_auth && /^[[:space:]]*operator_keys:[[:space:]]*(#.*)?$/ {
+      in_secret_map = 1
+      secret_map_indent = indent_of($0)
+      print
+      next
+    }
+    in_referrals && /^[[:space:]]*hmac_keys:[[:space:]]*(#.*)?$/ {
+      in_secret_map = 1
+      secret_map_indent = indent_of($0)
+      print
+      next
+    }
+    in_secret_map && $0 !~ /^[[:space:]]*(#|$)/ {
+      current_indent = indent_of($0)
+      if (current_indent <= secret_map_indent) {
+        in_secret_map = 0
+      }
+    }
+    in_secret_map && /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*/ {
+      if ($0 ~ /^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*env:[A-Za-z_][A-Za-z0-9_]*([[:space:]]*(#.*)?)?$/) {
+        suppress_secret_continuation($0)
+        print
+      } else {
+        print mask_secret_scalar($0)
+      }
+      next
+    }
+    /^[[:space:]]*catalog_public_key:[[:space:]]*/ { print; next }
+    /^[[:space:]]*[a-zA-Z0-9_]*(_key|_secret|_token|_dsn|dsn):[[:space:]]*/ {
+      if ($0 ~ /^[[:space:]]*[a-zA-Z0-9_]*(_key|_secret|_token|_dsn|dsn):[[:space:]]*env:[A-Za-z_][A-Za-z0-9_]*([[:space:]]*(#.*)?)?$/) {
+        suppress_secret_continuation($0)
+        print
+      } else {
+        print mask_secret_scalar($0)
+      }
+      next
+    }
+    { print }
+  ' | redact_dsn
+}
+normalize_yaml() {
+  # Mask any field whose name ends in _key / _secret / _token, then strip
+  # pure-comment lines and blanks so the drift check focuses on semantic
+  # differences (values + structure) rather than comment-placement noise.
+  sanitize_live_config_for_local_validation \
+    | sed -E 's/^([[:space:]]*[a-zA-Z0-9_]*(_key|_secret|_token)):[[:space:]]*.*$/\1: <MASKED>/' \
+    | sed -E 's/[[:space:]]+#.*$//' \
+    | grep -vE '^[[:space:]]*(#|$)'
+}
+print_config_drift_diff() {
+  redact_dsn | sed 's/^/    /' >&2
+}
+
 # R5 ARCH M1 — early coherence check: if the operator set
 # STATS_REQUIRED=1 but coordinator.yaml has stats.enabled=false (or
 # unset), the deploy would restart the binary then exit 9 in step 8.
 # Catch it BEFORE any SSH mutation.
-if [ "${STATS_REQUIRED:-0}" = "1" ]; then
+assert_stats_required_matches_effective_config() {
+  [ "${STATS_REQUIRED:-0}" = "1" ] || return 0
   _stats_enabled_pre="$(yaml_block_value stats enabled)"
   if [ "$_stats_enabled_pre" != "true" ]; then
-    echo "aborting deploy: STATS_REQUIRED=1 but stats.enabled is not true in $CONFIG ('$_stats_enabled_pre')." >&2
+    echo "aborting deploy: STATS_REQUIRED=1 but stats.enabled is not true in $DEPLOY_CONFIG ('$_stats_enabled_pre')." >&2
     echo "  Either set stats.enabled: true in coordinator.yaml, or drop STATS_REQUIRED=1." >&2
     exit 5
   fi
-fi
+}
 
 # Issue #582 (MEDIUM #6) — stats-inventory-sync restore-on-failure state.
 # The old 2-column sidecar is quiesced (stop+disable) BEFORE migration 019
@@ -679,6 +793,7 @@ trap '
   rm -f "${TMP_CATALOG_PUBKEY:-}"
   rm -f "${TMP_CATALOG_PINNED:-}"
   rm -f "${CATALOG_SMOKE_TMP:-}"
+  rm -f "${LIVE_COORDINATOR_CONFIG_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   rm -rf "${STATIC_SMOKE_DIR:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
@@ -892,6 +1007,29 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   echo "  local dry-run C2 check passed"
   exit 0
 else
+  if [ "$CONFIG_MODE" = "preserve-live" ]; then
+    LIVE_COORDINATOR_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-config.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
+    }
+    LIVE_COORDINATOR_CONFIG_REMOTE_SHA="$($SSH "sha256sum /opt/macprovider/coordinator.yaml | awk '{print \$1}'")" || {
+      echo "aborting deploy: could not hash installed coordinator config on Pearl" >&2
+      exit 5
+    }
+    $SSH 'test -f /opt/macprovider/coordinator.yaml || { echo "missing installed coordinator config: /opt/macprovider/coordinator.yaml" >&2; exit 1; }; cat /opt/macprovider/coordinator.yaml' \
+      | sanitize_live_config_for_local_validation > "$LIVE_COORDINATOR_CONFIG_TMP" || {
+      echo "aborting deploy: could not read installed coordinator config from Pearl" >&2
+      exit 5
+    }
+    LIVE_COORDINATOR_CONFIG_SHA=$(shasum -a 256 "$LIVE_COORDINATOR_CONFIG_TMP" | awk '{print $1}')
+    DEPLOY_CONFIG="$LIVE_COORDINATOR_CONFIG_TMP"
+    echo "  CONFIG_MODE=preserve-live — validating Pearl live coordinator config"
+    echo "    remote sha256=$LIVE_COORDINATOR_CONFIG_REMOTE_SHA"
+    echo "    sanitized validation copy sha256=$LIVE_COORDINATOR_CONFIG_SHA"
+  else
+    DEPLOY_CONFIG="$CONFIG"
+    echo "  CONFIG_MODE=apply-tracked — validating tracked coordinator config: $CONFIG"
+  fi
+  assert_stats_required_matches_effective_config
   if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
     echo "  SKIP_C2_CHECK=1 set — skipping timer/header assertions only; credential proof remains mandatory" >&2
   fi
@@ -939,8 +1077,8 @@ else
       *) printf '%s' - ;;
     esac
   }
-  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$CONFIG" auth operator_key)")" || exit 5
-  _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$CONFIG" auth gateway_service_token)")" || exit 5
+  _coord_op_name="$(_c2c_env_name "$(yaml_file_block_value "$DEPLOY_CONFIG" auth operator_key)")" || exit 5
+  _coord_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$DEPLOY_CONFIG" auth gateway_service_token)")" || exit 5
   _gateway_svc_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator service_token)")" || exit 5
   _gateway_op_name="$(_c2c_env_name "$(yaml_file_block_value "$GATEWAY_REMOTE_CONFIG_TMP" coordinator operator_key)")" || exit 5
   _c2c_proofs="$($SSH python3 - coordinator-deploy "$_coord_op_name" "$_coord_svc_name" "$_gateway_svc_name" "$_gateway_op_name" < "$C2C_PROOF_SCRIPT")" || {
@@ -962,7 +1100,7 @@ EOF
   C2C_GATEWAY_OPERATOR_KEY_SHA256="$C2C_GATEWAY_OPERATOR_KEY_SHA256" \
   MODEL_HASH_LEGACY_UNTIL="$MODEL_HASH_LEGACY_UNTIL_FOR_GATE" \
   SKIP_C2_CHECK="${SKIP_C2_CHECK:-0}" \
-    bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
+    bash "$CHECK_SCRIPT" "$DEPLOY_CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting deploy: config-drift check failed" >&2; exit 5;
   }
 fi
@@ -1115,22 +1253,8 @@ log "step 1b/9: drift check vs live /opt/macprovider/coordinator.yaml"
 # that would have surfaced that drift before the restart.
 #
 # Secrets are masked in the SSH pipe so unmasked Pearl content never lands
-# on local disk. Operator opts into pushing local-over-live with
-# ALLOW_CONFIG_DRIFT=1.
-normalize_yaml() {
-  # Mask any field whose name ends in _key / _secret / _token, then strip
-  # pure-comment lines and blanks so the drift check focuses on semantic
-  # differences (values + structure) rather than comment-placement noise.
-  sed -E 's/^([[:space:]]*[a-zA-Z0-9_]*(_key|_secret|_token)):[[:space:]]*.*$/\1: <MASKED>/' \
-    | sed -E 's/[[:space:]]+#.*$//' \
-    | grep -vE '^[[:space:]]*(#|$)'
-}
-redact_dsn() {
-  sed -E 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+@#\1***@#g'
-}
-print_config_drift_diff() {
-  redact_dsn | sed 's/^/    /' >&2
-}
+# on local disk. CONFIG_MODE=preserve-live keeps the live config in place; a
+# tracked-config replacement is allowed only when tracked already matches live.
 tier2_require_hash_verified() {
   awk '
     /^tier2:[[:space:]]*$/ {
@@ -1182,32 +1306,46 @@ LIVE_NORM=$($SSH 'cat /opt/macprovider/coordinator.yaml' 2>/dev/null | normalize
   echo "could not pull live coordinator.yaml from Pearl for drift check" >&2; exit 6;
 }
 LOCAL_NORM=$(normalize_yaml < "$CONFIG")
-LIVE_TIER2_HASH_REQUIRED="$(printf '%s\n' "$LIVE_NORM" | tier2_require_hash_verified || true)"
-LOCAL_TIER2_HASH_REQUIRED="$(printf '%s\n' "$LOCAL_NORM" | tier2_require_hash_verified || true)"
-if [ -z "$LIVE_TIER2_HASH_REQUIRED" ] || [ -z "$LOCAL_TIER2_HASH_REQUIRED" ]; then
-  echo "" >&2
-  echo "  Aborting: direct deploy requires one unambiguous tier2.require_hash_verified boolean in both configs." >&2
-  exit 9
-fi
-if [ "$LOCAL_TIER2_HASH_REQUIRED" != "$LIVE_TIER2_HASH_REQUIRED" ]; then
-  echo "" >&2
-  echo "  Aborting: direct deploy cannot change tier2.require_hash_verified." >&2
-  echo "  Use the reviewed enforcement or rollback transaction for that state transition." >&2
-  echo "  ALLOW_CONFIG_DRIFT does not bypass this enforcement state-transition guard." >&2
-  exit 9
+if [ "$CONFIG_MODE" = "apply-tracked" ]; then
+  LIVE_CONFIG_SHA="$($SSH "sha256sum /opt/macprovider/coordinator.yaml | awk '{print \$1}'")" || {
+    echo "could not hash live coordinator.yaml on Pearl for tracked-config deploy" >&2; exit 6;
+  }
+  LOCAL_CONFIG_SHA="$(shasum -a 256 "$CONFIG" | awk '{print $1}')"
+  if [ "$LOCAL_CONFIG_SHA" != "$LIVE_CONFIG_SHA" ]; then
+    echo "" >&2
+    echo "  Aborting: CONFIG_MODE=apply-tracked requires exact live/tracked coordinator.yaml byte equality." >&2
+    echo "  local sha256=$LOCAL_CONFIG_SHA" >&2
+    echo "  live  sha256=$LIVE_CONFIG_SHA" >&2
+    echo "  Use CONFIG_MODE=preserve-live for code/catalog deploys, or a reviewed field-scoped config migration for config changes." >&2
+    exit 8
+  fi
+  LIVE_TIER2_HASH_REQUIRED="$(printf '%s\n' "$LIVE_NORM" | tier2_require_hash_verified || true)"
+  LOCAL_TIER2_HASH_REQUIRED="$(printf '%s\n' "$LOCAL_NORM" | tier2_require_hash_verified || true)"
+  if [ -z "$LIVE_TIER2_HASH_REQUIRED" ] || [ -z "$LOCAL_TIER2_HASH_REQUIRED" ]; then
+    echo "" >&2
+    echo "  Aborting: tracked-config deploy requires one unambiguous tier2.require_hash_verified boolean in both configs." >&2
+    exit 9
+  fi
+  if [ "$LOCAL_TIER2_HASH_REQUIRED" != "$LIVE_TIER2_HASH_REQUIRED" ]; then
+    echo "" >&2
+    echo "  Aborting: tracked-config deploy cannot change tier2.require_hash_verified." >&2
+    echo "  Use the reviewed enforcement or rollback transaction for that state transition." >&2
+    exit 9
+  fi
 fi
 if ! DRIFT_DIFF=$(diff <(printf '%s\n' "$LOCAL_NORM") <(printf '%s\n' "$LIVE_NORM")); then
   echo "" >&2
   echo "  CONFIG DRIFT detected (secrets masked; '<' = local, '>' = live):" >&2
   printf '%s\n' "$DRIFT_DIFF" | print_config_drift_diff
   echo "" >&2
-  if [ "${ALLOW_CONFIG_DRIFT:-0}" != "1" ]; then
-    echo "  Aborting. The local config will overwrite the live one on deploy." >&2
-    echo "  Review the diff above. To proceed (pushing local over live):" >&2
-    echo "    ALLOW_CONFIG_DRIFT=1 $0" >&2
+  if [ "$CONFIG_MODE" = "preserve-live" ]; then
+    echo "  CONFIG_MODE=preserve-live set — live coordinator.yaml will be preserved." >&2
+    echo "  Tracked coordinator.yaml is not uploaded or installed in this mode." >&2
+  else
+    echo "  Aborting. CONFIG_MODE=apply-tracked may install tracked coordinator.yaml only when it already matches live." >&2
+    echo "  Broad ALLOW_CONFIG_DRIFT=1 is disabled; use a reviewed field-scoped config migration." >&2
     exit 8
   fi
-  echo "  ALLOW_CONFIG_DRIFT=1 set — proceeding despite drift." >&2
 else
   echo "  ok: local config matches live (modulo secrets)"
 fi
@@ -1375,7 +1513,7 @@ if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
     echo "  ok: required stats DSN env vars are present in coordinator.env"
   '
 else
-  echo "  stats.enabled is not true in $CONFIG — skipping stats env preflight"
+  echo "  stats.enabled is not true in $DEPLOY_CONFIG — skipping stats env preflight"
 fi
 
 # Issue #582 MIGRATION-019 ORDERING — quiesce the OLD stats-inventory-sync
@@ -2536,7 +2674,11 @@ $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64
 $SCP "$STATS_INVENTORY_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync-linux-amd64"
 $SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror-linux-amd64"
 $SCP "$STATS_HARDWARE_VERIFIER_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-hardware-verifier-linux-amd64"
-$SCP "$CONFIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
+if [ "$CONFIG_MODE" = "apply-tracked" ]; then
+  $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
+else
+  log "  CONFIG_MODE=preserve-live — not uploading tracked coordinator.yaml"
+fi
 $SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
 $SCP "$STATS_INVENTORY_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.service"
 $SCP "$STATS_INVENTORY_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.timer"
@@ -2581,21 +2723,24 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$TMP_CATALOG_PUBKEY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.pub"
 fi
 
-# M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
-# BEFORE we overwrite it. Step 1b already aborted on drift unless the
-# operator opted in, but the audit also calls for a persistent
-# remote-side backup so a bad deploy can be inspected/reverted without
-# trusting the operator's local copy. Backups live next to the live config
-# at /opt/macprovider/coordinator.yaml.bak-<UTC>.
-$SSH "exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
-      flock -s 8
-      if [ -f /opt/macprovider/coordinator.yaml ]; then
-        install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.prev
-        install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
-        echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
-      else
-        echo '  no live coordinator.yaml — first deploy, skipping backup'
-      fi"
+if [ "$CONFIG_MODE" = "apply-tracked" ]; then
+  # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
+  # BEFORE we overwrite it. Step 1b already aborted on drift, but the audit
+  # also calls for a persistent remote-side backup so a bad deploy can be
+  # inspected/reverted without trusting the operator's local copy. Backups live
+  # next to the live config at /opt/macprovider/coordinator.yaml.bak-<UTC>.
+  $SSH "exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+        flock -s 8
+        if [ -f /opt/macprovider/coordinator.yaml ]; then
+          install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.prev
+          install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
+          echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
+        else
+          echo '  no live coordinator.yaml — first deploy, skipping backup'
+        fi"
+else
+  log "  CONFIG_MODE=preserve-live — skipping coordinator.yaml backup because no config overwrite will occur"
+fi
 
 $SSH "set -e
   exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
@@ -2644,7 +2789,11 @@ $SSH "set -e
   # stats-hardware-verifier is an out-of-band stats sidecar. It promotes
   # queued autotune evidence after conservative verification.
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-hardware-verifier-linux-amd64 /opt/macprovider-stats/stats-hardware-verifier
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
+  if [ '$CONFIG_MODE' = 'apply-tracked' ]; then
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
+  else
+    echo '  preserving live /opt/macprovider/coordinator.yaml'
+  fi
   install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.service /etc/systemd/system/stats-inventory-sync.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.timer /etc/systemd/system/stats-inventory-sync.timer
@@ -3624,8 +3773,8 @@ echo "  SPEC-023 exact-byte canary OK: selected provider's live process uses the
 # R5 ARCH MED-1: coordinator's `stats.enabled` defaults FALSE — when
 # it's not set or set to false, /v1/stats/* routes don't exist. Hitting
 # them blind would flag a perfectly valid stats-disabled deploy as
-# degraded. Parse `stats.enabled` from the SAME coordinator.yaml we
-# just deployed; gate the smoke check on it.
+# degraded. Parse `stats.enabled` from the same effective coordinator.yaml
+# the restarted service uses; gate the smoke check on it.
 STATS_ENABLED_LOCAL="$(yaml_block_value stats enabled)"
 if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
   STATS_SMOKE_NONCE="${BACKUP_TS:-$(date -u +%Y%m%dT%H%M%SZ)}-$$"
@@ -3643,7 +3792,7 @@ if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
     else
       echo "  ABORT: $STATS_DOMAIN /v1/stats/health returned status=$STATS_STATUS (expected 200)" >&2
     fi
-    echo "  stats.enabled=true in $CONFIG — public stats smoke is mandatory." >&2
+    echo "  stats.enabled=true in $DEPLOY_CONFIG — public stats smoke is mandatory." >&2
     exit 9
   fi
   echo "  ok: $STATS_DOMAIN /v1/stats/health responded 200"
@@ -3673,7 +3822,7 @@ if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
   fi
   if [ "$STATS_LEADERBOARD_STATUS" != "200" ]; then
     echo "  ABORT: $STATS_DOMAIN /v1/stats/leaderboard returned status=$STATS_LEADERBOARD_STATUS (expected 200)" >&2
-    echo "  stats.enabled=true in $CONFIG — Malibu stats population smoke is mandatory." >&2
+    echo "  stats.enabled=true in $DEPLOY_CONFIG — Malibu stats population smoke is mandatory." >&2
     exit 9
   else
     echo "  ok: $STATS_DOMAIN /v1/stats/leaderboard responded 200"
@@ -3683,11 +3832,11 @@ else
   # explicitly asked for strict mode but disabled stats — that's
   # incoherent; refuse. Otherwise just log and skip.
   if [ "${STATS_REQUIRED:-0}" = "1" ]; then
-    echo "  ABORT: STATS_REQUIRED=1 but stats.enabled is not true in $CONFIG." >&2
+    echo "  ABORT: STATS_REQUIRED=1 but stats.enabled is not true in $DEPLOY_CONFIG." >&2
     echo "         Enable stats in coordinator.yaml or drop STATS_REQUIRED=1." >&2
     exit 9
   fi
-  echo "  stats.enabled is not true in $CONFIG — skipping $STATS_DOMAIN smoke check"
+  echo "  stats.enabled is not true in $DEPLOY_CONFIG — skipping $STATS_DOMAIN smoke check"
 fi
 
 log "step 9/9: tail the coordinator journal for sanity"
