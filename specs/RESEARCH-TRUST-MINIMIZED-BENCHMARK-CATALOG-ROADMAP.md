@@ -1,6 +1,6 @@
 # RESEARCH — Trust-Minimized Benchmark & Catalog Roadmap
 
-Date: 2026-07-27 (r5.1 — decomposed after the audit history showed the bundled roadmap could not converge; see §10 preamble)
+Date: 2026-07-27 (r5.2 — decomposed after the audit history showed the bundled roadmap could not converge; see §10 preamble)
 Status: research document (non-normative; basis for GitHub issues and implementation tracking)
 Scope: catalog, benchmark, hardware verification, provider admission, routing, buyer/provider UX trust model
 Related: #744, #745 (closed, fixed by #751), #742 (closed, fixed by #748), #687, #584, #582, PR #772, SPEC-002, SPEC-004, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-013, SPEC-017, SPEC-022, SPEC-023 (v0.8), SPEC-027, SPEC-029, SPEC-030, SPEC-031, SPEC-032, SPEC-033, SPEC-034, SPEC-036
@@ -21,7 +21,7 @@ Evidence tags:
 
 **Gate G0 (§10) is therefore the first item: query the existing `request_log` for requests/day per (provider, model) and per candidate bucket.** It costs an afternoon, uses data already persisted, and it gates the observed-aggregate briefs (B3/B4/B8). Do not schedule those before that number exists.
 
-**The structure of §10** (see its preamble for why): the work is split into **Plane A — ship-now independent pieces** (each its own issue, resting only on existing data), **Gate G0 — the one measurement**, and **Plane C — deferred design briefs** (each a future SPEC with its own audit loop, gated on G0). This document commits only to Plane A + G0; Plane C is analysis, not an approved plan.
+**The structure of §10** (see its preamble for why): the work is split into **Plane A — ship-now independent pieces** (each its own issue, resting only on existing data), **Gate G0 — the one measurement**, and **Plane C — deferred design briefs** (each a future SPEC with its own audit loop; the observed-aggregate briefs B3/B4/B8 gate on G0, the rest on their own dependencies). This document commits only to Plane A + G0; Plane C is analysis, not an approved plan.
 
 **The committed minimum path, if nothing else ships** (~12–20 operator hours, no open questions blocking any of it):
 

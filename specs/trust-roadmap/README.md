@@ -28,6 +28,8 @@ A2/A4/A8 all edit the LOCKED `SPEC-023` — coordinate those PRs (one unlock/ver
 
 ## The gate
 
+| Gate | Title | Size |
+|---|---|---|
 | [G0](G0-measure-demand.md) | Measure buyer demand per (provider, model, bucket) | XS |
 
 G0 produces the one number that decides whether the observed-performance work

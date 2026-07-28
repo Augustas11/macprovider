@@ -63,4 +63,4 @@ Emits an alert; changes **no** routing decision. Enforcement is Brief B2. A5
 ## Note
 Because A5 carries a SPEC-035 amendment (one audit loop for the spec, one for
 the IMPL) it is larger than the other A-pieces; it is in the committed minimum
-because it is the genuine hazard closure, not because it is the cheapest.
+because it is the genuine hazard *surfacing* (it ends the silence), not because it is the cheapest.
