@@ -57,6 +57,41 @@ class PearlConfigReconcileTest(unittest.TestCase):
             "tracked_only: tracked='1.8.33' live=<ABSENT>",
             result.stdout,
         )
+        self.assertIn(
+            "auth.credential_bootstrap_token_ttl_s: "
+            "tracked_only: tracked=600 live=<ABSENT> "
+            "[base_product_defaults; class=intentional Pearl production posture]",
+            result.stdout,
+        )
+        self.assertIn(
+            "autotune.public_keys.streamvc-autotune-static-v5: "
+            "tracked_only: tracked='vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA=' live=<ABSENT> "
+            "[fleet_version_admission_policy; class=fleet/version-admission policy]",
+            result.stdout,
+        )
+        self.assertIn(
+            "coordinator.env.COORDINATOR_PARTNER_KEYS_ADMIN_DSN: "
+            "key name is classified; value=<MASKED> "
+            "[pearl_operator_secrets; class=secrets/env-owned setting]",
+            result.stdout,
+        )
+        self.assertIn(
+            "production_overlay.pool.canary_challenges[0].prompt: "
+            "live canary challenge field is classified; value=<MASKED> "
+            "[pearl_production_overlay; class=overlay-owned Pearl production setting]",
+            result.stdout,
+        )
+        self.assertIn(
+            "production_overlay.referrals.hmac_keys.k1: "
+            "live referral HMAC key reference is classified; value=<MASKED> "
+            "[pearl_operator_secrets; class=secrets/env-owned setting]",
+            result.stdout,
+        )
+        self.assertIn(
+            "referrals.require_for_registration: tracked_only: tracked=False live=<ABSENT> "
+            "[base_product_defaults; class=overlay-owned Pearl production setting]",
+            result.stdout,
+        )
         self.assertIn("Inference:", result.stdout)
         self.assertIn(
             "providers.augustass-macbook-air: live-only provider row is classified",
@@ -145,6 +180,18 @@ class PearlConfigReconcileTest(unittest.TestCase):
         self.assertIn("diagnostics.<MASKED:", rendered_path)
         self.assertNotIn("ghp_abcdefghijklmnopqrstuvwxyz", rendered_path)
 
+    def test_config_false_positive_secret_paths_are_not_masked(self):
+        self.assertEqual(reconcile_module.display_value("auth.credential_bootstrap_token_ttl_s", 600), "600")
+        self.assertEqual(
+            reconcile_module.display_value(
+                "autotune.public_keys.streamvc-autotune-static-v5",
+                "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA=",
+            ),
+            "'vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA='",
+        )
+        self.assertEqual(reconcile_module.display_value("referrals.current_key_id", "k1"), "'k1'")
+        self.assertEqual(reconcile_module.display_value("referrals.hmac_keys.k1", "secret"), "<MASKED>")
+
     def test_local_yaml_parse_error_does_not_print_source_snippet(self):
         with tempfile.TemporaryDirectory() as tmp:
             live_config = Path(tmp) / "live.yaml"
@@ -227,6 +274,186 @@ class PearlConfigReconcileTest(unittest.TestCase):
         self.assertIn("production_overlay.unexpected.private_key", result.stdout)
         self.assertIn("value=<MASKED>", result.stdout)
         self.assertNotIn("redaction-sentinel-not-for-output", result.stdout)
+
+    def test_referral_overlay_secret_fields_must_be_env_references(self):
+        manifest = reconcile_module.load_yaml_file(ROOT / "ops/pearl/config/source-of-truth.yaml")
+        overlay = {
+            "referrals": {
+                "hmac_keys": {"k1": "inline-redaction-sentinel-not-for-output"},
+                "x_api_bearer_token": "env:X_API_BEARER_TOKEN",
+            }
+        }
+
+        evidence, unknown = reconcile_module.classify_overlay(overlay, manifest)
+        rendered = reconcile_module.render_findings(evidence, [], unknown)
+
+        self.assertIn("production_overlay.referrals.x_api_bearer_token", rendered)
+        self.assertIn("production_overlay.referrals.hmac_keys.k1", rendered)
+        self.assertIn("classified only when value is an env:NAME reference", rendered)
+        self.assertNotIn("inline-redaction-sentinel-not-for-output", rendered)
+
+    def test_unknown_referral_overlay_field_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            overlay_path = Path(tmpdir) / "unknown-referral-overlay.yaml"
+            overlay_path.write_text(
+                "referrals:\n"
+                "  unexpected_private_token: redaction-sentinel-not-for-output\n",
+                encoding="utf-8",
+            )
+            result = self.run_tool(
+                "--tracked-config",
+                str(DATA / "known-drift-tracked.yaml"),
+                "--live-config",
+                str(DATA / "known-drift-live.yaml"),
+                "--live-overlay",
+                str(overlay_path),
+                "--live-env",
+                str(DATA / "known-drift.env"),
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("production_overlay.referrals.unexpected_private_token", result.stdout)
+        self.assertIn("live overlay field is not listed in source-of-truth manifest", result.stdout)
+        self.assertNotIn("redaction-sentinel-not-for-output", result.stdout)
+
+    def test_unknown_canary_challenge_leaf_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            overlay_path = Path(tmpdir) / "unknown-canary-overlay.yaml"
+            overlay_path.write_text(
+                "pool:\n"
+                "  canary_challenges:\n"
+                "    - prompt: 'Return nonce {nonce}'\n"
+                "      expected: '{nonce}'\n"
+                "      private_token: redaction-sentinel-not-for-output\n",
+                encoding="utf-8",
+            )
+            result = self.run_tool(
+                "--tracked-config",
+                str(DATA / "known-drift-tracked.yaml"),
+                "--live-config",
+                str(DATA / "known-drift-live.yaml"),
+                "--live-overlay",
+                str(overlay_path),
+                "--live-env",
+                str(DATA / "known-drift.env"),
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("production_overlay.pool.canary_challenges[0].private_token", result.stdout)
+        self.assertIn("live overlay field is not listed in source-of-truth manifest", result.stdout)
+        self.assertNotIn("redaction-sentinel-not-for-output", result.stdout)
+
+    def test_nested_canary_challenge_field_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            overlay_path = Path(tmpdir) / "nested-canary-overlay.yaml"
+            overlay_path.write_text(
+                "pool:\n"
+                "  canary_challenges:\n"
+                "    - prompt: 'Return nonce {nonce}'\n"
+                "      expected: '{nonce}'\n"
+                "      private:\n"
+                "        prompt: redaction-sentinel-not-for-output\n"
+                "  canary_interval_s:\n"
+                "    private: redaction-sentinel-not-for-output\n"
+                "  model_class_challenges:\n"
+                "    qwen3-coder-30b-a3b-instruct:\n"
+                "      - prompt: 'Return nonce {nonce}'\n"
+                "        expected: '{nonce}'\n"
+                "        private:\n"
+                "          expected: redaction-sentinel-not-for-output\n",
+                encoding="utf-8",
+            )
+            result = self.run_tool(
+                "--tracked-config",
+                str(DATA / "known-drift-tracked.yaml"),
+                "--live-config",
+                str(DATA / "known-drift-live.yaml"),
+                "--live-overlay",
+                str(overlay_path),
+                "--live-env",
+                str(DATA / "known-drift.env"),
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("production_overlay.pool.canary_challenges[0].private.prompt", result.stdout)
+        self.assertIn("production_overlay.pool.canary_interval_s.private", result.stdout)
+        self.assertIn(
+            "production_overlay.pool.model_class_challenges.qwen3-coder-30b-a3b-instruct[0].private.expected",
+            result.stdout,
+        )
+        self.assertNotIn("redaction-sentinel-not-for-output", result.stdout)
+
+    def test_unknown_overlay_owned_prefix_children_exit_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            overlay_path = Path(tmpdir) / "unknown-prefix-overlay.yaml"
+            overlay_path.write_text(
+                "malibu_emission:\n"
+                "  private_token: redaction-sentinel-not-for-output\n"
+                "proof_of_weights:\n"
+                "  telemetry_drift:\n"
+                "    hash_alert_on_status:\n"
+                "      - ready\n"
+                "      - degraded\n"
+                "      - redaction-sentinel-not-for-output\n"
+                "opoi:\n"
+                "  private_token: redaction-sentinel-not-for-output\n",
+                encoding="utf-8",
+            )
+            result = self.run_tool(
+                "--tracked-config",
+                str(DATA / "known-drift-tracked.yaml"),
+                "--live-config",
+                str(DATA / "known-drift-live.yaml"),
+                "--live-overlay",
+                str(overlay_path),
+                "--live-env",
+                str(DATA / "known-drift.env"),
+            )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("production_overlay.malibu_emission.private_token", result.stdout)
+        self.assertIn("production_overlay.proof_of_weights.telemetry_drift.hash_alert_on_status[2]", result.stdout)
+        self.assertIn("production_overlay.opoi.private_token", result.stdout)
+        self.assertNotIn("redaction-sentinel-not-for-output", result.stdout)
+
+    def test_referral_overlay_env_reference_must_be_allowlisted_and_present(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            typo_overlay_path = Path(tmpdir) / "typo-referral-env-overlay.yaml"
+            typo_overlay_path.write_text(
+                "referrals:\n"
+                "  hmac_keys:\n"
+                "    k1: env:MAL_REFERRAL_HMAC_K2\n",
+                encoding="utf-8",
+            )
+            typo_result = self.run_tool(
+                "--tracked-config",
+                str(DATA / "known-drift-tracked.yaml"),
+                "--live-config",
+                str(DATA / "known-drift-live.yaml"),
+                "--live-overlay",
+                str(typo_overlay_path),
+                "--live-env",
+                str(DATA / "known-drift.env"),
+            )
+            missing_env_path = Path(tmpdir) / "missing-x-api.env"
+            missing_env_path.write_text(
+                "OPERATOR_KEY=redaction-sentinel-not-for-output\n"
+                "GATEWAY_SERVICE_TOKEN=redaction-sentinel-not-for-output\n"
+                "MAL_REFERRAL_HMAC_K1=redaction-sentinel-not-for-output\n",
+                encoding="utf-8",
+            )
+            missing_result = self.run_tool(
+                "--tracked-config",
+                str(DATA / "known-drift-tracked.yaml"),
+                "--live-config",
+                str(DATA / "known-drift-live.yaml"),
+                "--live-overlay",
+                str(DATA / "known-drift-overlay.yaml"),
+                "--live-env",
+                str(missing_env_path),
+            )
+        self.assertEqual(typo_result.returncode, 1, typo_result.stdout + typo_result.stderr)
+        self.assertIn("production_overlay.referrals.hmac_keys.k1", typo_result.stdout)
+        self.assertIn("overlay env reference is not listed in source-of-truth manifest", typo_result.stdout)
+        self.assertEqual(missing_result.returncode, 1, missing_result.stdout + missing_result.stderr)
+        self.assertIn("production_overlay.referrals.x_api_bearer_token", missing_result.stdout)
+        self.assertIn("overlay env reference is absent from live coordinator.env inventory", missing_result.stdout)
 
     def test_unknown_env_key_exits_nonzero_without_value(self):
         result = self.run_tool(
