@@ -151,14 +151,16 @@ grep -q 'cmp -s \$DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinato
   fail "direct catalog deploy must not replace one half of the signed coordinator/gateway pair"
 
 grep -qF 'tier2_require_hash_verified()' "$DEPLOY_SH" &&
-  grep -qF 'direct deploy cannot change tier2.require_hash_verified' "$DEPLOY_SH" &&
-  grep -qF 'ALLOW_CONFIG_DRIFT does not bypass this enforcement state-transition guard' "$DEPLOY_SH" ||
-  fail "direct deploy must hard-block every Tier-2 enforcement state transition"
-enforcement_guard_line=$(grep -nF 'direct deploy cannot change tier2.require_hash_verified' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
-config_drift_override_line=$(grep -nF 'if [ "${ALLOW_CONFIG_DRIFT:-0}" != "1" ]' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
-[ -n "$enforcement_guard_line" ] && [ -n "$config_drift_override_line" ] &&
-  [ "$enforcement_guard_line" -lt "$config_drift_override_line" ] ||
-  fail "Tier-2 enforcement transition guard must run before the config-drift override"
+  grep -qF 'tracked-config deploy cannot change tier2.require_hash_verified' "$DEPLOY_SH" &&
+  grep -qF 'if [ "$CONFIG_MODE" = "apply-tracked" ]; then' "$DEPLOY_SH" ||
+  fail "tracked-config deploy must hard-block every Tier-2 enforcement state transition"
+enforcement_mode_line=$(grep -nF 'if [ "$CONFIG_MODE" = "apply-tracked" ]; then' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+enforcement_guard_line=$(grep -nF 'tracked-config deploy cannot change tier2.require_hash_verified' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+apply_tracked_drift_line=$(grep -nF 'CONFIG_MODE=apply-tracked may install tracked coordinator.yaml only when it already matches live' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+[ -n "$enforcement_mode_line" ] && [ -n "$enforcement_guard_line" ] && [ -n "$apply_tracked_drift_line" ] &&
+  [ "$enforcement_mode_line" -lt "$enforcement_guard_line" ] &&
+  [ "$enforcement_guard_line" -lt "$apply_tracked_drift_line" ] ||
+  fail "Tier-2 enforcement transition guard must run before tracked-config drift handling"
 tier2_parser_tmp="$(mktemp)"
 awk '/^tier2_require_hash_verified\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" >"$tier2_parser_tmp"
 # shellcheck disable=SC1090
