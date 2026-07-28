@@ -221,7 +221,7 @@ rm -f /tmp/exc-cap.out
 # unrelated successors and a merge fan-out larger than any numeric window.
 hist="$(mktemp -d "${TMPDIR:-/tmp}/exception-hist.XXXXXX")"
 python3 - "$hist" "$root" <<'PY'
-import json, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 
 hist = Path(sys.argv[1])
@@ -231,9 +231,27 @@ import production_exceptions as pe
 
 repo = hist / "repo"
 repo.mkdir()
-subprocess.check_call(["git", "init", "-b", "main"], cwd=repo, stdout=subprocess.DEVNULL)
-subprocess.check_call(["git", "config", "user.email", "test@example.com"], cwd=repo)
-subprocess.check_call(["git", "config", "user.name", "test"], cwd=repo)
+git_env = os.environ.copy()
+for name in ("GIT_COMMON_DIR", "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+    git_env.pop(name, None)
+
+
+def git_call(*args, **kwargs):
+    kwargs.setdefault("cwd", repo)
+    kwargs.setdefault("env", git_env)
+    return subprocess.check_call(["git", *args], **kwargs)
+
+
+def git_output(*args, **kwargs):
+    kwargs.setdefault("cwd", repo)
+    kwargs.setdefault("env", git_env)
+    kwargs.setdefault("text", True)
+    return subprocess.check_output(["git", *args], **kwargs)
+
+
+git_call("init", "-b", "main", stdout=subprocess.DEVNULL)
+git_call("config", "user.email", "test@example.com")
+git_call("config", "user.name", "test")
 
 reg = {
   "$schema": "./production-exceptions.schema.json",
@@ -278,63 +296,37 @@ reg_dir = repo / "ops/exceptions"
 reg_dir.mkdir(parents=True)
 (reg_dir / "production-exceptions.json").write_text(json.dumps(reg, indent=2) + "\n")
 (reg_dir / "removed-exception-tombstones.json").write_text(json.dumps(tombs, indent=2) + "\n")
-subprocess.check_call(["git", "add", "."], cwd=repo)
-subprocess.check_call(["git", "commit", "-m", "baseline"], cwd=repo, stdout=subprocess.DEVNULL)
-baseline = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+git_call("add", ".")
+git_call("commit", "-m", "baseline", stdout=subprocess.DEVNULL)
+baseline = git_output("rev-parse", "HEAD").strip()
 
 reg["exceptions"][0]["expires_at"] = "2026-10-01T00:00:00Z"
 tombs["tombstones"] = []
 (reg_dir / "production-exceptions.json").write_text(json.dumps(reg, indent=2) + "\n")
 (reg_dir / "removed-exception-tombstones.json").write_text(json.dumps(tombs, indent=2) + "\n")
-subprocess.check_call(["git", "add", "."], cwd=repo)
-subprocess.check_call(["git", "commit", "-m", "weaken"], cwd=repo, stdout=subprocess.DEVNULL)
-weaken = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+git_call("add", ".")
+git_call("commit", "-m", "weaken", stdout=subprocess.DEVNULL)
+weaken = git_output("rev-parse", "HEAD").strip()
 
 (repo / "unrelated.txt").write_text("0\n")
-subprocess.check_call(["git", "add", "unrelated.txt"], cwd=repo)
-subprocess.check_call(["git", "commit", "-m", "unrelated-0"], cwd=repo, stdout=subprocess.DEVNULL)
+git_call("add", "unrelated.txt")
+git_call("commit", "-m", "unrelated-0", stdout=subprocess.DEVNULL)
 for i in range(1, 40):
     # Empty commits keep first-parent depth without stressing the object store.
-    subprocess.check_call(
-        ["git", "commit", "--allow-empty", "-m", f"unrelated-{i}"],
-        cwd=repo,
-        stdout=subprocess.DEVNULL,
-    )
+    git_call("commit", "--allow-empty", "-m", f"unrelated-{i}", stdout=subprocess.DEVNULL)
 
-subprocess.check_call(
-    ["git", "checkout", "-b", "side", baseline],
-    cwd=repo,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
+git_call("checkout", "-b", "side", baseline, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for i in range(40):
-    subprocess.check_call(
-        ["git", "commit", "--allow-empty", "-m", f"side-{i}"],
-        cwd=repo,
-        stdout=subprocess.DEVNULL,
-    )
-subprocess.check_call(
-    ["git", "checkout", "main"],
-    cwd=repo,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
-subprocess.check_call(
-    ["git", "merge", "--no-ff", "-m", "merge-side", "side"],
-    cwd=repo,
-    stdout=subprocess.DEVNULL,
-)
-tip = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    git_call("commit", "--allow-empty", "-m", f"side-{i}", stdout=subprocess.DEVNULL)
+git_call("checkout", "main", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+git_call("merge", "--no-ff", "-m", "merge-side", "side", stdout=subprocess.DEVNULL)
+tip = git_output("rev-parse", "HEAD").strip()
 
-raw = subprocess.check_output(["git", "rev-list", "-n", "32", tip], cwd=repo, text=True).split()
-path = subprocess.check_output(
-    [
-      "git", "rev-list", "--first-parent", tip, "--",
+raw = git_output("rev-list", "-n", "32", tip).split()
+path = git_output(
+    "rev-list", "--first-parent", tip, "--",
       "ops/exceptions/production-exceptions.json",
       "ops/exceptions/removed-exception-tombstones.json",
-    ],
-    cwd=repo,
-    text=True,
 ).split()
 if baseline not in path or weaken not in path:
     raise SystemExit(f"path-scoped history missing authority commits: {path}")
@@ -348,7 +340,7 @@ if not revs or revs[0] != tip:
 
 
 def show(rev, path_name):
-    raw_doc = subprocess.check_output(["git", "show", f"{rev}:{path_name}"], cwd=repo, text=True)
+    raw_doc = git_output("show", f"{rev}:{path_name}")
     return json.loads(raw_doc)
 
 regs = [show(rev, "ops/exceptions/production-exceptions.json") for rev in reversed(revs)]
