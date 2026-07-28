@@ -611,13 +611,13 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(equivalentPolicy.rowIdentity(for: "fixture"), identity)
     }
 
-    func testRateCardDoesNotUseDefaultForArbitraryRecommendationModelKey() throws {
+    func testRateCardUsesDefaultWhenSpecificRecommendationRowIsMissing() throws {
         let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
         {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
         """.utf8))
 
-        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct"))
-        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "meta-llama/llama-3.1-8b-instruct"))
+        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct")?.key, "default")
+        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "meta-llama/llama-3.1-8b-instruct")?.key, "default")
         XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "default")?.key, "default")
     }
 
@@ -2472,7 +2472,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     // MARK: - Rate-card recommendation gates + swap tolerance
 
-    func testRecommendationRejectsModelWhenOnlyDefaultRateCardRowMatches() throws {
+    func testRecommendationUsesDefaultTierWhenSpecificRateCardRowIsMissing() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         request.rateCard.rows.removeValue(forKey: modelKey)
@@ -2485,11 +2485,20 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertNil(result.recommendedModel)
-        XCTAssertNil(result.selectedCandidate)
-        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
-        XCTAssertFalse(result.warnings.contains(.rateCardDefaultTierUsed))
-        XCTAssertFalse(try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey }).eligible)
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, modelKey)
+        XCTAssertTrue(result.warnings.contains(.rateCardDefaultTierUsed))
+        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
+        let candidate = try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey })
+        XCTAssertTrue(candidate.eligible)
+        XCTAssertEqual(candidate.model, modelKey)
+        XCTAssertEqual(candidate.confidence, "low")
+        XCTAssertEqual(result.selectedCandidate?.confidence, "low")
+        XCTAssertEqual(candidate.promptRateUSDPerMillionTokens, 0.5)
+        XCTAssertEqual(candidate.completionRateUSDPerMillionTokens, 1.0)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+        let jsonCandidate = try XCTUnwrap((root["candidates"] as? [[String: Any]])?.first)
+        XCTAssertEqual(jsonCandidate["confidence"] as? String, "low")
     }
 
     func testRecommendationNoDefaultTierWarningWhenSpecificRowPresent() throws {

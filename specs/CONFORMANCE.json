@@ -637,7 +637,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.8",
+      "version": "v0.8.1",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -885,7 +885,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.1",
+      "version": "v0.2",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
