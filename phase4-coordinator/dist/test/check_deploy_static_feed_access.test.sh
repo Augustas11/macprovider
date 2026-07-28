@@ -246,10 +246,23 @@ grep -q 'CATALOG_CANARY_AUTH_TOKEN is required' "$DEPLOY_SH" ||
   fail "deploy must require authenticated canary evidence"
 
 token_validator_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp"' EXIT
+canary_operator_guard_tmp="$(mktemp)"
+trap 'rm -f "$token_validator_tmp" "$canary_operator_guard_tmp"' EXIT
 awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$token_validator_tmp"
 grep -qF '_validate_catalog_canary_auth_token()' "$token_validator_tmp" ||
   fail "deploy must keep an extractable portable canary token validator"
+awk '
+  /^_catalog_canary_auth_token_sha256\(\) \{/ { f=1 }
+  f { print }
+  /^_catalog_canary_auth_token_matches_operator_key\(\) \{/ { matcher=1 }
+  f && matcher && /^\}$/ { exit }
+' "$DEPLOY_SH" > "$canary_operator_guard_tmp"
+grep -qF '_catalog_canary_auth_token_matches_operator_key()' "$canary_operator_guard_tmp" ||
+  fail "deploy must keep an extractable canary operator-key proof guard"
+grep -qF 'CATALOG_CANARY_AUTH_TOKEN must be the coordinator operator key' "$DEPLOY_SH" ||
+  fail "deploy must name the operator-key-only canary token requirement"
+grep -qF '/v1/pool/check?details=deployment is operator-only' "$DEPLOY_SH" ||
+  fail "deploy must document that service tokens cannot satisfy deployment evidence"
 # BSD grep rejects interval upper bounds greater than 255. Length checks belong
 # in Bash so the production deploy remains portable on the operator Mac.
 if grep -qF '{32,512}' "$DEPLOY_SH"; then
@@ -276,8 +289,27 @@ _validate_catalog_canary_auth_token "$token_512" ||
 ! _validate_catalog_canary_auth_token "${token_32}"$'\r''header = "X-Injected: yes"' ||
   fail "canary token validator must reject carriage-return curl-config injection"
 
+HEX64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+HEX64B=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+HEX64_SHA256="$(printf '%s' "$HEX64" | shasum -a 256 | awk '{print $1}')"
+HEX64B_SHA256="$(printf '%s' "$HEX64B" | shasum -a 256 | awk '{print $1}')"
+# shellcheck disable=SC1090
+. "$canary_operator_guard_tmp"
+_catalog_canary_auth_token_matches_operator_key "$HEX64" "$HEX64_SHA256" ||
+  fail "canary token guard must accept the coordinator operator key"
+_catalog_canary_auth_token_matches_operator_key "$HEX64" "$(printf '%s' "$HEX64_SHA256" | tr 'a-f' 'A-F')" ||
+  fail "canary token guard must accept uppercase proof digests"
+! _catalog_canary_auth_token_matches_operator_key "$HEX64B" "$HEX64_SHA256" ||
+  fail "canary token guard must reject a distinct service token"
+! _catalog_canary_auth_token_matches_operator_key "$HEX64" "$HEX64B_SHA256" ||
+  fail "canary token guard must reject a mismatched operator proof"
+! _catalog_canary_auth_token_matches_operator_key "$HEX64" short ||
+  fail "canary token guard must reject malformed operator proof digests"
+! _catalog_canary_auth_token_matches_operator_key "${HEX64}!" "$HEX64_SHA256" ||
+  fail "canary token guard must preserve token syntax validation"
+
 deadline_alarm_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp" "$deadline_alarm_tmp"' EXIT
+trap 'rm -f "$token_validator_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp"' EXIT
 awk '/^_run_with_deadline_alarm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_alarm_tmp"
 grep -qF '_run_with_deadline_alarm()' "$deadline_alarm_tmp" ||
   fail "deploy must keep an extractable subprocess deadline helper"
@@ -293,7 +325,7 @@ _run_with_deadline_alarm 2 sh -c 'exit 0' ||
   fail "subprocess deadline helper must preserve successful commands"
 
 deadline_parser_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"' EXIT
+trap 'rm -f "$token_validator_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"' EXIT
 awk '/^_parse_model_hash_legacy_until\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_parser_tmp"
 grep -qF '_parse_model_hash_legacy_until()' "$deadline_parser_tmp" ||
   fail "deploy must keep an extractable MODEL_HASH_LEGACY_UNTIL parser"

@@ -593,7 +593,11 @@ The direct-deploy recovery procedure is:
 10. Confirm coordinator and gateway health report the installed signed pair and
    coordinator catalog status reports the intended release/signer.
 11. Set `CATALOG_CANARY_PROVIDER_ID` to a real enrolled canary provider and
-   provide `CATALOG_CANARY_AUTH_TOKEN` for the protected compatibility view.
+   provide `CATALOG_CANARY_AUTH_TOKEN` from the coordinator operator key, not
+   the gateway/coordinator service token. The deployment compatibility view is
+   `/v1/pool/check?details=deployment`, which is operator-only; the deploy
+   script proves this token against the Pearl coordinator operator-key digest
+   before any upload or restart.
    The deploy must poll `/v1/pool/check` until that exact provider reports
    `buyer_serving: true`, `catalog_admission_mode: current`, the exact active
    release/policy/digest/signer envelope, a valid selected row identity, and

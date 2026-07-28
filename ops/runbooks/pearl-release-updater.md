@@ -166,11 +166,13 @@ printf '%s\n' "$BETTERSTACK_UPTIME_API_TOKEN" | \
 ```
 
 Provision one enrolled catalog-aware canary Mac as the release commit witness.
-Create a coordinator bearer token authorized for `details=deployment` and a
-dedicated read-only SSH key as root-owned `0600` files on Pearl. Store the
-canary Mac host key in a dedicated root-owned `0600` known-hosts file; the
-hardened service cannot read root's home directory and always uses
-`StrictHostKeyChecking=yes`. Configure these values in
+Store the coordinator operator key, not the gateway/coordinator service token,
+as the catalog-canary bearer for `details=deployment`, and store a dedicated
+read-only SSH key as root-owned `0600` files on Pearl. The
+`/v1/pool/check?details=deployment` evidence path is operator-only; service
+tokens are rejected. Store the canary Mac host key in a dedicated root-owned
+`0600` known-hosts file; the hardened service cannot read root's home directory
+and always uses `StrictHostKeyChecking=yes`. Configure these values in
 `/etc/macprovider/pearl-updater.conf`:
 
 ```text
@@ -321,7 +323,7 @@ PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200
    floor, strict admission during this bridge rollout, or a bridge without the
    configured safe remaining window.
 5. Set `PEARL_UPDATER_ENABLED=1` and keep the config, revocation list, Better
-   Stack token, catalog-canary bearer token, and catalog-canary SSH key
+   Stack token, catalog-canary operator-key bearer, and catalog-canary SSH key
    `root:root 0600`.
 6. Prove the live root-owned config carries the exact outer handoff deadline
    and bridge safety window before starting the plan. These reads expose no

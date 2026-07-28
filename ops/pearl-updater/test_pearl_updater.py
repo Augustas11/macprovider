@@ -1800,6 +1800,7 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_canary_ssh_key_file=key,
             catalog_canary_known_hosts_file=known_hosts,
         )
+        self.updater.coordinator_operator_token = mock.Mock(return_value="t" * 32)
         order = []
         self.updater.prove_catalog_canary_mac = mock.Mock(
             side_effect=lambda *_args, **_kwargs: order.append("mac")
@@ -1831,6 +1832,32 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(order, ["mac", "pool"])
 
+    def test_exact_provider_canary_requires_operator_key_token(self):
+        release = self.verify()
+        token = self.root / "catalog-token"
+        key = self.root / "catalog-ssh-key"
+        known_hosts = self.root / "catalog-known-hosts"
+        token.write_text("s" * 32 + "\n")
+        key.write_text("private-key\n")
+        known_hosts.write_text("canary.example ssh-ed25519 AAAATEST\n")
+        token.chmod(0o600)
+        key.chmod(0o600)
+        known_hosts.chmod(0o600)
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            catalog_canary_provider_id="catalog-canary",
+            catalog_canary_auth_token_file=token,
+            catalog_canary_ssh_target="operator@canary.example",
+            catalog_canary_ssh_key_file=key,
+            catalog_canary_known_hosts_file=known_hosts,
+        )
+        self.updater.coordinator_operator_token = mock.Mock(return_value="o" * 32)
+        self.updater.prove_catalog_canary_mac = mock.Mock()
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "must be the coordinator operator key"):
+            self.updater.verify_exact_provider_canary(release)
+        self.updater.prove_catalog_canary_mac.assert_not_called()
+
     def test_exact_provider_canary_retries_full_proof_and_session_bound_admission(self):
         release = self.verify()
         token = self.root / "catalog-token"
@@ -1851,6 +1878,7 @@ class PearlUpdaterTests(unittest.TestCase):
             catalog_canary_ssh_key_file=key,
             catalog_canary_known_hosts_file=known_hosts,
         )
+        self.updater.coordinator_operator_token = mock.Mock(return_value="t" * 32)
         row_identity = "b" * 64
         self.updater.prove_catalog_canary_mac = mock.Mock(
             side_effect=[
