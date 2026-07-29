@@ -2499,7 +2499,7 @@ func (s *Server) forwardHTTPSequence(
 			upReq.Header.Set("Content-Type", "application/json")
 			upReq.Header.Set("X-Request-ID", originalRequestID)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
-			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s))
+			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), state.provider.AssignedID)
 			resp, doErr := providerhttp.Client.Do(upReq)
 			dispatchDone := phaseTimingNow(s)
 			state.phaseTiming.markProviderDispatchDone(dispatchDone)
@@ -2873,7 +2873,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	var relay *providerws.RelayStream
 	var err error
 	if state != nil {
-		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s))
+		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider.AssignedID)
 	}
 	if settlementMetadata != nil && s.settlementRelay != nil {
 		relay, err = s.settlementRelay(ctx, provider, requestID, body, stream, settlementMetadata)
@@ -3577,7 +3577,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 	}
 	if state != nil {
-		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s))
+		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s), provider.AssignedID)
 	}
 	resp, err := providerhttp.Client.Do(upReq)
 	dispatchDone := phaseTimingNow(s)

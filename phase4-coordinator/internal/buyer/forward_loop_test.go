@@ -129,6 +129,12 @@ func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 	if rows[0].ProviderAssignedID.String != "s1" {
 		t.Fatalf("rows[0].ProviderAssignedID = %q, want s1", rows[0].ProviderAssignedID.String)
 	}
+	if !rows[0].TTFTMs.Valid || rows[0].TTFTMs.Float64 < 80 {
+		t.Fatalf("rows[0].TTFTMs = %#v, want persisted non-null provider TTFT >= 80", rows[0].TTFTMs)
+	}
+	if !rows[0].DecodeMs.Valid {
+		t.Fatalf("rows[0].DecodeMs = %#v, want persisted non-null provider decode timing", rows[0].DecodeMs)
+	}
 }
 
 // Scenario 2: HTTP 502 → advance → HTTP 200. Two rows with explicit
@@ -198,6 +204,111 @@ func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	}
 	if rows[1].Retried != 1 {
 		t.Fatalf("rows[1].Retried = %d, want 1", rows[1].Retried)
+	}
+}
+
+func TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming(t *testing.T) {
+	const requestID = "eeeeeeee-5555-4555-8555-555555555555"
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(120 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"error":{"code":"provider_failed"}}`))
+	}))
+	defer failUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want failed provider row + no-provider row: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[0].Status != http.StatusBadGateway {
+		t.Fatalf("provider failure row = %#v, want s1/502", rows[0])
+	}
+	if !rows[0].TTFTMs.Valid || !rows[0].DecodeMs.Valid {
+		t.Fatalf("provider failure timing = (%#v, %#v), want non-null values", rows[0].TTFTMs, rows[0].DecodeMs)
+	}
+	if rows[1].ProviderAssignedID.Valid {
+		t.Fatalf("final row provider_assigned_id = %#v, want NULL no-provider row", rows[1].ProviderAssignedID)
+	}
+	if rows[1].TTFTMs.Valid || rows[1].DecodeMs.Valid {
+		t.Fatalf("no-provider timing = (%#v, %#v), want both NULL", rows[1].TTFTMs, rows[1].DecodeMs)
+	}
+}
+
+func TestB1_RequestLogPreDispatchProviderRowDoesNotInheritPriorTiming(t *testing.T) {
+	const requestID = "ffffffff-6666-4666-8666-666666666666"
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(120 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"error":{"code":"provider_failed"}}`))
+	}))
+	defer failUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "invalid", EndpointURL: "%"},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "invalid", "s2", "model-a", pool.StateReady, 20000, 1, "%", 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want failed provider row + pre-dispatch provider row: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || !rows[0].TTFTMs.Valid || !rows[0].DecodeMs.Valid {
+		t.Fatalf("provider failure row = %#v, want s1 with non-null timing", rows[0])
+	}
+	if rows[1].ProviderAssignedID.String != "s2" || rows[1].Status != http.StatusBadGateway {
+		t.Fatalf("pre-dispatch provider row = %#v, want s2/502", rows[1])
+	}
+	if rows[1].TTFTMs.Valid || rows[1].DecodeMs.Valid {
+		t.Fatalf("pre-dispatch provider timing = (%#v, %#v), want both NULL", rows[1].TTFTMs, rows[1].DecodeMs)
 	}
 }
 

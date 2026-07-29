@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.5.5",
+      "version": "1.5.6",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6",
+      "version": "0.6.1",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -179,7 +179,7 @@
     {
       "spec_id": "SPEC-007",
       "title": "Internal Operator Protocol Explorer",
-      "version": "0.5",
+      "version": "0.5.1",
       "path": "specs/SPEC-007-explorer.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1094,6 +1094,30 @@
     }
   ],
   "requirements": [
+    {
+      "requirement_id": "SPEC-002-R001",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/requestlog/store.go:Row",
+        "phase4-coordinator/internal/buyer/phase_timing.go:requestLogTTFTMs",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:record"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/requestlog/store_test.go::TestRequestLogMigratesExistingTable",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go::TestM2_1C_RowSequence_HTTPSuccessFirstAttempt",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go::TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go::TestB1_RequestLogPreDispatchProviderRowDoesNotInheritPriorTiming"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B1 persists nullable per-request provider TTFT/decode timings in local schema and retry fixtures, but live Pearl coordinator database migration evidence remains pending."
+      }
+    },
     {
       "requirement_id": "SPEC-008-R001",
       "spec_id": "SPEC-008",

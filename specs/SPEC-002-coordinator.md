@@ -1,7 +1,16 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.5 (2026-07-28, #784 C2 streaming-ceiling retarget)
+**Version:** 1.5.6 (2026-07-29, B1 request-log TTFT/decode persistence)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.6 (2026-07-29, B1 — per-request provider TTFT/decode persistence):**
+- `request_log` gains nullable `ttft_ms` and `decode_ms` columns. New
+  coordinator writes populate them from the existing provider phase-timing
+  anchors: `ttft_ms` is provider dispatch completion to provider first byte,
+  and `decode_ms` is provider first byte to provider completion. Rows where
+  either endpoint was not observed keep NULL, including legacy rows and
+  pre-dispatch failures. The columns are observability-only and require no
+  indexes.
 
 **Change log v1.5.5 (2026-07-28, issue #784 — C2 streaming-ceiling retarget):**
 - Retargets the deploy-time C2 timer relation after gateway #760 decomposed
@@ -1699,6 +1708,8 @@ Every buyer request is logged to the `request_log` table in SQLite:
 | `latency_ms` | REAL | Total wall time including routing |
 | `routing_ms` | REAL | Time spent in routing + preflight |
 | `queue_wait_ms` | REAL | Coordinator-side bounded slot queue wait for this attempt; 0 when no slot queue wait occurred |
+| `ttft_ms` | REAL NULL | (v1.5.6) Provider dispatch completion to provider first byte for this attempt. NULL when no provider first byte was observed or the request did not reach provider execution. |
+| `decode_ms` | REAL NULL | (v1.5.6) Provider first byte to provider completion for this attempt. NULL when the first byte or provider completion endpoint was not observed. |
 | `status` | INTEGER | HTTP status returned to buyer |
 | `stream` | INTEGER | 1 if streaming, 0 if not |
 | `buyer_ip` | TEXT | Buyer's IP (for rate limiting in future) |
@@ -1711,6 +1722,9 @@ Every buyer request is logged to the `request_log` table in SQLite:
 
 Token counts are extracted from the provider's response `usage` field.
 For streaming responses, they come from the usage chunk (SPEC-001 FR-7).
+`ttft_ms` and `decode_ms` are written from coordinator-observed phase
+timing only; they are not provider-reported fields and are not billing
+formula inputs.
 
 Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts within a single account. Note that `request_log.request_id` is coordinator-internal (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`); it is NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The cross-account collision class motivating #211 lives on `external_request_id`, not on internal `request_id`. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1.
 
@@ -1730,7 +1744,7 @@ CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_
 
 The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support closing-the-books reconciliation joins to gateway `usage_events` and `audit_events` (whether run as out-of-process harnesses or via a future coordinator-hosted reconciliation endpoint).
 
-Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL` (v1.5.2), and `ALTER TABLE request_log ADD COLUMN queue_wait_ms REAL NOT NULL DEFAULT 0` (v1.5.3), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup. The `attempt_n` column requires no index (it is a per-row ordinal, not a join key); the operator backfill subcommand `coordinator backfill-attempt-n` populates legacy NULL rows once per deployment.
+Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL` (v1.5.2), `ALTER TABLE request_log ADD COLUMN queue_wait_ms REAL NOT NULL DEFAULT 0` (v1.5.3), `ALTER TABLE request_log ADD COLUMN ttft_ms REAL NULL` (v1.5.6), and `ALTER TABLE request_log ADD COLUMN decode_ms REAL NULL` (v1.5.6), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup. The `attempt_n`, `ttft_ms`, and `decode_ms` columns require no index (they are per-row attributes, not join keys); the operator backfill subcommand `coordinator backfill-attempt-n` populates legacy NULL `attempt_n` rows once per deployment. Legacy `ttft_ms` / `decode_ms` rows remain NULL.
 
 **Per-key migration-state machine (v1.5.1).** Because ALTER TABLE migrations run at daemon startup but the partial-NULL composite indexes are built only by the operator subcommand `coordinator migrate-indexes`, each composite reconciliation key on `request_log` has its OWN three-state migration:
 
@@ -4170,6 +4184,16 @@ Run by: `go test ./phase4-coordinator/... -run TestRequestLogMultiAttemptRows`
 A deterministic null-usage error fixture returns SPEC-001 `inference_response_end.status="error_model_not_loaded"` with no usage object. The assertion is one `request_log` row whose `error_code` is exactly `error_model_not_loaded`, while success and non-SPEC-001 error paths keep `error_code` NULL.
 
 Run by: `go test ./phase4-coordinator/... -run TestRequestLogErrorCodePopulation`
+
+**AC-FR-B9-TIMING. request_log persists provider TTFT/decode observability.**
+A deterministic provider relay fixture delays its first response byte after
+provider dispatch completion and completes normally. The assertion is one
+`request_log` row with non-NULL `ttft_ms` and non-NULL `decode_ms`, where
+`ttft_ms` reflects the provider dispatch-completion to first-byte interval.
+A legacy-schema migration fixture asserts pre-migration rows scan NULL for
+both columns.
+
+Run by: `go test ./phase4-coordinator/internal/requestlog ./phase4-coordinator/internal/buyer -run 'TestRequestLogMigratesExistingTable|TestM2_1C_RowSequence_HTTPSuccessFirstAttempt|TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming|TestB1_RequestLogPreDispatchProviderRowDoesNotInheritPriorTiming'`
 
 **AC-11. Provisional admission.**
 Connect a mock provider with `provider_id` NOT in `config.providers[]`

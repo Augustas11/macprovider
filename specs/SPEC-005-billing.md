@@ -1,7 +1,15 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6 (2026-07-12, money-path reconciliation — reconcile the shipped billing formula, ledger schema, and rate-card resolution to code; fold in SPEC-024 prefix-cache billing — runbook item 11)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.2, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+**Version:** 0.6.1 (2026-07-29, B1 request-log timing consumer note)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.8, SPEC-024 v0.2.1 (prefix-cache cache-isolation; its billing sections are superseded by this spec)
+
+**Change log v0.6.1 (2026-07-29, B1 — request-log TTFT/decode consumer boundary):**
+- Dependency bump: SPEC-002 v1.5.2 → v1.5.6 to acknowledge
+  `request_log.ttft_ms` and `request_log.decode_ms`. They are
+  coordinator-observed, nullable, read-only observability fields.
+  SPEC-005 MAY expose or join them for operational reconciliation, but
+  MUST NOT use them in credit arithmetic, payout eligibility, quarantine
+  classification, or request-log migrations.
 
 **Change log v0.6 (2026-07-12, money-path reconciliation — runbook item 11; spec-only, reconciled to shipped code):**
 
@@ -523,7 +531,7 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - usage object has prompt_tokens, completion_tokens, total_tokens.
 - cancel usage is authoritative for v1.2.4+ providers.
 - SPEC-005 MUST NOT require new provider fields.
-**SPEC-002 v1.5.2:**
+**SPEC-002 v1.5.6:**
 - coordinator owns request_log and provider auth.
 - request_log is read-only to SPEC-005.
 - request_log carries deterministic `error_code` for SPEC-001 null-usage errors.
@@ -532,6 +540,7 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - each provider attempt for a repeated request_id has its own request_log row.
 - request_log carries `account_id` (v1.5.0 / issue #211). The composite `(account_id, request_id)` is the grouping key for attempt-ordinal derivation; SQLite `IS` semantics preserve the pre-v1.5.0 grouping for legacy NULL-`account_id` rows.
 - request_log carries `attempt_n` (v1.5.2 / issue #168). Zero-based monotonic ordinal populated at INSERT time by the writer within the same `(account_id, request_id)` group. SPEC-005 v0.3.3 reads this directly when non-NULL; falls back to id-ASC derivation when NULL (legacy / rollout window). Both paths produce byte-identical ordinals.
+- request_log carries nullable `ttft_ms` and `decode_ms` (v1.5.6 / B1). SPEC-005 treats them as read-only observability fields, never billing formula inputs.
 - FR-P11a supplies fault categories.
 - FR-P12 supplies provider bearer-token auth.
 - FR-R3 distinguishes stable provider_id from assigned_id.
@@ -743,6 +752,7 @@ ratify it as optimal.
 SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, error_code, provider_header, retried, and (v0.3.1) account_id.
 SPEC-005 never changes these columns.
 **SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168):** the D10 `attempt_n` need is satisfied by `request_log.attempt_n` (monotonic, populated at INSERT time within each `(account_id, request_id)` group under SQLite `IS`). SPEC-005 reads `attempt_n` directly when non-NULL; falls back to the legacy id-ASC derivation when NULL (rollout window). Both paths produce byte-identical ordinals.
+**SPEC-005 v0.6.1 / SPEC-002 v1.5.6 (B1):** `request_log.ttft_ms` and `request_log.decode_ms` are nullable coordinator-observed provider timing fields. SPEC-005 MAY read them for operator diagnostics, but MUST NOT use them to compute credits, provider rewards, settlement readiness, or quarantine reasons.
 
 Legacy fallback (NULL `attempt_n` only — pre-v1.5.2 rows OR rollback window): group rows that share the same `(account_id, request_id)` under SQLite `IS`, then order each group by `request_log.id ASC`. Under `IS` a NULL-`account_id` row clusters with NULL-`account_id` rows only — it does NOT cluster with non-NULL rows that happen to share `request_id`. Row 1 becomes `attempt_n=0`. Row 2 becomes `attempt_n=1` only when `request_log.retried` indicates an explicit retry. **Row 3+ in the fallback path is also assigned a stable monotonic ordinal (`attempt_n=2, 3, ...`) and is credited normally** — the prior v0.3.1 "row 3+ MUST be quarantined" rule is satisfied by the deterministic id-ASC derivation. Quarantining is reserved for the legitimate-retry-without-explicit-marker class (`attempt_n=1` with `retried=0`).
 
