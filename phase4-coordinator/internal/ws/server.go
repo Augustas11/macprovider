@@ -1763,7 +1763,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			}
 		}
 	}
-	attestResult := tier2.VerifyAttestationTokenExt(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
+	attestResult := tier2.VerifyAttestationTokenExtWithCatalog(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, entry.ModelID, s.catalogRef(), s.now(), s.log)
 	attestationStatus := attestResult.Status
 	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
