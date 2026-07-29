@@ -70,7 +70,8 @@
         "SPEC-016",
         "SPEC-022",
         "SPEC-024",
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-039"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -138,7 +139,8 @@
         "SPEC-023",
         "SPEC-032",
         "SPEC-037",
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-039"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -222,7 +224,8 @@
         "SPEC-022",
         "SPEC-024",
         "SPEC-030",
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-039"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -340,7 +343,8 @@
         "SPEC-006",
         "SPEC-015",
         "SPEC-037",
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-039"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -490,7 +494,8 @@
       "id": "kv-cache-persistence",
       "owner_spec": "SPEC-037",
       "consumers": [
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-039"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -510,6 +515,17 @@
       "id": "continuous-batching-serving",
       "owner_spec": "SPEC-038",
       "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "paged-kv-attention",
+      "owner_spec": "SPEC-039",
+      "consumers": [
+        "SPEC-038"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",

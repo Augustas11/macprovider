@@ -1091,6 +1091,38 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC v0.2 reframes activation from the falsified upstream batch API pin to a locally owned scheduler plus forward-referenced SPEC-039 paged-engine capability; IMPL follows in a separate PR behind a disabled-by-default flag, with MSB-01-05 and the FR-CB15 real-hardware enable gate pending."
       }
+    },
+    {
+      "spec_id": "SPEC-039",
+      "title": "Paged KV / paged-attention engine",
+      "version": "v0.1",
+      "path": "specs/SPEC-039-paged-kv-attention-engine.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "paged-kv-attention"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-024",
+        "SPEC-037"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC lands first from verified paged-attention spikes; implementation and exact-parity fixtures land in a separate PR behind a disabled-by-default provider-local gate."
+      }
     }
   ],
   "requirements": [
@@ -2500,6 +2532,141 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R001",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV1 (public KVCache injection seam): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R002",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV2 (paged storage and block allocator): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R003",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV3 (paged-attention kernel modes): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R004",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV4 (fp16 exactness invariant): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R005",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV5 (KV dtype scope and quantized-KV boundary): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R006",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV6 (provider-local default-off invariants): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R007",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV7 (fail-safe fallback and observability): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R008",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV8 (metallib packaging invariant): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R009",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV9 (SPEC-037 and SPEC-038 composition): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
       }
     }
   ]
