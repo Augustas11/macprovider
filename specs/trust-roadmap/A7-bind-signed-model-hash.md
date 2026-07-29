@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: complete in PR #806 at `1fdf68d8` ("Bind signed
+attestation hashes to catalog evidence").
+
 ## Problem (roadmap §4, tier2 audit)
 The SE attestation already signs `claimed.model_hash` and the coordinator
 discards it — `pillar_c.go` references `Claimed` only to hash it into an audit

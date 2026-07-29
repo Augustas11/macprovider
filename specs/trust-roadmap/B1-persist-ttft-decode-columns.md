@@ -4,7 +4,10 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
-**Gated on**: a SPEC-002 amendment (nearly ship-now otherwise).
+**Status (2026-07-29)**: complete in PR #809 at `6a493c8b` ("B1 persist
+per-request provider timing").
+
+**Gated on**: complete; SPEC-002 v1.5.6 now carries the amendment.
 
 ## Problem
 True TTFT/decode are measured on every request and discarded (roadmap §4.7).

@@ -5,6 +5,12 @@ Status: research document (non-normative; basis for GitHub issues and implementa
 Scope: catalog, benchmark, hardware verification, provider admission, routing, buyer/provider UX trust model
 Related: #744, #745 (closed, fixed by #751), #742 (closed, fixed by #748), #687, #584, #582, PR #772, SPEC-002, SPEC-004, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-013, SPEC-017, SPEC-022, SPEC-023 (v0.8), SPEC-027, SPEC-029, SPEC-030, SPEC-031, SPEC-032, SPEC-033, SPEC-034, SPEC-036
 
+Implementation status snapshot (2026-07-29): this original roadmap has been
+split into independently tracked files under `specs/trust-roadmap/`. Current
+merged/direct-to-main status is summarized in
+[`README.md`](README.md). Plane A is complete; G0 has live Pearl DB findings;
+B1, B2, B5, B6, and B10 are complete; B3, B4, B7, B8, and B9 remain deferred.
+
 Evidence tags:
 
 - **[E-code]** — verified by reading code at `origin/main` `8a39c636` (2026-07-27). This branch adds only this document; no code differs from that base.

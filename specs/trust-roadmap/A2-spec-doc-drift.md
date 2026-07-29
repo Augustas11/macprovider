@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **REDUCED — SPEC-032 item done by #769**.
 
+**Status (2026-07-29)**: complete on `main` at `c5b65673` ("Bound
+trust-roadmap spec claims to shipped authority").
+
 ## Problem (roadmap §4.10)
 - ~~`SPEC-032` posture inverted~~ — **DONE by PR #769**: the spec now records the 2026-07-11 posture as "superseded" and the gate as `false` (`SPEC-032:557,568`). No longer in scope.
 - `SPEC-033`'s migration roster omits migration 019 (operator dual-control approval).

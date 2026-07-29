@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: complete on `main` at `c9749d00`; live Pearl DB
+findings are recorded below.
+
 ## Why it is the gate
 The coordinator-observed thesis (that observed buyer-path performance should
 replace provider self-report as the authority for privileges) assumes enough

@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **SHAPE — now 3 disagreeing rows**.
 
+**Status (2026-07-29)**: complete on `main` at `2dac46fb` ("Reconcile SPEC-023
+with signed catalog reality").
+
 ## Problem (roadmap §4.13, F13)
 `SPEC-023` is now `v0.8.1`, `status: LOCKED`, and its normative row table still
 disagrees with the **live signed** catalog on **3 rows** (all live rows are

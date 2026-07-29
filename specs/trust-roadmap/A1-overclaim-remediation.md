@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: complete on `main` at `01e1585d` ("Clarify receipt
+trust boundaries").
+
 ## Problem
 `README.md:22` and `docs/using-macprovider-with-openai-sdk.md:202` present
 provider-self-reported model identity as a shipping guarantee ("the verified

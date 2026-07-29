@@ -4,7 +4,10 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
-**Gated on**: B2.
+**Status (2026-07-29)**: complete in PR #811 at `436642b8` ("Implement B5
+hello-gate sandbox reload safety").
+
+**Gated on**: complete.
 
 ## Problem / shape
 Turning `require_autotune_hello_gate` on is a one-line ops flip, but naively it

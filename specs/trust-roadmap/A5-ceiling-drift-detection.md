@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: complete in PR #803 at `cbecaa37` ("Observe provider
+model ceiling drift").
+
 ## Problem (roadmap §4.5, SPEC-032 FR-HG7 — silent half)
 A heartbeat model switch is applied unconditionally (`pool/provider.go:1908`)
 and emits no `SwapEvent` when it skips the loading transition (`:1899-1916`).

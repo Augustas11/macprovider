@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **SHAPE — backfill now fail-closed on a pinned release**.
 
+**Status (2026-07-29)**: complete in PR #807 at `acd2a0b6` ("A4 publish
+in-band autotune provenance").
+
 ## Problem (roadmap §4.3, F3)
 `bench_gate.provenance` ships as a **hardcoded client-side backfill table**
 (`AutotuneRecommend.swift:799`, applied `:757-765`) — now **fail-closed** unless the catalog matches the pinned recovery release + SHA (`:796-797`), which the live feed still matches, so it is still backfilled client-side — not signed catalog bytes — the Ed25519

@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: not implemented; still deferred by fleet/hardware
+preconditions.
+
 **Gated on**: ≥3 verified providers existing / #584 hardware. Deferred by physics, not choice.
 
 ## Problem / shape

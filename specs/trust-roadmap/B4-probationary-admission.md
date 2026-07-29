@@ -4,7 +4,12 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **SHAPE — harder, must integrate #763 bill-once journal**.
 
-**Gated on**: G0 + a pricing/settlement design. The largest brief; must NOT be bundled with anything. Design sketch: roadmap §6.
+**Status (2026-07-29)**: not implemented. G0 is broad-negative for current
+per-bucket observed-performance authority, and the pricing/settlement design
+remains unresolved. The largest brief; must NOT be bundled with anything.
+Design sketch: roadmap §6.
+
+**Gated on**: materially higher per-bucket demand plus a pricing/settlement SPEC.
 
 ## Shape the SPEC must resolve (before any code)
 1. **A new per-(provider, model) probation state** — `pool.Tier` is a

@@ -4,7 +4,10 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
-**Gated on**: a registration-policy decision. Not G0.
+**Status (2026-07-29)**: complete in PR #812 at `2cd5bd7f` ("Close
+fresh-provider registration wash with invite admission").
+
+**Gated on**: complete.
 
 ## Problem / shape
 Sanction *storage* is already correct (`provider_id`-keyed, durably persisted).

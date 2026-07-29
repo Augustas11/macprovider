@@ -4,7 +4,10 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
-**Gated on**: its own SPEC. Does **not** gate on G0 (a static `min_ram_gb ≤ ceiling` check needs no traffic).
+**Status (2026-07-29)**: complete in PR #810 at `af3064e6` ("B2: enforce
+admitted model ceilings in strict trust mode").
+
+**Gated on**: complete.
 
 ## Problem
 A5 detects a ceiling-drift switch but does not stop it. FR-HG7's enforcement half.

@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: complete in PR #801 at `66fec87f` ("Reject swapped
+autotune evidence at the coordinator").
+
 ## Problem (roadmap §4.4)
 `swap_detected` is a paid-recommendation hard veto client-side (#742) but is
 decoded and then **ignored** coordinator-side — `benchmarkPassesGate` never

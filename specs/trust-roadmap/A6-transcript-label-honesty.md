@@ -4,6 +4,9 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
+**Status (2026-07-29)**: complete in PR #805 at `ff5471c7` ("A6: make
+recommendation and stats trust labels explicit").
+
 ## Problem (roadmap §4.9, from F9 / §8)
 - The `autotune --recommend` human transcript surfaces none of #772's
   `confidence`/provenance/drift (JSON-only) and prints "Benchmarked N" where N

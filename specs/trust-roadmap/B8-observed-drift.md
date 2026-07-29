@@ -4,7 +4,11 @@
 
 > **Verified against `origin/main` @ `51a60c23` (2026-07-28)** — see [VERIFICATION-2026-07-28.md](VERIFICATION-2026-07-28.md). Status: **VALID**.
 
-**Gated on**: G0 + B1.
+**Status (2026-07-29)**: not implemented. B1 is complete, but G0 is
+broad-negative for current per-bucket authority; keep this deferred except for
+a future narrow observe-only design over high-fill buckets.
+
+**Gated on**: materially higher per-bucket demand or a narrow observe-only SPEC.
 
 ## Problem / shape
 Today's drift check compares the provider's heartbeat TPS claim against the
