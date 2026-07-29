@@ -1062,7 +1062,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.1",
+      "version": "v0.2",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1089,7 +1089,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC lands first (RESEARCH_232 Approach A); IMPL follows in a separate PR behind a disabled-by-default flag; MSB-01-05 and the FR-CB15 real-hardware enable gate are pending."
+        "rationale": "SPEC v0.2 reframes activation from the falsified upstream batch API pin to a locally owned scheduler plus forward-referenced SPEC-039 paged-engine capability; IMPL follows in a separate PR behind a disabled-by-default flag, with MSB-01-05 and the FR-CB15 real-hardware enable gate pending."
       }
     }
   ],
