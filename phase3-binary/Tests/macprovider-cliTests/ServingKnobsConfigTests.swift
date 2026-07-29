@@ -183,6 +183,24 @@ final class ServingKnobsConfigTests: XCTestCase {
         ))
     }
 
+    func testContinuousBatchingRejectsInvalidModeFromEnvironment() throws {
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCHING": "maybe"],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        ))
+    }
+
+    func testContinuousBatchingRejectsInvalidModeFromYAML() throws {
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: maybe\n" }
+        ))
+    }
+
     // MARK: - Preflight validation
 
     func testKvBitsPreflightRejectsInvalidValue() throws {
@@ -231,6 +249,74 @@ final class ServingKnobsConfigTests: XCTestCase {
         config.continuousBatching = .on
         config.maxConcurrencyOverride = 2
         XCTAssertThrowsError(try ServeCommand.runContinuousBatchingPreflight(config))
+    }
+
+    // Lock the fail-closed strict-mode error contract (status + code), not just
+    // that it throws — a future regression could keep "throws" while silently
+    // changing the client-visible status or reason code.
+    func testValidateStrictStartupErrorContract() throws {
+        func assertStrictError(
+            kvBits: Int?,
+            draftConfigured: Bool,
+            expectedStatus: Int,
+            expectedCode: String,
+            line: UInt = #line
+        ) {
+            let capability = ContinuousBatchingPolicy.capability(
+                mode: .on,
+                maxBatch: 2,
+                queueLimit: nil,
+                kvBits: kvBits,
+                draftConfigured: draftConfigured
+            )
+            XCTAssertThrowsError(
+                try ContinuousBatchingPolicy.validateStrictStartup(capability),
+                line: line
+            ) { error in
+                guard let apiError = error as? APIError else {
+                    return XCTFail("expected APIError, got \(error)", line: line)
+                }
+                XCTAssertEqual(apiError.status, expectedStatus, line: line)
+                XCTAssertEqual(apiError.code, expectedCode, line: line)
+                XCTAssertFalse(apiError.message.isEmpty, line: line)
+            }
+        }
+
+        // Unpinned upstream batch API => 503 continuous_batching_unavailable.
+        assertStrictError(
+            kvBits: nil,
+            draftConfigured: false,
+            expectedStatus: 503,
+            expectedCode: "continuous_batching_unavailable"
+        )
+        // kv_bits requested => 400 continuous_batching_unsupported_kv_bits.
+        assertStrictError(
+            kvBits: 4,
+            draftConfigured: false,
+            expectedStatus: 400,
+            expectedCode: "continuous_batching_unsupported_kv_bits"
+        )
+        // Draft model requested => 400 draft_model_capacity_shortfall (draft takes precedence).
+        assertStrictError(
+            kvBits: nil,
+            draftConfigured: true,
+            expectedStatus: 400,
+            expectedCode: "draft_model_capacity_shortfall"
+        )
+    }
+
+    // Off mode is inert: strict validation never throws regardless of otherwise-
+    // unsupported inputs (FR-CB9 flag-off parity).
+    func testValidateStrictStartupOffModeIsInert() throws {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .off,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: 4,
+            draftConfigured: true
+        )
+        XCTAssertNil(capability.unsupportedReason)
+        XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
     }
 
     func testContinuousBatchingCanarySerialRoutesUnsupportedPin() throws {

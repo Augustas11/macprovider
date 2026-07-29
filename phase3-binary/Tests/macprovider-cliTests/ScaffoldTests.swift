@@ -108,4 +108,22 @@ final class DecodeBenchHelperTests: XCTestCase {
             XCTAssertEqual(error as? MSBAggregateThroughputError, .invalidSample)
         }
     }
+
+    func testMSBAggregateThroughputRejectsTokenCountOverflow() {
+        let base = Date(timeIntervalSince1970: 100)
+        XCTAssertThrowsError(try msbAggregateThroughput([
+            MSBAggregateThroughputInput(
+                decodedTokens: Int.max,
+                decodeStartedAt: base,
+                decodeEndedAt: base.addingTimeInterval(1)
+            ),
+            MSBAggregateThroughputInput(
+                decodedTokens: 1,
+                decodeStartedAt: base,
+                decodeEndedAt: base.addingTimeInterval(1)
+            ),
+        ])) { error in
+            XCTAssertEqual(error as? MSBAggregateThroughputError, .tokenCountOverflow)
+        }
+    }
 }

@@ -463,6 +463,7 @@ struct MSBAggregateThroughputReport: Sendable, Equatable {
 enum MSBAggregateThroughputError: Error, Equatable {
     case emptySamples
     case invalidSample
+    case tokenCountOverflow
 }
 
 func msbAggregateThroughput(_ samples: [MSBAggregateThroughputInput]) throws -> MSBAggregateThroughputReport {
@@ -476,7 +477,11 @@ func msbAggregateThroughput(_ samples: [MSBAggregateThroughputInput]) throws -> 
         guard sample.decodedTokens >= 0, sample.decodeEndedAt > sample.decodeStartedAt else {
             throw MSBAggregateThroughputError.invalidSample
         }
-        totalDecodedTokens += sample.decodedTokens
+        let (sum, overflowed) = totalDecodedTokens.addingReportingOverflow(sample.decodedTokens)
+        guard !overflowed else {
+            throw MSBAggregateThroughputError.tokenCountOverflow
+        }
+        totalDecodedTokens = sum
         start = min(start, sample.decodeStartedAt)
         end = max(end, sample.decodeEndedAt)
     }
