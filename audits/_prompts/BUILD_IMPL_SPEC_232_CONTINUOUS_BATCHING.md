@@ -65,4 +65,3 @@ Run targeted Swift tests for changed config/runtime/harness behavior, then run
 the relevant package build or test subset. Do not claim the feature implements
 true shared-forward decode unless the code actually has a batch API and test
 evidence for one model forward per active decode step.
-
