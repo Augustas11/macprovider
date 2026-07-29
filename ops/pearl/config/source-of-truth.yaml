@@ -134,11 +134,11 @@ known_config_drift:
     rationale: Hard admission floor exists in tracked source; absence live is classified until PR C.
   - path: referrals.campaign
     drift_kind: tracked_only
-    tracked: ""
-    owner: base_product_defaults
+    tracked: prebeta_20260719
+    owner: referral_admission_policy
     category: Evidence
     classification: overlay-owned Pearl production setting
-    rationale: The checked-in default is campaign-empty; Pearl's live referral campaign, when enabled, is owned by the production overlay.
+    rationale: B6 makes fresh provider registration invite-gated; public referral exposure remains overlay-owned.
   - path: referrals.challenge_ttl_s
     drift_kind: tracked_only
     tracked: 900
@@ -148,11 +148,11 @@ known_config_drift:
     rationale: The checked-in referral default is supplied by code defaults when omitted from live base; Pearl-specific campaign timing is overlay-owned.
   - path: referrals.current_key_id
     drift_kind: tracked_only
-    tracked: ""
-    owner: base_product_defaults
+    tracked: k1
+    owner: referral_admission_policy
     category: Evidence
     classification: overlay-owned Pearl production setting
-    rationale: The checked-in default is intentionally empty; Pearl's active key id is overlay-owned and must not be inferred from base YAML absence.
+    rationale: B6 requires a configured referral key id for fresh-registration admission.
   - path: referrals.enable_join_links
     drift_kind: tracked_only
     tracked: false
@@ -181,13 +181,13 @@ known_config_drift:
     category: Evidence
     classification: overlay-owned Pearl production setting
     rationale: The checked-in default is no grandfather cutoff; Pearl's campaign cutoff, when present, is overlay-owned.
-  - path: referrals.hmac_keys
+  - path: referrals.hmac_keys.k1
     drift_kind: tracked_only
-    tracked: {}
+    tracked: env:MAL_REFERRAL_HMAC_K1
     owner: pearl_operator_secrets
     category: Evidence
     classification: secrets/env-owned setting
-    rationale: The checked-in base never carries referral HMAC material; Pearl secrets are env-owned and may be referenced by the overlay.
+    rationale: B6 requires env-owned HMAC material for the fresh-registration admission gate; secret bytes remain outside git.
   - path: referrals.join_base_url
     drift_kind: tracked_only
     tracked: "https://malibu.tech/j"
@@ -218,11 +218,11 @@ known_config_drift:
     rationale: The checked-in default omits a request-access URL; Pearl campaign UX URL is overlay-owned when set.
   - path: referrals.require_for_registration
     drift_kind: tracked_only
-    tracked: false
-    owner: base_product_defaults
+    tracked: true
+    owner: referral_admission_policy
     category: Evidence
     classification: overlay-owned Pearl production setting
-    rationale: The checked-in registration gate stays default-off; Pearl's campaign gate posture is overlay-owned.
+    rationale: B6 requires referral admission whenever fresh provider registration mint surfaces are enabled.
   - path: referrals.social_bonus_uses
     drift_kind: tracked_only
     tracked: 2

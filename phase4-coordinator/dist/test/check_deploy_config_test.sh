@@ -61,6 +61,7 @@
 #   T50 — provider_http.timeout_s below stream ceiling                          -> FAIL
 #   T51 — coordinator overlay lowering C2 walls is validated                    -> FAIL
 #   T52 — non-stream wall must outlive coordinator request wall                 -> FAIL
+#   T53 — fresh registration mint surface without referral admission            -> FAIL
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -117,6 +118,8 @@ write_coord() {
     echo "  request_timeout_s: $rt"
     echo "provider_http:"
     echo "  timeout_s: $rt"
+    echo "referrals:"
+    echo "  require_for_registration: true"
   } > "$wd/coordinator.yaml"
 }
 
@@ -128,6 +131,8 @@ auth:
   gateway_service_token: "$HEX64B"
   require_provider_tokens: true
   $bootstrap_line
+referrals:
+  require_for_registration: true
 routing:
   request_timeout_s: 900
 provider_http:
@@ -1003,6 +1008,28 @@ EOF
   rm -rf "$wd"
 }
 
+test_fresh_registration_surface_requires_referral_admission() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  cat > "$wd/coordinator.yaml" <<EOF
+auth:
+  operator_key: "$HEX64"
+  gateway_service_token: "$HEX64B"
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+referrals:
+  require_for_registration: false
+routing:
+  request_timeout_s: 900
+provider_http:
+  timeout_s: 900
+EOF
+  run_check "$wd"
+  assert_exit 1 "T53 fresh registration mint surface without referral gate -> FAIL"
+  assert_contains "identity re-registration wash" "T53 B6 failure message"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -1062,6 +1089,7 @@ test_skip_c2_check_cannot_omit_gateway_config
 test_provider_http_below_stream_ceiling_fails
 test_coordinator_overlay_lowering_c2_walls_fails
 test_non_stream_wall_must_outlive_coordinator_wall_fails
+test_fresh_registration_surface_requires_referral_admission
 
 echo
 echo "== summary =="

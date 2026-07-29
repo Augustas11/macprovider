@@ -21,6 +21,13 @@ func validTestConfig() Config {
 	return cfg
 }
 
+func enableReferralAdmissionForTest(cfg *Config) {
+	cfg.Referrals.RequireForRegistration = true
+	cfg.Referrals.Campaign = "prebeta_2026"
+	cfg.Referrals.CurrentKeyID = "k1"
+	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+}
+
 func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
@@ -60,6 +67,24 @@ func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T)
 	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid referral gate: %v", err)
+	}
+}
+
+func TestFreshRegistrationMintSurfacesRequireReferralAdmission(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "fresh provider registration mint surfaces") {
+		t.Fatalf("tokenless bootstrap without referral gate err=%v", err)
+	}
+	enableReferralAdmissionForTest(&cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("tokenless bootstrap with referral gate: %v", err)
+	}
+
+	cfg = validTestConfig()
+	cfg.Onboarding.AppTrackRegisterEnabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "fresh provider registration mint surfaces") {
+		t.Fatalf("app-track register without referral gate err=%v", err)
 	}
 }
 
@@ -847,6 +872,7 @@ func TestOnboardingDefaultsProductionDisabled(t *testing.T) {
 func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Onboarding.AppTrackRegisterEnabled = true
+	enableReferralAdmissionForTest(&cfg)
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.postgres_dsn") {
 		t.Fatalf("enabled without postgres_dsn err=%v", err)
 	}
@@ -905,6 +931,7 @@ func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
 func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Onboarding.AppTrackRegisterEnabled = true
+	enableReferralAdmissionForTest(&cfg)
 	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AuthPolicyRequestDSN = "postgres://provider_auth_policy_requester@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AuthPolicyApproveDSN = "postgres://provider_auth_policy_approver@127.0.0.1/db?sslmode=disable"

@@ -28,8 +28,12 @@ auth:
   require_provider_tokens: true
   allow_tokenless_provisional_bootstrap: true
 referrals:
+  require_for_registration: true
+  campaign: prebeta_test
+  policy_version: v1
+  current_key_id: current
   hmac_keys:
-    current: inline-referral-secret
+    current: inline-referral-secret-that-is-long-enough
 stats:
   reader_dsn: postgres://reader:secret-pass@db.example/macprovider
 pool:

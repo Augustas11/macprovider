@@ -545,6 +545,10 @@ func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 	publicKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
 	next.AutotuneFeeds.PublicKeys = map[string]string{"test-key": base64.StdEncoding.EncodeToString(publicKey)}
 	next.Onboarding.AppTrackRegisterEnabled = true
+	next.Referrals.RequireForRegistration = true
+	next.Referrals.Campaign = "prebeta_2026"
+	next.Referrals.CurrentKeyID = "k1"
+	next.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
 	next.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	next.Onboarding.AuthPolicyRequestDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	next.Onboarding.AuthPolicyApproveDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"

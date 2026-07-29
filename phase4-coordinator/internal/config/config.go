@@ -2046,6 +2046,9 @@ func (c Config) validateReferrals() error {
 			return fmt.Errorf("referrals.request_access_url must be a canonical absolute https URL without credentials, port, or fragment when set")
 		}
 	}
+	if !r.RequireForRegistration && (c.Auth.AllowTokenlessProvisionalBootstrap || c.Onboarding.AppTrackRegisterEnabled) {
+		return fmt.Errorf("referrals.require_for_registration must be true when fresh provider registration mint surfaces are enabled")
+	}
 	if r.EnableJoinLinks {
 		if !r.RequireForRegistration {
 			return fmt.Errorf("referrals.enable_join_links requires require_for_registration=true")
