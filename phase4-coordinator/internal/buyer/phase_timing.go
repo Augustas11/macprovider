@@ -26,6 +26,7 @@ type requestPhaseTiming struct {
 	providerDispatchDone  time.Time
 	providerFirstByte     time.Time
 	providerDone          time.Time
+	providerAssignedID    string
 }
 
 func (t *requestPhaseTiming) init(start time.Time) {
@@ -40,13 +41,14 @@ func (t *requestPhaseTiming) markCoordRoutingDone(at time.Time) {
 	t.coordRoutingDone = at
 }
 
-func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time) {
+func (t *requestPhaseTiming) markProviderDispatchStart(at time.Time, providerAssignedID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.providerDispatchStart = at
 	t.providerDispatchDone = time.Time{}
 	t.providerFirstByte = time.Time{}
 	t.providerDone = time.Time{}
+	t.providerAssignedID = providerAssignedID
 }
 
 func (t *requestPhaseTiming) markProviderDispatchDone(at time.Time) {
@@ -81,6 +83,7 @@ func (t *requestPhaseTiming) snapshot() requestPhaseTimingSnapshot {
 		providerDispatchDone:  t.providerDispatchDone,
 		providerFirstByte:     t.providerFirstByte,
 		providerDone:          t.providerDone,
+		providerAssignedID:    t.providerAssignedID,
 	}
 }
 
@@ -91,6 +94,7 @@ type requestPhaseTimingSnapshot struct {
 	providerDispatchDone  time.Time
 	providerFirstByte     time.Time
 	providerDone          time.Time
+	providerAssignedID    string
 }
 
 type phaseTimingResponseWriter struct {
@@ -265,6 +269,26 @@ func durationMillisBetween(start, end time.Time) int64 {
 		return 0
 	}
 	return durationMillis(end.Sub(start))
+}
+
+func nullableDurationMillisBetween(start, end time.Time) *float64 {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return nil
+	}
+	ms := float64(durationMillis(end.Sub(start)))
+	return &ms
+}
+
+func (snap requestPhaseTimingSnapshot) requestLogTTFTMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerDispatchDone, snap.providerFirstByte)
+}
+
+func (snap requestPhaseTimingSnapshot) requestLogDecodeMs() *float64 {
+	return nullableDurationMillisBetween(snap.providerFirstByte, snap.providerDone)
+}
+
+func (snap requestPhaseTimingSnapshot) matchesProviderAssignedID(providerAssignedID string) bool {
+	return providerAssignedID != "" && snap.providerAssignedID == providerAssignedID
 }
 
 func durationMillis(d time.Duration) int64 {

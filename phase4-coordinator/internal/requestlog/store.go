@@ -75,6 +75,8 @@ type Row struct {
 	LatencyMs             float64
 	RoutingMs             float64
 	QueueWaitMs           float64
+	TTFTMs                *float64
+	DecodeMs              *float64
 	Status                int
 	Stream                bool
 	BuyerIP               string
@@ -195,6 +197,8 @@ CREATE TABLE IF NOT EXISTS request_log (
     latency_ms           REAL    NOT NULL,
     routing_ms           REAL    NOT NULL,
     queue_wait_ms        REAL    NOT NULL DEFAULT 0,
+    ttft_ms              REAL    NULL,
+    decode_ms            REAL    NULL,
     status               INTEGER NOT NULL,
     stream               INTEGER NOT NULL,
     buyer_ip             TEXT    NOT NULL DEFAULT '',
@@ -476,6 +480,8 @@ INSERT INTO request_log (
     latency_ms,
     routing_ms,
     queue_wait_ms,
+    ttft_ms,
+    decode_ms,
     status,
     stream,
     buyer_ip,
@@ -486,7 +492,7 @@ INSERT INTO request_log (
     provider_header,
     retried,
     attempt_n
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sqliteTimeText(row.TSUtc),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
@@ -501,6 +507,8 @@ INSERT INTO request_log (
 		row.LatencyMs,
 		row.RoutingMs,
 		row.QueueWaitMs,
+		nullFloat64(row.TTFTMs),
+		nullFloat64(row.DecodeMs),
 		row.Status,
 		boolInt(row.Stream),
 		row.BuyerIP,
@@ -537,6 +545,8 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "latency_ms", sql: `ALTER TABLE request_log ADD COLUMN latency_ms REAL NOT NULL DEFAULT 0`},
 		{name: "routing_ms", sql: `ALTER TABLE request_log ADD COLUMN routing_ms REAL NOT NULL DEFAULT 0`},
 		{name: "queue_wait_ms", sql: `ALTER TABLE request_log ADD COLUMN queue_wait_ms REAL NOT NULL DEFAULT 0`},
+		{name: "ttft_ms", sql: `ALTER TABLE request_log ADD COLUMN ttft_ms REAL NULL`},
+		{name: "decode_ms", sql: `ALTER TABLE request_log ADD COLUMN decode_ms REAL NULL`},
 		{name: "status", sql: `ALTER TABLE request_log ADD COLUMN status INTEGER NOT NULL DEFAULT 0`},
 		{name: "stream", sql: `ALTER TABLE request_log ADD COLUMN stream INTEGER NOT NULL DEFAULT 0`},
 		{name: "buyer_ip", sql: `ALTER TABLE request_log ADD COLUMN buyer_ip TEXT NOT NULL DEFAULT ''`},
@@ -1013,6 +1023,13 @@ func nullInt64(v *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *v, Valid: true}
+}
+
+func nullFloat64(v *float64) sql.NullFloat64 {
+	if v == nil {
+		return sql.NullFloat64{}
+	}
+	return sql.NullFloat64{Float64: *v, Valid: true}
 }
 
 func boolInt(v bool) int {

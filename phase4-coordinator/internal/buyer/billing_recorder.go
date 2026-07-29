@@ -300,6 +300,14 @@ func (b *billingRecorder) recordRow(
 		}()
 	}
 	recoveryCachedPromptTok, cacheQuarantineReason := requestLogCacheRecoveryFields(cachedPromptTok, promptTok, b.state, attemptN)
+	var ttftMs, decodeMs *float64
+	if providerAssignedID != "" {
+		phaseTiming := b.state.phaseTiming.snapshot()
+		if phaseTiming.matchesProviderAssignedID(providerAssignedID) {
+			ttftMs = phaseTiming.requestLogTTFTMs()
+			decodeMs = phaseTiming.requestLogDecodeMs()
+		}
+	}
 	row := requestlog.Row{
 		TSUtc:                 b.startedAt,
 		RequestID:             b.requestID,
@@ -314,6 +322,8 @@ func (b *billingRecorder) recordRow(
 		LatencyMs:             float64(time.Since(b.startedAt).Milliseconds()),
 		RoutingMs:             float64(b.state.routingDone.Sub(b.startedAt).Milliseconds()),
 		QueueWaitMs:           float64(b.state.queueWait.Milliseconds()),
+		TTFTMs:                ttftMs,
+		DecodeMs:              decodeMs,
 		Status:                status,
 		Stream:                b.stream,
 		BuyerIP:               buyerIP(b.req.RemoteAddr),

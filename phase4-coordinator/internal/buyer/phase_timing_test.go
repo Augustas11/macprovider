@@ -18,7 +18,7 @@ func TestPhaseTimingResponseWriterInjectsHeaders(t *testing.T) {
 	state := &forwardState{queueWait: 25 * time.Millisecond}
 	state.phaseTiming.init(start)
 	state.phaseTiming.markCoordRoutingDone(start.Add(10 * time.Millisecond))
-	state.phaseTiming.markProviderDispatchStart(start.Add(20 * time.Millisecond))
+	state.phaseTiming.markProviderDispatchStart(start.Add(20*time.Millisecond), "s1")
 	state.phaseTiming.markProviderDispatchDone(start.Add(30 * time.Millisecond))
 	state.phaseTiming.markProviderFirstByte(start.Add(80 * time.Millisecond))
 	state.phaseTiming.markProviderDone(start.Add(140 * time.Millisecond))
@@ -111,7 +111,7 @@ func TestPhaseTimingStreamingTrailersSurviveHTTPResult(t *testing.T) {
 	state := &forwardState{}
 	state.phaseTiming.init(start)
 	state.phaseTiming.markCoordRoutingDone(start.Add(10 * time.Millisecond))
-	state.phaseTiming.markProviderDispatchStart(start.Add(20 * time.Millisecond))
+	state.phaseTiming.markProviderDispatchStart(start.Add(20*time.Millisecond), "s1")
 	state.phaseTiming.markProviderDispatchDone(start.Add(30 * time.Millisecond))
 	state.phaseTiming.markProviderFirstByte(start.Add(40 * time.Millisecond))
 
@@ -241,13 +241,13 @@ func TestPhaseTimingFinalAttemptSnapshotDoesNotMixPriorDispatch(t *testing.T) {
 	state := &forwardState{queueWait: 7 * time.Millisecond}
 	state.phaseTiming.init(start)
 	state.phaseTiming.markCoordRoutingDone(start.Add(10 * time.Millisecond))
-	state.phaseTiming.markProviderDispatchStart(start.Add(20 * time.Millisecond))
+	state.phaseTiming.markProviderDispatchStart(start.Add(20*time.Millisecond), "s1")
 	state.phaseTiming.markProviderDispatchDone(start.Add(30 * time.Millisecond))
 	state.phaseTiming.markProviderFirstByte(start.Add(50 * time.Millisecond))
 	state.phaseTiming.markProviderDone(start.Add(60 * time.Millisecond))
 
 	state.phaseTiming.markCoordRoutingDone(start.Add(100 * time.Millisecond))
-	state.phaseTiming.markProviderDispatchStart(start.Add(110 * time.Millisecond))
+	state.phaseTiming.markProviderDispatchStart(start.Add(110*time.Millisecond), "s2")
 	state.phaseTiming.markProviderDispatchDone(start.Add(115 * time.Millisecond))
 	state.phaseTiming.markProviderFirstByte(start.Add(150 * time.Millisecond))
 	state.phaseTiming.markProviderDone(start.Add(210 * time.Millisecond))
@@ -265,6 +265,32 @@ func TestPhaseTimingFinalAttemptSnapshotDoesNotMixPriorDispatch(t *testing.T) {
 	assertHeader(phaseTimingProviderDispatchHeader, "5")
 	assertHeader(phaseTimingProviderPrefillHeader, "35")
 	assertHeader(phaseTimingProviderDecodeHeader, "60")
+}
+
+func TestPhaseTimingRequestLogDurationsAreNullable(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	state := &forwardState{}
+	state.phaseTiming.init(start)
+	state.phaseTiming.markProviderDispatchStart(start.Add(10*time.Millisecond), "s1")
+	state.phaseTiming.markProviderDispatchDone(start.Add(20 * time.Millisecond))
+
+	snap := state.phaseTiming.snapshot()
+	if got := snap.requestLogTTFTMs(); got != nil {
+		t.Fatalf("TTFT = %v, want nil before provider first byte", *got)
+	}
+	if got := snap.requestLogDecodeMs(); got != nil {
+		t.Fatalf("decode = %v, want nil before provider done", *got)
+	}
+
+	state.phaseTiming.markProviderFirstByte(start.Add(75 * time.Millisecond))
+	state.phaseTiming.markProviderDone(start.Add(130 * time.Millisecond))
+	snap = state.phaseTiming.snapshot()
+	if got := snap.requestLogTTFTMs(); got == nil || *got != 55 {
+		t.Fatalf("TTFT = %v, want 55", got)
+	}
+	if got := snap.requestLogDecodeMs(); got == nil || *got != 55 {
+		t.Fatalf("decode = %v, want 55", got)
+	}
 }
 
 func TestPhaseTimingNowFallsBackWhenClockUnset(t *testing.T) {

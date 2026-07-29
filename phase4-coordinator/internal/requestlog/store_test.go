@@ -19,6 +19,8 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 	ts := time.Date(2026, 5, 31, 12, 34, 56, 789, time.UTC)
 	promptTokens := int64(11)
 	completionTokens := int64(7)
+	ttftMs := 42.0
+	decodeMs := 315.0
 
 	if err := store.Insert(ctx, Row{
 		TSUtc:              ts,
@@ -29,6 +31,8 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 		CompletionTokens:   &completionTokens,
 		LatencyMs:          123.5,
 		RoutingMs:          4.5,
+		TTFTMs:             &ttftMs,
+		DecodeMs:           &decodeMs,
 		Status:             200,
 		Stream:             true,
 		BuyerIP:            "203.0.113.1:41234",
@@ -52,6 +56,8 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 		TotalTokens        sql.NullInt64
 		LatencyMs          float64
 		RoutingMs          float64
+		TTFTMs             sql.NullFloat64
+		DecodeMs           sql.NullFloat64
 		Status             int
 		Stream             int
 		BuyerIP            string
@@ -64,7 +70,7 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 	err := store.db.QueryRowContext(ctx, `
 SELECT id, ts_utc, request_id, model, provider_assigned_id,
        prompt_tokens, completion_tokens, total_tokens, latency_ms,
-       routing_ms, status, stream, buyer_ip, error, error_code,
+       routing_ms, ttft_ms, decode_ms, status, stream, buyer_ip, error, error_code,
        pref_header, provider_header, retried
 FROM request_log
 WHERE request_id = ?`, "req-roundtrip").Scan(
@@ -78,6 +84,8 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 		&got.TotalTokens,
 		&got.LatencyMs,
 		&got.RoutingMs,
+		&got.TTFTMs,
+		&got.DecodeMs,
 		&got.Status,
 		&got.Stream,
 		&got.BuyerIP,
@@ -100,6 +108,8 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 		got.TotalTokens.Int64 != 18 || !got.TotalTokens.Valid ||
 		got.LatencyMs != 123.5 ||
 		got.RoutingMs != 4.5 ||
+		got.TTFTMs.Float64 != 42 || !got.TTFTMs.Valid ||
+		got.DecodeMs.Float64 != 315 || !got.DecodeMs.Valid ||
 		got.Status != 200 ||
 		got.Stream != 1 ||
 		got.BuyerIP != "203.0.113.1:41234" ||
@@ -583,12 +593,23 @@ INSERT INTO request_log (
 	if migrated.Valid {
 		t.Fatalf("pre-migration row external_request_id = %#v, want NULL", migrated)
 	}
+	var preTTFT, preDecode sql.NullFloat64
+	if err := store.db.QueryRow(`SELECT ttft_ms, decode_ms FROM request_log WHERE request_id = ?`, "req-pre-migration").Scan(&preTTFT, &preDecode); err != nil {
+		t.Fatalf("query timing columns on pre-migration row: %v", err)
+	}
+	if preTTFT.Valid || preDecode.Valid {
+		t.Fatalf("pre-migration timing = (%#v, %#v), want both NULL", preTTFT, preDecode)
+	}
 	// A fresh insert with ExternalRequestID set MUST persist the value.
+	freshTTFT := 12.0
+	freshDecode := 34.0
 	if err := store.Insert(context.Background(), Row{
 		TSUtc:             time.Now().UTC(),
 		RequestID:         "req-fresh",
 		ExternalRequestID: "55555555-5555-4555-8555-555555555555",
 		Model:             "model-a",
+		TTFTMs:            &freshTTFT,
+		DecodeMs:          &freshDecode,
 		Status:            200,
 	}); err != nil {
 		t.Fatalf("insert fresh row with external_request_id: %v", err)
@@ -599,6 +620,13 @@ INSERT INTO request_log (
 	}
 	if !fresh.Valid || fresh.String != "55555555-5555-4555-8555-555555555555" {
 		t.Fatalf("fresh external_request_id = %#v, want UUID", fresh)
+	}
+	var gotTTFT, gotDecode sql.NullFloat64
+	if err := store.db.QueryRow(`SELECT ttft_ms, decode_ms FROM request_log WHERE request_id = ?`, "req-fresh").Scan(&gotTTFT, &gotDecode); err != nil {
+		t.Fatalf("query timing columns on fresh row: %v", err)
+	}
+	if !gotTTFT.Valid || gotTTFT.Float64 != 12 || !gotDecode.Valid || gotDecode.Float64 != 34 {
+		t.Fatalf("fresh timing = (%#v, %#v), want 12/34", gotTTFT, gotDecode)
 	}
 }
 

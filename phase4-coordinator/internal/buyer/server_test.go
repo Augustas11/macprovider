@@ -6242,6 +6242,8 @@ type requestLogTestRow struct {
 	ProviderAssignedID sql.NullString
 	PromptTokens       sql.NullInt64
 	CompletionTokens   sql.NullInt64
+	TTFTMs             sql.NullFloat64
+	DecodeMs           sql.NullFloat64
 	Status             int
 	ErrorCode          sql.NullString
 	Retried            int
@@ -6289,7 +6291,7 @@ func queryRequestLogRows(t *testing.T, dbPath, requestID string) []requestLogTes
 	defer db.Close()
 	rows, err := db.Query(`
 SELECT id, request_id, external_request_id, model, provider_assigned_id,
-       prompt_tokens, completion_tokens, status, error_code, retried
+       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried
 FROM request_log
 WHERE request_id = ?
 ORDER BY id ASC`, requestID)
@@ -6308,6 +6310,8 @@ ORDER BY id ASC`, requestID)
 			&row.ProviderAssignedID,
 			&row.PromptTokens,
 			&row.CompletionTokens,
+			&row.TTFTMs,
+			&row.DecodeMs,
 			&row.Status,
 			&row.ErrorCode,
 			&row.Retried,
@@ -6331,7 +6335,7 @@ func queryAllRequestLogRows(t *testing.T, dbPath string) []requestLogTestRow {
 	defer db.Close()
 	rows, err := db.Query(`
 SELECT id, request_id, external_request_id, model, provider_assigned_id,
-       prompt_tokens, completion_tokens, status, error_code, retried
+       prompt_tokens, completion_tokens, ttft_ms, decode_ms, status, error_code, retried
 FROM request_log
 ORDER BY id ASC`)
 	if err != nil {
@@ -6349,6 +6353,8 @@ ORDER BY id ASC`)
 			&row.ProviderAssignedID,
 			&row.PromptTokens,
 			&row.CompletionTokens,
+			&row.TTFTMs,
+			&row.DecodeMs,
 			&row.Status,
 			&row.ErrorCode,
 			&row.Retried,
