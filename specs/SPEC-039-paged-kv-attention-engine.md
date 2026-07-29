@@ -8,11 +8,28 @@ Audit history: three-lane codex SPEC audit (code / security / architect). Conver
 
 ## 1. Purpose and scope
 
-Define the provider-local paged KV cache and paged-attention engine that lets
-a Mac serve larger models and longer contexts more memory-efficiently. This
-is **memory-servability** infrastructure: it changes residency and memory
-layout inside the provider inference engine, not buyer-visible billing,
-receipts, request schemas, model identity, or settlement.
+Define the provider-local paged KV cache and paged-attention engine that gives
+a Mac a **correctness-preserving paged KV residency** layout for its inference
+engine. This is **memory-servability** infrastructure: it changes KV residency
+and memory layout inside the provider inference engine, not buyer-visible
+billing, receipts, request schemas, model identity, or settlement.
+
+**Scope of the v0.1 claim (proven vs deferred).** v0.1 claims only
+correctness-preserving paged *residency*: KV is stored in non-contiguous
+physical blocks and gathered back into logical order before attention. The
+v0.1 default **gather-feeds-SDPA** mode (FR-PKV3) materializes a transient
+**contiguous** K/V copy per attention op before calling stock SDPA, so v0.1
+does **not** claim an attention-time peak-memory reduction; that peak-memory
+win requires the fully-fused paged-attention op, which is deferred (out of
+scope below; FR-PKV3). Framed honestly: **fp16 KV at batch size 1 is the
+correctness-proven foundation of this engine, not its servability payoff.** The
+throughput payoff comes from continuous batching (SPEC-038) sharing one paged
+pool across rows; the peak-memory payoff comes from quantized KV (future). Both
+are built on top of the exact-parity correctness this SPEC proves. The
+servability envelope this residency layout unlocks over the stock contiguous
+path — which model/context sizes fit on the 32 GB live-30B envelope that stock
+cannot — is a normative define-and-record obligation (FR-PKV13), not a v0.1
+performance claim.
 
 The v0.1 engine is additive on macprovider's pinned production stack,
 `mlx-swift-lm 3.31.4` -> `mlx-swift 0.31.4`. It MUST NOT require a fork of
@@ -21,9 +38,11 @@ surface is a `PagedKVCache` conforming to `mlx-swift-lm`'s public `KVCache`
 protocol and passed through `model(_:cache:)`, so the existing model attention
 modules continue to apply RoPE, GQA/MQA grouping, and causal masking.
 
-This SPEC stands alone. It is useful at batch size 1 because paging improves
-KV residency and context/model servability for a single stream. SPEC-038
-continuous batching is a consumer of this engine, not a prerequisite.
+This SPEC stands alone. It is useful at batch size 1 because paging changes KV
+residency and gives the provider an explicit, hard-bounded KV pool plus the
+consumer-facing block-table primitives (FR-PKV10) that SPEC-024 cross-turn
+cache reuse and SPEC-038 continuous batching consume. SPEC-038 continuous
+batching is a consumer of this engine, not a prerequisite.
 
 In scope for v0.1:
 
@@ -53,8 +72,14 @@ Out of scope for v0.1:
   feasibility at production dimensions, but installing it requires a light
   `mlx-swift-lm` fork of internal attention/helper code and is optional
   future work.
-- Cross-provider or cross-conversation block sharing, global content-addressed
-  KV deduplication, or buyer-controlled block residency.
+- Cross-provider or **cross-conversation** block sharing, global
+  content-addressed KV deduplication, or buyer-controlled block residency.
+  This exclusion is scoped to sharing blocks *between distinct conversations*
+  and to buyer-directed residency control. It does **not** exclude
+  **same-conversation** retain-and-reattach of a sequence's own blocks across
+  turns, nor materializing a sequence's own block table into a standalone
+  contiguous cache: those are the normative FR-PKV10 consumer primitives that
+  keep SPEC-024 cross-turn cache reuse eligible and are explicitly in scope.
 - Continuous-batching scheduling, admission, row lifecycle, per-request
   accounting under a shared forward, and MoE expert dispatch under batching
   (SPEC-038 territory).
@@ -71,17 +96,24 @@ Out of scope for v0.1:
 - **SPEC-024** — provider prefix-cache billing isolation. Untouched; paged KV
   changes residency/layout only and MUST preserve `cached_prompt_tokens`
   computation wherever SPEC-024 reuse is otherwise eligible.
-- **SPEC-037** — KV survival across restarts. If paged KV becomes the
-  resident in-memory layout, SPEC-037 persistence becomes a consumer of the
-  paged layout rather than an independent dense layout owner (§8).
+- **SPEC-037** — KV survival across restarts. SPEC-039 **exposes** paged
+  layout metadata that a SPEC-037 implementation **MAY** consume if paged KV
+  becomes the resident in-memory layout; the decision whether SPEC-037 MUST
+  consume the paged layout (vs. keeping its serial layout flag-isolated from
+  persistence, SPEC-037 §8) belongs to the SPEC-037 owner, not to this SPEC
+  (FR-PKV9).
 - **SPEC-038** — continuous batching. SPEC-038 consumes this engine when it
   needs per-sequence block tables under a shared scheduler; SPEC-039 MUST NOT
   depend on SPEC-038.
 
 SPEC-039 owns the authority domain `paged-kv-attention`: the provider-local
-paged KV layout, block-table contract, allocator semantics, paged-gather
-kernel mode, optional fused-op boundary, fp16 correctness gate, quantized-KV
-scope boundary, fail-safe fallback, and metallib packaging invariant.
+paged KV layout, block-table contract and validation, physical-block allocator
+semantics, the machine-readable capability descriptor and cache-class
+allowlist, the consumer-facing cache-extraction / same-conversation retention
+primitive, paged-gather kernel mode, optional fused-op boundary, fp16
+correctness gate, quantized-KV scope boundary, fail-safe fallback, operator
+config surface, servability/sizing obligation, and metallib packaging
+invariant.
 
 ## 3. Terms
 
@@ -97,10 +129,14 @@ scope boundary, fail-safe fallback, and metallib packaging invariant.
 | fp16 KV path | The production/default provider KV dtype path when `kv_bits` is unset. |
 | Quantized KV path | A `kvBits` cache path using quantized weights/scales/biases and quantized SDPA. |
 | Residency optimization | A provider-local memory/layout optimization that may change which contexts fit but not receipt, usage, billing, or settlement semantics. |
+| Capability descriptor | The engine's machine-readable advertisement of what it can serve: block size, supported model families, allowed cache classes, KV dtype, and MoE-dispatch support (FR-PKV11). |
+| Cache extraction | The engine operation that materializes one sequence's paged block table into a standalone contiguous `KVCache` in logical token order (FR-PKV10). |
+| Same-conversation retention | Retaining a sequence's own physical blocks between its turns and reattaching them to a new decode, preserving SPEC-024 token-granular LCP/trim, without sharing blocks across conversations (FR-PKV10). |
+| Block-table handle | The engine-issued reference a consumer holds for one sequence's block table; the engine allocates the physical blocks, the consumer binds/extends/releases through the handle (FR-PKV2, FR-PKV10). |
 
 ## 4. Normative requirements
 
-Requirement IDs `SPEC-039-R001`..`R009` are the conformance units; FR labels
+Requirement IDs `SPEC-039-R001`..`R014` are the conformance units; FR labels
 below are the prose anchors. MUST / MUST NOT / SHOULD are RFC-2119 normative.
 
 ### FR-PKV1 — public KVCache injection seam (SPEC-039-R001)
@@ -155,12 +191,41 @@ tail MUST be rejected before GPU dispatch.
 
 The allocator MUST maintain an explicit free list or equivalent exact free
 set, allocate whole physical blocks, and reclaim whole physical blocks only
-after no live sequence table references them. Eviction MUST be
-policy-controlled and sequence-scoped unless a future SPEC defines safe
-subsequence or shared-prefix ownership. A failed allocation MUST either
-trigger a reason-coded fallback to the stock contiguous path before paged
-state becomes visible, or fail preflight with a reason-coded error; it MUST
-NOT produce partial paged state.
+after no live sequence table references them. Reclaim is **mechanism only**:
+the engine MUST NOT reclaim any physical block that is referenced by an
+in-flight decode step, and the eviction/reclaim **policy** (which sequence's
+blocks to reclaim under pressure, and when) is deferred to the consumer —
+SPEC-038 owns it under batching. The engine exposes eviction as a
+sequence-scoped mechanism only, unless a future SPEC defines safe subsequence
+or shared-prefix ownership. A failed allocation MUST either trigger a
+reason-coded fallback to the stock contiguous path before paged state becomes
+visible, or fail preflight with a reason-coded error; it MUST NOT produce
+partial paged state.
+
+**Ownership boundary (engine vs. consumer).** The engine owns physical-block
+allocation, the free list, block-table validation, and issues block IDs and a
+per-sequence block-table handle; the verb **"allocate"** is reserved for the
+engine. A consumer (e.g. the SPEC-038 scheduler) owns the per-request
+logical→physical mapping *lifecycle* — request allocation, bind, extend,
+release — through the engine-issued handle; it MUST NOT reach past the handle
+into free-list or block-storage internals.
+
+**Concurrency model.** All allocator state transitions (allocate, free,
+reclaim, block-table validation) MUST be serialized by a single-driver
+isolation domain (a single Swift actor or equivalent single-owner domain), so
+no two callers mutate the free list or a block table concurrently.
+
+**Batch-size-1 pool sizing (mid-stream exhaustion structurally impossible).**
+At batch size 1 the resident paged pool capacity MUST be `>=` the worst-case
+single-sequence context the request may reach: admission MUST reject at
+preflight (reason-coded) when the request's `max_tokens` (prompt + generated
+ceiling) cannot be guaranteed to fit within the pool for that lone sequence.
+Because the whole worst-case footprint is reserved at preflight, a batch-1
+sequence can never run out of blocks mid-decode; block-pool exhaustion is a
+preflight/pre-first-token condition, not a mid-stream one (FR-PKV7). Behavior
+of block-extension failure under a *shared* pool with multiple rows is a
+SPEC-038 scheduler concern (admission back-pressure plus request-local
+failure), not an engine mid-stream partial-response path.
 
 ### FR-PKV3 — paged-attention kernel modes (SPEC-039-R003)
 
@@ -192,6 +257,16 @@ exact greedy-argmax token parity over at least 32 generated tokens, with KV
 exercised on every layer and every decode step. A passing test MUST prove the
 paged kernel ran for every K and V cache update under test; a test that
 bypasses paged gather is invalid.
+
+The parity fixtures MUST exercise a **non-degenerate** paged layout, not a
+single-block identity case: the context under test MUST span at least two
+physical blocks (`>= N` blocks where `N >= 2` for the configured
+`block_size_tokens`), the block table MUST use a **non-identity permutation**
+(physical block IDs not in ascending logical order), and the 32+ token decode
+MUST cross at least one block boundary (a tail block filling and a new block
+being allocated mid-decode). A parity pass on a layout that never leaves the
+first block, or whose block table is the identity permutation, does not
+satisfy this gate.
 
 The parity fixture set MUST include at least:
 
@@ -258,9 +333,42 @@ Both branches MUST emit an operator-observable, reason-coded result. A
 configured paged mode MUST NOT silently become stock contiguous without such
 operator observability.
 
+**Fallback is a preflight / pre-first-token decision.** Reason-coded
+stock-contiguous fallback and preflight rejection apply **before any
+buyer-visible token, SSE frame, usage accounting, or receipt state** is
+emitted for the request. There is no mid-stream fallback: once a request has
+emitted its first token in paged mode, a subsequent engine failure MUST fail
+the request closed through the normal terminal path and MUST NOT stitch paged
+and stock output for one request. Because batch-1 pool footprint is fully
+reserved at preflight (FR-PKV2), block-pool exhaustion cannot arise mid-stream
+at batch size 1; multi-row shared-pool pressure is a SPEC-038 scheduler
+concern.
+
 Fallback MUST preserve cache isolation: paged physical blocks that were
 allocated for a rejected or fallback-routed sequence MUST be reclaimed before
 the sequence can be admitted again.
+
+**Closed reason-code enum (exhaustive, normative — like SPEC-037 FR-KVP12).**
+Every paged-mode fail-safe or fallback outcome MUST map to exactly one code in
+this closed list; the IMPL MUST NOT invent additional codes without a SPEC
+revision:
+
+- `paged_fallback_cache_class` — cache class / `kv_bits` not on the paged
+  allowlist (FR-PKV12);
+- `paged_fallback_allocator` — allocation/block-table validation failure or
+  pool exhaustion at preflight (FR-PKV2);
+- `paged_fallback_kernel` — Metal kernel registration or dispatch failure
+  (FR-PKV3);
+- `paged_fallback_metallib` — `default.metallib` missing, version-mismatched,
+  or undiscoverable (FR-PKV8);
+- `paged_fallback_parity` — a required parity gate is not established for the
+  selected model/cache class (FR-PKV4);
+- `paged_fallback_identity` — a required served-model/cache compatibility
+  identity input is unavailable or mismatched (FR-PKV6);
+- `paged_fallback_quantized` — `kv_bits` configured with no paged-quantized
+  path (FR-PKV5);
+- `paged_preflight_reject` — strict-policy preflight rejection for any of the
+  above (the strict-mode counterpart of a permissive fallback).
 
 ### FR-PKV8 — metallib packaging invariant (SPEC-039-R008)
 
@@ -276,31 +384,144 @@ closed before serving in paged mode.
 
 ### FR-PKV9 — SPEC-037 and SPEC-038 composition (SPEC-039-R009)
 
-Paged KV is the resident memory layout authority for paged-mode inference. If
-that resident layout becomes the source of truth for conversation KV state,
-SPEC-037 persistence MUST consume this layout rather than inventing an
-independent dense serialization for the same resident state. Any persisted
-paged format MUST record at least the block size, logical length, per-layer
-shape/dtype metadata, block-table version, allocator/pool compatibility
-epoch, source MLX/MLXLM revision identities, served model identity, tokenizer
-identity, cache class, and quantization scope. A SPEC-037 implementation MAY
-choose to materialize paged state into its existing opaque record only when
-doing so preserves SPEC-037's validation, promotion, purge, and rollback
-invariants exactly.
+Paged KV is the resident memory layout authority for paged-mode inference.
+SPEC-039 **exposes** the layout metadata a persistence consumer would need to
+serialize paged resident state: at least the block size, logical length,
+per-layer shape/dtype metadata, block-table version, allocator/pool
+compatibility epoch, source MLX/MLXLM revision identities, served model
+identity, tokenizer identity, cache class, and quantization scope. SPEC-039
+does **not** mandate that SPEC-037 consume the paged layout. Whether SPEC-037
+**MUST** consume this layout (materializing paged state into its opaque record)
+or instead keep its serial layout **flag-isolated from persistence** — the
+alternative SPEC-037 §8 already permits — is a decision reserved to the
+SPEC-037 owner. If a SPEC-037 implementation does choose to consume the paged
+layout, it MAY materialize paged state into its existing opaque record only
+when doing so preserves SPEC-037's validation, promotion, purge, and rollback
+invariants exactly, and any resulting break in SPEC-037 v1 round-trip
+compatibility requires a new payload codec ID plus an ABI-epoch bump (never a
+silent format change), consistent with SPEC-037 §8.
 
 SPEC-038 continuous batching is a consumer of SPEC-039. A continuous-batching
-scheduler MAY allocate and reclaim per-sequence paged blocks through this
-engine, but SPEC-039 MUST remain usable without SPEC-038 at batch size 1.
-SPEC-039 MUST NOT include batch admission, row lifecycle, per-request usage
-under a shared forward, or scheduler throughput claims. Those remain SPEC-038
-authority.
+scheduler MAY request allocation of, bind, extend, and release per-sequence
+paged blocks through the engine-issued block-table handle (the engine performs
+the underlying physical-block allocation and reclaim, FR-PKV2), but SPEC-039
+MUST remain usable without SPEC-038 at batch size 1. SPEC-039 MUST NOT include
+batch admission, row lifecycle, per-request usage under a shared forward, or
+scheduler throughput claims. Those remain SPEC-038 authority.
+
+### FR-PKV10 — cache-extraction / same-conversation retention primitive (SPEC-039-R010)
+
+The engine MUST expose two **normative consumer-facing operations** over a
+sequence's own block table, so a consumer (SPEC-038 scheduler for cross-turn
+continuation, or the SPEC-024 conversation-cache path directly) can keep
+cross-turn cache reuse eligible:
+
+1. **Cache extraction (materialize).** Given a sequence's block-table handle,
+   the engine MUST materialize that sequence's paged K/V into a **standalone
+   contiguous** `KVCache` in exact logical token order, suitable for handoff to
+   the stock contiguous conversation-cache path. The materialized cache MUST be
+   byte-exact (fp16) against what the stock contiguous path would hold for the
+   same token sequence.
+2. **Same-conversation retain-and-reattach.** The engine MUST allow a
+   sequence's own physical blocks to be **retained** past a decode's end and
+   **reattached** to a subsequent decode of the *same conversation*, without
+   copying through a contiguous cache.
+
+Both operations MUST preserve **SPEC-024 token-granular LCP/trim semantics
+exactly**: an extracted or reattached cache MUST support token-granular trim
+where every KV layer trims exactly the requested count (a shortfall is a miss,
+SPEC-024 FR-CI2/FR-CI3), including a trim at a **mid-block** boundary (the tail
+block's valid-token count is adjusted, no whole-block rounding). These
+operations are **same-conversation only**: they MUST NOT share, expose, or
+reattach one conversation's blocks to a different conversation (the
+cross-conversation exclusion in §1 stands), and they grant no buyer-controlled
+residency.
+
+### FR-PKV11 — capability descriptor handshake (SPEC-039-R011)
+
+The engine MUST advertise a **machine-readable capability descriptor** that a
+consumer reads to decide whether a requested tuple can be served in paged mode.
+The descriptor MUST include at least: `block_size_tokens`, supported model
+families, the **allowed cache classes** (the FR-PKV12 allowlist), KV dtype
+(fp16 in v0.1), and whether MoE expert-dispatch-shaped models are supported by
+the paged path. The descriptor is the single source of truth for paged
+capability: a consumer's activation predicate MUST be `requested tuple ∈
+engine-advertised descriptor`, never a separately self-declared support matrix
+that could drift from what the engine actually serves. The descriptor MUST be
+derivable at attach time and MUST reflect the FR-PKV12 attach-time allowlist
+result for the resident model.
+
+### FR-PKV12 — cache-class allowlist and attach-time admission gate (SPEC-039-R012)
+
+At model attach, the engine MUST inspect the runtime `newCache()` class and the
+`kv_bits` setting against a **paged allowlist**. The v1 allowlist is:
+**non-rotating contiguous `KVCacheSimple`-equivalent, fp16, `kv_bits` unset.**
+A model whose runtime cache class is **not** on the allowlist — enumerated
+non-allowlisted classes include `RotatingKVCache` (sliding-window),
+`CacheList` (hybrid), and `QuantizedKVCache` — MUST **fail safe to the stock
+contiguous path** with an **observable reason code** (`paged_fallback_cache_class`,
+FR-PKV7), logged **once at attach**. Paged mode MUST NOT be advertised in the
+FR-PKV11 descriptor for a non-allowlisted class.
+
+This gate is correctness-load-bearing, not merely an optimization guard: the
+v0.1 gather-feeds-SDPA path assumes the stock full-context causal mask. Paging
+a **sliding-window** (`RotatingKVCache`) model through it would silently defeat
+the model's own windowed masking and produce **wrong tokens billed as
+correct** — so a non-allowlisted cache class MUST never be served in paged
+mode, exactly as SPEC-037 AC-10 fails a non-`KVCacheSimple` family safe to a
+miss with an observable skip.
+
+### FR-PKV13 — servability / sizing obligation and overhead ceiling (SPEC-039-R013)
+
+The v0.1 engine claims correctness-preserving residency, not a measured
+performance win (§1). To keep the servability rationale honest, the IMPL PR
+MUST define and record — the **obligation to define is normative even though
+the values are IMPL-set**, exactly as FR-PKV2's capacity bound is:
+
+- a **sizing table** for the live production 30B model, apportioning the
+  **32 GB** unified-memory envelope across model weights, per-request
+  activation, and the paged block pool, showing the block-pool capacity that
+  fits alongside weights and activation;
+- the **minimum model/context envelope the paged path serves that the stock
+  contiguous path cannot** — the differentiated servability the layout buys —
+  recorded with real model/context memory evidence (an obligation to define
+  and record, not a fixed v0.1 number);
+- a **paged-attention overhead ceiling**: a bound on the per-op gather (and,
+  for the fused path when it exists, per-op attention) overhead versus the
+  stock contiguous path, enforced as an **IMPL gate** — paged mode that
+  exceeds the recorded ceiling fails the gate rather than shipping a
+  regression.
+
+These are normative define-and-record obligations; the specific byte and
+percentage values are chosen by the IMPL against real evidence and recorded in
+diagnostics and acceptance fixtures.
+
+### FR-PKV14 — operator configuration surface (SPEC-039-R014)
+
+Paged KV MUST expose an operator configuration surface mirroring the SPEC-037
+FR-KVP11 pattern: a triple-source (YAML file → environment → CLI override)
+precedence with a **default-off** enable flag. The surface MUST include at
+least:
+
+| YAML `paged_kv:` key | Env var | CLI flag | Default | Rule |
+|---|---|---|---|---|
+| `enabled` | `MACPROVIDER_PAGED_KV_ENABLED` | `--paged-kv-enabled` | `false` | bool; invalid ⇒ paged disabled, error logged |
+| `block_size_tokens` | `MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS` | `--paged-kv-block-size-tokens` | IMPL-set | positive integer, fixed per pool (FR-PKV2); invalid ⇒ disabled |
+| `max_physical_blocks` | `MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS` | `--paged-kv-max-physical-blocks` | IMPL-set | pool capacity bound (FR-PKV2), or an equivalent `max_pool_bytes`; > 0; invalid ⇒ disabled |
+| `fallback_policy` | `MACPROVIDER_PAGED_KV_FALLBACK_POLICY` | `--paged-kv-fallback-policy` | `permissive` | `permissive` (stock-route) or `strict` (fail preflight) (FR-PKV7); invalid ⇒ disabled |
+
+Default-off invariants are FR-PKV6; the fallback-policy values select the
+FR-PKV7 branch. Invalid configuration MUST disable paged mode with a logged
+error, never a silent partial enable.
 
 ## 5. Outcome tables
 
 | Configuration | Required result |
 |---|---|
 | Paged flag off | Stock contiguous path; no buyer-visible behavior change. |
-| Paged flag on, fp16 KV, compatible cache class, gates pass | Paged KV may serve; exact greedy parity with stock is required. |
+| Paged flag on, fp16 KV, allowlisted cache class, gates pass | Paged KV may serve; exact greedy parity with stock is required. |
+| Paged flag on, non-allowlisted cache class at attach (`RotatingKVCache`/sliding-window, `CacheList`/hybrid, `QuantizedKVCache`) | Fail safe to stock contiguous with `paged_fallback_cache_class`, logged once at attach; paged not advertised in descriptor (FR-PKV12). |
+| Paged flag on, batch=1, `max_tokens` cannot fit the worst-case single-sequence context in the pool | Reason-coded preflight rejection (`paged_fallback_allocator`); no mid-stream exhaustion (FR-PKV2). |
 | Paged flag on, allocator or block-table invalid | Reason-coded stock fallback or preflight failure before paged serving. |
 | Paged flag on, `kvBits` configured and no paged-quantized path exists | Reason-coded stock fallback or preflight failure; no silent quantization downgrade. |
 | Metal kernel or `default.metallib` unavailable | Reason-coded stock fallback or preflight failure before paged serving. |
@@ -313,20 +534,31 @@ The implementation PR for this SPEC MUST include fixtures that prove:
 - **AC-1 dense exact parity:** paged fp16 KV produces exact greedy-token
   parity against stock contiguous KV for a Llama-family model over at least
   32 generated tokens, with every layer and step exercising paged K and V.
+  The fixture MUST use a **non-degenerate** layout (FR-PKV4): the context spans
+  `>= 2` physical blocks, the block table is a **non-identity permutation**,
+  and the decode **crosses at least one block boundary** (a new block allocated
+  mid-decode).
 - **AC-2 second dense exact parity:** the same cache implementation produces
   exact parity on a second dense architecture, preferably Qwen-family, with
-  paged K and V exercised every layer and step.
+  paged K and V exercised every layer and step, under the same non-degenerate
+  multi-block / non-identity-permutation / boundary-crossing layout as AC-1.
 - **AC-3 MoE exact parity:** the same cache implementation produces exact
   parity on a Qwen3 MoE model matching the production attention/cache shape,
-  with paged K and V exercised every layer and step.
+  with paged K and V exercised every layer and step, under the same
+  non-degenerate multi-block / non-identity-permutation / boundary-crossing
+  layout as AC-1.
 - **AC-4 allocator/block-table correctness:** allocation, free-list reuse,
   eviction/reclaim, out-of-range block IDs, duplicate writable blocks,
   missing blocks, invalid tail lengths, and logical ordering are covered by
   unit tests.
-- **AC-5 pool capacity fail-safe:** exhausting the configured paged pool
-  produces reason-coded stock fallback or preflight failure without process
-  OOM, leaked blocks, partial buyer-visible output, usage accounting, or
-  receipt side effects.
+- **AC-5 pool capacity fail-safe (preflight arm):** exhausting the configured
+  paged pool produces reason-coded stock fallback or preflight failure without
+  process OOM, leaked blocks, partial buyer-visible output, usage accounting,
+  or receipt side effects. The fixture MUST include the **batch-1 preflight
+  arm**: a request whose `max_tokens` worst-case single-sequence context
+  exceeds the pool is **rejected at preflight** (`paged_fallback_allocator`),
+  proving mid-stream exhaustion is structurally impossible at batch size 1
+  (FR-PKV2). No fallback occurs after a first token is emitted.
 - **AC-6 fp16 floor:** fp16 KV is the normative path and passes all exactness
   gates before paged mode can be enabled.
 - **AC-7 quantized boundary:** a `kvBits` configuration without a
@@ -348,6 +580,37 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   validation, promotion, purge, and rollback invariants.
 - **AC-12 SPEC-038 independence:** paged KV passes batch-size-1 parity and
   fallback tests without the continuous-batching scheduler enabled.
+- **AC-13 cache-class allowlist attach gate (FR-PKV12):** attaching a model
+  whose runtime cache class is off the paged allowlist — a `RotatingKVCache`
+  (sliding-window), a `CacheList` (hybrid), and a `QuantizedKVCache` are each
+  exercised — fails safe to the stock contiguous path with an observable
+  `paged_fallback_cache_class`, logged once at attach, and paged mode is not
+  advertised in the FR-PKV11 descriptor; an allowlisted fp16 `KVCacheSimple`
+  attaches to paged mode. This mirrors SPEC-037 AC-10.
+- **AC-14 capability descriptor handshake (FR-PKV11):** the engine advertises a
+  machine-readable descriptor (block size, model families, allowed cache
+  classes, KV dtype, MoE-dispatch support) that reflects the attach-time
+  allowlist result; a fixture asserts a consumer admitting `requested tuple ∈
+  descriptor` and rejecting/fallback-routing a tuple outside it, never from a
+  separate self-declared matrix.
+- **AC-15 cache-extraction / same-conversation retention + token-granular trim
+  (FR-PKV10):** materializing a paged sequence's block table into a standalone
+  contiguous `KVCache` is byte-exact (fp16) against the stock contiguous cache
+  for the same tokens; retain-and-reattach continues the *same* conversation
+  without a contiguous round-trip; both preserve SPEC-024 token-granular
+  LCP/trim, including a **mid-block** LCP prefix-reuse where the tail block's
+  valid-token count is trimmed with no whole-block rounding. Cross-conversation
+  reattach is rejected.
+- **AC-16 servability / sizing obligation (FR-PKV13):** the IMPL records the
+  32 GB live-30B sizing table (weights + activation + block pool), the minimum
+  model/context envelope paged serves that stock cannot, and enforces the
+  paged-attention overhead ceiling as an IMPL gate (paged mode exceeding the
+  recorded ceiling fails the gate).
+- **AC-17 operator config surface (FR-PKV14):** the triple-source
+  (YAML/env/CLI) precedence resolves `enabled` (default `false`),
+  `block_size_tokens`, pool capacity, and `fallback_policy`
+  (`permissive`/`strict`); invalid values disable paged mode with a logged
+  error and never a silent partial enable.
 
 ## 7. No-go list
 
@@ -358,7 +621,13 @@ The implementation PR for this SPEC MUST include fixtures that prove:
 - No `kvBits` support claim until a quantized paged path targets quantized
   SDPA directly.
 - No batching throughput claim from this SPEC alone.
-- No global or buyer-visible KV block sharing.
+- No attention-time peak-memory-reduction claim from the v0.1
+  gather-feeds-SDPA path (it materializes a transient contiguous copy per op).
+- No serving a non-allowlisted cache class (`RotatingKVCache`/sliding-window,
+  `CacheList`/hybrid, `QuantizedKVCache`) in paged mode; attach fails safe to
+  stock contiguous.
+- No global, cross-conversation, or buyer-visible KV block sharing
+  (same-conversation retain/reattach is in scope, FR-PKV10).
 
 ## 8. Open questions carried
 
@@ -371,3 +640,10 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
+- Catalog / autotune product-surface interaction: how the paged servability
+  envelope (FR-PKV13 — the larger model/context classes a Mac can serve under
+  paging) should surface in the SPEC-010 model catalog and the SPEC-023
+  installer-autotune recommendation (which models/contexts a given hardware
+  tier advertises) is an open product-surface question, deferred to those
+  specs' owners. This SPEC defines only the provider-local engine, not the
+  catalog/autotune advertisement.

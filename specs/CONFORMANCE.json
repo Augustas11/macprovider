@@ -2668,6 +2668,81 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-PKV9 (SPEC-037 and SPEC-038 composition): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
       }
+    },
+    {
+      "requirement_id": "SPEC-039-R010",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV10 (cache-extraction / same-conversation retention primitive, preserving SPEC-024 token-granular LCP/trim): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R011",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV11 (machine-readable capability descriptor handshake consumed by the SPEC-038 activation predicate): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R012",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV12 (cache-class allowlist + attach-time admission gate; non-allowlisted classes fail safe to stock contiguous, mirroring SPEC-037 AC-10): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R013",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV13 (servability / sizing obligation against the 32 GB live-30B envelope + paged-attention overhead ceiling IMPL gate): normative define-and-record obligation in SPEC-039 v0.1; values and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R014",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV14 (operator configuration surface mirroring SPEC-037 FR-KVP11: triple-source precedence, default-off, block size, pool capacity, fallback policy): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
     }
   ]
 }
