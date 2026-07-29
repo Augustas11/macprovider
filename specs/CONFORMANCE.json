@@ -885,7 +885,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2.1",
+      "version": "v0.2.2",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -911,7 +911,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-HG7 route exclusion and the FR-HG6 stale-evidence 30s sweep are implemented under coordinator unit tests for strict hello-gate deployments. Gate-off production posture remains observe-only. FR-HG5 below-two alert, FR-CFG2 hot reload / atomic existing-session re-gating, proactive evidence refresh, and real proof-of-weights remain pending."
+        "rationale": "FR-HG7 route exclusion, the FR-HG6 stale-evidence 30s sweep, FR-CFG2 hot reload / atomic existing-session re-gating, and B5's non-buyer/admission-limited/no-credential sandbox for evidence-absent providers are implemented under coordinator unit tests for strict hello-gate deployments. Gate-off production posture remains observe-only. FR-HG5 below-two alert, proactive evidence refresh, real proof-of-weights, and Pearl deploy evidence remain pending."
       }
     },
     {
@@ -1682,7 +1682,39 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. Proactive refresh, hot-reload re-gating, and production deploy evidence remain pending."
+        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. Proactive refresh and production deploy evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R003",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionSandboxed",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) QuarantineForProofOfWeightsReload",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) SetProofOfWeightsConfig",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) revalidateProofOfWeightsAdmissions",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) checkAutotuneHelloGate",
+        "phase4-coordinator/cmd/coordinator/main.go:func reloadCoordinatorConfig",
+        "phase4-coordinator/cmd/coordinator/main.go:func telemetryDriftEvaluatorForReload"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestAdmissionSandboxedRemovesProviderFromRouting",
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestSetAdmissionSandboxedReportsTransitionsOnly",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateSandboxesMissingEvidence",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestProofOfWeightsReloadSandboxesExistingUnverifiedSession",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateRechecksEvidenceAfterChallenge",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. Pearl deploy evidence and FR-HG5 below-two alert remain pending."
       }
     },
     {

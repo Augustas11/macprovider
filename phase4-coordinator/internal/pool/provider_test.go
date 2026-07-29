@@ -413,6 +413,46 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	}
 }
 
+func TestRegisterRefusesCredentialBypassedSandboxOverCredentialBearingSession(t *testing.T) {
+	t.Parallel()
+	registry := NewRegistry(nil)
+	existing := &Provider{
+		ProviderID:     "provider-a",
+		AssignedID:     "self-minted-session",
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		AuthState:      AuthSelfMinted,
+		Tier:           TierProvisional,
+		MaxConcurrency: 1,
+	}
+	if _, registered, refusal := registry.RegisterAtDetailed(existing, nil, time.Now().UTC()); !registered || refusal != RegisterRefusalNone {
+		t.Fatalf("register existing self-minted provider registered=%v refusal=%q", registered, refusal)
+	}
+
+	sandbox := &Provider{
+		ProviderID:                         "provider-a",
+		AssignedID:                         "sandbox-session",
+		State:                              StateReady,
+		SlotsFree:                          1,
+		SlotsTotal:                         1,
+		AdmissionSandboxed:                 true,
+		AdmissionSandboxCredentialBypassed: true,
+		Tier:                               TierProvisional,
+		MaxConcurrency:                     1,
+	}
+	if _, registered, refusal := registry.RegisterAtDetailed(sandbox, nil, time.Now().UTC()); registered || refusal != RegisterRefusalSandboxCredentialBypass {
+		t.Fatalf("credential-bypassed sandbox registered=%v refusal=%q, want sandbox credential-bypass refusal", registered, refusal)
+	}
+	current, ok := registry.Resolve("provider-a", "")
+	if !ok {
+		t.Fatal("existing provider missing after sandbox refusal")
+	}
+	if current.AssignedID != "self-minted-session" || current.AuthState != AuthSelfMinted {
+		t.Fatalf("sandbox refusal did not preserve existing credential-bearing session: %+v", current)
+	}
+}
+
 func TestExpireLegacyBridgeAdmissionsRemovesBuyerServingCapacity(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{

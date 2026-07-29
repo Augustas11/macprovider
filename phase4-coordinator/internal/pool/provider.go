@@ -224,6 +224,18 @@ type Provider struct {
 	// separate from AdmissionCeilingExcluded so a heartbeat that returns to an
 	// in-ceiling model cannot clear a stale-evidence fail-closed verdict.
 	AdmissionEvidenceStale bool `json:"admission_evidence_stale,omitempty"`
+	// AdmissionSandboxed marks a strict hello-gate session that connected
+	// without verified hardware evidence. The session remains visible and may
+	// receive coordinator-owned probes, but it never receives buyer traffic or
+	// counts as buyer-serving capacity until proof-of-weights re-gating clears
+	// this flag from verified evidence.
+	AdmissionSandboxed bool `json:"admission_sandboxed,omitempty"`
+	// AdmissionSandboxCredentialBypassed is set only for sessions that entered
+	// as sandbox-only and therefore did not receive newly minted durable
+	// provider credentials. Gate-disable reloads must not auto-promote these
+	// sessions; they need a reconnect or verified re-gating path before they can
+	// become buyer-routable.
+	AdmissionSandboxCredentialBypassed bool `json:"-"`
 	// Admitted hardware-trust tuple (issue #582 FIX B). Captured at the hello
 	// gate from the exact verified evidence that authorized this session, so the
 	// bounded trust-revalidation sweep can re-check the SAME hardware tuple that
@@ -271,6 +283,12 @@ type Provider struct {
 	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
+}
+
+type AdmissionGateFlags struct {
+	AdmissionCeilingExcluded bool
+	AdmissionEvidenceStale   bool
+	AdmissionSandboxed       bool
 }
 
 type ProviderSafetyTelemetry struct {
@@ -470,7 +488,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.BenchmarkQuarantined {
 		return false
 	}
-	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale {
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed {
 		return false
 	}
 	return p.State == StateReady && p.SlotsFree > 0
@@ -495,7 +513,7 @@ func (p Provider) ServingCapable() bool {
 	if p.BenchmarkQuarantined {
 		return false
 	}
-	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale {
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed {
 		return false
 	}
 	return p.State == StateReady || p.State == StateBusy
@@ -784,7 +802,7 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 //
 //   - registered==false: registration was REFUSED. Caller MUST NOT
 //     proceed and MUST close `conn` with CloseInvalidToken /
-//     "invalid_token". This branch fires on two SPEC-003 v0.8.4 FR-C9.4
+//     "invalid_token". This branch fires on three SPEC-003 v0.8.4 FR-C9.4
 //     defense layers:
 //
 //     1. **Bearer-less duplicate rule (fix-pass-3):** an incoming
@@ -802,8 +820,13 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 //     Bearer-validated incoming connects always succeed because
 //     their proof-of-bearer is independently strong.
 //
+//     3. **Sandbox credential-bypass protection (SPEC-032 B5):** an
+//     incoming strict hello-gate sandbox session that bypassed credential
+//     proof is refused whenever the existing session is credential-bearing
+//     (Bearer-validated, self-minted, or self-minted-verified).
+//
 // The DB partial unique index alone prevents the attacker from minting
-// a parallel bearer, but does NOT prevent these two pool-slot capture
+// a parallel bearer, but does NOT prevent these pool-slot capture
 // shapes. These checks close them at the registry layer.
 func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registered bool) {
 	return r.RegisterAt(p, conn, time.Now().UTC())
@@ -822,6 +845,7 @@ const (
 	RegisterRefusalNone                       RegisterRefusal = ""
 	RegisterRefusalBearerlessDuplicate        RegisterRefusal = "bearerless_duplicate"
 	RegisterRefusalBearerDowngrade            RegisterRefusal = "bearer_downgrade"
+	RegisterRefusalSandboxCredentialBypass    RegisterRefusal = "sandbox_credential_bypass"
 	RegisterRefusalReceiptRotationGraceActive RegisterRefusal = "receipt_rotation_grace_active"
 )
 
@@ -839,6 +863,15 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		// provider is still in the pool would hit this branch.
 		if p.AuthState == AuthBearerlessDuplicate {
 			return nil, false, RegisterRefusalBearerlessDuplicate
+		}
+		// A strict hello-gate sandbox admitted without credential proof must
+		// not replace a session that already proved or just minted credential
+		// custody. This closes the mint-to-registration race where a tokenless
+		// sandbox observes no active token, a concurrent admission mints one,
+		// and the sandbox then evicts the self-minted session before the
+		// cleartext token reaches the legitimate provider.
+		if p.AdmissionSandboxCredentialBypassed && p.AuthState != AuthBearerValidated && providerCredentialBearing(existing.AuthState) {
+			return nil, false, RegisterRefusalSandboxCredentialBypass
 		}
 		// Protect proven (Bearer-validated, routing-eligible) sessions
 		// from non-Bearer-validated replacement. Without this check, a
@@ -899,6 +932,15 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
 	r.applyCanarySanctionLocked(p)
 	return old, true, RegisterRefusalNone
+}
+
+func providerCredentialBearing(auth AuthState) bool {
+	switch auth {
+	case AuthBearerValidated, AuthSelfMinted, AuthSelfMintedVerified:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Registry) stageReceiptPublicationLocked(existing, incoming *Provider, now time.Time) RegisterRefusal {
@@ -1673,6 +1715,82 @@ func (r *Registry) SetAdmissionEvidenceStale(providerID, assignedID string, stal
 	}
 	p.AdmissionEvidenceStale = stale
 	return true
+}
+
+// SetAdmissionSandboxed flips the strict hello-gate sandbox bucket for a live
+// session. Returns true only when the flag changed.
+func (r *Registry) SetAdmissionSandboxed(providerID, assignedID string, sandboxed bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.AdmissionSandboxed == sandboxed {
+		return false
+	}
+	p.AdmissionSandboxed = sandboxed
+	if !sandboxed {
+		p.AdmissionSandboxCredentialBypassed = false
+	}
+	return true
+}
+
+// SetAdmissionGateFlags atomically publishes every proof-of-weights route
+// exclusion flag for one live session. It prevents routing from observing an
+// intermediate all-clear state while a strict-gate revalidation moves a
+// provider between stale, sandboxed, and ceiling-excluded states.
+func (r *Registry) SetAdmissionGateFlags(providerID, assignedID string, flags AdmissionGateFlags) (AdmissionGateFlags, bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return AdmissionGateFlags{}, false, false
+	}
+	prior := AdmissionGateFlags{
+		AdmissionCeilingExcluded: p.AdmissionCeilingExcluded,
+		AdmissionEvidenceStale:   p.AdmissionEvidenceStale,
+		AdmissionSandboxed:       p.AdmissionSandboxed,
+	}
+	changed := prior != flags
+	p.AdmissionCeilingExcluded = flags.AdmissionCeilingExcluded
+	p.AdmissionEvidenceStale = flags.AdmissionEvidenceStale
+	p.AdmissionSandboxed = flags.AdmissionSandboxed
+	if !flags.AdmissionSandboxed {
+		p.AdmissionSandboxCredentialBypassed = false
+	}
+	return prior, changed, true
+}
+
+// QuarantineForProofOfWeightsReload marks every live session fail-closed before
+// a proof_of_weights hot reload is published. The post-publish revalidation pass
+// clears sessions that prove under the new generation.
+func (r *Registry) QuarantineForProofOfWeightsReload() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	updated := 0
+	for _, p := range r.providers {
+		if !p.AdmissionEvidenceStale {
+			p.AdmissionEvidenceStale = true
+			updated++
+		}
+	}
+	return updated
+}
+
+// ClearBenchmarkQuarantines clears telemetry-drift benchmark quarantines when
+// that enforcement surface is disabled or reloaded into observe-only mode.
+func (r *Registry) ClearBenchmarkQuarantines() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	updated := 0
+	for _, p := range r.providers {
+		if p.BenchmarkQuarantined {
+			p.BenchmarkQuarantined = false
+			updated++
+		}
+	}
+	return updated
 }
 
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {

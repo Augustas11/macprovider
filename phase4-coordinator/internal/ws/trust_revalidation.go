@@ -163,10 +163,14 @@ func (s *Server) runTrustRevalidationSweep() {
 }
 
 func (s *Server) runAdmissionEvidenceRevalidationSweep() {
-	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate || s.autotuneCatalog == nil || s.autotuneEvidence == nil || s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays <= 0 {
+	s.proofOfWeightsAdmissionMu.RLock()
+	defer s.proofOfWeightsAdmissionMu.RUnlock()
+
+	powCfg := s.proofOfWeightsConfig()
+	if !powCfg.RequireAutotuneHelloGate || s.autotuneCatalog == nil || s.autotuneEvidence == nil || powCfg.AutotuneEvidenceTTLDays <= 0 {
 		return
 	}
-	ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	deadline := trustRevalidationInterval
 	if deadline > trustRevalidationSweepDeadlineCap {
 		deadline = trustRevalidationSweepDeadlineCap
