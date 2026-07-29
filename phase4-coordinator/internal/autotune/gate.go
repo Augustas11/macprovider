@@ -88,6 +88,9 @@ func benchmarkPassesGate(benchmark VerifiedBenchmark, row Row, catalogSHA256, ro
 	if benchmark.ThermalThrottleDetected {
 		return false
 	}
+	if benchmark.SwapDetected {
+		return false
+	}
 	if strings.TrimSpace(benchmark.CandidateRowIdentity) != "" {
 		if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateRowIdentity), strings.TrimSpace(rowIdentity)) {
 			return false
