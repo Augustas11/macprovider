@@ -1,10 +1,15 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8.2
+version: v0.8.3
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-29
 
 ## Change log
+
+- **v0.8.3 (2026-07-29)** — Signed candidate-catalog row reconciliation (A8).
+  1. **The normative row table follows the signed candidate catalog.** The §3.2 row table records the current `published-2026-07-10-catalog-recovery-v1` candidate catalog rows and gate values from `phase3-binary/dist/static/autotune-candidates.json`, which matches Pearl's live `/v1/autotune-candidates` bytes.
+  2. **Serving catalog reality is authoritative for row state.** All rows in the current signed candidate catalog are `recommendable`; `qwen3-32b`, `qwen2.5-coder-32b-instruct`, and `google-gemma-4-26b-a4b-it` no longer retain the older `listed` / `blocked` table states.
+  3. **The baked/live drift note is superseded.** The v0.2 historical baked/live divergence is no longer normative for the current release artifacts; the committed baked copy and served `/v1` candidate catalog are reconciled.
 
 - **v0.8.2 (2026-07-29)** — Human transcript label honesty (A6).
   1. **Human transcript carries the same trust hints as JSON.** The happy-path transcript MUST print confidence, bench-gate provenance, and bench-gate drift for the selected recommendation.
@@ -90,7 +95,7 @@ last-locked: 2026-07-29
      `chmod 0600`); the resign script at
      `scripts/resign-autotune-static.sh` refuses to run if the key
      file is world-readable. Runtime signature verification remains
-     unchanged: the client fetches from `coordinator.streamvc.live/static/*`,
+     unchanged: the client then fetched from `coordinator.streamvc.live/static/*`,
      verifies against the baked v3 pubkey, and falls back to the
      compiled-in baked catalog on verification failure. Older v1.7.9-
      clients that still bake the v2 pubkey `sidecarIsValid`-fail on
@@ -116,8 +121,9 @@ last-locked: 2026-07-29
      Baked catalog values in `AutotuneRecommend.swift` mirror the live
      feed for the 4 M-Base-relevant rows we lowered (qwen3-coder-30b-a3b,
      openai/gpt-oss-20b, meta-llama/llama-3.1-8b, qwen2.5-coder-32b) so
-     fallback semantics match the intended M-Base UX. Baked and live
-     intentionally drift on two other axes: (i) baked keeps
+     fallback semantics match the intended M-Base UX. At the time of the
+     v0.2 amendment, baked and live intentionally drifted on two other axes
+     (superseded by v0.8.3's signed-catalog reconciliation): (i) baked kept
      `runtime_status="listed"` (qwen3-32b, qwen2.5-coder-32b) and
      `runtime_status="blocked"` (google-gemma) rows that
      the live feed omits — baked serves as an offline superset for
@@ -208,7 +214,7 @@ Candidate metadata is a separate signed control-plane input. Demand rank may sco
 Primary source:
 
 ```text
-https://coordinator.streamvc.live/static/autotune-candidates.json
+https://coordinator.streamvc.live/v1/autotune-candidates
 ```
 
 Fallback source:
@@ -262,21 +268,23 @@ Field rules:
 - `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, or `legacy_unverified`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. During the v4->v5 bridge window, only the exact historical `published-2026-07-10-catalog-recovery-v1` rows may omit `bench_gate.provenance`; bridge clients backfill the #744 audit table for those known row keys. Newly generated catalog releases MUST include explicit provenance.
 - `runtime_status` is one of `candidate`, `listed`, `recommendable`, or `blocked`. Only `recommendable` rows may become paid defaults, and the demand-rank row must also have `recommendable: true`.
 
-The table below lists the minimum v0.1 rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
+The table below lists the current signed candidate-catalog rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
 
-The v0.1 baked catalog MUST contain at least these rows:
+The baked and served static candidate catalog MUST contain at least these rows:
 
 || model_key | model_id | min_ram_gb | min_bandwidth_tier | min_sustained_tps | max_4k_ttft_ms | runtime_status |
 ||---|---|---:|---|---:|---:|---|
-|| `meta-llama/llama-3.1-8b-instruct` | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` | 16 | `C` | 20 | 2500 | `recommendable` |
-|| `openai/gpt-oss-20b` | `mlx-community/gpt-oss-20b-MXFP4-Q8` | 24 | `C` | 30 | 2500 | `recommendable` |
-|| `qwen3-32b` | `mlx-community/Qwen3-32B-4bit` | 32 | `A` | 30 | 3000 | `listed` |
-|| `qwen3-coder-30b-a3b-instruct` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 32 | `C` | 25 | 3000 | `recommendable` |
-|| `qwen2.5-coder-32b-instruct` | `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit` | 64 | `A` | 30 | 3500 | `listed` |
-|| `google-gemma-4-26b-a4b-it` | `mlx-community/gemma-4-26b-a4b-it-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
+|| `meta-llama/llama-3.1-8b-instruct` | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` | 12 | `C` | 15 | 2500 | `recommendable` |
+|| `openai/gpt-oss-20b` | `mlx-community/gpt-oss-20b-MXFP4-Q8` | 24 | `C` | 15 | 2500 | `recommendable` |
+|| `qwen3-32b` | `mlx-community/Qwen3-32B-4bit` | 48 | `B` | 15 | 4000 | `recommendable` |
+|| `qwen3-coder-30b-a3b-instruct` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 28 | `C` | 20 | 3500 | `recommendable` |
+|| `qwen2.5-coder-32b-instruct` | `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit` | 48 | `A` | 20 | 3500 | `recommendable` |
+|| `google-gemma-4-26b-a4b-it` | `mlx-community/gemma-4-26b-a4b-it-4bit` | 28 | `C` | 10 | 3000 | `recommendable` |
 || `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `recommendable` |
+|| `meta-llama/llama-3.2-3b-instruct` | `mlx-community/Llama-3.2-3B-Instruct-4bit` | 4 | `C` | 15 | 2500 | `recommendable` |
+|| `qwen3-8b` | `mlx-community/Qwen3-8B-4bit` | 12 | `C` | 15 | 4500 | `recommendable` |
 
-`blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default in v0.1. The Gemma blocked status means pending `mlx-swift-lm` migration validation and rate-card rollout, not an upstream architecture absence. Nemotron moved to `recommendable` after its `mlx-swift-lm` runtime validation and coordinator rate-card rollout.
+`blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default. The current signed candidate catalog has no blocked rows; Gemma and Nemotron are `recommendable` after `mlx-swift-lm` runtime validation and coordinator rate-card rollout.
 
 ### 3.3 Rate card
 
@@ -319,7 +327,7 @@ The v0.1 rate-card JSON schema is:
 
 ### 3.4 Demand signal
 
-The recommendation engine fetches `https://coordinator.streamvc.live/static/demand-rank.json` and falls back to a baked snapshot when the static fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
+The recommendation engine fetches `https://coordinator.streamvc.live/v1/demand-rank` and falls back to a baked snapshot when the signed feed fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
 
 The v0.1 demand-rank JSON schema is locked as:
 
@@ -364,8 +372,8 @@ Field rules:
 
 Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified before parsing into the recommendation engine:
 
-1. Fetch `{name}.json` and detached `{name}.json.sig` from `https://coordinator.streamvc.live/static/`.
-2. Parse `{name}.json.sig` as UTF-8 JSON exactly in this shape:
+1. Fetch `autotune-candidates` and detached `autotune-candidates.sig` from `https://coordinator.streamvc.live/v1/autotune-candidates` and `https://coordinator.streamvc.live/v1/autotune-candidates.sig`; fetch `demand-rank` and detached `demand-rank.sig` from `https://coordinator.streamvc.live/v1/demand-rank` and `https://coordinator.streamvc.live/v1/demand-rank.sig`.
+2. Parse the detached `{name}.sig` sidecar as UTF-8 JSON exactly in this shape:
 
 ```json
 {
@@ -697,7 +705,7 @@ Run: macprovider-cli autotune --recommend
 | M12 | Hard eligibility gates | §5 requires RAM, benchmark, no-swap, no-thermal, and rate-card gates before scoring. |
 | M16 | Deployability gate | §3.2 and §3.4 define deployability via `runtime_status` + `recommendable`; §5 enforces both. |
 | M18 | Full-utilization wording | §4 separates ranking from displayed capacity; §7 uses per-token rates only. |
-| M20 | Static JSON demand control plane | §3.4 requires `coordinator.streamvc.live/static/demand-rank.json` with baked fallback and version metadata. |
+| M20 | Static JSON demand control plane | §3.4 requires `coordinator.streamvc.live/v1/demand-rank` with baked fallback and version metadata. |
 
 ## 11. Acceptance criteria
 
