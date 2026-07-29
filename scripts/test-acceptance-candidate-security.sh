@@ -436,6 +436,74 @@ pearl = json.loads(pathlib.Path(sys.argv[1]).read_text())
 if pearl.get("channel") != "production":
     raise SystemExit("promotion-ready Pearl metadata did not declare the production channel")
 PY
+python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --runtime-only \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-runtime-only.json"
+python3 - "$work/pearl-runtime-only.json" "$tag" <<'PY'
+import json
+import pathlib
+import sys
+
+pearl = json.loads(pathlib.Path(sys.argv[1]).read_text())
+tag = sys.argv[2]
+if pearl.get("release_lane") != "pearl_runtime":
+    raise SystemExit("runtime-only Pearl metadata did not declare the runtime lane")
+if pearl.get("catalog") is not None:
+    raise SystemExit("runtime-only Pearl metadata bound catalog state")
+if "provider_advertised_version" in pearl:
+    raise SystemExit("runtime-only Pearl metadata carried provider version authority")
+PY
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy strict_post_migration \
+  --provider-advertised-version 1.8.31 \
+  --runtime-only \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-runtime-only-with-provider-version.json" >"$work/runtime-only-provider-version.out" 2>&1; then
+  echo "Pearl metadata builder accepted runtime-only provider version binding" >&2
+  exit 1
+fi
+grep -q -- '--runtime-only cannot bind --provider-advertised-version' "$work/runtime-only-provider-version.out"
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --provider-admission-policy bridge_required \
+  --runtime-only \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-runtime-only-with-bridge.json" >"$work/runtime-only-bridge.out" 2>&1; then
+  echo "Pearl metadata builder accepted runtime-only provider bridge binding" >&2
+  exit 1
+fi
+grep -q -- '--runtime-only cannot bind provider admission bridge policy' "$work/runtime-only-bridge.out"
+if python3 "$metadata" build-pearl \
+  --repository Augustas11/macprovider \
+  --tag "$tag" \
+  --commit "$candidate_commit" \
+  --compatibility-manifest "$work/pearl-compatibility.json" \
+  --provider-admission-policy bridge_required \
+  --runtime-only \
+  --coordinator "$work/assets/coordinator-linux-amd64" \
+  --coordinator-cli "$work/assets/coordinator-cli-linux-amd64" \
+  --gateway "$work/assets/gateway-linux-amd64" \
+  --output "$work/pearl-runtime-only-with-compatibility.json" >"$work/runtime-only-compatibility.out" 2>&1; then
+  echo "Pearl metadata builder accepted runtime-only compatibility binding" >&2
+  exit 1
+fi
+grep -q -- '--runtime-only cannot bind --compatibility-manifest' "$work/runtime-only-compatibility.out"
 python3 - "$work/pearl-catalog/release.json" <<'PY'
 import json
 import pathlib
