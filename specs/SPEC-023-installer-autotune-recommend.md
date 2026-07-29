@@ -1,18 +1,23 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8.4
+version: v0.8.5
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-29
 
 ## Change log
 
+- **v0.8.5 (2026-07-29)** — A4 signed in-band provenance catalog release.
+  1. **Current signed catalog carries explicit provenance.** The current release is `published-2026-07-29-inband-provenance-v1`; every `bench_gate` object in the signed candidate catalog includes machine-readable `provenance`.
+  2. **Nil-provenance is retired for current releases.** Catalog-release verification, direct CLI catalog decoding, and current coordinator feed loading fail closed when `bench_gate.provenance` is absent. The exact signed July 10 recovery release remains a transition-only compatibility input for pre-activation live fetches and `previous-target` rollback loading; it is pinned by release id plus SHA-256 and MUST NOT generalize to new releases.
+  3. **No new benchmark authority.** A4 signs the existing #744 provenance classifications in-band; it does not promote gate values to trusted post-#745 provider-run measurements.
+
 - **v0.8.4 (2026-07-29)** — A2 signature-caveat reconciliation.
   1. **Catalog signature proof is bounded.** §3.2 now names exactly what the signed candidate catalog proves and what it does not prove, mirroring the SPEC-015 negative-list pattern.
   2. **No new trust authority.** The caveat does not change row eligibility, scoring, catalog bytes, signature verification, or coordinator admission behavior.
 
 - **v0.8.3 (2026-07-29)** — Signed candidate-catalog row reconciliation (A8).
-  1. **The normative row table follows the signed candidate catalog.** The §3.2 row table records the current `published-2026-07-10-catalog-recovery-v1` candidate catalog rows and gate values from `phase3-binary/dist/static/autotune-candidates.json`, which matches Pearl's live `/v1/autotune-candidates` bytes.
-  2. **Serving catalog reality is authoritative for row state.** All rows in the current signed candidate catalog are `recommendable`; `qwen3-32b`, `qwen2.5-coder-32b-instruct`, and `google-gemma-4-26b-a4b-it` no longer retain the older `listed` / `blocked` table states.
+  1. **The normative row table follows the signed candidate catalog.** The §3.2 row table recorded the then-current `published-2026-07-10-catalog-recovery-v1` candidate catalog rows and gate values from `phase3-binary/dist/static/autotune-candidates.json`, which matched Pearl's live `/v1/autotune-candidates` bytes at the time.
+  2. **Serving catalog reality is authoritative for row state.** All rows in that signed candidate catalog were `recommendable`; `qwen3-32b`, `qwen2.5-coder-32b-instruct`, and `google-gemma-4-26b-a4b-it` no longer retained the older `listed` / `blocked` table states.
   3. **The baked/live drift note is superseded.** The v0.2 historical baked/live divergence is no longer normative for the current release artifacts; the committed baked copy and served `/v1` candidate catalog are reconciled.
 
 - **v0.8.2 (2026-07-29)** — Human transcript label honesty (A6).
@@ -30,7 +35,7 @@ last-locked: 2026-07-29
   2. **Buyer TTFT ceiling is separate from catalog drift.** `--buyer-ttft-ceiling-ms` is an operator-set paid recommendation ceiling. Values `>0` hard-veto paid rows whose measured p95 TTFT exceeds the ceiling and emit `buyer_ttft_ceiling_exceeded` when that leaves no eligible paid row. `0` disables it. This does not restore the old `--gate-ttft-ms` default; omitted `--gate-ttft-ms` on `--recommend` remains disabled.
   3. **`bench_gate` provenance is machine-readable.** Candidate catalog `bench_gate` now carries `provenance.source` plus optional `hardware`, `measured_at`, and `notes`. Current release values remain advisory drift signals unless/until promoted from trusted post-#745 provider runs.
   4. **Candidate JSON exposes drift.** Each candidate includes `bench_gate_provenance`, `bench_gate_drift`, and `buyer_ttft_ceiling_exceeded` so support tooling can distinguish bad catalog expectations from buyer-facing selection vetoes.
-  5. **Static signer rotation is bridged, not activated.** The v4 private key was unavailable locally for the next provenance catalog release; v5 public key is release-pinned in the trusted keyring with bridge status, while the current live feed remains signed by `streamvc-autotune-static-v4`. The first v5-signed feed is a separate activation after bridge adoption.
+  5. **Static signer rotation is bridged, not activated.** At v0.8 publication time, the active v4 signing material was unavailable to that release session, so the v5 public key was release-pinned in the trusted keyring with bridge status while the live feed remained signed by `streamvc-autotune-static-v4`. A4 later published the in-band provenance release with the active v4 signer; the first v5-signed feed remains a separate activation after bridge adoption.
 
 - **v0.7 (2026-07-25)** — Swap is a paid-path hard eligibility veto (#742).
   1. **`swap_detected == true` disqualifies paid recommendation.** Swap is a locally measured fact about the provider machine (pageouts during the Stage 1 probe). It needs no catalog threshold and applies on hardware never benchmarked in advance. A swapping row MUST NOT become `recommended_model`.
@@ -284,10 +289,10 @@ Field rules:
 - SPEC-010 §3.7 owns the name `macprovider.snapshot-manifest.v1`, provider/coordinator wire fields, and comparison authority for this digest. This section defines the canonical manifest bytes only and MUST NOT be used as a second admission authority.
 - Every downloadable row (`candidate`, `listed`, or `recommendable`) MUST include both `model_revision` and `model_sha256`. If either is absent, the row is ineligible before download or benchmark, including donor mode.
 - `min_ram_gb` and `min_bandwidth_tier` are authoritative for §5. `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets only; they do not veto paid or donor selection.
-- `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, or `legacy_unverified`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. During the v4->v5 bridge window, only the exact historical `published-2026-07-10-catalog-recovery-v1` rows may omit `bench_gate.provenance`; bridge clients backfill the #744 audit table for those known row keys. Newly generated catalog releases MUST include explicit provenance.
+- `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, or `legacy_unverified`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. Newly generated catalog releases, direct CLI catalog decoding, and current coordinator feed loading MUST fail closed when `bench_gate.provenance` is absent. During A4 feed activation only, implementations MAY accept the exact `published-2026-07-10-catalog-recovery-v1` candidate catalog with SHA-256 `776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda` as a signed live fetch or `previous-target` rollback input; every other missing-provenance candidate catalog remains an integrity failure.
 - `runtime_status` is one of `candidate`, `listed`, `recommendable`, or `blocked`. Only `recommendable` rows may become paid defaults, and the demand-rank row must also have `recommendable: true`.
 
-The table below lists the current signed candidate-catalog rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
+The table below lists the current `published-2026-07-29-inband-provenance-v1` signed candidate-catalog rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
 
 The baked and served static candidate catalog MUST contain at least these rows:
 
@@ -302,6 +307,20 @@ The baked and served static candidate catalog MUST contain at least these rows:
 || `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `recommendable` |
 || `meta-llama/llama-3.2-3b-instruct` | `mlx-community/Llama-3.2-3B-Instruct-4bit` | 4 | `C` | 15 | 2500 | `recommendable` |
 || `qwen3-8b` | `mlx-community/Qwen3-8B-4bit` | 12 | `C` | 15 | 4500 | `recommendable` |
+
+The current signed catalog carries these in-band `bench_gate.provenance` classifications:
+
+|| model_key | source | hardware | notes |
+||---|---|---|---|
+|| `meta-llama/llama-3.1-8b-instruct` | `no_throughput_bench` |  | #744 audit: gate row had no throughput benchmark. |
+|| `meta-llama/llama-3.2-3b-instruct` | `no_throughput_bench` |  | #744 audit: gate row had no throughput benchmark. |
+|| `openai/gpt-oss-20b` | `measured_single_host` | `M5 32GB` | #744 audit: measured single-host row; #745 blocks trusted gate re-derivation. |
+|| `qwen3-32b` | `never_benched` |  | #744 audit: high-memory row was never benched; values unchanged. |
+|| `qwen3-coder-30b-a3b-instruct` | `measured_single_host` | `M5 32GB` | #744 audit: measured single-host row; #745 blocks trusted gate re-derivation. |
+|| `qwen2.5-coder-32b-instruct` | `policy` |  | #744 audit: gate set by operator policy to broaden eligibility. |
+|| `google-gemma-4-26b-a4b-it` | `measured_single_host` | `M5 32GB` | #744 audit: measured single-host row; #745 blocks trusted gate re-derivation. |
+|| `nvidia/nemotron-3-nano-30b-a3b` | `runtime_validated_only` |  | #744 audit: runtime validated only; no trusted throughput gate. |
+|| `qwen3-8b` | `measured_single_host` | `M5 32GB` | #744 audit: measured single-host row; #745 blocks trusted gate re-derivation. |
 
 `blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default. The current signed candidate catalog has no blocked rows; Gemma and Nemotron are `recommendable` after `mlx-swift-lm` runtime validation and coordinator rate-card rollout.
 
@@ -559,7 +578,7 @@ Schema rules:
 - `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
 - `raw_score` is rounded to 6 decimal places in JSON.
-- `bench_gate_provenance` is copied from the signed candidate catalog row for the displayed candidate. For the exact historical `published-2026-07-10-catalog-recovery-v1` bridge release only, clients derive row-specific #744 audit provenance for known rows that predate the explicit field.
+- `bench_gate_provenance` is copied from the signed candidate catalog row for the displayed candidate. Missing signed-catalog provenance is a catalog integrity failure, not a display fallback, except for the exact A4 transition-pinned July 10 live fetch where clients may derive the display-only #744 provenance classification while retaining the original signed bytes as the selected catalog hash.
 - `bench_gate_drift` is a sorted array containing `tps_below_gate` and/or `ttft_above_gate` when local measured benchmark results diverge from the advisory catalog target.
 - `buyer_ttft_ceiling_exceeded` is `true` when the candidate failed the paid-path buyer TTFT ceiling.
 - `confidence` is:

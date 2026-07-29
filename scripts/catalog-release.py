@@ -40,19 +40,6 @@ TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_en
 TIER2_SIG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
-LEGACY_MISSING_PROVENANCE_RELEASE = "published-2026-07-10-catalog-recovery-v1"
-LEGACY_MISSING_PROVENANCE_CANDIDATE_SHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
-LEGACY_MISSING_PROVENANCE_ROWS = frozenset({
-    "qwen3-coder-30b-a3b-instruct",
-    "openai/gpt-oss-20b",
-    "google-gemma-4-26b-a4b-it",
-    "qwen3-8b",
-    "meta-llama/llama-3.1-8b-instruct",
-    "meta-llama/llama-3.2-3b-instruct",
-    "qwen3-32b",
-    "qwen2.5-coder-32b-instruct",
-    "nvidia/nemotron-3-nano-30b-a3b",
-})
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
@@ -224,9 +211,8 @@ def validate_candidate_workloads(row: dict, row_key: str) -> None:
                 fail(f"candidate row {row_key}: speculative recommendation is not bound to draft_candidates")
 
 
-def validate_candidate(data: bytes, *, require_provenance: bool = False) -> dict:
+def validate_candidate(data: bytes, *, require_provenance: bool = True) -> dict:
     value = strict_json(data, "autotune-candidates")
-    candidate_hash = sha256(data)
     top = {"version", "generated_at", "source", "policy_version", "rows"}
     exact_keys(value, top, {"version", "generated_at", "source", "policy_version", "rows"}, "autotune-candidates")
     if value["source"] != "operator_curated_autotune_candidate_catalog":
@@ -267,12 +253,7 @@ def validate_candidate(data: bytes, *, require_provenance: bool = False) -> dict
         if not isinstance(gate, dict):
             fail(f"candidate row {key}: bench_gate must be an object")
         required_gate_fields = {"min_sustained_tps", "max_4k_ttft_ms"}
-        if (
-            require_provenance
-            or candidate_hash != LEGACY_MISSING_PROVENANCE_CANDIDATE_SHA256
-            or value["version"] != LEGACY_MISSING_PROVENANCE_RELEASE
-            or key not in LEGACY_MISSING_PROVENANCE_ROWS
-        ):
+        if require_provenance:
             required_gate_fields.add("provenance")
         exact_keys(
             gate,

@@ -21,13 +21,15 @@ import (
 )
 
 const (
-	maxAutotuneFeedBytes                    = 4 << 20
-	maxAutotuneSidecarBytes                 = 16 << 10
-	candidateCatalogSource                  = "operator_curated_autotune_candidate_catalog"
-	demandRankSource                        = "openrouter_completion_token_rank_operator_curated"
-	demandSupplySource                      = "macprovider_buyer_supply_deficit_v1"
-	legacyMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
-	legacyMissingProvenanceCandidateSHA256  = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
+	maxAutotuneFeedBytes    = 4 << 20
+	maxAutotuneSidecarBytes = 16 << 10
+	candidateCatalogSource  = "operator_curated_autotune_candidate_catalog"
+	demandRankSource        = "openrouter_completion_token_rank_operator_curated"
+	demandSupplySource      = "macprovider_buyer_supply_deficit_v1"
+
+	staticV4SignerKeyID                         = "streamvc-autotune-static-v4"
+	transitionMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
+	transitionMissingProvenanceCandidateSHA256  = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
 )
 
 var (
@@ -123,6 +125,32 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	}, nil
 }
 
+// LoadPreviousAutotuneCandidateFeed verifies the deployer-recorded previous
+// candidate feed for rollback/compatibility only. Current feed loading remains
+// strict; this path exists so an A4 rollout can keep the exact July 10 release
+// as previous-target while publishing the in-band provenance release.
+func LoadPreviousAutotuneCandidateFeed(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
+	keyring, err := cfg.DecodePublicKeyring()
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
+	candidates, err := loadAutotuneFeedPair(
+		cfg.AutotuneCandidatesPath,
+		cfg.AutotuneCandidatesSigPath,
+		"autotune_candidates",
+		keyring,
+		validatePreviousCandidateCatalogFeed,
+	)
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
+	return AutotuneFeeds{
+		AutotuneCandidatesJSON:         candidates.jsonBytes,
+		AutotuneCandidatesSig:          candidates.sigBytes,
+		AutotuneCandidatesVerification: candidates.verification,
+	}, nil
+}
+
 type loadedAutotuneFeed struct {
 	jsonBytes    []byte
 	sigBytes     []byte
@@ -139,7 +167,7 @@ type feedRelease struct {
 	generatedAt   time.Time
 }
 
-type feedValidator func([]byte) (feedRelease, error)
+type feedValidator func([]byte, string) (feedRelease, error)
 
 func loadAutotuneFeedPair(
 	jsonPath, sigPath, label string,
@@ -191,7 +219,7 @@ func loadAutotuneFeedPair(
 	if !ed25519.Verify(publicKey, jsonBytes, signature) {
 		return loadedAutotuneFeed{}, fmt.Errorf("autotune.%s signature verification failed", label)
 	}
-	release, err := validate(jsonBytes)
+	release, err := validate(jsonBytes, sidecar.KeyID)
 	if err != nil {
 		return loadedAutotuneFeed{}, fmt.Errorf("autotune.%s schema: %w", label, err)
 	}
@@ -276,7 +304,7 @@ func (r *nullableRank) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-func validateDemandRankFeed(raw []byte) (feedRelease, error) {
+func validateDemandRankFeed(raw []byte, _ string) (feedRelease, error) {
 	var feed demandRankFeed
 	if err := decodeStrictJSON(raw, &feed); err != nil {
 		return feedRelease{}, err
@@ -436,7 +464,15 @@ func (v *optionalProvenanceString) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-func validateCandidateCatalogFeed(raw []byte) (feedRelease, error) {
+func validateCandidateCatalogFeed(raw []byte, signerKeyID string) (feedRelease, error) {
+	return validateCandidateCatalogFeedWithTransition(raw, signerKeyID, false)
+}
+
+func validatePreviousCandidateCatalogFeed(raw []byte, signerKeyID string) (feedRelease, error) {
+	return validateCandidateCatalogFeedWithTransition(raw, signerKeyID, true)
+}
+
+func validateCandidateCatalogFeedWithTransition(raw []byte, signerKeyID string, allowPinnedMissingProvenance bool) (feedRelease, error) {
 	var feed candidateCatalogFeed
 	if err := decodeStrictJSON(raw, &feed); err != nil {
 		return feedRelease{}, err
@@ -487,7 +523,7 @@ func validateCandidateCatalogFeed(raw []byte) (feedRelease, error) {
 		if row.BenchGate.Max4KTTFTMS == nil || *row.BenchGate.Max4KTTFTMS < 0 {
 			return feedRelease{}, fmt.Errorf("row %q bench_gate.max_4k_ttft_ms must be >= 0", key)
 		}
-		if err := validateCandidateBenchGateProvenance(release.version, digestHex, key, row.BenchGate.Provenance); err != nil {
+		if err := validateCandidateBenchGateProvenance(release.version, digestHex, signerKeyID, key, row.BenchGate.Provenance, allowPinnedMissingProvenance); err != nil {
 			return feedRelease{}, err
 		}
 		if err := validateCandidateWorkloads(key, row); err != nil {
@@ -497,11 +533,13 @@ func validateCandidateCatalogFeed(raw []byte) (feedRelease, error) {
 	return release, nil
 }
 
-func validateCandidateBenchGateProvenance(releaseVersion, candidateSHA256, rowKey string, provenance *candidateBenchProvenance) error {
+func validateCandidateBenchGateProvenance(releaseVersion, candidateSHA256, signerKeyID, rowKey string, provenance *candidateBenchProvenance, allowPinnedMissingProvenance bool) error {
 	if provenance == nil {
-		if candidateSHA256 == legacyMissingProvenanceCandidateSHA256 &&
-			releaseVersion == legacyMissingProvenanceCandidateRelease &&
-			legacyMissingProvenanceCandidateRows[rowKey] {
+		if allowPinnedMissingProvenance &&
+			signerKeyID == staticV4SignerKeyID &&
+			releaseVersion == transitionMissingProvenanceCandidateRelease &&
+			candidateSHA256 == transitionMissingProvenanceCandidateSHA256 &&
+			transitionMissingProvenanceCandidateRows[rowKey] {
 			return nil
 		}
 		return fmt.Errorf("row %q bench_gate.provenance is required", rowKey)
@@ -529,16 +567,16 @@ func validateCandidateBenchGateProvenance(releaseVersion, candidateSHA256, rowKe
 	return nil
 }
 
-var legacyMissingProvenanceCandidateRows = map[string]bool{
-	"qwen3-coder-30b-a3b-instruct":     true,
-	"openai/gpt-oss-20b":               true,
+var transitionMissingProvenanceCandidateRows = map[string]bool{
 	"google-gemma-4-26b-a4b-it":        true,
-	"qwen3-8b":                         true,
 	"meta-llama/llama-3.1-8b-instruct": true,
 	"meta-llama/llama-3.2-3b-instruct": true,
-	"qwen3-32b":                        true,
-	"qwen2.5-coder-32b-instruct":       true,
 	"nvidia/nemotron-3-nano-30b-a3b":   true,
+	"openai/gpt-oss-20b":               true,
+	"qwen2.5-coder-32b-instruct":       true,
+	"qwen3-32b":                        true,
+	"qwen3-8b":                         true,
+	"qwen3-coder-30b-a3b-instruct":     true,
 }
 
 func validateCandidateWorkloads(rowKey string, row candidateRow) error {

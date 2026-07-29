@@ -65,7 +65,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 		if verification.KeyID != "streamvc-autotune-static-v4" {
 			t.Fatalf("%s key ID=%q", name, verification.KeyID)
 		}
-		if verification.Version != "published-2026-07-10-catalog-recovery-v1" {
+		if verification.Version != "published-2026-07-29-inband-provenance-v1" {
 			t.Fatalf("%s version=%q", name, verification.Version)
 		}
 		if verification.PolicyVersion != "autotune-policy-v1" {
@@ -137,7 +137,7 @@ func TestAutotuneFeedsServeLiteralSignedBytes(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &release); err != nil {
 		t.Fatalf("decode autotune release: %v", err)
 	}
-	if release.Status != "live_verified" || release.ReleaseID != "published-2026-07-10-catalog-recovery-v1" || release.PolicyVersion != "autotune-policy-v1" {
+	if release.Status != "live_verified" || release.ReleaseID != "published-2026-07-29-inband-provenance-v1" || release.PolicyVersion != "autotune-policy-v1" {
 		t.Fatalf("autotune release metadata=%+v", release)
 	}
 	if release.Feeds["autotune_candidates"].SHA256 != feeds.AutotuneCandidatesVerification.SHA256 || release.Feeds["demand_rank"].SignerKeyID != "streamvc-autotune-static-v4" {
@@ -312,20 +312,86 @@ func TestLoadAutotuneFeedsRejectsInvalidFeedSchema(t *testing.T) {
 	}
 }
 
-func TestLoadAutotuneFeedsRejectsMutatedLegacyBridgeWithoutProvenance(t *testing.T) {
+func TestLoadAutotuneFeedsRejectsSignedCatalogWithoutProvenance(t *testing.T) {
 	t.Parallel()
 	staticDir := filepath.Join("..", "..", "..", "phase3-binary", "dist", "static")
 	raw, err := os.ReadFile(filepath.Join(staticDir, "autotune-candidates.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mutated := bytesReplace(t, raw, `"min_ram_gb":48`, `"min_ram_gb":47`)
+	mutated := removeFirstBenchGateProvenance(t, raw)
 	publicKey, privateKey := testSigningKey(t)
 	dir := t.TempDir()
 	jsonPath, sigPath := writeSignedFeedPair(t, dir, "autotune-candidates", mutated, "test-key", privateKey)
 	_, err = buyer.LoadAutotuneFeeds(candidateFeedConfig(jsonPath, sigPath, "test-key", publicKey))
 	if err == nil || !strings.Contains(err.Error(), "bench_gate.provenance is required") {
 		t.Fatalf("LoadAutotuneFeeds error=%v, want provenance rejection", err)
+	}
+}
+
+func TestLoadPreviousAutotuneCandidateFeedAcceptsPinnedJuly10PreviousWithoutProvenance(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join("..", "..", "..", "phase3-binary", "catalog", "autotune", "testdata")
+	raw, err := os.ReadFile(filepath.Join(corpus, "published-2026-07-10-catalog-recovery-v1.autotune-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if got := hex.EncodeToString(sum[:]); got != "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda" {
+		t.Fatalf("fixture sha256=%s, want July 10 production hash", got)
+	}
+	publicKey, privateKey := testSigningKey(t)
+	dir := t.TempDir()
+	jsonPath, sigPath := writeSignedFeedPair(t, dir, "autotune-candidates", raw, "streamvc-autotune-static-v4", privateKey)
+	cfg := candidateFeedConfig(jsonPath, sigPath, "streamvc-autotune-static-v4", publicKey)
+
+	if _, err := buyer.LoadAutotuneFeeds(cfg); err == nil || !strings.Contains(err.Error(), "bench_gate.provenance is required") {
+		t.Fatalf("LoadAutotuneFeeds error=%v, want strict current provenance rejection", err)
+	}
+
+	feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(cfg)
+	if err != nil {
+		t.Fatalf("LoadPreviousAutotuneCandidateFeed: %v", err)
+	}
+	verification := feeds.AutotuneCandidatesVerification
+	if verification.Version != "published-2026-07-10-catalog-recovery-v1" ||
+		verification.SHA256 != "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda" {
+		t.Fatalf("previous verification=%+v, want pinned July 10 identity", verification)
+	}
+}
+
+func TestLoadPreviousAutotuneCandidateFeedRejectsPinnedJuly10PreviousUnderWrongSigner(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join("..", "..", "..", "phase3-binary", "catalog", "autotune", "testdata")
+	raw, err := os.ReadFile(filepath.Join(corpus, "published-2026-07-10-catalog-recovery-v1.autotune-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey := testSigningKey(t)
+	dir := t.TempDir()
+	jsonPath, sigPath := writeSignedFeedPair(t, dir, "autotune-candidates", raw, "test-key", privateKey)
+
+	_, err = buyer.LoadPreviousAutotuneCandidateFeed(candidateFeedConfig(jsonPath, sigPath, "test-key", publicKey))
+	if err == nil || !strings.Contains(err.Error(), "bench_gate.provenance is required") {
+		t.Fatalf("LoadPreviousAutotuneCandidateFeed error=%v, want non-v4 transition signer rejection", err)
+	}
+}
+
+func TestLoadPreviousAutotuneCandidateFeedRejectsUnpinnedMissingProvenance(t *testing.T) {
+	t.Parallel()
+	corpus := filepath.Join("..", "..", "..", "phase3-binary", "catalog", "autotune", "testdata")
+	raw, err := os.ReadFile(filepath.Join(corpus, "published-2026-07-10-catalog-recovery-v1.autotune-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := bytesReplace(t, raw, `"min_ram_gb":28`, `"min_ram_gb":29`)
+	publicKey, privateKey := testSigningKey(t)
+	dir := t.TempDir()
+	jsonPath, sigPath := writeSignedFeedPair(t, dir, "autotune-candidates", mutated, "streamvc-autotune-static-v4", privateKey)
+
+	_, err = buyer.LoadPreviousAutotuneCandidateFeed(candidateFeedConfig(jsonPath, sigPath, "streamvc-autotune-static-v4", publicKey))
+	if err == nil || !strings.Contains(err.Error(), "bench_gate.provenance is required") {
+		t.Fatalf("LoadPreviousAutotuneCandidateFeed error=%v, want unpinned provenance rejection", err)
 	}
 }
 
@@ -552,6 +618,39 @@ func bytesReplace(t *testing.T, raw []byte, old, replacement string) []byte {
 		t.Fatalf("fixture does not contain %q", old)
 	}
 	return []byte(updated)
+}
+
+func removeFirstBenchGateProvenance(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := root["rows"].(map[string]any)
+	if !ok {
+		t.Fatal("fixture rows missing")
+	}
+	for _, rawRow := range rows {
+		row, ok := rawRow.(map[string]any)
+		if !ok {
+			continue
+		}
+		benchGate, ok := row["bench_gate"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := benchGate["provenance"]; !ok {
+			continue
+		}
+		delete(benchGate, "provenance")
+		updated, err := json.Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return updated
+	}
+	t.Fatal("fixture does not contain bench_gate.provenance")
+	return nil
 }
 
 func TestNginxAutotuneFeedsAllowThroughBeforeV1CatchAll(t *testing.T) {

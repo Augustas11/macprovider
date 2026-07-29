@@ -5,15 +5,17 @@ import XCTest
 @testable import macprovider_cli
 
 final class AutotuneRecommendTests: XCTestCase {
-    func testCandidateCatalogSharedNestedSchemaCorpus() throws {
-        let corpus = URL(fileURLWithPath: #filePath)
+    private static var catalogTestdata: URL {
+        URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("catalog/autotune/testdata", isDirectory: true)
+    }
 
+    func testCandidateCatalogSharedNestedSchemaCorpus() throws {
         XCTAssertNoThrow(try AutotuneStaticInputs.decodeCandidateCatalog(
-            Data(contentsOf: corpus.appendingPathComponent("valid-workload-profile.json"))
+            Data(contentsOf: Self.catalogTestdata.appendingPathComponent("valid-workload-profile.json"))
         ))
         for fixture in [
             "invalid-workload-profiles-type.json",
@@ -21,7 +23,7 @@ final class AutotuneRecommendTests: XCTestCase {
             "invalid-workload-no-winner-samples.json",
         ] {
             XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(
-                Data(contentsOf: corpus.appendingPathComponent(fixture))
+                Data(contentsOf: Self.catalogTestdata.appendingPathComponent(fixture))
             ), fixture)
         }
     }
@@ -1114,8 +1116,8 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-10-catalog-recovery-v1", with: "fetched-2026-08-10")
-            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-08-10T00:00:00Z")
+            .replacingOccurrences(of: "published-2026-07-29-inband-provenance-v1", with: "fetched-2026-08-10")
+            .replacingOccurrences(of: "2026-07-29T08:45:00Z", with: "2026-08-10T00:00:00Z")
             .utf8)
         let signature = Data(repeating: 0, count: 64).base64EncodedString()
         let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
@@ -1143,8 +1145,8 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-10-catalog-recovery-v1", with: "fetched-2026-07-15")
-            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-15T00:00:00Z")
+            .replacingOccurrences(of: "published-2026-07-29-inband-provenance-v1", with: "fetched-2026-07-29")
+            .replacingOccurrences(of: "2026-07-29T08:45:00Z", with: "2026-07-29T09:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
         let inputs = AutotuneStaticInputs(
@@ -1205,6 +1207,122 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(selection.warnings.contains(.candidateCatalogIntegrityFailure))
     }
 
+    func testSignedStaticAcceptsPinnedJuly10TransitionReleaseBeforeFeedActivation() async throws {
+        let demandPayload = try Data(contentsOf: Self.catalogTestdata.appendingPathComponent("published-2026-07-10-catalog-recovery-v1.demand-rank.json"))
+        let candidatePayload = try Data(contentsOf: Self.catalogTestdata.appendingPathComponent("published-2026-07-10-catalog-recovery-v1.autotune-candidates.json"))
+        XCTAssertEqual(AutotuneStaticInputs.candidateCatalogSHA256(bytes: demandPayload), "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2")
+        XCTAssertEqual(AutotuneStaticInputs.candidateCatalogSHA256(bytes: candidatePayload), "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda")
+        XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(candidatePayload))
+
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let keyID = "streamvc-autotune-static-v4"
+        let demandSidecar = try Self.sidecar(for: demandPayload, keyID: keyID, privateKey: privateKey)
+        let candidateSidecar = try Self.sidecar(for: candidatePayload, keyID: keyID, privateKey: privateKey)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                switch url.path {
+                case _ where url.path.hasSuffix("/demand-rank.sig"):
+                    return demandSidecar
+                case _ where url.path.hasSuffix("/demand-rank"):
+                    return demandPayload
+                case _ where url.path.hasSuffix("/autotune-candidates.sig"):
+                    return candidateSidecar
+                case _ where url.path.hasSuffix("/autotune-candidates"):
+                    return candidatePayload
+                default:
+                    throw URLError(.fileDoesNotExist)
+                }
+            },
+            trustedPublicKeys: [keyID: privateKey.publicKey.rawRepresentation.base64EncodedString()],
+            now: { Self.date("2026-07-29T12:00:00Z") }
+        )
+
+        let release = await inputs.loadCatalogRelease()
+
+        XCTAssertFalse(release.demand.usedFallback)
+        XCTAssertFalse(release.candidate.usedFallback)
+        XCTAssertEqual(release.demand.value.version, "published-2026-07-10-catalog-recovery-v1")
+        XCTAssertEqual(release.candidate.value.version, "published-2026-07-10-catalog-recovery-v1")
+        XCTAssertFalse(release.demand.warnings.contains(.demandRankUpdateRequired))
+        XCTAssertFalse(release.candidate.warnings.contains(.candidateCatalogUpdateRequired))
+        XCTAssertFalse(release.candidate.warnings.contains(.candidateCatalogIntegrityFailure))
+        XCTAssertTrue(release.demand.warnings.contains(.demandRankStale))
+        XCTAssertTrue(release.candidate.warnings.contains(.candidateCatalogStale))
+    }
+
+    func testSignedStaticRejectsUnpinnedMissingProvenanceTransitionShape() async throws {
+        let demandPayload = try Data(contentsOf: Self.catalogTestdata.appendingPathComponent("published-2026-07-10-catalog-recovery-v1.demand-rank.json"))
+        let candidatePayload = try Self.dataReplacing(
+            Data(contentsOf: Self.catalogTestdata.appendingPathComponent("published-2026-07-10-catalog-recovery-v1.autotune-candidates.json")),
+            "\"min_ram_gb\":28",
+            "\"min_ram_gb\":29"
+        )
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let keyID = "streamvc-autotune-static-v4"
+        let demandSidecar = try Self.sidecar(for: demandPayload, keyID: keyID, privateKey: privateKey)
+        let candidateSidecar = try Self.sidecar(for: candidatePayload, keyID: keyID, privateKey: privateKey)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                switch url.path {
+                case _ where url.path.hasSuffix("/demand-rank.sig"):
+                    return demandSidecar
+                case _ where url.path.hasSuffix("/demand-rank"):
+                    return demandPayload
+                case _ where url.path.hasSuffix("/autotune-candidates.sig"):
+                    return candidateSidecar
+                case _ where url.path.hasSuffix("/autotune-candidates"):
+                    return candidatePayload
+                default:
+                    throw URLError(.fileDoesNotExist)
+                }
+            },
+            trustedPublicKeys: [keyID: privateKey.publicKey.rawRepresentation.base64EncodedString()],
+            now: { Self.date("2026-07-29T12:00:00Z") }
+        )
+
+        let release = await inputs.loadCatalogRelease()
+
+        XCTAssertTrue(release.candidate.usedFallback)
+        XCTAssertTrue(release.candidate.warnings.contains(.candidateCatalogIntegrityFailure))
+        XCTAssertTrue(release.candidate.warnings.contains(.candidateCatalogFallbackUsed))
+    }
+
+    func testSignedStaticRejectsPinnedJuly10TransitionUnderWrongSigner() async throws {
+        let demandPayload = try Data(contentsOf: Self.catalogTestdata.appendingPathComponent("published-2026-07-10-catalog-recovery-v1.demand-rank.json"))
+        let candidatePayload = try Data(contentsOf: Self.catalogTestdata.appendingPathComponent("published-2026-07-10-catalog-recovery-v1.autotune-candidates.json"))
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let keyID = "streamvc-autotune-static-v5"
+        let demandSidecar = try Self.sidecar(for: demandPayload, keyID: keyID, privateKey: privateKey)
+        let candidateSidecar = try Self.sidecar(for: candidatePayload, keyID: keyID, privateKey: privateKey)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                switch url.path {
+                case _ where url.path.hasSuffix("/demand-rank.sig"):
+                    return demandSidecar
+                case _ where url.path.hasSuffix("/demand-rank"):
+                    return demandPayload
+                case _ where url.path.hasSuffix("/autotune-candidates.sig"):
+                    return candidateSidecar
+                case _ where url.path.hasSuffix("/autotune-candidates"):
+                    return candidatePayload
+                default:
+                    throw URLError(.fileDoesNotExist)
+                }
+            },
+            trustedPublicKeys: [keyID: privateKey.publicKey.rawRepresentation.base64EncodedString()],
+            now: { Self.date("2026-07-29T12:00:00Z") }
+        )
+
+        let release = await inputs.loadCatalogRelease()
+
+        XCTAssertTrue(release.demand.usedFallback)
+        XCTAssertTrue(release.candidate.usedFallback)
+        XCTAssertTrue(release.demand.warnings.contains(.demandRankUpdateRequired))
+        XCTAssertTrue(release.candidate.warnings.contains(.candidateCatalogUpdateRequired))
+        XCTAssertFalse(release.demand.warnings.contains(.demandRankIntegrityFailure))
+        XCTAssertFalse(release.candidate.warnings.contains(.candidateCatalogIntegrityFailure))
+    }
+
     func testSignedStaticAcceptsBridgeKeyFromTrustedKeyring() async throws {
         let payload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
         let privateKey = Curve25519.Signing.PrivateKey()
@@ -1216,7 +1334,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
             trustedPublicKeys: keyring,
-            now: { Self.date("2026-07-26T17:00:00Z") }
+            now: { Self.date("2026-07-30T17:00:00Z") }
         )
 
         let selection = await inputs.loadDemandRank()
@@ -1260,31 +1378,53 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testCandidateCatalogRejectsUppercaseRevisionAndSHA() throws {
         let json = """
-        {"version":"test","generated_at":"2026-07-01T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"model-a":{"model_id":"namespace/model","model_revision":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","model_sha256":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}
+        {"version":"test","generated_at":"2026-07-01T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"model-a":{"model_id":"namespace/model","model_revision":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","model_sha256":"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"policy","notes":"test fixture"}},"runtime_status":"recommendable"}}}
         """
 
         XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(Data(json.utf8)))
     }
 
-    func testCandidateCatalogBackfillsLegacyBenchGateProvenance() throws {
+    func testBakedCandidateCatalogCarriesBenchGateProvenanceInBand() throws {
         let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let row = try XCTUnwrap(catalog.rows["qwen2.5-coder-32b-instruct"])
         XCTAssertEqual(row.benchGate.provenance.source, "policy")
         XCTAssertEqual(row.benchGate.provenance.notes, "#744 audit: gate set by operator policy to broaden eligibility.")
     }
 
-    func testCandidateCatalogRejectsMutatedLegacyBridgeWithoutProvenance() throws {
-        let json = AutotuneStaticInputs.bakedCandidateCatalogJSON.replacingOccurrences(
-            of: "\"min_ram_gb\":48",
-            with: "\"min_ram_gb\":47",
-            options: [],
-            range: AutotuneStaticInputs.bakedCandidateCatalogJSON.range(of: "\"min_ram_gb\":48")
-        )
+    func testCandidateCatalogRejectsMissingBenchGateProvenance() throws {
+        let json = try Self.bakedCandidateCatalogRemovingFirstProvenance()
 
         XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(Data(json.utf8)))
     }
 
-    func testCandidateCatalogRejectsMissingBenchGateProvenanceOutsideLegacyBridge() throws {
+    private static func bakedCandidateCatalogRemovingFirstProvenance() throws -> String {
+        let data = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var rows = try XCTUnwrap(root["rows"] as? [String: Any])
+        let firstKey = try XCTUnwrap(rows.keys.sorted().first)
+        var row = try XCTUnwrap(rows[firstKey] as? [String: Any])
+        var benchGate = try XCTUnwrap(row["bench_gate"] as? [String: Any])
+        benchGate.removeValue(forKey: "provenance")
+        row["bench_gate"] = benchGate
+        rows[firstKey] = row
+        root["rows"] = rows
+        let mutated = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        return try XCTUnwrap(String(data: mutated, encoding: .utf8))
+    }
+
+    private static func sidecar(for payload: Data, keyID: String, privateKey: Curve25519.Signing.PrivateKey) throws -> Data {
+        let signature = try privateKey.signature(for: payload).base64EncodedString()
+        return Data("{\"key_id\":\"\(keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+    }
+
+    private static func dataReplacing(_ data: Data, _ old: String, _ new: String) throws -> Data {
+        let string = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let updated = string.replacingOccurrences(of: old, with: new, options: [], range: string.range(of: old))
+        XCTAssertNotEqual(updated, string)
+        return Data(updated.utf8)
+    }
+
+    func testCandidateCatalogRejectsMissingBenchGateProvenanceInFetchedRelease() throws {
         let json = """
         {"version":"new-release","generated_at":"2026-07-26T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"model-a":{"model_id":"mlx-community/Test-Model-4bit","model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}
         """

@@ -1167,7 +1167,7 @@ func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Ca
 	previousCfg.DemandRankSigPath = ""
 	previousCfg.AutotuneCandidatesPath = filepath.Join(root, target, "autotune-candidates.json")
 	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
-	feeds, err := buyer.LoadAutotuneFeeds(previousCfg)
+	feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(previousCfg)
 	if err != nil {
 		return nil, fmt.Errorf("verify %s: %w", target, err)
 	}

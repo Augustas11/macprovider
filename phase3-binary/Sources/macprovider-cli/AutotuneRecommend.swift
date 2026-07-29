@@ -510,7 +510,6 @@ struct CandidateCatalog: Decodable, Equatable {
         var minSustainedTPS: Double
         var max4KTTFTMS: Int
         var provenance: Provenance
-        var provenanceWasMissing: Bool
 
         init(
             minSustainedTPS: Double,
@@ -520,7 +519,6 @@ struct CandidateCatalog: Decodable, Equatable {
             self.minSustainedTPS = minSustainedTPS
             self.max4KTTFTMS = max4KTTFTMS
             self.provenance = provenance
-            self.provenanceWasMissing = false
         }
 
         enum CodingKeys: String, CodingKey {
@@ -533,13 +531,7 @@ struct CandidateCatalog: Decodable, Equatable {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             minSustainedTPS = try c.decode(Double.self, forKey: .minSustainedTPS)
             max4KTTFTMS = try c.decode(Int.self, forKey: .max4KTTFTMS)
-            if let decoded = try c.decodeIfPresent(Provenance.self, forKey: .provenance) {
-                provenance = decoded
-                provenanceWasMissing = false
-            } else {
-                provenance = Provenance(source: "legacy_unverified", notes: "pre-v0.8 catalog bridge default")
-                provenanceWasMissing = true
-            }
+            provenance = try c.decode(Provenance.self, forKey: .provenance)
         }
     }
 
@@ -743,7 +735,7 @@ struct CandidateCatalog: Decodable, Equatable {
         generatedAt = date
     }
 
-    func validated(candidateCatalogSHA256: String? = nil) throws -> CandidateCatalog {
+    func validated() throws -> CandidateCatalog {
         guard source == "operator_curated_autotune_candidate_catalog" else {
             throw AutotuneRecommendError.invalidStaticJSON("candidate catalog source")
         }
@@ -751,20 +743,9 @@ struct CandidateCatalog: Decodable, Equatable {
             throw AutotuneRecommendError.invalidStaticJSON("candidate catalog policy_version")
         }
         let allowedStatuses = Set(["candidate", "listed", "recommendable", "blocked"])
-        var catalog = self
+        let catalog = self
         for (key, originalRow) in catalog.rows {
-            var row = originalRow
-            if row.benchGate.provenanceWasMissing {
-                guard candidateCatalogSHA256 == Self.legacyMissingProvenanceCatalogSHA256,
-                      catalog.version == Self.legacyMissingProvenanceReleaseVersion,
-                      let provenance = Self.legacyBenchGateProvenance[key]
-                else {
-                    throw AutotuneRecommendError.invalidStaticJSON("bench_gate.provenance for \(key)")
-                }
-                row.benchGate.provenance = provenance
-                row.benchGate.provenanceWasMissing = false
-                catalog.rows[key] = row
-            }
+            let row = originalRow
             guard allowedStatuses.contains(row.runtimeStatus) else {
                 throw AutotuneRecommendError.invalidStaticJSON("runtime_status for \(key)")
             }
@@ -792,52 +773,6 @@ struct CandidateCatalog: Decodable, Equatable {
         }
         return catalog
     }
-
-    static let legacyMissingProvenanceReleaseVersion = "published-2026-07-10-catalog-recovery-v1"
-    static let legacyMissingProvenanceCatalogSHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
-
-    static let legacyBenchGateProvenance: [String: BenchGate.Provenance] = [
-        "qwen3-coder-30b-a3b-instruct": BenchGate.Provenance(
-            source: "measured_single_host",
-            hardware: "M5 32GB",
-            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
-        ),
-        "openai/gpt-oss-20b": BenchGate.Provenance(
-            source: "measured_single_host",
-            hardware: "M5 32GB",
-            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
-        ),
-        "google-gemma-4-26b-a4b-it": BenchGate.Provenance(
-            source: "measured_single_host",
-            hardware: "M5 32GB",
-            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
-        ),
-        "qwen3-8b": BenchGate.Provenance(
-            source: "measured_single_host",
-            hardware: "M5 32GB",
-            notes: "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
-        ),
-        "meta-llama/llama-3.1-8b-instruct": BenchGate.Provenance(
-            source: "no_throughput_bench",
-            notes: "#744 audit: gate row had no throughput benchmark."
-        ),
-        "meta-llama/llama-3.2-3b-instruct": BenchGate.Provenance(
-            source: "no_throughput_bench",
-            notes: "#744 audit: gate row had no throughput benchmark."
-        ),
-        "qwen3-32b": BenchGate.Provenance(
-            source: "never_benched",
-            notes: "#744 audit: high-memory row was never benched; values unchanged."
-        ),
-        "qwen2.5-coder-32b-instruct": BenchGate.Provenance(
-            source: "policy",
-            notes: "#744 audit: gate set by operator policy to broaden eligibility."
-        ),
-        "nvidia/nemotron-3-nano-30b-a3b": BenchGate.Provenance(
-            source: "runtime_validated_only",
-            notes: "#744 audit: runtime validated only; no trusted throughput gate."
-        ),
-    ]
 
     static let allowedBenchGateProvenanceSources = Set([
         "measured_single_host",
@@ -1271,6 +1206,9 @@ struct AutotuneStaticInputs {
     static let autotune_static_json_ed25519_v5 = "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
     static let publicKeyBase64 = generatedTrustedPublicKeys[keyID] ?? autotune_static_json_ed25519_v5
     static let defaultTrustedPublicKeys = generatedTrustedPublicKeys
+    static let transitionMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
+    static let transitionMissingProvenanceCandidateSHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
+    static let transitionDemandRankSHA256 = "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2"
 
     var fetch: (URL) async throws -> Data
     var trustedPublicKeys: [String: String]
@@ -1302,7 +1240,8 @@ struct AutotuneStaticInputs {
             fallbackWarning: .demandRankFallbackUsed,
             integrityWarning: .demandRankIntegrityFailure,
             updateWarning: .demandRankUpdateRequired,
-            staleWarning: .demandRankStale
+            staleWarning: .demandRankStale,
+            allowOlderFetchedBytes: Self.isPinnedTransitionDemandRank
         ) { try Self.decodeDemandRank($0) }
     }
 
@@ -1313,8 +1252,9 @@ struct AutotuneStaticInputs {
             fallbackWarning: .candidateCatalogFallbackUsed,
             integrityWarning: .candidateCatalogIntegrityFailure,
             updateWarning: .candidateCatalogUpdateRequired,
-            staleWarning: .candidateCatalogStale
-        ) { try Self.decodeCandidateCatalog($0) }
+            staleWarning: .candidateCatalogStale,
+            allowOlderFetchedBytes: Self.isPinnedTransitionCandidateCatalog
+        ) { try Self.decodeSignedStaticCandidateCatalog($0) }
     }
 
     func loadCatalogRelease() async -> (
@@ -1352,6 +1292,7 @@ struct AutotuneStaticInputs {
         integrityWarning: AutotuneRecommendWarning,
         updateWarning: AutotuneRecommendWarning,
         staleWarning: AutotuneRecommendWarning,
+        allowOlderFetchedBytes: (Data, String) -> Bool = { _, _ in false },
         decode: (Data) throws -> T
     ) async -> AutotuneStaticSelection<T> {
         let bakedValue = (try? decode(bakedBytes))!
@@ -1415,7 +1356,7 @@ struct AutotuneStaticInputs {
             )
         }
         let current = now()
-        guard fetchedGeneratedAt >= bakedGeneratedAt,
+        guard (fetchedGeneratedAt >= bakedGeneratedAt || allowOlderFetchedBytes(jsonBytes, sidecar.keyID)),
               fetchedGeneratedAt <= current.addingTimeInterval(10 * 60),
               current.timeIntervalSince(fetchedGeneratedAt) <= 30 * 24 * 3600
         else {
@@ -1501,7 +1442,18 @@ struct AutotuneStaticInputs {
     static func decodeCandidateCatalog(_ data: Data) throws -> CandidateCatalog {
         try AutotuneStrictJSON.validate(data, kind: .candidateCatalog)
         return try JSONDecoder.autotune.decode(CandidateCatalog.self, from: data)
-            .validated(candidateCatalogSHA256: candidateCatalogSHA256(bytes: data))
+            .validated()
+    }
+
+    static func decodeSignedStaticCandidateCatalog(_ data: Data) throws -> CandidateCatalog {
+        do {
+            return try decodeCandidateCatalog(data)
+        } catch {
+            guard let transitionBytes = candidateCatalogWithPinnedTransitionProvenance(data) else {
+                throw error
+            }
+            return try decodeCandidateCatalog(transitionBytes)
+        }
     }
 
     static func decodeRateCard(_ data: Data) throws -> RateCardProjection {
@@ -1509,7 +1461,59 @@ struct AutotuneStaticInputs {
     }
 
     static func candidateCatalogSHA256(bytes: Data) -> String {
+        sha256(bytes: bytes)
+    }
+
+    private static func sha256(bytes: Data) -> String {
         Data(SHA256.hash(data: bytes)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isPinnedTransitionDemandRank(_ data: Data, signerKeyID: String) -> Bool {
+        guard signerKeyID == "streamvc-autotune-static-v4",
+              sha256(bytes: data) == transitionDemandRankSHA256,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return false
+        }
+        return object["version"] as? String == transitionMissingProvenanceCandidateRelease
+    }
+
+    private static func isPinnedTransitionCandidateCatalog(_ data: Data, signerKeyID: String) -> Bool {
+        guard signerKeyID == "streamvc-autotune-static-v4",
+              sha256(bytes: data) == transitionMissingProvenanceCandidateSHA256,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return false
+        }
+        return object["version"] as? String == transitionMissingProvenanceCandidateRelease
+    }
+
+    private static func candidateCatalogWithPinnedTransitionProvenance(_ data: Data) -> Data? {
+        guard sha256(bytes: data) == transitionMissingProvenanceCandidateSHA256,
+              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["version"] as? String == transitionMissingProvenanceCandidateRelease,
+              var rows = root["rows"] as? [String: Any],
+              let currentRoot = try? JSONSerialization.jsonObject(with: Data(bakedCandidateCatalogJSON.utf8)) as? [String: Any],
+              let currentRows = currentRoot["rows"] as? [String: Any]
+        else {
+            return nil
+        }
+        for key in rows.keys {
+            guard var row = rows[key] as? [String: Any],
+                  var benchGate = row["bench_gate"] as? [String: Any],
+                  benchGate["provenance"] == nil,
+                  let currentRow = currentRows[key] as? [String: Any],
+                  let currentBenchGate = currentRow["bench_gate"] as? [String: Any],
+                  let provenance = currentBenchGate["provenance"] as? [String: Any]
+            else {
+                return nil
+            }
+            benchGate["provenance"] = provenance
+            row["bench_gate"] = benchGate
+            rows[key] = row
+        }
+        root["rows"] = rows
+        return try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
     }
 
     private func generatedAt(in data: Data) -> Date? {

@@ -137,12 +137,14 @@ candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
 candidate["version"] = " padded-release "
 rejected("padded candidate version", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
 candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
+next(iter(candidate["rows"].values()))["bench_gate"].pop("provenance", None)
 rejected("publish candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate), require_provenance=True))
 candidate["version"] = "new-release"
 rejected("new release candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
 candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
+next(iter(candidate["rows"].values()))["bench_gate"].pop("provenance", None)
 next(iter(candidate["rows"].values()))["min_ram_gb"] += 1
-rejected("mutated legacy candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
+rejected("mutated candidate missing provenance", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
 candidate = json.loads((canonical / "autotune-candidates.json").read_bytes())
 next(iter(candidate["rows"].values()))["bench_gate"]["provenance"] = {"source": "legacy_unverified", "notes": None}
 rejected("null provenance notes", lambda: module.validate_candidate(module.canonical_bytes(candidate)))
