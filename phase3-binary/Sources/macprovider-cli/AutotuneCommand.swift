@@ -955,7 +955,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 throw ValidationError("selected recommendation lacks signed catalog row")
             }
             if applyingDonorFallback {
-                FileHandle.standardError.write(Data("DONOR MODE: no paid model clears $0.0050/hr on this Mac; \(selected.model) is for network support only.\n".utf8))
+                FileHandle.standardError.write(Data("\(Self.donorModeApplyWarning(for: selected.model))\n".utf8))
             }
             let rawPath = config ?? AppConfig.defaultConfigPath
             let expanded = ConfigLoader.expandTilde(rawPath)
@@ -1335,6 +1335,10 @@ struct AutotuneCommand: AsyncParsableCommand {
             throw ValidationError("--max-context-axis must not contain duplicate cells")
         }
         return values
+    }
+
+    static func donorModeApplyWarning(for selectedModel: String) -> String {
+        "DONOR MODE: \(selectedModel) does not meet rate-card or hardware requirements on this Mac."
     }
 }
 

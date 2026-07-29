@@ -951,6 +951,30 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(drift, ["tps_below_gate"])
         XCTAssertEqual(candidate["confidence"] as? String, "low")
         XCTAssertEqual(candidate["buyer_ttft_ceiling_exceeded"] as? Bool, false)
+
+        let transcript = result.humanTranscript()
+        XCTAssertTrue(transcript.contains("Confidence: low"), transcript)
+        XCTAssertTrue(transcript.contains("Bench gate provenance: source=measured_single_host, hardware=M5 32GB, measured_at=2026-07-25, notes=fixture"), transcript)
+        XCTAssertTrue(transcript.contains("Bench gate drift: tps_below_gate"), transcript)
+    }
+
+    func testTranscriptSanitizesBenchGateProvenanceControlCharacters() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        request.candidateCatalog.rows[modelKey]?.benchGate.provenance = CandidateCatalog.BenchGate.Provenance(
+            source: "measured_single_host",
+            hardware: "M5\n32GB",
+            measuredAt: "2026-07-25",
+            notes: "fixture\n\u{001B}[31mforged-line"
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let transcript = result.humanTranscript()
+
+        XCTAssertTrue(transcript.contains("hardware=M5 32GB"), transcript)
+        XCTAssertTrue(transcript.contains("notes=fixture [31mforged-line"), transcript)
+        XCTAssertFalse(transcript.contains("hardware=M5\n32GB"), transcript)
+        XCTAssertFalse(transcript.contains("notes=fixture\n"), transcript)
     }
 
     func testJSONCandidatesExcludeIneligibleDiagnosticsWhenEligibleRowsExist() throws {
@@ -3084,6 +3108,35 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(transcript.contains("per million completion tokens"), transcript)
         XCTAssertFalse(transcript.contains("/hr"), transcript)
         XCTAssertFalse(transcript.contains("starter"), transcript)
+    }
+
+    func testTranscriptCountsBenchmarkedRowsNotRenderedEligibleRows() throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        let diagnosticKey = "diagnostic-benchmarked-row"
+        var request = try makeRequest(modelKey: modelKey)
+        request.candidateCatalog.rows[diagnosticKey] = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        request.demandRank.rows[diagnosticKey] = DemandRank.Row(
+            demandWeight: 0.1,
+            rank: 2,
+            recommendable: false,
+            minProviderTarget: 0
+        )
+        request.rateCard.rows[diagnosticKey] = try XCTUnwrap(request.rateCard.rows[modelKey])
+        request.benchmarks[diagnosticKey] = try fixtureBenchmark(
+            modelKey: diagnosticKey,
+            request: request,
+            sustainedTPS: 80,
+            ttftMS: 100,
+            swapDetected: false,
+            generatedAt: request.generatedAt
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let transcript = result.humanTranscript()
+
+        XCTAssertEqual(result.benchmarkedCount, 2)
+        XCTAssertEqual(result.candidates.filter(\.eligible).count, 1)
+        XCTAssertTrue(transcript.contains("Benchmarked 2 local benchmark results"), transcript)
     }
 
     func testTranscriptDoesNotOfferUnreadYPrompt() throws {

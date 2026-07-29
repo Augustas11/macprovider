@@ -2,7 +2,7 @@
 
 package stats_test
 
-// SPEC-017 v0.1.8 Step 3 — handler integration tests against a
+// SPEC-017 v0.1.9 Step 3 — handler integration tests against a
 // real Postgres via testcontainers-go. Reuses the per-test
 // container helpers from integration_test.go (same package +
 // build tag) and the rollup helpers from
@@ -132,7 +132,7 @@ func seedAgedOverview(t *testing.T, adminDB *sql.DB, ageSeconds int) {
 }
 
 // ===========================================================================
-// AC-1 — /v1/stats/overview JSON shape (14 network fields + 30-point
+// AC-1 — /v1/stats/overview JSON shape (14 numeric metrics + source labels + 30-point
 //
 //	rpm_30m.points / tpm_30m.points with `t` timestamps).
 //
@@ -169,6 +169,7 @@ func TestAC1_OverviewJSONShape(t *testing.T) {
 		"bandwidth_gb_per_s", "network_power_kw",
 		"network_utilization_pct", "gpu_cores_total", "cpu_cores_total",
 		"unified_ram_gb_total", "avg_tokens_per_request", "models_serving",
+		"capacity_estimate_sources",
 	}
 	if len(net) != len(required) {
 		t.Errorf("network has %d fields, want %d", len(net), len(required))
@@ -176,6 +177,22 @@ func TestAC1_OverviewJSONShape(t *testing.T) {
 	for _, k := range required {
 		if _, ok := net[k]; !ok {
 			t.Errorf("network.%s missing", k)
+		}
+	}
+	sources, ok := net["capacity_estimate_sources"].(map[string]any)
+	if !ok {
+		t.Fatalf("network.capacity_estimate_sources missing or not object")
+	}
+	expectedLabels := map[string]string{
+		"bandwidth_gb_per_s":   "estimated_from_hardware_profile_or_provider_reported_summary",
+		"network_power_kw":     "estimated_from_hardware_profile_or_provider_reported_summary",
+		"gpu_cores_total":      "estimated_from_hardware_profile_or_provider_reported_summary",
+		"cpu_cores_total":      "estimated_from_hardware_profile_or_provider_reported_summary",
+		"unified_ram_gb_total": "provider_reported_or_profiled",
+	}
+	for k, want := range expectedLabels {
+		if got, ok := sources[k].(string); !ok || got != want {
+			t.Errorf("network.capacity_estimate_sources.%s = %v, want %q", k, sources[k], want)
 		}
 	}
 	ts, ok := body["timeseries"].(map[string]any)

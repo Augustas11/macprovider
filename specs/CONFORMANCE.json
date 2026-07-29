@@ -454,7 +454,7 @@
     {
       "spec_id": "SPEC-017",
       "title": "Network Stats API",
-      "version": "0.1.8",
+      "version": "0.1.9",
       "path": "specs/SPEC-017-network-stats-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -637,7 +637,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.8.1",
+      "version": "v0.8.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1095,6 +1095,26 @@
   ],
   "requirements": [
     {
+      "requirement_id": "SPEC-017-R001",
+      "spec_id": "SPEC-017",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stats/handlers.go:type overviewCapacityEstimateSources struct",
+        "phase4-coordinator/internal/stats/handlers.go:overviewCapacityEstimateSources"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/stats/handlers_integration_test.go::TestAC1_OverviewJSONShape"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The stats overview now labels aggregate capacity fields as estimates in code and integration tests, but SPEC-017 remains pending reconciliation until the wider stats API is tied to a signed production verification record."
+      }
+    },
+    {
       "requirement_id": "SPEC-010-R001",
       "spec_id": "SPEC-010",
       "state": "pending",
@@ -1500,6 +1520,31 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired here, but the requirement remains pending until a signed candidate completes the physical referral/X acceptance journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R002",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func donorModeApplyWarning",
+        "phase3-binary/dist/install.sh:run_autotune_recommend_apply"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendationJSONCarriesBenchGateProvenanceAndDrift",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptCountsBenchmarkedRowsNotRenderedEligibleRows",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptSanitizesBenchGateProvenanceControlCharacters",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testDonorModeApplyWarningMatchesSpec"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests; SPEC-023 remains pending until a signed physical installer/autotune journey proves the operator-visible transcript in production."
       }
     },
     {

@@ -5826,7 +5826,8 @@ run_autotune_recommend_apply() {
     if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
       case "$artifact_path" in
         /*)
-          if prompt_yes_no "Start provider with $recommended_model? [Y/n]" "Y"; then
+          log "Configuration applied. Start the provider with: macprovider-cli serve"
+          if prompt_yes_no "Start provider now with $recommended_model? [Y/n]" "Y"; then
             model="$recommended_model"
             log "Recommendation selected verified model: $model (artifact: $artifact_path)"
             ensure_provider_credentials
@@ -5839,7 +5840,7 @@ run_autotune_recommend_apply() {
           ;;
       esac
     fi
-    log "No paid model currently clears the minimum net-yield threshold on this Mac."
+    log "No paid model currently clears rate-card or hardware requirements on this Mac."
     if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
       log "Applying donor-mode configuration."
       run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \

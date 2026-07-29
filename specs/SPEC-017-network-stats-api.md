@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.8 (2026-06-26, **LOCKED** — codex round-10 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. Round 10 narrative: `specs/SPEC-017-r10-audit.md`. Round 9 (initial v0.1.8 draft) returned 0C+2M; v0.1.8 fix pass absorbed M1 (removed `partner_keys.rate_limit_burst` column + CLI flag) and M2 (added §5.6 auth-failure tier + AC-22). r10 closure narrative: `specs/SPEC-017-r10-audit.md`. The v0.1.8 deltas vs v0.1.7 came from the 3-lane IMPL-prompt audit surfacing two SPEC contradictions: (1) §9.4 named rebuild Shape A/B but §7.2.2 grant set lacks the required privileges — v0.1.8 added Shape C (single-tx DELETE+INSERT) executable under locked grants; (2) §5.6 "burst 120" was inconsistent with AC-8 — v0.1.8 dropped burst from both tiers + added Authorization-aware nginx keying + auth-failure tier limiter + AC-22. Trajectory across 10 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK v0.1.6, r8 0/0/0 → LOCK v0.1.7 (Claude fix pass), r9 0C+2M+0m, r10 0/0/0 → LOCK v0.1.8 (IMPL-audit-driven SPEC fix pass).)
-**Status:** **LOCKED** at v0.1.8 (2026-06-26). v0.1.7 was the prior LOCK; v0.1.8 supersedes it. The IMPL prompt is re-anchored to v0.1.8 via a v9+ revision (separately audited). The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
+**Version:** 0.1.9 (2026-07-29, **LOCKED** — A6 label-honesty patch adds explicit `/v1/stats/overview` source labels for synthetic hardware capacity estimates without changing the 14 numeric metrics. v0.1.8 lock history: codex round-10 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. Round 10 narrative: `specs/SPEC-017-r10-audit.md`. Round 9 (initial v0.1.8 draft) returned 0C+2M; v0.1.8 fix pass absorbed M1 (removed `partner_keys.rate_limit_burst` column + CLI flag) and M2 (added §5.6 auth-failure tier + AC-22). r10 closure narrative: `specs/SPEC-017-r10-audit.md`. The v0.1.8 deltas vs v0.1.7 came from the 3-lane IMPL-prompt audit surfacing two SPEC contradictions: (1) §9.4 named rebuild Shape A/B but §7.2.2 grant set lacks the required privileges — v0.1.8 added Shape C (single-tx DELETE+INSERT) executable under locked grants; (2) §5.6 "burst 120" was inconsistent with AC-8 — v0.1.8 dropped burst from both tiers + added Authorization-aware nginx keying + auth-failure tier limiter + AC-22. Trajectory across 10 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK v0.1.6, r8 0/0/0 → LOCK v0.1.7 (Claude fix pass), r9 0C+2M+0m, r10 0/0/0 → LOCK v0.1.8 (IMPL-audit-driven SPEC fix pass).)
+**Status:** **LOCKED** at v0.1.9 (2026-07-29). v0.1.8 was the prior LOCK; v0.1.9 supersedes it for A6 label-honesty source labels while preserving the separately audited v0.1.8 implementation-prompt history. The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -582,7 +582,14 @@ with `Allow: GET, HEAD, OPTIONS`.
     "cpu_cores_total":      5190,
     "unified_ram_gb_total": 30068,
     "avg_tokens_per_request": 2848,
-    "models_serving":       5
+    "models_serving":       5,
+    "capacity_estimate_sources": {
+      "bandwidth_gb_per_s": "estimated_from_hardware_profile_or_provider_reported_summary",
+      "network_power_kw": "estimated_from_hardware_profile_or_provider_reported_summary",
+      "gpu_cores_total": "estimated_from_hardware_profile_or_provider_reported_summary",
+      "cpu_cores_total": "estimated_from_hardware_profile_or_provider_reported_summary",
+      "unified_ram_gb_total": "provider_reported_or_profiled"
+    }
   },
   "timeseries": {
     "rpm_30m": {
@@ -609,7 +616,9 @@ with `Allow: GET, HEAD, OPTIONS`.
   exactly.
 - `stale_after` — `generated_at + Cache-Control: s-maxage`. Clients MAY
   use this as a hint; servers do not enforce.
-- `network.*` — integers and floats per the table in §5.1.1.
+- `network.*` — integers and floats per the table in §5.1.1, plus the
+  `capacity_estimate_sources` label object. The label object is
+  operator-facing metadata; it is not a hardware attestation signal.
 - `timeseries.rpm_30m.points` — exactly 30 points, one per minute,
   newest last. If the rollup pipeline has fewer than 30 minutes of
   history (e.g. cold start), the array MUST still be exactly 30 entries
@@ -657,6 +666,7 @@ the suffix distinction is normative.
 | `unified_ram_gb_total` | int32 | GB | live (point-in-time snapshot) | sum over online providers |
 | `avg_tokens_per_request` | int32 | tokens | cumulative all-time | `tokens_served_total / max(1, requests_total)` |
 | `models_serving` | int32 | count | live (point-in-time snapshot) | distinct `model_id` advertised by ≥1 online provider |
+| `capacity_estimate_sources` | object | labels | source metadata | stable string labels for synthetic capacity fields; `bandwidth_gb_per_s`, `network_power_kw`, `gpu_cores_total`, and `cpu_cores_total` MUST be labeled as estimates derived from hardware profiles or provider-reported hardware summaries, not as attested inventory |
 
 All integer fields MUST fit in JSON-safe `int64` (≤ 2^53 − 1). The
 rollup MUST clamp at ingestion if any source overflows; clamp events
@@ -1868,6 +1878,9 @@ documented in the public-facing changelog (§8.5). Permitted additive
 changes:
 
 - New top-level JSON fields (any endpoint).
+- New nested metadata fields under existing JSON objects when they only
+  label or describe sibling values and do not change sibling value
+  semantics; clients MUST ignore unknown object members.
 - New optional query params with safe defaults.
 - New error codes appended to the §5.9 vocabulary, subject to §8.2.1
   forward-compat rules below.
@@ -2050,6 +2063,7 @@ JSON-to-column mapping for `/v1/stats/overview` (§5.1):
 | `network.unified_ram_gb_total` | `unified_ram_gb_total` |
 | `network.avg_tokens_per_request` | derived: `(tokens_in+tokens_out) / max(1, requests)` |
 | `network.models_serving` | `models_serving` |
+| `network.capacity_estimate_sources` | derived labels; no database column |
 
 The `provider_id → pseudonym` mapping is deterministic per provider
 and persisted in `stats_leaderboard_*.pseudonym`. The mapping
@@ -2330,8 +2344,9 @@ implemented. Each is mechanically checkable in tests or an operator
 runbook step.
 
 - **AC-1.** `GET /v1/stats/overview` returns 200 with the §5.1 JSON
-  shape, all 14 `network.*` fields present (per the §5.1.1 schema
-  table), and exactly 30 points in each timeseries.
+  shape, all 14 numeric `network.*` metrics present, the
+  `network.capacity_estimate_sources` object present for the synthetic
+  capacity labels, and exactly 30 points in each timeseries.
 - **AC-2.** `GET /v1/stats/leaderboard` with no `window` query returns
   the `24h` window. With invalid `window=foo` returns 400 with
   `code: "bad_request"`.

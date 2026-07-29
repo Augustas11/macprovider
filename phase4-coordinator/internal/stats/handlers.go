@@ -60,7 +60,7 @@ func (h *Handler) overviewStaleProbe(ctx context.Context, now time.Time) (bool, 
 
 // overviewResponse mirrors the locked §5.1 wire shape:
 //
-//	{ generated_at, stale_after, network{14 fields},
+//	{ generated_at, stale_after, network{14 metrics + source labels},
 //	  timeseries{rpm_30m{bucket_seconds, points[]},
 //	             tpm_30m{bucket_seconds, points[]}} }
 type overviewResponse struct {
@@ -71,24 +71,32 @@ type overviewResponse struct {
 	IdlePrewarm overviewIdlePrewarmSummary `json:"idle_prewarm"`
 }
 
-// overviewNetwork is the §5.1.1 14-field schema (12 distinct
-// counters + 2 derived: tokens_served_total and
-// avg_tokens_per_request).
+// overviewNetwork is the §5.1.1 schema: 14 numeric metrics plus
+// estimate-source labels for synthetic hardware capacity fields.
 type overviewNetwork struct {
-	TokensServedTotal     int64   `json:"tokens_served_total"`
-	TokensInTotal         int64   `json:"tokens_in_total"`
-	TokensOutTotal        int64   `json:"tokens_out_total"`
-	RequestsTotal         int64   `json:"requests_total"`
-	NodesOnline           int     `json:"nodes_online"`
-	NodesHardwareAttested int     `json:"nodes_hardware_attested"`
-	BandwidthGBPerSec     int64   `json:"bandwidth_gb_per_s"`
-	NetworkPowerKW        float64 `json:"network_power_kw"`
-	NetworkUtilizationPct int     `json:"network_utilization_pct"`
-	GPUCoresTotal         int     `json:"gpu_cores_total"`
-	CPUCoresTotal         int     `json:"cpu_cores_total"`
-	UnifiedRAMGBTotal     int     `json:"unified_ram_gb_total"`
-	AvgTokensPerRequest   int64   `json:"avg_tokens_per_request"`
-	ModelsServing         int     `json:"models_serving"`
+	TokensServedTotal       int64                           `json:"tokens_served_total"`
+	TokensInTotal           int64                           `json:"tokens_in_total"`
+	TokensOutTotal          int64                           `json:"tokens_out_total"`
+	RequestsTotal           int64                           `json:"requests_total"`
+	NodesOnline             int                             `json:"nodes_online"`
+	NodesHardwareAttested   int                             `json:"nodes_hardware_attested"`
+	BandwidthGBPerSec       int64                           `json:"bandwidth_gb_per_s"`
+	NetworkPowerKW          float64                         `json:"network_power_kw"`
+	NetworkUtilizationPct   int                             `json:"network_utilization_pct"`
+	GPUCoresTotal           int                             `json:"gpu_cores_total"`
+	CPUCoresTotal           int                             `json:"cpu_cores_total"`
+	UnifiedRAMGBTotal       int                             `json:"unified_ram_gb_total"`
+	AvgTokensPerRequest     int64                           `json:"avg_tokens_per_request"`
+	ModelsServing           int                             `json:"models_serving"`
+	CapacityEstimateSources overviewCapacityEstimateSources `json:"capacity_estimate_sources"`
+}
+
+type overviewCapacityEstimateSources struct {
+	BandwidthGBPerSec string `json:"bandwidth_gb_per_s"`
+	NetworkPowerKW    string `json:"network_power_kw"`
+	GPUCoresTotal     string `json:"gpu_cores_total"`
+	CPUCoresTotal     string `json:"cpu_cores_total"`
+	UnifiedRAMGBTotal string `json:"unified_ram_gb_total"`
 }
 
 type overviewTimeseries struct {
@@ -186,6 +194,13 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 			UnifiedRAMGBTotal:     ov.UnifiedRAMGBTotal,
 			AvgTokensPerRequest:   avgTokensPerRequest,
 			ModelsServing:         ov.ModelsServing,
+			CapacityEstimateSources: overviewCapacityEstimateSources{
+				BandwidthGBPerSec: "estimated_from_hardware_profile_or_provider_reported_summary",
+				NetworkPowerKW:    "estimated_from_hardware_profile_or_provider_reported_summary",
+				GPUCoresTotal:     "estimated_from_hardware_profile_or_provider_reported_summary",
+				CPUCoresTotal:     "estimated_from_hardware_profile_or_provider_reported_summary",
+				UnifiedRAMGBTotal: "provider_reported_or_profiled",
+			},
 		},
 		Timeseries: overviewTimeseries{
 			Rpm30m: timeseriesRpm{

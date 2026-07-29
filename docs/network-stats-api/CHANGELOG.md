@@ -4,6 +4,15 @@ Per SPEC-017 §8.5. Each entry cites the PR(s) that landed the
 delta, the SPEC version delivered, and a one-line summary suitable
 for a partner-facing announcement.
 
+## v0.1.9 — 2026-07-29
+
+Adds `network.capacity_estimate_sources` to
+`GET /v1/stats/overview` so synthetic capacity totals are labeled as
+estimates from hardware profiles or provider-reported summaries, not
+as hardware attestation. Existing numeric metrics are unchanged.
+
+Delivered in PR [Augustas11/macprovider#805][pr805].
+
 ## v0.1.8 — 2026-06-26
 
 First public release. Surface frozen to:
@@ -58,3 +67,4 @@ Structured log event taxonomy: `stats_request_served`,
 `stats_partner_key_revoked`.
 
 [pr173]: https://github.com/Augustas11/macprovider/pull/173
+[pr805]: https://github.com/Augustas11/macprovider/pull/805
