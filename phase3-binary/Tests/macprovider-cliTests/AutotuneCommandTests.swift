@@ -166,6 +166,16 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertTrue(command.restartForeground)
     }
 
+    func testDonorModeApplyWarningMatchesSpec() {
+        let warning = AutotuneCommand.donorModeApplyWarning(for: "model-a")
+
+        XCTAssertEqual(
+            warning,
+            "DONOR MODE: model-a does not meet rate-card or hardware requirements on this Mac."
+        )
+        XCTAssertFalse(warning.contains("/hr"))
+    }
+
     func testRecommendFlagsParse() throws {
         let command = try AutotuneCommand.parse([
             "--recommend",

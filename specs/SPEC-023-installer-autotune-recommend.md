@@ -1,10 +1,15 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8.1
+version: v0.8.2
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-28
+last-locked: 2026-07-29
 
 ## Change log
+
+- **v0.8.2 (2026-07-29)** — Human transcript label honesty (A6).
+  1. **Human transcript carries the same trust hints as JSON.** The happy-path transcript MUST print confidence, bench-gate provenance, and bench-gate drift for the selected recommendation.
+  2. **Benchmarked count means local benchmark results.** The transcript count is the number of local benchmark result rows in the recommendation result, not the number of rendered eligible candidates.
+  3. **Donor copy no longer names the deleted hourly gate.** Donor-mode fallback text MUST NOT reference the superseded hourly threshold.
 
 - **v0.8.1 (2026-07-28)** — Default-tier fresh-install recovery (#786).
   1. **Coordinator default-rate semantics are restored for recommendation.** When exact and normalized rate-card lookup miss but the projection carries `rows.default`, the candidate remains rate-card-enabled and is priced against `default`.
@@ -534,6 +539,7 @@ Schema rules:
   - `high` when rate-card fetch, signed demand-rank fetch, signed candidate-catalog fetch, and current local benchmark all used live/current data.
   - `medium` when rate card, demand rank, or candidate catalog used a valid baked fallback, or the benchmark used a valid cache.
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
+- The human transcript MUST render the selected candidate's `confidence`, `bench_gate_provenance`, and `bench_gate_drift` fields. Empty drift is rendered as `none`.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
 - `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`; v0.8.1 restores `rate_card_default_tier_used` as the visible signal for default-row pricing fallback. Any integrity/update-required warning blocks a paid recommendation.
 
@@ -549,21 +555,37 @@ The install transcript shows a per-token rate at recommendation time and instruc
 
 ### 7.1 Happy path (recommended model)
 
-Use this text verbatim, replacing braces with computed values:
+For `macprovider-cli autotune --recommend`, use this text verbatim,
+replacing braces with computed values:
 
 ```text
 Detected {machine_or_chip}, {memory_gb} GB unified memory, Tier {bandwidth_tier}.
-Benchmarked {benchmarked_count} compatible models against rate card {rate_card_version} and demand rank {demand_rank_version}.
+Benchmarked {benchmarked_count} local benchmark results against rate card {rate_card_version} and demand rank {demand_rank_version}.
 
 Recommended: {recommended_model}
 Rate: ${prompt_rate_usd_per_million_tokens} per million prompt tokens
       ${completion_rate_usd_per_million_tokens} per million completion tokens
+Confidence: {confidence}
+Bench gate provenance: {bench_gate_provenance}
+Bench gate drift: {bench_gate_drift}
 Real earnings scale with buyer demand and your uptime.
 
-Start provider with {recommended_model}? [Y/n]
+To apply this recommendation, rerun with --apply. Then start the provider with:
+              macprovider-cli serve
 ```
 
 Happy path applies only when at least one recommendable model is eligible and clears all §5 gates.
+After the CLI applies the recommendation, it replaces the final two lines above with:
+
+```text
+Configuration applied. Start the provider with:
+              macprovider-cli serve
+```
+
+The public `install.sh` wrapper may ask a separate service-start
+confirmation after `--apply` succeeds, but that wrapper prompt is not part
+of the `autotune --recommend` transcript and MUST NOT reuse the deleted
+minimum-hourly-gate donor copy.
 
 ### 7.2 Donor-tier path
 

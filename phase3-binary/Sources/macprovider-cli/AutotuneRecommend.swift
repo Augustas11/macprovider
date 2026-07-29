@@ -1589,6 +1589,7 @@ struct AutotuneRecommendResult: Equatable {
     var selectedCandidate: AutotuneCandidateScore?
     var candidates: [AutotuneCandidateScore]
     var allCandidates: [AutotuneCandidateScore]
+    var benchmarkedCount: Int = 0
     var defaultModel: String?
     var donorFallbackModel: String?
     var donorFallbackCandidate: AutotuneCandidateScore?
@@ -1795,6 +1796,9 @@ struct AutotuneRecommendEngine {
         }
 
         let resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
+        let benchmarkedCount = scored.reduce(0) { count, score in
+            request.benchmarks[score.catalogKey] == nil ? count : count + 1
+        }
 
         return AutotuneRecommendResult(
             generatedAt: request.generatedAt,
@@ -1811,6 +1815,7 @@ struct AutotuneRecommendEngine {
             selectedCandidate: recommended,
             candidates: resultCandidates,
             allCandidates: scored,
+            benchmarkedCount: benchmarkedCount,
             defaultModel: defaultModel,
             donorFallbackModel: donorFallback?.model,
             donorFallbackCandidate: donorFallback,
@@ -2027,6 +2032,34 @@ extension AutotuneRecommendResult {
         return "{\(fields.joined(separator: ","))}"
     }
 
+    private static func humanBenchGateProvenance(_ provenance: CandidateCatalog.BenchGate.Provenance) -> String {
+        var fields = ["source=\(humanSingleLine(provenance.source))"]
+        if let hardware = provenance.hardware {
+            fields.append("hardware=\(humanSingleLine(hardware))")
+        }
+        if let measuredAt = provenance.measuredAt {
+            fields.append("measured_at=\(humanSingleLine(measuredAt))")
+        }
+        if let notes = provenance.notes {
+            fields.append("notes=\(humanSingleLine(notes))")
+        }
+        return fields.joined(separator: ", ")
+    }
+
+    private static func humanSingleLine(_ value: String) -> String {
+        let scalars = value.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ? " " : String(scalar)
+        }.joined()
+        let collapsed = scalars
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .joined(separator: " ")
+        return String(collapsed.prefix(200))
+    }
+
+    private static func humanBenchGateDrift(_ drift: [String]) -> String {
+        drift.isEmpty ? "none" : drift.joined(separator: ", ")
+    }
+
     private static func serveConfigJSON(_ core: RecommendationCore, donorMode: Bool) -> String {
         let kvBits = core.knobs.kvBits.map(String.init) ?? "null"
         return """
@@ -2065,11 +2098,14 @@ extension AutotuneRecommendResult {
                 : "To apply this recommendation, rerun with --apply. Then start the provider with:\n              macprovider-cli serve"
             return """
             Detected \(machineOrChip), \(hardware.memoryGB) GB unified memory, Tier \(hardware.bandwidthTier.rawValue).
-            Benchmarked \(candidates.filter(\.eligible).count) compatible models against rate card \(rateCardVersion) and demand rank \(demandRankVersion).
+            Benchmarked \(benchmarkedCount) local benchmark results against rate card \(rateCardVersion) and demand rank \(demandRankVersion).
 
             Recommended: \(recommendedModel)
             Rate: \(formatPerTokenRate(candidate.promptRateUSDPerMillionTokens)) per million prompt tokens
                   \(formatPerTokenRate(candidate.completionRateUSDPerMillionTokens)) per million completion tokens
+            Confidence: \(candidate.confidence)
+            Bench gate provenance: \(Self.humanBenchGateProvenance(candidate.benchGateProvenance))
+            Bench gate drift: \(Self.humanBenchGateDrift(candidate.benchGateDrift))
             Real earnings scale with buyer demand and your uptime.
 
             \(nextStep)
