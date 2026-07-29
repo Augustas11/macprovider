@@ -2737,6 +2737,8 @@ final class AutoUpdateTests: XCTestCase {
             "autotune-candidates.json.sig",
             "demand-rank.json",
             "demand-rank.json.sig",
+            "rate-card.json",
+            "rate-card.json.sig",
         ] {
             let contents = name == "release.json" ? "\(prefix)-catalog" : "\(prefix)-\(name)"
             try Data(contents.utf8).write(to: catalog.appendingPathComponent(name))

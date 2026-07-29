@@ -53,6 +53,8 @@ stage_release() {
   cp "$STATIC/autotune-candidates.json.sig" "$TMP/release/"
   cp "$STATIC/demand-rank.json" "$TMP/release/"
   cp "$STATIC/demand-rank.json.sig" "$TMP/release/"
+  cp "$STATIC/rate-card.json" "$TMP/release/"
+  cp "$STATIC/rate-card.json.sig" "$TMP/release/"
   cp "$CANONICAL/tier2-catalog.json" "$TMP/release/"
 }
 
@@ -80,7 +82,6 @@ canonical = pathlib.Path(sys.argv[2])
 static = pathlib.Path(sys.argv[3])
 coordinator_config = pathlib.Path(sys.argv[4])
 
-assert module.root_trusted_executable("/usr/bin/true")
 with tempfile.TemporaryDirectory() as directory:
     user_owned = pathlib.Path(directory) / "openssl"
     user_owned.write_text("#!/bin/sh\nexit 0\n")
@@ -179,6 +180,14 @@ candidate = module.validate_candidate((canonical / "autotune-candidates.json").r
 demand = module.validate_demand((canonical / "demand-rank.json").read_bytes())
 demand["version"] = "different-release"
 rejected("mixed release pair", lambda: module.validate_pair(candidate, demand))
+rate_card = json.loads((static / "rate-card.json").read_bytes())
+wrong_rate_card_version = json.loads(json.dumps(rate_card))
+wrong_rate_card_version["version"] = "0" * 64
+rejected("rate-card version not projection hash", lambda: module.validate_rate_card(module.canonical_bytes(wrong_rate_card_version)))
+rate_card_obj = module.validate_rate_card(module.canonical_bytes(rate_card))
+wrong_rate_card_policy = json.loads(json.dumps(rate_card_obj))
+wrong_rate_card_policy["policy_version"] = "other-policy-v2"
+rejected("mixed rate-card policy", lambda: module.validate_release_inputs(candidate, module.validate_demand((canonical / "demand-rank.json").read_bytes()), wrong_rate_card_policy))
 
 corpus = canonical / "testdata"
 module.validate_candidate((corpus / "valid-workload-profile.json").read_bytes())
@@ -256,26 +265,40 @@ rejected(
         {"releases": {}, "tombstones": {}},
     ),
 )
-legacy_record = json.loads(json.dumps(record))
-legacy_record["feeds"].pop("tier2-catalog.json")
+two_feed_record = json.loads(json.dumps(record))
+two_feed_record["feeds"].pop("tier2-catalog.json")
+two_feed_record["feeds"].pop("rate-card.json")
+tier2_record = json.loads(json.dumps(record))
+tier2_record["feeds"].pop("rate-card.json")
 rejected(
-    "new two-feed release after Tier-2 membership became mandatory",
+    "new release without rate-card membership after B10 became mandatory",
     lambda: module.require_ledger_evolution(
         {"releases": {}, "tombstones": {}},
-        {"releases": {release_id: legacy_record}, "tombstones": {}},
+        {"releases": {release_id: tier2_record}, "tombstones": {}},
+    ),
+)
+rejected(
+    "new two-feed release after Tier-2/rate-card membership became mandatory",
+    lambda: module.require_ledger_evolution(
+        {"releases": {}, "tombstones": {}},
+        {"releases": {release_id: two_feed_record}, "tombstones": {}},
     ),
 )
 module.require_ledger_evolution(
-    {"releases": {release_id: legacy_record}, "tombstones": {}},
+    {"releases": {release_id: two_feed_record}, "tombstones": {}},
+    {"releases": {release_id: tier2_record}, "tombstones": {}},
+)
+module.require_ledger_evolution(
+    {"releases": {release_id: tier2_record}, "tombstones": {}},
     {"releases": {release_id: record}, "tombstones": {}},
 )
-changed_legacy_feed = json.loads(json.dumps(record))
-changed_legacy_feed["feeds"]["autotune-candidates.json"]["sha256"] = "f" * 64
+changed_enriched_feed = json.loads(json.dumps(record))
+changed_enriched_feed["feeds"]["autotune-candidates.json"]["sha256"] = "f" * 64
 rejected(
-    "legacy release enrichment that rebinds an autotune feed",
+    "release enrichment that rebinds an autotune feed",
     lambda: module.require_ledger_evolution(
-        {"releases": {release_id: legacy_record}, "tombstones": {}},
-        {"releases": {release_id: changed_legacy_feed}, "tombstones": {}},
+        {"releases": {release_id: tier2_record}, "tombstones": {}},
+        {"releases": {release_id: changed_enriched_feed}, "tombstones": {}},
     ),
 )
 rebound_manifest = json.loads((canonical / "release.json").read_bytes())
@@ -550,6 +573,8 @@ candidate_bytes = (canonical / "autotune-candidates.json").read_bytes()
 candidate_obj = module.validate_candidate(candidate_bytes)
 demand_bytes = (canonical / "demand-rank.json").read_bytes()
 demand_obj = module.validate_demand(demand_bytes)
+rate_card_bytes = (static / "rate-card.json").read_bytes()
+rate_card_obj = module.validate_rate_card(rate_card_bytes)
 qwen_row = candidate_obj["rows"]["qwen3-8b"]
 
 
@@ -671,7 +696,7 @@ key_id_tampered_signer = module.verify_tier2_signature(key_id_tampered_bytes)
 if key_id_tampered_signer != trusted_key_fingerprint:
     raise SystemExit("verify_tier2_signature must ignore the catalog's own claimed key_id")
 key_id_tampered_manifest = module.manifest(
-    candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+    candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
     tier2=key_id_tampered_bytes, tier2_obj=key_id_tampered_obj, tier2_signer_key_id=key_id_tampered_signer,
 )
 if json.loads(key_id_tampered_manifest)["feeds"]["tier2-catalog.json"]["signer_key_id"] == "forged-id":
@@ -874,51 +899,69 @@ except module.CatalogError as exc:
 else:
     raise SystemExit("conflicting tier2 feed candidate was accepted")
 
-# --- manifest() binds tier2-catalog.json as a third feed ---
+# --- manifest() binds rate-card.json and tier2-catalog.json as declared feeds ---
 # signer_key_id must come from the authenticated verify_tier2_signature()
 # result (a fingerprint of the trusted key), NOT from the catalog's own
 # unauthenticated signature.key_id claim (#608 audit).
 manifest_with_tier2 = module.manifest(
-    candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+    candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
     tier2=agreeing_tier2, tier2_obj=tier2_obj, tier2_signer_key_id=trusted_key_fingerprint,
 )
 manifest_value = json.loads(manifest_with_tier2)
-if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.json", "tier2-catalog.json"}:
-    raise SystemExit(f"tier2 feed missing from manifest: {sorted(manifest_value['feeds'])}")
+if set(manifest_value["feeds"]) != {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json"}:
+    raise SystemExit(f"required feed missing from manifest: {sorted(manifest_value['feeds'])}")
 tier2_feed = manifest_value["feeds"]["tier2-catalog.json"]
 if tier2_feed["sha256"] != module.sha256(agreeing_tier2) or tier2_feed["bytes"] != len(agreeing_tier2):
     raise SystemExit("tier2 feed digest/bytes do not bind the signed catalog")
 if tier2_feed["version"] != "test-catalog-agree" or tier2_feed["signer_key_id"] != trusted_key_fingerprint:
     raise SystemExit("tier2 feed version must come from the signed catalog; signer_key_id from the authenticated trusted key")
+rate_card_feed = manifest_value["feeds"]["rate-card.json"]
+if rate_card_feed["sha256"] != module.sha256(rate_card_bytes) or rate_card_feed["bytes"] != len(rate_card_bytes):
+    raise SystemExit("rate-card feed digest/bytes do not bind the signed projection")
+if rate_card_feed["version"] != rate_card_obj["version"]:
+    raise SystemExit("rate-card feed version must come from the signed rate-card projection")
 
 rejected(
     "manifest() with tier2 bytes but no authenticated tier2_signer_key_id",
     lambda: module.manifest(
-        candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+        candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
         tier2=agreeing_tier2, tier2_obj=tier2_obj,
     ),
 )
 
-manifest_without_tier2 = module.manifest(candidate_bytes, demand_bytes, candidate_obj, demand_obj)
+manifest_without_tier2 = module.manifest(
+    candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
+)
 if "tier2-catalog.json" in json.loads(manifest_without_tier2)["feeds"]:
     raise SystemExit("manifest() must omit tier2-catalog.json when tier2 bytes are not supplied")
 
-# --- release-ledger: historical 2-feed rows stay valid; new 3-feed rows are accepted ---
-hist_release_id, hist_record = module.release_record(manifest_without_tier2)
+# --- release-ledger: historical 2/3-feed rows stay valid; new 4-feed rows are accepted ---
+legacy_manifest_value = json.loads(manifest_without_tier2)
+legacy_manifest_value["feeds"].pop("rate-card.json")
+hist_release_id, hist_record = module.release_record(
+    json.dumps(legacy_manifest_value, sort_keys=True).encode(),
+)
 
-# A synthetic later release_id proves the 3-feed shape is accepted for *new*
-# rows without disturbing the real historical row's 2-feed shape.
+# A synthetic later release_id proves the rate-card-bound 4-feed shape is
+# accepted for *new* rows without disturbing the real historical 2/3-feed
+# shapes.
 new_candidate_obj = json.loads(json.dumps(candidate_obj))
-new_candidate_obj["version"] = "published-2026-07-20-tier2-bound"
+new_candidate_obj["version"] = "published-2026-07-20-rate-card-bound"
 new_demand_obj = json.loads(json.dumps(demand_obj))
 new_demand_obj["version"] = new_candidate_obj["version"]
+new_rate_card_obj = json.loads(json.dumps(rate_card_obj))
 new_manifest_with_tier2 = module.manifest(
-    candidate_bytes, demand_bytes, new_candidate_obj, new_demand_obj,
+    candidate_bytes, demand_bytes, rate_card_bytes, new_candidate_obj, new_demand_obj, new_rate_card_obj,
     tier2=agreeing_tier2, tier2_obj=tier2_obj, tier2_signer_key_id=trusted_key_fingerprint,
 )
 bound_release_id, bound_record = module.release_record(new_manifest_with_tier2)
 if bound_release_id == hist_release_id:
-    raise SystemExit("synthetic tier2-bound release_id must differ from the real historical release_id")
+    raise SystemExit("synthetic rate-card-bound release_id must differ from the real historical release_id")
+historical_tier2_value = json.loads(manifest_with_tier2)
+historical_tier2_value["feeds"].pop("rate-card.json")
+tier2_hist_release_id, tier2_hist_record = module.release_record(
+    json.dumps(historical_tier2_value, sort_keys=True).encode(),
+)
 
 legacy_ledger = {
     "schema_version": "macprovider.autotune-release-ledger.v2",
@@ -931,30 +974,40 @@ tier2_bound_ledger = {
     "schema_version": "macprovider.autotune-release-ledger.v2",
     "releases": {
         hist_release_id: hist_record,
-        bound_release_id: bound_record,
+        tier2_hist_release_id: tier2_hist_record,
     },
     "tombstones": {},
 }
 module.validate_release_ledger(json.dumps(tier2_bound_ledger).encode())
+rate_card_bound_ledger = {
+    "schema_version": "macprovider.autotune-release-ledger.v2",
+    "releases": {
+        hist_release_id: hist_record,
+        tier2_hist_release_id: tier2_hist_record,
+        bound_release_id: bound_record,
+    },
+    "tombstones": {},
+}
+module.validate_release_ledger(json.dumps(rate_card_bound_ledger).encode())
 
 # Historical rows must not silently gain/require Tier-2, and rows must not mix
 # an unexpected feed name into either accepted shape.
-hybrid_ledger = json.loads(json.dumps(tier2_bound_ledger))
+hybrid_ledger = json.loads(json.dumps(rate_card_bound_ledger))
 hybrid_ledger["releases"][bound_release_id]["feeds"]["mystery.json"] = (
     hybrid_ledger["releases"][bound_release_id]["feeds"].pop("demand-rank.json")
 )
 rejected("unexpected feed name set", lambda: module.validate_release_ledger(json.dumps(hybrid_ledger).encode()))
 
-# tier2-catalog.json's `version` field is the signed catalog_id, not the
-# autotune release_id — legacy feeds still must match release_id exactly.
-mismatched_autotune_version = json.loads(json.dumps(tier2_bound_ledger))
+# tier2-catalog.json and rate-card.json use their own content identities, not
+# the autotune release_id — legacy feeds still must match release_id exactly.
+mismatched_autotune_version = json.loads(json.dumps(rate_card_bound_ledger))
 mismatched_autotune_version["releases"][bound_release_id]["feeds"]["autotune-candidates.json"]["version"] = "wrong"
 rejected(
     "autotune feed version must equal release_id even with tier2 bound",
     lambda: module.validate_release_ledger(json.dumps(mismatched_autotune_version).encode()),
 )
 
-print("release-ledger accepts historical 2-feed rows and Tier-2-bound 3-feed rows")
+print("release-ledger accepts historical 2/3-feed rows and rate-card-bound 4-feed rows")
 
 # --- generate(): Tier-2 is mandatory for current/new releases ---
 original_tier2_path = module.TIER2_CATALOG_PATH
@@ -986,7 +1039,7 @@ print("generate() requires an authenticated tier2-catalog.json feed")
 with tempfile.TemporaryDirectory() as directory:
     release = pathlib.Path(directory)
     shutil.copy(canonical / "trusted-keys.json", release / "trusted-keys.json")
-    for name in ("autotune-candidates.json", "demand-rank.json"):
+    for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
         shutil.copy(static / name, release / name)
         shutil.copy(static / f"{name}.sig", release / f"{name}.sig")
 
@@ -1045,9 +1098,12 @@ with tempfile.TemporaryDirectory() as directory:
     (release / "tier2-catalog.json").unlink()
     rejected("verify_directory without tier2-catalog.json", lambda: module.verify_directory(release))
     (release / "tier2-catalog.json").write_bytes(agreeing_tier2)
+    (release / "rate-card.json").unlink()
+    rejected("verify_directory without rate-card.json", lambda: module.verify_directory(release))
+    (release / "rate-card.json").write_bytes(rate_card_bytes)
 
     # Undeclared: an agreeing tier2-catalog.json sitting beside a release.json
-    # that only binds the legacy 2 feeds must fail closed (feed membership,
+    # that only binds the signed static feeds must fail closed (feed membership,
     # not just digest overlap, is what #608 requires).
     (release / "release.json").write_bytes(manifest_without_tier2)
     try:
@@ -1065,7 +1121,7 @@ with tempfile.TemporaryDirectory() as directory:
     # release.json); verify_directory must re-authenticate independently and
     # reject regardless of what signer_key_id the manifest claims.
     forged_manifest = module.manifest(
-        candidate_bytes, demand_bytes, candidate_obj, demand_obj,
+        candidate_bytes, demand_bytes, rate_card_bytes, candidate_obj, demand_obj, rate_card_obj,
         tier2=wrong_signer_tier2, tier2_obj=module.validate_tier2_catalog(wrong_signer_tier2),
         tier2_signer_key_id="forged-claim-does-not-matter",
     )

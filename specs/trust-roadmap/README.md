@@ -2,7 +2,7 @@
 
 Each file in this directory is **one independently shippable piece** of work,
 written to stand alone as a GitHub issue. They came out of the audit in
-[`../RESEARCH-TRUST-MINIMIZED-BENCHMARK-CATALOG-ROADMAP.md`](../RESEARCH-TRUST-MINIMIZED-BENCHMARK-CATALOG-ROADMAP.md)
+[`RESEARCH-TRUST-MINIMIZED-BENCHMARK-CATALOG-ROADMAP.md`](RESEARCH-TRUST-MINIMIZED-BENCHMARK-CATALOG-ROADMAP.md)
 (the analysis and evidence live there; the pieces live here).
 
 **Re-verified 2026-07-28** against `origin/main` @ `51a60c23` (17 commits past the

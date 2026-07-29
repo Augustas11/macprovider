@@ -102,6 +102,8 @@ validate_artifact_entries() {
   local has_catalog_candidates_signature=0
   local has_catalog_demand=0
   local has_catalog_demand_signature=0
+  local has_catalog_rate_card=0
+  local has_catalog_rate_card_signature=0
   local has_compatibility_set=0
   local has_local_install_contract=0 has_local_provider_plist=0 has_local_updater_metadata=0
   local has_local_watchdog_plist=0 has_local_watchdog_script=0
@@ -173,6 +175,12 @@ validate_artifact_entries() {
       catalog-release/demand-rank.json.sig)
         has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
         ;;
+      catalog-release/rate-card.json)
+        has_catalog_rate_card=$((has_catalog_rate_card + 1))
+        ;;
+      catalog-release/rate-card.json.sig)
+        has_catalog_rate_card_signature=$((has_catalog_rate_card_signature + 1))
+        ;;
       *.bundle|*.bundle/*)
         ;;
       *)
@@ -201,6 +209,8 @@ EOF
     [ "$has_catalog_candidates_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json.sig"
     [ "$has_catalog_demand" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json"
     [ "$has_catalog_demand_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json.sig"
+    [ "$has_catalog_rate_card" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/rate-card.json"
+    [ "$has_catalog_rate_card_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/rate-card.json.sig"
   fi
   if [ "$version_major" -gt 1 ] || \
      { [ "$version_major" -eq 1 ] && [ "$version_minor" -gt 8 ]; } || \

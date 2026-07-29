@@ -235,6 +235,8 @@ final class CompatibilityManifestFixture {
         "autotune-candidates.json.sig",
         "demand-rank.json",
         "demand-rank.json.sig",
+        "rate-card.json",
+        "rate-card.json.sig",
         "release.json",
         "tier2-catalog.json",
         "trusted-keys.json",

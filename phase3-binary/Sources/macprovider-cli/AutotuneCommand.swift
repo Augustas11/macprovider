@@ -802,10 +802,10 @@ struct AutotuneCommand: AsyncParsableCommand {
         defer { _ = signalSources }
 
         let staticInputs = AutotuneStaticInputs()
-        let release = await staticInputs.loadCatalogRelease()
-        let demand = release.demand
-        let catalog = release.candidate
-        let rateCard = await staticInputs.loadRateCard()
+        let inputs = await staticInputs.loadRecommendationInputs()
+        let demand = inputs.demand
+        let catalog = inputs.candidate
+        let rateCard = inputs.rateCard
 
         let fingerprint = MachineFingerprinter().sample()
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
@@ -986,16 +986,18 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     private func runRecommendationPrefetch() async throws {
         let staticInputs = AutotuneStaticInputs()
-        let release = await staticInputs.loadCatalogRelease()
-        let catalog = release.candidate
+        let inputs = await staticInputs.loadRecommendationInputs()
+        let catalog = inputs.candidate
         let fingerprint = MachineFingerprinter().sample()
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
         let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
-        var warnings = Set<AutotuneRecommendWarning>()
-        warnings.formUnion(release.demand.warnings)
-        warnings.formUnion(catalog.warnings)
+        let warnings = Self.recommendationPrefetchTrustWarnings(
+            demand: inputs.demand,
+            catalog: catalog,
+            rateCard: inputs.rateCard
+        )
 
         if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
             throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
@@ -1040,6 +1042,14 @@ struct AutotuneCommand: AsyncParsableCommand {
         for artifact in outcome.artifacts.sorted(by: { $0.modelID < $1.modelID }) {
             print("prefetch_verified model=\(artifact.modelID) path=\(artifact.path) sha256=\(artifact.sha256)")
         }
+    }
+
+    static func recommendationPrefetchTrustWarnings(
+        demand: AutotuneStaticSelection<DemandRank>,
+        catalog: AutotuneStaticSelection<CandidateCatalog>,
+        rateCard: AutotuneStaticSelection<RateCardProjection>
+    ) -> Set<AutotuneRecommendWarning> {
+        demand.warnings.union(catalog.warnings).union(rateCard.warnings)
     }
 
     static func recommendationCoreForConfig(

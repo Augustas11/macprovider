@@ -282,6 +282,10 @@ type settlementCatalogFixture struct {
 	path                   string
 	publicKey              string
 	modelHash              string
+	rateCardPath           string
+	rateCardSigPath        string
+	demandRankPath         string
+	demandRankSigPath      string
 	autotuneCatalogPath    string
 	autotuneCatalogSigPath string
 	autotuneCatalogSHA256  string
@@ -593,6 +597,10 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	}
 	if settlementCatalog.autotuneCatalogPath != "" {
 		cfg["autotune"] = map[string]any{
+			"rate_card_path":               settlementCatalog.rateCardPath,
+			"rate_card_sig_path":           settlementCatalog.rateCardSigPath,
+			"demand_rank_path":             settlementCatalog.demandRankPath,
+			"demand_rank_sig_path":         settlementCatalog.demandRankSigPath,
 			"autotune_candidates_path":     settlementCatalog.autotuneCatalogPath,
 			"autotune_candidates_sig_path": settlementCatalog.autotuneCatalogSigPath,
 			"enforce_provider_admission":   true,
@@ -625,9 +633,24 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 	}
 	autotuneCatalogPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "autotune-candidates.json")
 	autotuneCatalogSigPath := autotuneCatalogPath + ".sig"
+	rateCardPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "rate-card.json")
+	rateCardSigPath := rateCardPath + ".sig"
+	demandRankPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "demand-rank.json")
+	demandRankSigPath := demandRankPath + ".sig"
 	autotuneCatalogJSON, err := os.ReadFile(autotuneCatalogPath)
 	if err != nil {
 		s.t.Fatalf("read signed autotune fixture: %v", err)
+	}
+	for label, path := range map[string]string{
+		"rate-card fixture":     rateCardPath,
+		"rate-card signature":   rateCardSigPath,
+		"demand-rank fixture":   demandRankPath,
+		"demand-rank signature": demandRankSigPath,
+		"autotune signature":    autotuneCatalogSigPath,
+	} {
+		if _, err := os.Stat(path); err != nil {
+			s.t.Fatalf("read %s: %v", label, err)
+		}
 	}
 	var autotuneCatalog struct {
 		Version       string `json:"version"`
@@ -697,6 +720,10 @@ func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
 		path:                   path,
 		publicKey:              base64.RawURLEncoding.EncodeToString(pub),
 		modelHash:              modelHash,
+		rateCardPath:           rateCardPath,
+		rateCardSigPath:        rateCardSigPath,
+		demandRankPath:         demandRankPath,
+		demandRankSigPath:      demandRankSigPath,
 		autotuneCatalogPath:    autotuneCatalogPath,
 		autotuneCatalogSigPath: autotuneCatalogSigPath,
 		autotuneCatalogSHA256:  hex.EncodeToString(autotuneCatalogDigest[:]),

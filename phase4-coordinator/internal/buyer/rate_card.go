@@ -16,6 +16,7 @@ import (
 
 type recommendationRateCardResponse struct {
 	Version              string                               `json:"version"`
+	PolicyVersion        string                               `json:"policy_version"`
 	GeneratedAt          string                               `json:"generated_at"`
 	USDPerMillionCredits float64                              `json:"usd_per_million_credits"`
 	Rows                 map[string]recommendationRateCardRow `json:"rows"`
@@ -37,6 +38,12 @@ type recommendationRateCardVersionProjection struct {
 }
 
 func (s *Server) handleRateCard(w http.ResponseWriter, r *http.Request) {
+	feeds := s.autotuneFeedsSnapshot()
+	if feeds.rateCardEnabled() {
+		s.serveAutotuneFeedBytes(w, r, feeds.RateCardJSON, true)
+		return
+	}
+
 	rewards, usdPerMillionCredits := s.recommendationRateCardState()
 	rows := buildRecommendationRateCardRows(rewards)
 	version := recommendationRateCardVersion(rows, billing.ParseShareBps(rewards.ProviderShare), billing.ParseMultiplierPPM(rewards.GlobalMultiplier), usdPerMillionCredits)
@@ -44,10 +51,16 @@ func (s *Server) handleRateCard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(recommendationRateCardResponse{
 		Version:              version,
+		PolicyVersion:        "autotune-policy-v1",
 		GeneratedAt:          s.now().UTC().Format(time.RFC3339),
 		USDPerMillionCredits: usdPerMillionCredits,
 		Rows:                 rows,
 	})
+}
+
+func (s *Server) handleRateCardSig(w http.ResponseWriter, r *http.Request) {
+	feeds := s.autotuneFeedsSnapshot()
+	s.serveAutotuneFeedBytes(w, r, feeds.RateCardSig, feeds.rateCardEnabled())
 }
 
 func buildRecommendationRateCardRows(rewards config.RewardsConfig) map[string]recommendationRateCardRow {

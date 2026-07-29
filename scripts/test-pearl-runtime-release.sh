@@ -110,6 +110,8 @@ make_release_dir() {
   printf '%s\n' autotune-candidates-sig > "$directory/autotune-candidates.json.sig"
   printf '%s\n' demand-rank > "$directory/demand-rank.json"
   printf '%s\n' demand-rank-sig > "$directory/demand-rank.json.sig"
+  printf '%s\n' rate-card > "$directory/rate-card.json"
+  printf '%s\n' rate-card-sig > "$directory/rate-card.json.sig"
   python3 - "$directory" "$tag" "$commit" "$lane" <<'PY'
 import hashlib
 import json
@@ -138,6 +140,8 @@ if lane == "pearl_runtime_catalog":
             "autotune-candidates.json.sig": digest("autotune-candidates.json.sig"),
             "demand-rank.json": digest("demand-rank.json"),
             "demand-rank.json.sig": digest("demand-rank.json.sig"),
+            "rate-card.json": digest("rate-card.json"),
+            "rate-card.json.sig": digest("rate-card.json.sig"),
         },
     }
 elif lane != "pearl_runtime":

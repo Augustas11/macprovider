@@ -948,18 +948,20 @@ final class ServeCommandTests: XCTestCase {
         let currentCatalogJSON = """
         {"version":"current-catalog","generated_at":"2026-07-29T08:45:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"recommendable"}}}
         """
-        let rateCardJSON = """
-        {"version":"test-rate-card","generated_at":"2026-07-10T12:00:00Z","usd_per_million_credits":1.0,"rows":{"\(key)":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-        """
+        let rateCardJSON = Self.validRateCardJSON(keys: [key])
+        let demandRankJSON = Self.validDemandRankJSON(keys: [key], version: "current-catalog")
         let catalogBytes = Data(currentCatalogJSON.utf8)
         let rateCardBytes = Data(rateCardJSON.utf8)
+        let demandRankBytes = Data(demandRankJSON.utf8)
         let staticInputs = AutotuneStaticInputs(
             fetch: { url in
                 switch url.path {
                 case "/v1/rate-card":
                     return rateCardBytes
-                case "/v1/autotune-candidates", "/v1/demand-rank":
+                case "/v1/autotune-candidates":
                     return catalogBytes
+                case "/v1/demand-rank":
+                    return demandRankBytes
                 default:
                     break
                 }
@@ -1032,6 +1034,38 @@ final class ServeCommandTests: XCTestCase {
         }
     }
 
+    func testCoordinatorJoinRejectsRateCardIntegrityFailureForCatalogBoundSnapshot() async throws {
+        do {
+            try await assertCatalogBoundSnapshotPreflight(
+                runtimeStatus: "recommendable",
+                donorMode: false,
+                catalogKey: "test-model",
+                configuredModel: nil,
+                rateCardKey: "test-model",
+                rateCardSidecarMissing: true
+            )
+            XCTFail("paid coordinator join must block untrusted signed rate-card inputs")
+        } catch {
+            // expected
+        }
+    }
+
+    func testCoordinatorJoinRejectsRateCardReleaseMismatchForCatalogBoundSnapshot() async throws {
+        do {
+            try await assertCatalogBoundSnapshotPreflight(
+                runtimeStatus: "recommendable",
+                donorMode: false,
+                catalogKey: "test-model",
+                configuredModel: nil,
+                rateCardKey: "test-model",
+                rateCardGeneratedAt: "2026-07-29T09:00:00Z"
+            )
+            XCTFail("paid coordinator join must block signed rate-card/catalog release mismatch")
+        } catch {
+            // expected
+        }
+    }
+
     private func assertCatalogBoundSnapshotPreflight(runtimeStatus: String, donorMode: Bool) async throws {
         try await assertCatalogBoundSnapshotPreflight(
             runtimeStatus: runtimeStatus,
@@ -1047,7 +1081,9 @@ final class ServeCommandTests: XCTestCase {
         donorMode: Bool,
         catalogKey: String,
         configuredModel: String?,
-        rateCardKey: String
+        rateCardKey: String,
+        rateCardSidecarMissing: Bool = false,
+        rateCardGeneratedAt: String = "2026-07-29T08:45:00Z"
     ) async throws {
         let hub = try tempDir()
         let resolver = CachedModelArtifactResolver(hubRoot: hub)
@@ -1062,22 +1098,27 @@ final class ServeCommandTests: XCTestCase {
         let catalogJSON = """
         {"version":"test-catalog","generated_at":"2026-07-29T08:45:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000,"provenance":{"source":"legacy_unverified","notes":"test fixture"}},"runtime_status":"\(runtimeStatus)"}}}
         """
-        let rateCardJSON = """
-        {"version":"test-rate-card","generated_at":"2026-07-10T12:00:00Z","usd_per_million_credits":1.0,"rows":{"\(rateCardKey)":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-        """
+        let rateCardJSON = Self.validRateCardJSON(keys: [rateCardKey], generatedAt: rateCardGeneratedAt)
+        let demandRankJSON = Self.validDemandRankJSON(keys: [key], version: "test-catalog")
         let catalogBytes = Data(catalogJSON.utf8)
         let rateCardBytes = Data(rateCardJSON.utf8)
+        let demandRankBytes = Data(demandRankJSON.utf8)
         let staticInputs = AutotuneStaticInputs(
             fetch: { url in
                 switch url.path {
                 case "/v1/rate-card":
                     return rateCardBytes
-                case "/v1/autotune-candidates", "/v1/demand-rank":
+                case "/v1/autotune-candidates":
                     return catalogBytes
+                case "/v1/demand-rank":
+                    return demandRankBytes
                 default:
                     break
                 }
                 if url.path.hasSuffix(".sig") {
+                    if rateCardSidecarMissing, url.path == "/v1/rate-card.sig" {
+                        throw URLError(.fileDoesNotExist)
+                    }
                     let signature = Data(repeating: 0, count: 64).base64EncodedString()
                     return Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
                 }
@@ -1104,6 +1145,60 @@ final class ServeCommandTests: XCTestCase {
             staticInputs: staticInputs,
             artifactResolver: resolver
         )
+    }
+
+    private static func validRateCardJSON(
+        keys: [String],
+        generatedAt: String = "2026-07-29T08:45:00Z"
+    ) -> String {
+        var rows: [String: RateCardProjection.Row] = [
+            "default": RateCardProjection.Row(
+                promptRatePerMtok: 1,
+                completionRatePerMtok: 1,
+                providerShareBPS: 9_000,
+                globalMultiplierPPM: 1_000_000
+            ),
+        ]
+        for key in keys where key != "default" {
+            rows[key] = RateCardProjection.Row(
+                promptRatePerMtok: 1,
+                completionRatePerMtok: 1,
+                providerShareBPS: 9_000,
+                globalMultiplierPPM: 1_000_000
+            )
+        }
+        let projection = RateCardProjection(
+            version: "",
+            policyVersion: "autotune-policy-v1",
+            generatedAt: ISO8601DateFormatter.autotuneInternet.date(from: generatedAt)!,
+            usdPerMillionCredits: 1,
+            rows: rows
+        )
+        let rowsJSON = rows.keys.sorted().map { key -> String in
+            let row = rows[key]!
+            return "\(Self.jsonStringLiteral(key)):{\"prompt_rate_per_mtok\":\(row.promptRatePerMtok),\"prompt_cache_hit_rate_per_mtok\":\(row.promptCacheHitRatePerMtok),\"completion_rate_per_mtok\":\(row.completionRatePerMtok),\"provider_share_bps\":\(row.providerShareBPS),\"global_multiplier_ppm\":\(row.globalMultiplierPPM)}"
+        }.joined(separator: ",")
+        return """
+        {"version":"\(projection.projectionHash)","policy_version":"autotune-policy-v1","generated_at":"\(generatedAt)","usd_per_million_credits":1,"rows":{\(rowsJSON)}}
+        """
+    }
+
+    private static func validDemandRankJSON(
+        keys: [String],
+        version: String,
+        generatedAt: String = "2026-07-29T08:45:00Z"
+    ) -> String {
+        let rowsJSON = keys.sorted().enumerated().map { index, key -> String in
+            "\(Self.jsonStringLiteral(key)):{\"demand_weight\":0.5,\"rank\":\(index + 1),\"recommendable\":true,\"min_provider_target\":1}"
+        }.joined(separator: ",")
+        return """
+        {"version":"\(version)","generated_at":"\(generatedAt)","source":"macprovider_buyer_supply_deficit_v1","policy_version":"autotune-policy-v1","cold_start_floor":0.15,"diversification_band":0.85,"rows":{\(rowsJSON)}}
+        """
+    }
+
+    private static func jsonStringLiteral(_ value: String) -> String {
+        let data = try! JSONEncoder().encode(value)
+        return String(decoding: data, as: UTF8.self)
     }
 
     func testModelArtifactPreflightRejectsMismatch() async throws {

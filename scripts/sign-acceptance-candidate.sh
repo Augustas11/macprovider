@@ -277,7 +277,7 @@ install -m 0755 "$coordinator_cli" "$output_dir/coordinator-cli-linux-amd64"
 install -m 0755 "$gateway" "$output_dir/gateway-linux-amd64"
 install -m 0644 "$toolchain" "$output_dir/release-toolchain.json"
 install -m 0644 "$cli_work/compatibility-set.json" "$output_dir/compatibility-set.json"
-for catalog_name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+for catalog_name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
   install -m 0644 "$cli_work/catalog-release/$catalog_name" "$output_dir/$catalog_name"
 done
 
@@ -318,6 +318,8 @@ artifact_arguments=(
   --artifact "catalog_candidates_signature=$output_dir/autotune-candidates.json.sig"
   --artifact "catalog_demand=$output_dir/demand-rank.json"
   --artifact "catalog_demand_signature=$output_dir/demand-rank.json.sig"
+  --artifact "catalog_rate_card=$output_dir/rate-card.json"
+  --artifact "catalog_rate_card_signature=$output_dir/rate-card.json.sig"
   --artifact "pearl_metadata=$output_dir/pearl-release.json"
   --artifact "pearl_metadata_signature=$output_dir/pearl-release.json.sig"
 )
@@ -360,6 +362,8 @@ release_assets=(
   "$output_dir/autotune-candidates.json.sig"
   "$output_dir/demand-rank.json"
   "$output_dir/demand-rank.json.sig"
+  "$output_dir/rate-card.json"
+  "$output_dir/rate-card.json.sig"
   "$output_dir/pearl-release.json"
   "$output_dir/pearl-release.json.sig"
   "$output_dir/compatibility-artifact-index.json"

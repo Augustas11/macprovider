@@ -40,6 +40,7 @@ The runtime verification model relies on:
 
 1. **Provider clients** ship the baked v4 public key in
    `AutotuneRecommend.swift`. They fetch the signed feed from
+   `https://coordinator.streamvc.live/v1/rate-card`,
    `https://coordinator.streamvc.live/v1/demand-rank` and
    `https://coordinator.streamvc.live/v1/autotune-candidates` (URL
    hardcoded in
@@ -48,11 +49,12 @@ The runtime verification model relies on:
 2. **The private key** is held only by the operator running
    `scripts/resign-autotune-static.sh` locally. It never enters
    git, CI logs, or `coordinator.streamvc.live`.
-3. **Deployment** copies the freshly-signed `autotune-candidates.json`
-   / `demand-rank.json`, their `.sig` sidecars, and the release-bound signed
-   `tier2-catalog.json` to Pearl VPS via
+3. **Deployment** copies the freshly-signed `rate-card.json`,
+   `autotune-candidates.json`, `demand-rank.json`, their `.sig` sidecars,
+   and the release-bound signed `tier2-catalog.json` to Pearl VPS via
    `phase4-coordinator/dist/deploy-pearl-vps.sh`; the coordinator buyer
-   mux serves them under `/v1/demand-rank` and `/v1/autotune-candidates`.
+   mux serves them under `/v1/rate-card`, `/v1/demand-rank`, and
+   `/v1/autotune-candidates`.
 
 Additional defenses in depth:
 
@@ -60,13 +62,12 @@ Additional defenses in depth:
   client verifies the downloaded HuggingFace revision against that SHA.
   Even a legitimate signer cannot swap in a novel binary — only a
   slower already-existing HF model.
-- Rate-card / earnings signals come from
-  `https://coordinator.streamvc.live/v1/rate-card` (TLS-signed by
-  LetsEncrypt), not from this signed feed. This keypair does not
-  govern provider earnings.
+- Rate-card / earnings signals are now signed by this detached Ed25519 feed
+  before the CLI accepts live bytes for paid recommendation. TLS remains the
+  transport layer; the sidecar is the feed integrity boundary.
 - If verification fails at runtime (bad sig, wrong keyID, network
-  partition), the client falls back to the compiled-in baked catalog
-  in `AutotuneRecommend.swift` and stays online.
+  partition), the client falls back to the compiled-in baked static inputs
+  and emits the relevant fallback/integrity warning.
 
 ## Rotation history
 

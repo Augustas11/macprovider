@@ -253,6 +253,36 @@ final class AutotuneCommandTests: XCTestCase {
         ]))
     }
 
+    func testRecommendPrefetchTrustWarningsIncludeRateCardBlockingWarnings() throws {
+        let demand = AutotuneStaticSelection(
+            value: try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)),
+            selectedBytes: Data(),
+            warnings: [.demandRankFallbackUsed],
+            usedFallback: false
+        )
+        let catalog = AutotuneStaticSelection(
+            value: try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)),
+            selectedBytes: Data(),
+            warnings: [.candidateCatalogFallbackUsed],
+            usedFallback: false
+        )
+        let rateCard = AutotuneStaticSelection(
+            value: try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)),
+            selectedBytes: Data(),
+            warnings: [.rateCardIntegrityFailure],
+            usedFallback: true
+        )
+
+        let warnings = AutotuneCommand.recommendationPrefetchTrustWarnings(
+            demand: demand,
+            catalog: catalog,
+            rateCard: rateCard
+        )
+
+        XCTAssertTrue(warnings.contains(.rateCardIntegrityFailure))
+        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks(warnings))
+    }
+
     func testRecommendUsesSpec023FourKProbeContext() throws {
         let command = try AutotuneCommand.parse(["--recommend"])
 

@@ -1254,6 +1254,8 @@ for requirement in (
     "compatibility_manifest=$compatibility_manifest",
     "catalog_trusted_keys=trusted-keys.json",
     "catalog_tier2=tier2-catalog.json",
+    "catalog_rate_card=rate-card.json",
+    "catalog_rate_card_signature=rate-card.json.sig",
     "pearl_metadata=$pearl_metadata",
     "pearl_metadata_signature=$pearl_metadata_sig",
 ):
@@ -1269,6 +1271,8 @@ for asset in (
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "rate-card.json",
+    "rate-card.json.sig",
 ):
     if asset not in prepare:
         raise SystemExit(f"signed Pearl transaction omits catalog asset: {asset}")

@@ -1,10 +1,15 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8.5
+version: v0.8.6
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-29
 
 ## Change log
+
+- **v0.8.6 (2026-07-29)** — Signed rate-card feed (B10).
+  1. **Rate-card live bytes are signed.** `/v1/rate-card` is served from literal verified static bytes when configured, and `/v1/rate-card.sig` is a detached Ed25519 sidecar over those exact bytes.
+  2. **Paid recommendation fails closed on rate-card trust failures.** Missing/malformed sidecars, unknown signers, bad signatures, schema failures, policy mismatch, stale/future/expired live bytes, or valid older-than-baked bytes fall back locally and emit rate-card integrity/update warnings that block paid recommendation.
+  3. **The release manifest binds rate-card bytes.** `rate-card.json` is a first-class SPEC-023 feed member with its own projection-hash `version`, separate from the catalog release ID.
 
 - **v0.8.5 (2026-07-29)** — A4 signed in-band provenance catalog release.
   1. **Current signed catalog carries explicit provenance.** The current release is `published-2026-07-29-inband-provenance-v1`; every `bench_gate` object in the signed candidate catalog includes machine-readable `provenance`.
@@ -326,26 +331,28 @@ The current signed catalog carries these in-band `bench_gate.provenance` classif
 
 ### 3.3 Rate card
 
-The recommendation engine fetches the current rate card from `https://coordinator.streamvc.live/v1/rate-card`. If the fetch fails, it uses the baked rate-card snapshot compiled into the installer/CLI release and emits a warning to stderr and JSON `warnings[]`.
+The recommendation engine fetches the current rate card from `https://coordinator.streamvc.live/v1/rate-card` and its detached sidecar from `https://coordinator.streamvc.live/v1/rate-card.sig`. Live rate-card bytes MUST be verified before paid recommendation uses them. Transport/HTTP unavailability may use the baked rate-card snapshot compiled into the installer/CLI release and emit `rate_card_fallback_used`; missing/malformed sidecar, unknown signer, invalid signature, invalid schema, policy mismatch, valid older-than-baked bytes, future bytes, or expired bytes MUST additionally emit `rate_card_integrity_failure` or `rate_card_update_required` as applicable and block paid recommendation.
 
-`GET /v1/rate-card` is a read-only coordinator endpoint. It MUST NOT alter billing, settlement, routing, provider state, request logs, `RateCardEntry`, YAML schema, ledger schema, or settlement arithmetic. It is public-read in v0.1 because it exposes only prices already used for buyer/provider economics; no provider or buyer credential is required. The endpoint returns a recommendation-only projection derived from the running coordinator's existing `Rewards.RateCard`, `Rewards.ProviderShare`, `Rewards.GlobalMultiplier`, and `stats.rollup.usd_per_million_credits` after config load.
+`GET /v1/rate-card` is a read-only coordinator endpoint. It MUST NOT alter billing, settlement, routing, provider state, request logs, `RateCardEntry`, settlement arithmetic, or coordinator-held signing material. It is public-read because it exposes only prices already used for buyer/provider economics; no provider or buyer credential is required. Production serves literal signed `rate-card.json` bytes loaded from disk after Ed25519 verification at startup. Unconfigured local/development coordinators may compute the same recommendation-only projection from `Rewards.RateCard`, `Rewards.ProviderShare`, `Rewards.GlobalMultiplier`, and `stats.rollup.usd_per_million_credits`; clients still require the sidecar before trusting live bytes.
 
 Repository routing contract:
 
 - The handler lives on the coordinator buyer HTTP mux (`buyer_port: 8443`), not the provider/operator mux (`provider_port: 8444`).
-- Production nginx MUST include an exact `location = /v1/rate-card` allow-through before the generic `location /v1/ { return 404; }` block in `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`.
-- The nginx location proxies to `http://127.0.0.1:8443/v1/rate-card$is_args$args`, forwards `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`, and does not require `Authorization`.
+- Production nginx MUST include exact `location = /v1/rate-card` and `location = /v1/rate-card.sig` allow-through blocks before the generic `location /v1/ { return 404; }` block in `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`.
+- The nginx locations proxy to `http://127.0.0.1:8443/v1/rate-card$is_args$args` and `http://127.0.0.1:8443/v1/rate-card.sig$is_args$args`, forward `Host`, `X-Real-IP`, `X-Forwarded-For`, and `X-Forwarded-Proto`, and do not require `Authorization`.
 
 The v0.1 rate-card JSON schema is:
 
 ```json
 {
   "version": "string",
+  "policy_version": "autotune-policy-v1",
   "generated_at": "RFC3339 timestamp",
   "usd_per_million_credits": 1.0,
   "rows": {
     "<model_key>": {
       "prompt_rate_per_mtok": 0,
+      "prompt_cache_hit_rate_per_mtok": 0,
       "completion_rate_per_mtok": 0,
       "provider_share_bps": 9000,
       "global_multiplier_ppm": 1000000
@@ -354,14 +361,14 @@ The v0.1 rate-card JSON schema is:
 }
 ```
 
-`prompt_rate_per_mtok` and `completion_rate_per_mtok` are coordinator credits per million tokens, matching `phase4-coordinator/internal/billing/formula.go::RateCardEntry` semantics and ledger `*_rate_per_mtok` columns. `usd_per_million_credits` is the active `stats.rollup.usd_per_million_credits` conversion used for recommendation math; v0.1 expects `1.0` but the endpoint value is authoritative. A model is rate-card-enabled for recommendation if lookup succeeds by exact key, by Wave 0b `normalizeModelKey`, or by the coordinator `default` row after those specific lookups miss. When the `default` row is used for a non-`default` candidate, `recommended_model` remains the catalog model key and the CLI emits `rate_card_default_tier_used`. Unknown/missing `provider_share_bps` is non-compliant for fetched rate-card rows; baked fallback rows may use `9000` only when the release snapshot explicitly records that fallback.
+`prompt_rate_per_mtok`, `prompt_cache_hit_rate_per_mtok`, and `completion_rate_per_mtok` are coordinator credits per million tokens, matching `phase4-coordinator/internal/billing/formula.go::RateCardEntry` semantics and ledger `*_rate_per_mtok` columns. `usd_per_million_credits` is the active `stats.rollup.usd_per_million_credits` conversion used for recommendation math; v0.1 expects `1.0` but the signed endpoint value is authoritative. A model is rate-card-enabled for recommendation if lookup succeeds by exact key, by Wave 0b `normalizeModelKey`, or by the coordinator `default` row after those specific lookups miss. When the `default` row is used for a non-`default` candidate, `recommended_model` remains the catalog model key and the CLI emits `rate_card_default_tier_used`. Missing `provider_share_bps` or missing `prompt_cache_hit_rate_per_mtok` is non-compliant for fetched rate-card rows.
 
 `version` is a recommendation-projection version, not the existing billing snapshot hash. It is the lowercase hex SHA-256 of the canonical projection bytes after config load:
 
 1. Build a JSON object containing only `usd_per_million_credits`, `provider_share_bps`, `global_multiplier_ppm`, and `rows`.
 2. Sort `rows` by normalized model key.
 3. Serialize JSON with sorted object keys, no insignificant whitespace, decimal integers for all rates/BPS/PPM values, and decimal number syntax for `usd_per_million_credits`.
-4. Exclude unrelated config and ledger fields, including quarantine/force-void state, request-log state, operator settings, and settlement runtime state.
+4. Exclude unrelated config and ledger fields, including `policy_version`, `generated_at`, quarantine/force-void state, request-log state, operator settings, and settlement runtime state.
 
 ### 3.4 Demand signal
 
@@ -408,9 +415,9 @@ Field rules:
 
 ### 3.5 Static JSON integrity
 
-Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified before parsing into the recommendation engine:
+Fetched `rate-card.json`, `demand-rank.json`, and `autotune-candidates.json` MUST be verified before parsing into the recommendation engine:
 
-1. Fetch `autotune-candidates` and detached `autotune-candidates.sig` from `https://coordinator.streamvc.live/v1/autotune-candidates` and `https://coordinator.streamvc.live/v1/autotune-candidates.sig`; fetch `demand-rank` and detached `demand-rank.sig` from `https://coordinator.streamvc.live/v1/demand-rank` and `https://coordinator.streamvc.live/v1/demand-rank.sig`.
+1. Fetch `rate-card` and detached `rate-card.sig` from `https://coordinator.streamvc.live/v1/rate-card` and `https://coordinator.streamvc.live/v1/rate-card.sig`; fetch `autotune-candidates` and detached `autotune-candidates.sig` from `https://coordinator.streamvc.live/v1/autotune-candidates` and `https://coordinator.streamvc.live/v1/autotune-candidates.sig`; fetch `demand-rank` and detached `demand-rank.sig` from `https://coordinator.streamvc.live/v1/demand-rank` and `https://coordinator.streamvc.live/v1/demand-rank.sig`.
 2. Parse the detached `{name}.sig` sidecar as UTF-8 JSON exactly in this shape:
 
 ```json
@@ -426,10 +433,11 @@ Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified befor
 5. Parse `{name}.json` only after signature verification succeeds.
 6. Reject the fetched file and use the baked snapshot only for local-safe behavior when the signature sidecar is missing/malformed, uses an unknown `key_id`, uses any `alg` other than `ed25519`, or fails verification; emit the corresponding integrity-failure warning and block paid recommendation/coordinator join.
 7. Reject the fetched file and use the baked snapshot only for local-safe behavior when `generated_at` is older than the baked snapshot's `generated_at`; emit the corresponding update-required warning and block paid recommendation/coordinator join.
-8. Emit `demand_rank_stale` for stale `demand-rank.json` or `candidate_catalog_stale` for stale `autotune-candidates.json`, but allow the fetched file when `generated_at` is 14-30 days old.
+8. Emit `rate_card_stale` for stale `rate-card.json`, `demand_rank_stale` for stale `demand-rank.json`, or `candidate_catalog_stale` for stale `autotune-candidates.json`, but allow the fetched file when `generated_at` is 14-30 days old.
 9. Reject the fetched file and emit update-required when `generated_at` is more than 10 minutes in the future relative to the local clock.
 10. Reject the fetched file and emit update-required when `generated_at` is more than 30 days old.
 11. Candidate and demand feeds selected as one live release MUST share `version`, `generated_at`, and `policy_version`; mixed releases fail closed.
+12. `rate-card.json` is release-manifest-bound but versioned by the §3.3 recommendation projection hash, so its `version` MAY differ from the candidate/demand release ID. It MUST share the policy version expected by the baked rate-card snapshot.
 
 Clients MUST keep a release-pinned verifier keyring. Key rotations require a bridge binary that embeds both old and new verifier keys before the feed signer changes. The old key remains trusted until operator telemetry establishes the retirement threshold defined by the release runbook.
 
@@ -587,7 +595,7 @@ Schema rules:
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - The human transcript MUST render the selected candidate's `confidence`, `bench_gate_provenance`, and `bench_gate_drift` fields. Empty drift is rendered as `none`.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
-- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`; v0.8.1 restores `rate_card_default_tier_used` as the visible signal for default-row pricing fallback. Any integrity/update-required warning blocks a paid recommendation.
+- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required`; v0.8 adds `buyer_ttft_ceiling_exceeded`; v0.8.1 restores `rate_card_default_tier_used` as the visible signal for default-row pricing fallback; v0.8.6 adds `rate_card_integrity_failure`, `rate_card_update_required`, and `rate_card_stale`. Any integrity/update-required warning blocks a paid recommendation.
 
 ## 7. Per-token payout semantics
 
@@ -755,7 +763,7 @@ AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, war
 
 AC-4 **[amended v0.6]**: Transport/HTTP unavailability may use baked demand data with `demand_rank_fallback_used`. Invalid signature/key/sidecar/schema additionally emits `demand_rank_integrity_failure`; valid-but-old/future/expired/policy-incompatible data emits `demand_rank_update_required`. Either blocking warning prevents a paid recommendation.
 
-AC-5: When `/v1/rate-card` cannot be fetched, the CLI falls back to the baked rate-card snapshot and emits `rate_card_fallback_used`.
+AC-5 **[amended v0.8.6]**: Transport/HTTP unavailability for `/v1/rate-card` or `/v1/rate-card.sig` may use the baked rate-card snapshot with `rate_card_fallback_used`. Invalid signature/key/sidecar/schema additionally emits `rate_card_integrity_failure`; valid-but-old/future/expired/policy-incompatible data emits `rate_card_update_required`. Either blocking warning prevents a paid recommendation.
 
 AC-6 **[amended v0.6]**: Transport/HTTP unavailability may use the baked candidate catalog with `candidate_catalog_fallback_used`. Invalid signature/key/sidecar/schema additionally emits `candidate_catalog_integrity_failure`; valid-but-old/future/expired/policy-incompatible data emits `candidate_catalog_update_required`. Either blocking warning prevents a paid recommendation and coordinator join.
 
@@ -823,7 +831,7 @@ AC-35: Bandwidth-tier eligibility is deterministic: a Tier-C Mac fails a row wit
 
 AC-36: A downloaded model snapshot containing symlinks, hardlinks with link count greater than one, special files, absolute paths, path escapes, or `..` path segments fails artifact verification before benchmark, recommendation, local donor-mode commit, or provider run.
 
-AC-37: Unauthenticated `GET https://coordinator.streamvc.live/v1/rate-card` reaches the coordinator buyer mux through nginx and returns the §3.3 schema; the nginx route is declared before the generic `/v1/` 404 block.
+AC-37 **[amended v0.8.6]**: Unauthenticated `GET https://coordinator.streamvc.live/v1/rate-card` and `GET https://coordinator.streamvc.live/v1/rate-card.sig` reach the coordinator buyer mux through nginx and return the §3.3 schema/sidecar; both nginx routes are declared before the generic `/v1/` 404 block.
 
 AC-38: `rate_card_version` changes when the recommendation projection rows, provider share, global multiplier, or `usd_per_million_credits` change, and does not change when unrelated quarantine, request-log, operator, ledger runtime, or settlement runtime state changes.
 

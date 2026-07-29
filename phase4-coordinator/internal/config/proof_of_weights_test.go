@@ -17,8 +17,7 @@ func TestValidateProofOfWeightsRequiresFeedsAndOnboarding(t *testing.T) {
 		t.Fatalf("Validate() = %v, want autotune feed requirement", err)
 	}
 
-	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
-	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+	setSignedAutotuneFeedPathsForProofTest(&cfg)
 	cfg.AutotuneFeeds.PublicKeys = map[string]string{
 		"streamvc-autotune-static-v4": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
 	}
@@ -28,8 +27,7 @@ func TestValidateProofOfWeightsRequiresFeedsAndOnboarding(t *testing.T) {
 }
 
 func proofOfWeightsOnboardingBaseline(cfg *config.Config) {
-	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
-	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+	setSignedAutotuneFeedPathsForProofTest(cfg)
 	cfg.AutotuneFeeds.PublicKeys = map[string]string{
 		"streamvc-autotune-static-v4": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
 	}
@@ -47,6 +45,15 @@ func proofOfWeightsOnboardingBaseline(cfg *config.Config) {
 	cfg.Referrals.Campaign = "prebeta_2026"
 	cfg.Referrals.CurrentKeyID = "k1"
 	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+}
+
+func setSignedAutotuneFeedPathsForProofTest(cfg *config.Config) {
+	cfg.AutotuneFeeds.RateCardPath = "/tmp/rate-card.json"
+	cfg.AutotuneFeeds.RateCardSigPath = "/tmp/rate-card.json.sig"
+	cfg.AutotuneFeeds.DemandRankPath = "/tmp/demand-rank.json"
+	cfg.AutotuneFeeds.DemandRankSigPath = "/tmp/demand-rank.json.sig"
+	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
+	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
 }
 
 func TestValidateProofOfWeightsHelloGateRejectsTTLBelowVerifierLimit(t *testing.T) {

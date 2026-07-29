@@ -52,7 +52,7 @@ receives all of them either way.
 | `provider_diagnostics` | repeated recent `invalid_token`, `invalid_auth_request`, or `warmup_failed`, including pre-identity `_anonymous` auth failures; any `version_unsupported`; optional expected-provider missing-auth window; diagnostics read failures | **yes** |
 | `gateway_status` | gateway self-reports `idle` / `degraded` / `down` (WARN) | no |
 | `service` | coordinator `/healthz` or gateway `/v1/status` unreachable (CRITICAL), `/poolz` read failed (WARN), recovery (INFO) | **yes** |
-| `static_feed` | SPEC-023 autotune feeds (`/v1/autotune-candidates`, `.sig`, `/v1/demand-rank`, `.sig`) unreachable from Pearl (CRITICAL), recovery (INFO) | **yes** |
+| `static_feed` | SPEC-023 autotune feeds (`/v1/rate-card`, `.sig`, `/v1/autotune-candidates`, `.sig`, `/v1/demand-rank`, `.sig`) unreachable from Pearl (CRITICAL), recovery (INFO) | **yes** |
 
 ## Email volume control (`EMAIL_MUTED_KINDS`)
 

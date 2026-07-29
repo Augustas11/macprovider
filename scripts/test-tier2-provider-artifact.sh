@@ -161,7 +161,8 @@ fake_bin="$WORKDIR/fake-bin"
 make_fake_binary "$preflight_dir" "1.8.39" "1"
 mkdir -p "$preflight_dir/catalog-release" "$preflight_dir/compatibility-set-local" "$fake_bin"
 for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
-  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json \
+  rate-card.json.sig; do
   printf '{}\n' > "$preflight_dir/catalog-release/$catalog_member"
 done
 for local_member in install.sh provider-launch-agent.plist.template updater-rollback.json \
@@ -272,7 +273,7 @@ missing_catalog_tar="$WORKDIR/missing-catalog.tar.gz"
 make_fake_binary "$missing_catalog_dir" "1.8.31" "1"
 mkdir -p "$missing_catalog_dir/catalog-release"
 for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
-  autotune-candidates.json.sig demand-rank.json; do
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json; do
   printf '{}\n' > "$missing_catalog_dir/catalog-release/$catalog_member"
 done
 make_tarball "$missing_catalog_dir" "$missing_catalog_tar"
@@ -284,7 +285,7 @@ if PROVIDER_ARTIFACT="$missing_catalog_tar" \
   die "catalog-incomplete v1.8.31 artifact unexpectedly passed"
 fi
 assert_contains "$WORKDIR/missing-catalog.err" \
-  "exactly one catalog-release/demand-rank.json.sig"
+  "exactly one catalog-release/rate-card.json.sig"
 
 PROVIDER_ARTIFACT="$good_tar" \
   PROVIDER_VERSION="1.2.6" \

@@ -741,6 +741,7 @@ func (s *Server) Handler() http.Handler {
 	r.Head("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/rate-card", s.handleRateCard)
+	r.Get("/v1/rate-card.sig", s.handleRateCardSig)
 	r.Get("/v1/demand-rank", s.handleDemandRank)
 	r.Get("/v1/demand-rank.sig", s.handleDemandRankSig)
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)

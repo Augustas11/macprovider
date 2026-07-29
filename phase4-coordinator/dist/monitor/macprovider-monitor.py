@@ -58,6 +58,8 @@ ADMIN_PROVIDERS = "http://127.0.0.1:8444/admin/providers"
 GW_STATUS = "http://127.0.0.1:9443/v1/status"
 ANONYMOUS_PROVIDER_ID = "_anonymous"
 STATIC_FEEDS = (
+    "https://coordinator.streamvc.live/v1/rate-card",
+    "https://coordinator.streamvc.live/v1/rate-card.sig",
     "https://coordinator.streamvc.live/v1/autotune-candidates",
     "https://coordinator.streamvc.live/v1/autotune-candidates.sig",
     "https://coordinator.streamvc.live/v1/demand-rank",

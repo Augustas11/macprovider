@@ -36,6 +36,8 @@ CATALOG_FILES = (
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "rate-card.json",
+    "rate-card.json.sig",
 )
 LOCAL_ARTIFACT_FILES = {
     "install_contract": "install.sh",
@@ -520,7 +522,7 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
     feeds = manifest["feeds"]
     if not isinstance(feeds, dict):
         fail("catalog release.json feeds: must be an object")
-    exact_keys(feeds, {"autotune-candidates.json", "demand-rank.json", "tier2-catalog.json"}, "catalog release.json feeds")
+    exact_keys(feeds, {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json"}, "catalog release.json feeds")
     for name, record in feeds.items():
         if not isinstance(record, dict):
             fail(f"catalog release.json feed {name}: must be an object")
@@ -533,7 +535,7 @@ def catalog_component(catalog_directory: pathlib.Path, catalog_feed_directory: p
             fail(f"catalog release.json feed {name}: byte count does not match packaged feed")
         if record["sha256"] != hashlib.sha256(catalog_bytes[name]).hexdigest():
             fail(f"catalog release.json feed {name}: digest does not match packaged feed")
-        if name != "tier2-catalog.json" and record["version"] != manifest["release_id"]:
+        if name not in {"tier2-catalog.json", "rate-card.json"} and record["version"] != manifest["release_id"]:
             fail(f"catalog release.json feed {name}: version does not match release_id")
     return {
         "activation": "local",

@@ -637,9 +637,23 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
+        let pairedRecommendationInputs = requireRecommendable
+            ? await staticInputs.loadRecommendationInputs()
+            : nil
         let expectedPublicModel: String
         if requireRecommendable {
-            let rateCard = await staticInputs.loadRateCard()
+            let rateCard = pairedRecommendationInputs!.rateCard
+            let rateCardTrustBlockingWarnings: Set<AutotuneRecommendWarning> = [
+                .rateCardIntegrityFailure,
+                .rateCardUpdateRequired,
+            ]
+            if !rateCardTrustBlockingWarnings.isDisjoint(with: rateCard.warnings) {
+                let state = rateCard.warnings.contains(.rateCardIntegrityFailure)
+                    ? "rate_card_integrity_failure"
+                    : "rate_card_update_required"
+                FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible rate-card release\n".utf8))
+                throw ExitCode(2)
+            }
             guard let match = rateCard.value.rowForRecommendation(modelKey: key) else {
                 FileHandle.standardError.write(Data("model artifact is not admitted by the signed rate card\n".utf8))
                 throw ExitCode(2)
@@ -663,7 +677,12 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
-        let catalog = await staticInputs.loadCandidateCatalog()
+        let catalog: AutotuneStaticSelection<CandidateCatalog>
+        if let pairedRecommendationInputs {
+            catalog = pairedRecommendationInputs.candidate
+        } else {
+            catalog = await staticInputs.loadCandidateCatalog()
+        }
         let actualCatalogHash = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
         let trustBlockingWarnings: Set<AutotuneRecommendWarning> = [
             .candidateCatalogIntegrityFailure,

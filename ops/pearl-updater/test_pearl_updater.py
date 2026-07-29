@@ -247,6 +247,8 @@ class PearlUpdaterTests(unittest.TestCase):
                 "release.json": REPO_ROOT / "phase3-binary/catalog/autotune/release.json",
                 "trusted-keys.json": REPO_ROOT / "phase3-binary/catalog/autotune/trusted-keys.json",
                 "tier2-catalog.json": REPO_ROOT / "phase3-binary/catalog/autotune/tier2-catalog.json",
+                "rate-card.json": REPO_ROOT / "phase3-binary/dist/static/rate-card.json",
+                "rate-card.json.sig": REPO_ROOT / "phase3-binary/dist/static/rate-card.json.sig",
                 "autotune-candidates.json": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json",
                 "autotune-candidates.json.sig": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json.sig",
                 "demand-rank.json": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json",
@@ -1830,6 +1832,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 "demand_rank": {
                     "sha256": manifest["feeds"]["demand-rank.json"]["sha256"],
                     "signer_key_id": manifest["feeds"]["demand-rank.json"]["signer_key_id"],
+                },
+                "rate_card": {
+                    "sha256": manifest["feeds"]["rate-card.json"]["sha256"],
+                    "signer_key_id": manifest["feeds"]["rate-card.json"]["signer_key_id"],
                 },
             },
         }

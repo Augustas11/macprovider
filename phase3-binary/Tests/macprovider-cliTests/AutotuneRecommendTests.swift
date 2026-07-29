@@ -110,6 +110,8 @@ final class AutotuneRecommendTests: XCTestCase {
         let demandSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("demand-rank.json.sig"))
         let catalogBytes = try Data(contentsOf: staticDir.appendingPathComponent("autotune-candidates.json"))
         let catalogSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("autotune-candidates.json.sig"))
+        let rateCardBytes = try Data(contentsOf: staticDir.appendingPathComponent("rate-card.json"))
+        let rateCardSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("rate-card.json.sig"))
         let publicKeyFile = AutotuneStaticInputs.keyID == "streamvc-autotune-static-v4"
             ? "keys/autotune-static-v4.public.base64"
             : "keys/autotune-static-v5.public.base64"
@@ -118,11 +120,14 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(String(decoding: publicKeyBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), AutotuneStaticInputs.publicKeyBase64)
         XCTAssertTrue(Self.sidecar(demandSigBytes, hasKeyID: AutotuneStaticInputs.keyID))
         XCTAssertTrue(Self.sidecar(catalogSigBytes, hasKeyID: AutotuneStaticInputs.keyID))
+        XCTAssertTrue(Self.sidecar(rateCardSigBytes, hasKeyID: AutotuneStaticInputs.keyID))
         XCTAssertTrue(AutotuneStaticInputs.defaultSignatureVerifier(jsonBytes: demandBytes, sidecarBytes: demandSigBytes))
         XCTAssertTrue(AutotuneStaticInputs.defaultSignatureVerifier(jsonBytes: catalogBytes, sidecarBytes: catalogSigBytes))
+        XCTAssertTrue(AutotuneStaticInputs.defaultSignatureVerifier(jsonBytes: rateCardBytes, sidecarBytes: rateCardSigBytes))
 
         let demand = try AutotuneStaticInputs.decodeDemandRank(demandBytes)
         let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(catalogBytes)
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(rateCardBytes)
 
         let demandRow = try XCTUnwrap(demand.rows[modelKey])
         XCTAssertTrue(demandRow.recommendable)
@@ -137,6 +142,12 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(catalogRow.runtimeStatus, "recommendable")
         XCTAssertEqual(catalogRow.minRAMGB, 32)
         XCTAssertEqual(catalogRow.minBandwidthTier, .c)
+
+        let rateMatch = try XCTUnwrap(rateCard.rowForRecommendation(modelKey: modelKey))
+        XCTAssertEqual(rateMatch.key, "nemotron-3-nano-30b-a3b")
+        XCTAssertEqual(rateMatch.row.promptRatePerMtok, 80_000)
+        XCTAssertEqual(rateMatch.row.promptCacheHitRatePerMtok, 20_000)
+        XCTAssertEqual(rateMatch.row.completionRatePerMtok, 160_000)
     }
 
     func testCandidateCatalogDecodesSpec029WorkloadProfiles() throws {
@@ -614,9 +625,13 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testRateCardUsesDefaultWhenSpecificRecommendationRowIsMissing() throws {
-        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
-        {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-        """.utf8))
+        let rateCard = RateCardProjection(
+            version: "test",
+            policyVersion: "autotune-policy-v1",
+            generatedAt: Self.date("2026-07-01T00:00:00Z"),
+            usdPerMillionCredits: 1.0,
+            rows: ["default": RateCardProjection.Row(promptRatePerMtok: 1, completionRatePerMtok: 1, providerShareBPS: 9_000, globalMultiplierPPM: 1_000_000)]
+        )
 
         XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct")?.key, "default")
         XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "meta-llama/llama-3.1-8b-instruct")?.key, "default")
@@ -624,18 +639,29 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testRateCardReturnsNilWhenNoDefaultAndNoMatch() throws {
-        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
-        {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"qwen3-32b":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-        """.utf8))
+        let rateCard = RateCardProjection(
+            version: "test",
+            policyVersion: "autotune-policy-v1",
+            generatedAt: Self.date("2026-07-01T00:00:00Z"),
+            usdPerMillionCredits: 1.0,
+            rows: ["qwen3-32b": RateCardProjection.Row(promptRatePerMtok: 1, completionRatePerMtok: 1, providerShareBPS: 9_000, globalMultiplierPPM: 1_000_000)]
+        )
 
         XCTAssertNil(rateCard.rowForRecommendation(modelKey: "unknown-model"))
     }
 
     func testRateCardPrefersSpecificRowOverDefault() throws {
         // v1.7.6 Track A1: exact/normalized specific row wins over "default".
-        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
-        {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":9,"completion_rate_per_mtok":9,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-32b":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-        """.utf8))
+        let rateCard = RateCardProjection(
+            version: "test",
+            policyVersion: "autotune-policy-v1",
+            generatedAt: Self.date("2026-07-01T00:00:00Z"),
+            usdPerMillionCredits: 1.0,
+            rows: [
+                "default": RateCardProjection.Row(promptRatePerMtok: 9, completionRatePerMtok: 9, providerShareBPS: 9_000, globalMultiplierPPM: 1_000_000),
+                "qwen3-32b": RateCardProjection.Row(promptRatePerMtok: 1, completionRatePerMtok: 1, providerShareBPS: 9_000, globalMultiplierPPM: 1_000_000),
+            ]
+        )
 
         let match = rateCard.rowForRecommendation(modelKey: "qwen3-32b")
         XCTAssertEqual(match?.key, "qwen3-32b")
@@ -651,9 +677,16 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testNemotronRateCardLookupUsesNormalizedCoordinatorKey() throws {
-        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
-        {"version":"test","generated_at":"2026-07-06T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":500000,"completion_rate_per_mtok":1000000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"nemotron-3-nano-30b-a3b":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-        """.utf8))
+        let rateCard = RateCardProjection(
+            version: "test",
+            policyVersion: "autotune-policy-v1",
+            generatedAt: Self.date("2026-07-06T00:00:00Z"),
+            usdPerMillionCredits: 1.0,
+            rows: [
+                "default": RateCardProjection.Row(promptRatePerMtok: 500_000, promptCacheHitRatePerMtok: 125_000, completionRatePerMtok: 1_000_000, providerShareBPS: 9_000, globalMultiplierPPM: 1_000_000),
+                "nemotron-3-nano-30b-a3b": RateCardProjection.Row(promptRatePerMtok: 117_500, promptCacheHitRatePerMtok: 29_375, completionRatePerMtok: 235_000, providerShareBPS: 9_000, globalMultiplierPPM: 1_000_000),
+            ]
+        )
 
         for modelKey in [
             "nvidia/nemotron-3-nano-30b-a3b",
@@ -1057,6 +1090,8 @@ final class AutotuneRecommendTests: XCTestCase {
     func testPaidTrustBlockLeavesCatalogFallbackForLocalDiagnostics() {
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogIntegrityFailure]))
         XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.demandRankUpdateRequired]))
+        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.rateCardIntegrityFailure]))
+        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.rateCardUpdateRequired]))
         XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed, .rateCardFallbackUsed]))
         XCTAssertTrue(AutotuneRecommendEngine.networkSubmissionBlocks([.candidateCatalogFallbackUsed]))
         XCTAssertFalse(AutotuneRecommendEngine.networkSubmissionBlocks([.rateCardFallbackUsed, .candidateCatalogStale]))
@@ -1141,6 +1176,104 @@ final class AutotuneRecommendTests: XCTestCase {
         let fallback = await fallbackInputs.loadDemandRank()
         XCTAssertTrue(fallback.usedFallback)
         XCTAssertTrue(fallback.warnings.contains(.demandRankFallbackUsed))
+    }
+
+    func testSignedRateCardAcceptsVerifiedLiveBytes() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedRateCardJSON
+            .replacingOccurrences(of: "\"generated_at\":\"2026-07-29T08:45:00Z\"", with: "\"generated_at\":\"2026-07-29T09:00:00Z\"")
+            .utf8)
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let keyID = "streamvc-autotune-static-v4"
+        let signature = try privateKey.signature(for: payload).base64EncodedString()
+        let sidecar = Data("{\"key_id\":\"\(keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        var keyring = AutotuneStaticInputs.defaultTrustedPublicKeys
+        keyring[keyID] = privateKey.publicKey.rawRepresentation.base64EncodedString()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
+            trustedPublicKeys: keyring,
+            now: { Self.date("2026-07-29T10:00:00Z") }
+        )
+
+        let selection = await inputs.loadRateCard()
+
+        XCTAssertFalse(selection.usedFallback)
+        XCTAssertEqual(selection.signerKeyID, keyID)
+        XCTAssertFalse(selection.warnings.contains(.rateCardIntegrityFailure))
+        XCTAssertEqual(selection.value.generatedAt, Self.date("2026-07-29T09:00:00Z"))
+    }
+
+    func testSignedRateCardMissingSidecarFallsBackWithIntegrityWarning() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                if url.path.hasSuffix(".sig") { throw URLError(.fileDoesNotExist) }
+                return payload
+            },
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-29T10:00:00Z") }
+        )
+
+        let selection = await inputs.loadRateCard()
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.rateCardFallbackUsed))
+        XCTAssertTrue(selection.warnings.contains(.rateCardIntegrityFailure))
+    }
+
+    func testSignedRateCardRejectsUnknownSchemaField() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedRateCardJSON
+            .replacingOccurrences(of: "\"rows\":{", with: "\"unexpected\":true,\"rows\":{")
+            .utf8)
+        let selection = await Self.loadSignedRateCardWithAcceptedSignature(payload)
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.rateCardIntegrityFailure))
+    }
+
+    func testSignedRateCardRejectsWrongProjectionVersion() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedRateCardJSON
+            .replacingOccurrences(
+                of: #"\"version\":\"[0-9a-f]{64}\""#,
+                with: "\"version\":\"\(String(repeating: "0", count: 64))\"",
+                options: .regularExpression
+            )
+            .utf8)
+        let selection = await Self.loadSignedRateCardWithAcceptedSignature(payload)
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.rateCardIntegrityFailure))
+    }
+
+    func testRecommendationInputsRejectRateCardReleaseMismatch() async throws {
+        let demandPayload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+        let candidatePayload = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        let rateCardPayload = Data(AutotuneStaticInputs.bakedRateCardJSON
+            .replacingOccurrences(of: "\"generated_at\":\"2026-07-29T08:45:00Z\"", with: "\"generated_at\":\"2026-07-29T09:00:00Z\"")
+            .utf8)
+        let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(Data(repeating: 0, count: 64).base64EncodedString())\"}".utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                if url.path.hasSuffix(".sig") { return sidecar }
+                switch url.path {
+                case _ where url.path.hasSuffix("/demand-rank"):
+                    return demandPayload
+                case _ where url.path.hasSuffix("/autotune-candidates"):
+                    return candidatePayload
+                case _ where url.path.hasSuffix("/rate-card"):
+                    return rateCardPayload
+                default:
+                    throw URLError(.fileDoesNotExist)
+                }
+            },
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-29T10:00:00Z") }
+        )
+
+        let loaded = await inputs.loadRecommendationInputs()
+
+        XCTAssertTrue(loaded.rateCard.warnings.contains(.rateCardIntegrityFailure))
+        XCTAssertTrue(loaded.demand.warnings.contains(.demandRankIntegrityFailure))
+        XCTAssertTrue(loaded.candidate.warnings.contains(.candidateCatalogIntegrityFailure))
     }
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
@@ -1415,6 +1548,17 @@ final class AutotuneRecommendTests: XCTestCase {
     private static func sidecar(for payload: Data, keyID: String, privateKey: Curve25519.Signing.PrivateKey) throws -> Data {
         let signature = try privateKey.signature(for: payload).base64EncodedString()
         return Data("{\"key_id\":\"\(keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+    }
+
+    private static func loadSignedRateCardWithAcceptedSignature(_ payload: Data) async -> AutotuneStaticSelection<RateCardProjection> {
+        let signature = Data(repeating: 0, count: 64).base64EncodedString()
+        let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-29T10:00:00Z") }
+        )
+        return await inputs.loadRateCard()
     }
 
     private static func dataReplacing(_ data: Data, _ old: String, _ new: String) throws -> Data {

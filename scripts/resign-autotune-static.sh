@@ -110,19 +110,25 @@ guard let publicRaw = env["PUBLIC_B64"].flatMap({ Data(base64Encoded: $0) }),
 
 candidate_json="$STATIC_DIR/autotune-candidates.json"
 demand_json="$STATIC_DIR/demand-rank.json"
+rate_card_json="$STATIC_DIR/rate-card.json"
 candidate_sig="$TMP_DIR/autotune-candidates.json.sig"
 demand_sig="$TMP_DIR/demand-rank.json.sig"
+rate_card_sig="$TMP_DIR/rate-card.json.sig"
 
 sign_one "$candidate_json" "$candidate_sig"
 sign_one "$demand_json" "$demand_sig"
+sign_one "$rate_card_json" "$rate_card_sig"
 verify_one "$candidate_json" "$candidate_sig"
 verify_one "$demand_json" "$demand_sig"
+verify_one "$rate_card_json" "$rate_card_sig"
 
-# Both signatures are verified before either generated sidecar is replaced.
+# All signatures are verified before any generated sidecar is replaced.
 install -m 0644 "$candidate_sig" "$STATIC_DIR/autotune-candidates.json.sig.new"
 install -m 0644 "$demand_sig" "$STATIC_DIR/demand-rank.json.sig.new"
+install -m 0644 "$rate_card_sig" "$STATIC_DIR/rate-card.json.sig.new"
 mv "$STATIC_DIR/autotune-candidates.json.sig.new" "$STATIC_DIR/autotune-candidates.json.sig"
 mv "$STATIC_DIR/demand-rank.json.sig.new" "$STATIC_DIR/demand-rank.json.sig"
+mv "$STATIC_DIR/rate-card.json.sig.new" "$STATIC_DIR/rate-card.json.sig"
 
 python3 "$REPO_ROOT/scripts/catalog-release.py" generate --signer-key-id "$KEY_ID"
 python3 "$REPO_ROOT/scripts/catalog-release.py" verify

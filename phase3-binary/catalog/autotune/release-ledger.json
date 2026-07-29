@@ -128,6 +128,12 @@
           "signer_key_id": "streamvc-autotune-static-v4",
           "version": "published-2026-07-29-inband-provenance-v1"
         },
+        "rate-card.json": {
+          "bytes": 2235,
+          "sha256": "68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3",
+          "signer_key_id": "streamvc-autotune-static-v4",
+          "version": "51d4eb9d29024e759c8e41610ad3f13614253e52f47bc032c92f46adb599ad42"
+        },
         "tier2-catalog.json": {
           "bytes": 3449,
           "sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92",

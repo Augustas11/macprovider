@@ -1499,6 +1499,8 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
             "autotune-candidates.json.sig",
             "demand-rank.json",
             "demand-rank.json.sig",
+            "rate-card.json",
+            "rate-card.json.sig",
         ] {
             let values = try catalog.appendingPathComponent(required)
                 .resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])

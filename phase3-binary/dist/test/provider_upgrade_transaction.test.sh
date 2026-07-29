@@ -115,7 +115,9 @@ complete_payload="$(printf '%s\n' \
   catalog-release/autotune-candidates.json \
   catalog-release/autotune-candidates.json.sig \
   catalog-release/demand-rank.json \
-  catalog-release/demand-rank.json.sig)"
+  catalog-release/demand-rank.json.sig \
+  catalog-release/rate-card.json \
+  catalog-release/rate-card.json.sig)"
 validate_staged_entries "$complete_payload" "test payload"
 if (validate_staged_entries "${complete_payload//$'\n'mlx.metallib/}" "test payload"); then
   echo "payload without mlx.metallib unexpectedly passed validation" >&2
@@ -127,6 +129,10 @@ if (validate_staged_entries "${complete_payload//$'\n'Runtime.bundle$'\n'Runtime
 fi
 if (validate_staged_entries "${complete_payload//$'\n'catalog-release\/release.json/}" "test payload"); then
   echo "payload without the signed catalog manifest unexpectedly passed validation" >&2
+  exit 1
+fi
+if (validate_staged_entries "${complete_payload//$'\n'catalog-release\/rate-card.json.sig/}" "test payload"); then
+  echo "payload without the signed rate-card sidecar unexpectedly passed validation" >&2
   exit 1
 fi
 if (validate_staged_entries "${complete_payload//$'\n'compatibility-set.json/}" "test payload"); then

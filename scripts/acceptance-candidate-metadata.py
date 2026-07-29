@@ -49,6 +49,8 @@ CATALOG_NAMES = (
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "rate-card.json",
+    "rate-card.json.sig",
 )
 LOCAL_COMPATIBILITY_NAMES = {
     "install.sh",
