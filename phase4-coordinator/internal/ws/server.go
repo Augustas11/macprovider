@@ -352,6 +352,14 @@ const EventProviderCapacityOverClaim = "provider_capacity_over_claim"
 // issue-#765 fail-suspect transition (quarantined / released).
 const EventProviderBenchmarkQuarantine = "provider_benchmark_quarantine"
 
+// EventProviderAdmissionCeilingExclusion is the structured-log event name for a
+// SPEC-032 FR-HG7 route-exclusion transition.
+const EventProviderAdmissionCeilingExclusion = "provider_admission_ceiling_exclusion"
+
+// EventProviderAdmissionEvidenceStale is the structured-log event name for a
+// SPEC-032 FR-HG6 session-time evidence TTL route-exclusion transition.
+const EventProviderAdmissionEvidenceStale = "provider_admission_evidence_stale"
+
 // capacity-over-claim tripwire phases. Closed set — used as a prometheus label.
 const (
 	capacityPhaseHello       = "hello"
@@ -702,11 +710,12 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		// context/quota are omitted (deferred to FR-CAN23, see canaryBuyerServing).
 		registry.SetBuyerServingPredicate(s.canaryBuyerServing)
 	}
-	// Issue #582 FIX A: bounded active-session hardware-trust revalidation.
-	// Gated on the trust checker being wired — i.e. only when the hardware
-	// trust hello gate (the admission trust join) is enabled — so non-onboarding
-	// deployments are unaffected.
-	if s.providerTrust != nil && registry != nil {
+	// Issue #582 FIX A + SPEC-032 FR-HG6/B2: bounded active-session trust
+	// revalidation. Hardware-trust checks run when the trust checker is wired;
+	// strict autotune evidence TTL checks run only when the hello gate is enabled
+	// and its catalog+evidence dependencies are wired. Both use the same 30s
+	// sweep cadence.
+	if (s.providerTrust != nil || (s.cfg.ProofOfWeights.RequireAutotuneHelloGate && s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
 		go s.runTrustRevalidationLoop()
 	}
 	return s
@@ -2323,7 +2332,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			Int("effective_max_concurrency", capacity.MaxConcurrency).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
-	return &pool.Provider{
+	entry := &pool.Provider{
 		ProviderID:             hello.ProviderID,
 		AssignedID:             assignedID,
 		Hostname:               hello.Hostname,
@@ -2364,7 +2373,11 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		AdmittedHardwareIdentityHash: admittedTuple.HardwareIdentityHash,
 		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
 		AdmittedUnifiedMemoryGB:      admittedTuple.UnifiedMemoryGB,
-	}, true
+	}
+	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		entry.AdmissionCeilingExcluded = s.admissionCeilingRouteVerdict(*entry).excluded
+	}
+	return entry, true
 }
 
 func (s *Server) expectedAdmissionModelHash(hello Hello, admissionMode string) string {
@@ -3522,6 +3535,9 @@ func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool 
 	if s.belowModelVersionFloor(provider, "warmup_gate") {
 		return false
 	}
+	if provider.AdmissionCeilingExcluded || provider.AdmissionEvidenceStale {
+		return false
+	}
 	body, err := json.Marshal(map[string]any{
 		"model": providerProbeModelID(provider),
 		"messages": []map[string]string{{
@@ -4498,6 +4514,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	if heartbeatResult.ModelIDChanged {
 		s.observeAdmissionCeilingDrift(*entry, heartbeatResult.PriorModelID)
 	}
+	s.applyAdmissionCeilingRouteExclusion(entry, "heartbeat")
 	s.rememberProviderSnapshotCoalesced(*entry)
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
 	if gap > threshold {
@@ -4548,26 +4565,111 @@ func (s *Server) observeAdmissionCeilingDrift(provider pool.Provider, priorModel
 		s.recordAdmissionCeilingEvent(provider, priorModelID, 0, providerevents.KindMissingAdmissionCap)
 		return
 	}
-	claimedMinRAMGB, ok := s.catalogMinRAMForProviderModel(provider, provider.ModelID)
-	if !ok || claimedMinRAMGB <= provider.MaxAdmittedMinRAMGB {
+	verdict := s.admissionCeilingRouteVerdict(provider)
+	if !verdict.excluded {
 		return
 	}
-	s.recordAdmissionCeilingEvent(provider, priorModelID, claimedMinRAMGB, providerevents.KindModelCeilingDrift)
+	s.recordAdmissionCeilingEvent(provider, priorModelID, verdict.claimedMinRAMGB, providerevents.KindModelCeilingDrift)
 }
 
 func (s *Server) catalogMinRAMForProviderModel(provider pool.Provider, modelID string) (int, bool) {
 	catalog := s.autotuneCatalog
-	if provider.CatalogAdmissionMode == "previous" {
-		catalog = s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
-	}
 	if catalog == nil {
 		return 0, false
+	}
+	if provider.CatalogAdmissionMode == "previous" {
+		previousCatalog := s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
+		if previousCatalog == nil {
+			return 0, false
+		}
+		previousKey, _, ok := previousCatalog.HighestClaimedTier(modelID)
+		if !ok {
+			return 0, false
+		}
+		activeKey, activeRow, ok := catalog.HighestClaimedTier(modelID)
+		if !ok {
+			return 0, false
+		}
+		previousIdentity, ok := previousCatalog.RowIdentity(previousKey)
+		if !ok {
+			return 0, false
+		}
+		activeIdentity, ok := catalog.RowIdentity(activeKey)
+		if !ok || !strings.EqualFold(previousIdentity, activeIdentity) {
+			return 0, false
+		}
+		if !previousCatalog.PolicyEquivalent(previousKey, catalog, activeKey) {
+			return 0, false
+		}
+		return activeRow.MinRAMGB, true
 	}
 	_, row, ok := catalog.HighestClaimedTier(modelID)
 	if !ok {
 		return 0, false
 	}
 	return row.MinRAMGB, true
+}
+
+func (s *Server) autotuneCatalogForProvider(provider pool.Provider) *autotune.Catalog {
+	if provider.CatalogAdmissionMode == "previous" {
+		return s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
+	}
+	return s.autotuneCatalog
+}
+
+type admissionCeilingRouteVerdict struct {
+	excluded        bool
+	reason          string
+	claimedMinRAMGB int
+}
+
+func (s *Server) admissionCeilingRouteVerdict(provider pool.Provider) admissionCeilingRouteVerdict {
+	if provider.MaxAdmittedMinRAMGB <= 0 {
+		return admissionCeilingRouteVerdict{reason: "admission_cap_missing"}
+	}
+	claimedMinRAMGB, ok := s.catalogMinRAMForProviderModel(provider, provider.ModelID)
+	if !ok {
+		return admissionCeilingRouteVerdict{excluded: true, reason: "autotune_model_uncatalogued"}
+	}
+	if claimedMinRAMGB > provider.MaxAdmittedMinRAMGB {
+		return admissionCeilingRouteVerdict{excluded: true, reason: "autotune_model_cap_exceeded", claimedMinRAMGB: claimedMinRAMGB}
+	}
+	return admissionCeilingRouteVerdict{reason: "admission_ceiling_valid", claimedMinRAMGB: claimedMinRAMGB}
+}
+
+func (s *Server) applyAdmissionCeilingRouteExclusion(provider *pool.Provider, actor string) {
+	if provider == nil {
+		return
+	}
+	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		if s.pool.SetAdmissionCeilingExcluded(provider.ProviderID, provider.AssignedID, false) {
+			provider.AdmissionCeilingExcluded = false
+		}
+		return
+	}
+	verdict := s.admissionCeilingRouteVerdict(*provider)
+	if !s.pool.SetAdmissionCeilingExcluded(provider.ProviderID, provider.AssignedID, verdict.excluded) {
+		provider.AdmissionCeilingExcluded = verdict.excluded
+		return
+	}
+	provider.AdmissionCeilingExcluded = verdict.excluded
+	logger := s.log.Info()
+	message := "provider admission ceiling route exclusion cleared"
+	if verdict.excluded {
+		logger = s.log.Warn()
+		message = "provider route-excluded by admission ceiling"
+	}
+	logger.
+		Str("event", EventProviderAdmissionCeilingExclusion).
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Str("actor", actor).
+		Str("model_id", provider.ModelID).
+		Str("reason", verdict.reason).
+		Bool("excluded", verdict.excluded).
+		Int("claimed_min_ram_gb", verdict.claimedMinRAMGB).
+		Int("max_admitted_min_ram_gb", provider.MaxAdmittedMinRAMGB).
+		Msg(message)
 }
 
 func (s *Server) recordAdmissionCeilingEvent(provider pool.Provider, priorModelID string, claimedMinRAMGB int, kind string) {
@@ -4591,6 +4693,8 @@ func (s *Server) recordAdmissionCeilingEvent(provider pool.Provider, priorModelI
 	}
 	if kind == providerevents.KindMissingAdmissionCap {
 		logger.Msg("provider heartbeat changed model without an observed admission cap")
+	} else if claimedMinRAMGB == 0 {
+		logger.Msg("provider heartbeat model is uncatalogued under observed admission cap")
 	} else {
 		logger.Msg("provider heartbeat model exceeds observed admission cap")
 	}

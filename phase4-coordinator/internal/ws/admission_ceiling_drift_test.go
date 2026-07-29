@@ -27,6 +27,16 @@ func (blockingAutotuneEvidence) LatestVerified(ctx context.Context, _ string, _ 
 	return autotune.VerifiedEvidence{}, false, ctx.Err()
 }
 
+type staticAdmissionEvidence struct {
+	evidence autotune.VerifiedEvidence
+	ok       bool
+	err      error
+}
+
+func (s staticAdmissionEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+	return s.evidence, s.ok, s.err
+}
+
 func (s *recordingConnectionEventStore) Record(_ context.Context, event providerevents.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,7 +79,7 @@ func TestHeartbeatModelChangeRecordsAdmissionCeilingDrift(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	registry := pool.NewRegistry(nil)
 	events := &recordingConnectionEventStore{}
-	server := NewServer(config.Default(), registry, zerolog.Nop(),
+	server := NewServer(admissionCeilingEnforcementConfig(), registry, zerolog.Nop(),
 		WithAutotuneCatalog(admissionCeilingTestCatalog(t)),
 		WithConnectionEventStore(events),
 		WithNow(func() time.Time { return now }),
@@ -101,8 +111,96 @@ func TestHeartbeatModelChangeRecordsAdmissionCeilingDrift(t *testing.T) {
 	if !strings.Contains(event.Diagnostic, "claimed_min_ram_gb=32") || !strings.Contains(event.Diagnostic, "max_admitted_min_ram_gb=8") {
 		t.Fatalf("diagnostic = %q", event.Diagnostic)
 	}
-	if snap, ok := registry.Resolve("provider-a", "assigned-a"); !ok || snap.State == pool.StateDegraded {
-		t.Fatalf("drift observation changed routing state: provider=%+v ok=%v", snap, ok)
+	snap, ok := registry.Resolve("provider-a", "assigned-a")
+	if !ok {
+		t.Fatal("provider missing from registry after heartbeat")
+	}
+	if snap.State != pool.StateReady {
+		t.Fatalf("drift enforcement changed provider state: %q", snap.State)
+	}
+	if !snap.AdmissionCeilingExcluded || snap.RoutingEligible() || snap.ServingCapable() {
+		t.Fatalf("over-ceiling provider must be route-excluded without state mutation: %+v", snap)
+	}
+}
+
+func TestHeartbeatUncataloguedModelIsRouteExcluded(t *testing.T) {
+	t.Parallel()
+	registry := pool.NewRegistry(nil)
+	server := NewServer(admissionCeilingEnforcementConfig(), registry, zerolog.Nop(),
+		WithAutotuneCatalog(admissionCeilingTestCatalog(t)),
+	)
+	registerAdmissionCeilingProvider(t, registry, pool.Provider{
+		ProviderID:           "provider-a",
+		AssignedID:           "assigned-a",
+		ModelID:              "small-model",
+		MaxAdmittedMinRAMGB:  8,
+		MaxAdmittedModelID:   "small-model",
+		CatalogAdmissionMode: "current",
+	})
+
+	server.handleHeartbeat(nil, "provider-a", "assigned-a", admissionCeilingHeartbeat("uncatalogued-model"))
+
+	snap, ok := registry.Resolve("provider-a", "assigned-a")
+	if !ok {
+		t.Fatal("provider missing from registry after heartbeat")
+	}
+	if !snap.AdmissionCeilingExcluded || snap.RoutingEligible() {
+		t.Fatalf("uncatalogued model must be route-excluded: %+v", snap)
+	}
+}
+
+func TestPreviousCatalogTransitionRequiresActiveRowEquivalence(t *testing.T) {
+	t.Parallel()
+	current := admissionCeilingTestCatalog(t)
+	previousRaw := strings.Replace(string(current.RawJSON), `"version":"test-admission-ceiling"`, `"version":"previous-admission-ceiling"`, 1)
+	previousRaw = strings.Replace(previousRaw, `"large":{"model_id":"large-model","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":32`, `"large":{"model_id":"large-model","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":16`, 1)
+	previous, err := autotune.ParseCatalog([]byte(previousRaw))
+	if err != nil {
+		t.Fatalf("parse previous catalog: %v", err)
+	}
+	server := NewServer(admissionCeilingEnforcementConfig(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithAutotuneCatalog(current, previous),
+	)
+	provider := pool.Provider{
+		ProviderID:           "provider-a",
+		AssignedID:           "assigned-a",
+		ModelID:              "large-model",
+		MaxAdmittedMinRAMGB:  20,
+		CatalogAdmissionMode: "previous",
+		CatalogReleaseID:     previous.Version,
+	}
+
+	verdict := server.admissionCeilingRouteVerdict(provider)
+	if !verdict.excluded || verdict.reason != "autotune_model_uncatalogued" {
+		t.Fatalf("changed previous-catalog transition row verdict = %+v, want excluded as incompatible/uncatalogued", verdict)
+	}
+}
+
+func TestHeartbeatInCeilingModelClearsRouteExclusion(t *testing.T) {
+	t.Parallel()
+	registry := pool.NewRegistry(nil)
+	server := NewServer(admissionCeilingEnforcementConfig(), registry, zerolog.Nop(),
+		WithAutotuneCatalog(admissionCeilingTestCatalog(t)),
+	)
+	registerAdmissionCeilingProvider(t, registry, pool.Provider{
+		ProviderID:               "provider-a",
+		AssignedID:               "assigned-a",
+		ModelID:                  "small-model",
+		MaxAdmittedMinRAMGB:      8,
+		MaxAdmittedModelID:       "small-model",
+		CatalogAdmissionMode:     "current",
+		AdmissionCeilingExcluded: true,
+		AdmissionEvidenceStale:   false,
+	})
+
+	server.handleHeartbeat(nil, "provider-a", "assigned-a", admissionCeilingHeartbeat("small-model"))
+
+	snap, ok := registry.Resolve("provider-a", "assigned-a")
+	if !ok {
+		t.Fatal("provider missing from registry after heartbeat")
+	}
+	if snap.AdmissionCeilingExcluded {
+		t.Fatalf("in-ceiling heartbeat must clear route exclusion: %+v", snap)
 	}
 }
 
@@ -236,6 +334,97 @@ func TestGateOffAutotuneObservationTimeoutAdmits(t *testing.T) {
 	}
 }
 
+func TestAdmissionEvidenceRevalidationRouteExcludesExpiredEvidence(t *testing.T) {
+	t.Parallel()
+	s, provider, _ := newEncryptedRelayHarness(t)
+	catalog := admissionCeilingTestCatalog(t)
+	provider.ModelID = "small-model"
+	provider.MaxAdmittedMinRAMGB = 8
+	provider.MaxAdmittedModelID = "small-model"
+	provider.CatalogAdmissionMode = "current"
+	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	s.cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+	s.autotuneCatalog = catalog
+	s.autotuneEvidence = staticAdmissionEvidence{ok: false}
+
+	s.runTrustRevalidationSweep()
+
+	snap, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing from registry after sweep")
+	}
+	if !snap.AdmissionEvidenceStale || snap.RoutingEligible() {
+		t.Fatalf("expired evidence must route-exclude provider: %+v", snap)
+	}
+
+	s.autotuneEvidence = staticAdmissionEvidence{
+		ok:       true,
+		evidence: admissionCeilingVerifiedEvidence(t, catalog, "small", "hashA", "apple m4 max", 64),
+	}
+	s.runTrustRevalidationSweep()
+
+	snap, ok = s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing from registry after recovery sweep")
+	}
+	if snap.AdmissionEvidenceStale || !snap.RoutingEligible() {
+		t.Fatalf("fresh same-tuple evidence must restore routing: %+v", snap)
+	}
+}
+
+func TestAdmissionEvidenceRevalidationRejectsTupleMismatch(t *testing.T) {
+	t.Parallel()
+	s, provider, _ := newEncryptedRelayHarness(t)
+	catalog := admissionCeilingTestCatalog(t)
+	provider.ModelID = "small-model"
+	provider.MaxAdmittedMinRAMGB = 8
+	provider.MaxAdmittedModelID = "small-model"
+	provider.CatalogAdmissionMode = "current"
+	setAdmittedTupleValues(provider, "hashA", "apple m4 max", 64)
+	s.cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+	s.autotuneCatalog = catalog
+	s.autotuneEvidence = staticAdmissionEvidence{
+		ok:       true,
+		evidence: admissionCeilingVerifiedEvidence(t, catalog, "small", "hashB", "apple m4 max", 64),
+	}
+
+	s.runTrustRevalidationSweep()
+
+	snap, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing from registry after sweep")
+	}
+	if !snap.AdmissionEvidenceStale || snap.RoutingEligible() {
+		t.Fatalf("tuple-mismatched evidence must route-exclude provider: %+v", snap)
+	}
+}
+
+func TestAdmissionEvidenceRevalidationRejectsMissingAdmittedTuple(t *testing.T) {
+	t.Parallel()
+	s, provider, _ := newEncryptedRelayHarness(t)
+	catalog := admissionCeilingTestCatalog(t)
+	provider.ModelID = "small-model"
+	provider.MaxAdmittedMinRAMGB = 8
+	provider.MaxAdmittedModelID = "small-model"
+	provider.CatalogAdmissionMode = "current"
+	s.cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+	s.autotuneCatalog = catalog
+	s.autotuneEvidence = staticAdmissionEvidence{
+		ok:       true,
+		evidence: admissionCeilingVerifiedEvidence(t, catalog, "small", "hashA", "apple m4 max", 64),
+	}
+
+	s.runTrustRevalidationSweep()
+
+	snap, ok := s.pool.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing from registry after sweep")
+	}
+	if !snap.AdmissionEvidenceStale || snap.RoutingEligible() {
+		t.Fatalf("missing admitted tuple must route-exclude capped provider: %+v", snap)
+	}
+}
+
 func TestAdmissionCeilingEventClockRegressionResetsWindow(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
@@ -270,6 +459,12 @@ func admissionCeilingHeartbeat(modelID string) []byte {
 	return []byte(`{"type":"heartbeat","status":"ready","model_id":"` + modelID + `","model_params_b":30.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":2,"slots_free":2,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0}`)
 }
 
+func admissionCeilingEnforcementConfig() config.Config {
+	cfg := config.Default()
+	cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+	return cfg
+}
+
 func admissionCeilingTestCatalog(t *testing.T) *autotune.Catalog {
 	t.Helper()
 	catalog, err := autotune.ParseCatalog([]byte(`{
@@ -277,12 +472,38 @@ func admissionCeilingTestCatalog(t *testing.T) *autotune.Catalog {
 		"policy_version":"test",
 		"source":"operator_curated_autotune_candidate_catalog",
 		"rows":{
-			"small":{"model_id":"small-model","min_ram_gb":8,"min_bandwidth_tier":"low","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommended"},
-			"large":{"model_id":"large-model","min_ram_gb":32,"min_bandwidth_tier":"high","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommended"}
-		}
-	}`))
+				"small":{"model_id":"small-model","model_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","min_ram_gb":8,"min_bandwidth_tier":"low","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommended"},
+				"large":{"model_id":"large-model","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":32,"min_bandwidth_tier":"high","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommended"}
+			}
+		}`))
 	if err != nil {
 		t.Fatalf("parse catalog: %v", err)
 	}
 	return catalog
+}
+
+func admissionCeilingVerifiedEvidence(t *testing.T, catalog *autotune.Catalog, modelKey, hardwareHash, chip string, memoryGB int) autotune.VerifiedEvidence {
+	t.Helper()
+	row, ok := catalog.Row(modelKey)
+	if !ok {
+		t.Fatalf("catalog row %q missing", modelKey)
+	}
+	rowIdentity, ok := catalog.RowIdentity(modelKey)
+	if !ok {
+		t.Fatalf("catalog row identity %q missing", modelKey)
+	}
+	return autotune.VerifiedEvidence{
+		GeneratedAt:            time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC),
+		CandidateCatalogSHA256: catalog.SHA256,
+		HardwareIdentityHash:   hardwareHash,
+		ChipNormalized:         chip,
+		UnifiedMemoryGB:        memoryGB,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:               modelKey,
+			ModelID:                row.ModelID,
+			ArtifactSHA256:         row.ModelSHA256,
+			CandidateCatalogSHA256: catalog.SHA256,
+			CandidateRowIdentity:   rowIdentity,
+		}},
+	}
 }

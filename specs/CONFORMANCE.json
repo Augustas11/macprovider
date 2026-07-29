@@ -885,7 +885,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2",
+      "version": "v0.2.1",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -901,16 +901,17 @@
         "SPEC-030",
         "SPEC-031"
       ],
-      "implementation_status": "pending-reconciliation",
+      "implementation_status": "partial",
       "production_status": "pending-verification",
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-HG7 route exclusion and the FR-HG6 stale-evidence 30s sweep are implemented under coordinator unit tests for strict hello-gate deployments. Gate-off production posture remains observe-only. FR-HG5 below-two alert, FR-CFG2 hot reload / atomic existing-session re-gating, proactive evidence refresh, and real proof-of-weights remain pending."
       }
     },
     {
@@ -1626,6 +1627,62 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests; SPEC-023 remains pending until a signed physical installer/autotune journey proves the operator-visible transcript in production."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R001",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionCeilingExcluded",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) applyAdmissionCeilingRouteExclusion",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) admissionCeilingRouteVerdict"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestAdmissionCeilingExclusionRemovesProviderFromRouting",
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestSetAdmissionCeilingExcludedReportsTransitionsOnly",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatModelChangeRecordsAdmissionCeilingDrift",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatUncataloguedModelIsRouteExcluded",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestPreviousCatalogTransitionRequiresActiveRowEquivalence",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatInCeilingModelClearsRouteExclusion",
+        "phase4-coordinator/internal/ws/warmup_internal_test.go:TestWarmupGateSkipsAdmissionCeilingExcludedProvider"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. Gate-off production posture remains observe-only, and Pearl deploy evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R002",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionEvidenceStale",
+        "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) runAdmissionEvidenceRevalidationSweep",
+        "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) admissionEvidenceStaleVerdict",
+        "phase4-coordinator/internal/ws/trust_revalidation.go:func verifiedEvidenceMatchesAdmittedTuple"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestAdmissionEvidenceStaleRemovesProviderFromRouting",
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestSetAdmissionEvidenceStaleReportsTransitionsOnly",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRouteExcludesExpiredEvidence",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRejectsTupleMismatch",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRejectsMissingAdmittedTuple",
+        "phase4-coordinator/internal/ws/warmup_internal_test.go:TestWarmupGateSkipsStaleAdmissionEvidenceProvider"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. Proactive refresh, hot-reload re-gating, and production deploy evidence remain pending."
       }
     },
     {

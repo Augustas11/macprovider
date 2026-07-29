@@ -1,7 +1,7 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.2-draft
-**Date:** 2026-07-11
+**Status:** v0.2.1-draft
+**Date:** 2026-07-29
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
 
@@ -453,8 +453,8 @@ sessions keep serving during an unbounded scan does not satisfy this. Conformanc
 | FR-HG3 capacity ceiling (resolution) | Implemented | `ResolveMaxAdmission` / `benchmarkPassesGate` resolve the ceiling correctly at hello. (Enforcement on the *served* model is FR-HG7.) |
 | FR-HG4 close-reason taxonomy + classification | **Tightens** | The five reasons ship; the evidence-absent / no-passing-benchmark (affirmative-shortfall, catalog-staleness, **or** semantic-misbinding) / policy-unverifiable classification is new (esp. `evidence_invalid` and `uncatalogued` as NOT probation-eligible). |
 | FR-HG5 redundancy alert; no auto-probation | **Gap (alert)** | The below-two operator redundancy alert is new/unimplemented. "No automatic probationary admission in v0.1" matches the shipped hard-close behavior (deliberate scope decision, not a Gap); auto-probation is deferred with its full constraint set. |
-| FR-HG6 bounded mid-session expiry recheck | **Gap** | Gate runs only at hello — no bounded session-time freshness recheck; a continuously-connected provider can serve indefinitely on expired evidence. On recheck v0.1 moves the provider non-routable (no auto-probation). |
-| **FR-HG7 ceiling enforced on model transition** | **Gap (CRITICAL-class)** | The ceiling has **no routing consumer**; a heartbeat model-swap to a larger **or uncatalogued** tier bypasses the gate entirely. Required to make the hello-gate meaningful. |
+| FR-HG6 bounded mid-session expiry recheck | **Partial** | When `require_autotune_hello_gate:true`, the 30s trust-revalidation sweep now re-checks live autotune evidence TTL for admitted sessions with observed caps and route-excludes stale / tuple-mismatched / invalid rechecks. Proactive refresh and hot-reload re-gating remain gaps. |
+| **FR-HG7 ceiling enforced on model transition** | Implemented | When `require_autotune_hello_gate:true`, `Provider.AdmissionCeilingExcluded` is set on heartbeat from the signed admission catalog verdict and is consumed by `RoutingEligible` / `ServingCapable`, including over-ceiling and uncatalogued heartbeat targets. Gate-off deployments remain observe-only. |
 | FR-PW1 OPoI non-binding labeling | **Tightens** | Go source already says liveness-only; this makes it a normative repo-wide prohibition on weight-claims. Reconciled in this change: the `server.go` OPoI comment and the `proof-of-weights-implementation.md` runbook's "anti-downgrade" claims (both docs/comment-only). |
 | FR-PW2 OPoI flag observability-only | Implemented | Zero routing/tiering/degrade/payout readers **and** already exposed as `model_class_opoi_pass` on the operator-auth `/poolz` surface. Not dead state. |
 | FR-PW3 real proof-of-weights definition | **Gap (forward)** | No weight-binding test exists; deferred. |
@@ -463,19 +463,17 @@ sessions keep serving during an unbounded scan does not satisfy this. Conformanc
 | FR-CFG1 config surface | Implemented | `ProofOfWeightsConfig` + validation. |
 | FR-CFG2 reload without restart + existing-session re-eval | **Gap** | `proof_of_weights.*` startup-only; SIGHUP reloads Tier-2/billing/settlement/USD/routing-classes but not this block, and there is no re-evaluation of existing sessions on gate enable/tighten. |
 
-**Re-enable / hardening bar.** The priority is **FR-HG7** — a **CRITICAL-severity**
-bypass live in the shipped code: the ceiling is not wired into routing, so a
-heartbeat model-swap (to a larger **or uncatalogued** model) defeats the whole
-gate whenever it is enabled, meaning the gate as shipped does not
-actually protect buyers from a capability-mismatched *served* model. Then the
-redundancy levers — **FR-HG5** below-two alert + **FR-CFG2** (no-restart tuning *and*
-existing-session re-eval, so an operator can safely relax the gate in an emergency
-without a restart and re-gate stale sessions when tightening it) — and **FR-HG6**
-(bounded expiry recheck). v0.1 deliberately ships **no** automatic probationary
-admission; that mechanism is deferred behind the full constraint set in FR-HG5. OPoI /
-telemetry-drift remain observability-only until a weight-binding test (FR-PW3) exists;
-they MUST NOT be wired to routing/sanction before then, and SPEC-008's authoritative
-hash routing exclusion MUST NOT be weakened (FR-TD1).
+**Re-enable / hardening bar.** FR-HG7's model-transition bypass is closed in
+v0.2.1. Remaining hardening priorities are the redundancy levers — **FR-HG5**
+below-two alert + **FR-CFG2** (no-restart tuning *and* existing-session re-eval,
+so an operator can safely relax the gate in an emergency without a restart and
+re-gate stale sessions when tightening it) — and the remaining **FR-HG6** pieces
+(proactive refresh and hot-reload interaction). v0.1 deliberately ships **no**
+automatic probationary admission; that mechanism is deferred behind the full
+constraint set in FR-HG5. OPoI / telemetry-drift remain observability-only until
+a weight-binding test (FR-PW3) exists; they MUST NOT be wired to routing/sanction
+before then, and SPEC-008's authoritative hash routing exclusion MUST NOT be
+weakened (FR-TD1).
 
 ## Acceptance criteria
 
@@ -519,14 +517,22 @@ Testable against the current build:
   `hash_mismatch`/`hash_invalid` is excluded from routing (SPEC-008 §5.5–5.6), even
   with `require_hash_verified: false` — SPEC-032 does not weaken this.
 
-Forward criteria (expected to FAIL against the current build; §14 Gap rows):
+Implemented hardening criteria:
 
-- **AC-F1 (FR-HG7, CRITICAL).** A provider that passes hello on a small model and then
+- **AC-F1 (FR-HG7, CRITICAL).** With `require_autotune_hello_gate:true`, a provider that passes hello on a small model and then
   heartbeat-switches to a model whose `MinRAMGB` exceeds its verified ceiling is **not**
   routing-eligible for the larger model.
-- **AC-F2 (FR-HG7, CRITICAL — uncatalogued).** A provider that heartbeat-switches to an
+- **AC-F2 (FR-HG7, CRITICAL — uncatalogued).** With `require_autotune_hello_gate:true`, a provider that heartbeat-switches to an
   **uncatalogued** model is **not** routing-eligible for that model (an uncatalogued
   target does not pass by default for lack of a `MinRAMGB` to compare).
+- **AC-F4 (FR-HG6).** With `require_autotune_hello_gate:true`, an admitted provider whose evidence crosses the TTL mid-session is
+  re-gated within the defined bound (the 30s trust-revalidation sweep) and moved
+  non-routable (v0.1), and does not serve past that bound on expired evidence; it
+  is not hard-killed mid-request. This criterion now passes for stale /
+  tuple-mismatched evidence revalidation; proactive refresh and config hot-reload
+  interactions remain forward work under FR-CFG2.
+
+Remaining forward criteria (expected to FAIL against the current build; §14 Gap rows):
 - **AC-F3 (FR-HG5).** A gate action that leaves a model's admitted routing-eligible
   count below two emits a distinct operator redundancy alert — covering **both** an
   eligibility loss that drops below two **and** rejecting a second provider while the
@@ -536,10 +542,6 @@ Forward criteria (expected to FAIL against the current build; §14 Gap rows):
   cooldown-bounded** (a provider spamming random `model_id` claims cannot flood it); and
   no rejection of any class — including `autotune_gate_unavailable` — is auto-admitted
   (v0.1 has no probationary path).
-- **AC-F4 (FR-HG6).** An admitted provider whose evidence crosses the TTL mid-session is
-  re-gated within the defined bound (`autotune_evidence_recheck_interval_s` / heartbeat
-  interval) and moved non-routable (v0.1), and does not serve past that bound on expired
-  evidence; it is not hard-killed mid-request.
 - **AC-F5 (FR-CFG2).** `require_autotune_hello_gate`, **`autotune_evidence_ttl_days`**,
   and the `telemetry_drift.*` keys can be changed without a coordinator restart. The TTL
   direction is correct: **raising** `autotune_evidence_ttl_days` admits older-but-verified
@@ -579,8 +581,10 @@ behind the absent `quarantine_missing_benchmark`). Full snapshot + drift notes:
   canary disabled, the OPoI pass-rate path is inactive (TPS/hash drift may evaluate at
   heartbeat but is alert-only regardless — FR-TD1).
 
-The highest-value follow-up is **FR-HG7** (wire the ceiling into routing —
-closes the shipped-code capability-gate bypass before any re-enable). The single-provider fragility's remedy is chiefly
+FR-HG7's ceiling predicate now exists but is dormant in the 2026-07-27
+gate-off production posture; re-enabling the hello gate makes it load-bearing.
+The remaining highest-value follow-ups are FR-HG5, FR-CFG2, and the rest of
+FR-HG6. The single-provider fragility's remedy is chiefly
 **operational** (acquire and verify a second provider for the tier), surfaced by the
 FR-HG5 below-two alert and made safely tunable by FR-CFG2; it is **not** solved by
 auto-admitting an unverified provider (the recorded `air5` was never-verified and a
@@ -603,6 +607,18 @@ smaller box), which is why v0.1 ships no automatic probation.
   design is the other candidate substrate for FR-PW3.
 
 ## Changelog
+
+- **v0.2.1-draft (2026-07-29, B2)** — Ceiling enforcement implementation
+  reconciliation. When `require_autotune_hello_gate:true`, heartbeat model
+  transitions now route-exclude providers whose current served model is
+  uncatalogued or whose catalog `MinRAMGB` exceeds the admitted verified
+  ceiling. Gate-off deployments remain observe-only. The flag is consumed by both buyer routing
+  eligibility and buyer-serving capacity so a sole provider cannot be kept
+  routable by the canary floor. The 30s trust-revalidation sweep also checks
+  autotune evidence TTL and tuple binding for capped sessions and route-excludes
+  stale or mismatched evidence without hard-killing mid-request. Remaining gaps:
+  FR-HG5 below-two operator alert, FR-CFG2 hot reload / atomic re-gating, and
+  future real proof-of-weights.
 
 - **v0.2-draft (2026-07-27, epic #770 / #769)** — Prod-posture reconciliation.
   Corrected the "true in the Pearl production overlay" claims (five sites: §1

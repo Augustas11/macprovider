@@ -129,10 +129,12 @@ model exceeds the observed cap, the coordinator MUST emit a bounded redacted
 operator-visible event with kind `model_ceiling_drift`. These diagnostics MUST
 be coalesced or rate-limited per provider and event kind so a compromised
 provider cannot create an unbounded durable-event or warning-log stream by
-toggling model IDs or reconnecting. These diagnostics MUST NOT evict, exclude, degrade, or
-otherwise alter buyer routing by themselves; they are observe-only operator
-signals. They MUST NOT expose raw protocol payloads, tokens, Authorization
-values, local paths, or buyer-visible diagnostics.
+toggling model IDs or reconnecting. These diagnostics MUST NOT evict, exclude,
+degrade, or otherwise alter buyer routing by themselves; they are observe-only
+operator signals. A separate strict-gate route predicate specified by SPEC-032
+MAY act on the same heartbeat; that predicate is not authority granted by this
+diagnostic event. They MUST NOT expose raw protocol payloads, tokens,
+Authorization values, local paths, or buyer-visible diagnostics.
 
 ## 4. Rollout
 

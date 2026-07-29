@@ -1235,6 +1235,9 @@ func TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled(t *testing.T) {
 	if provider.MaxAdmittedModelKey != "small" || provider.MaxAdmittedMinRAMGB != 4 {
 		t.Fatalf("observed admission cap = key %q ram %d, want small/4", provider.MaxAdmittedModelKey, provider.MaxAdmittedMinRAMGB)
 	}
+	if provider.AdmissionCeilingExcluded || !provider.RoutingEligible() {
+		t.Fatalf("gate-off admission cap observation must remain routing-observe-only: %+v", provider)
+	}
 }
 
 func TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup(t *testing.T) {
@@ -1285,6 +1288,9 @@ func TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup(t *testing.T) {
 	}
 	if provider.MaxAdmittedModelKey != "small" || provider.MaxAdmittedMinRAMGB != 4 {
 		t.Fatalf("observed admission cap = key %q ram %d, want small/4", provider.MaxAdmittedModelKey, provider.MaxAdmittedMinRAMGB)
+	}
+	if provider.AdmissionCeilingExcluded || !provider.RoutingEligible() {
+		t.Fatalf("gate-off v2 admission cap observation must remain routing-observe-only: %+v", provider)
 	}
 	if got := store.callCount(); got != 1 {
 		t.Fatalf("evidence lookups = %d, want 1", got)
