@@ -1,7 +1,7 @@
 # macprovider research roadmap
 
 **Living doc — state drifts; verify against `origin/main` before acting.**
-Last synthesized: 2026-07-29 (SPEC-038 batching SPEC merged #799 — real IMPL upstream-gated, recommend park behind PR #263 watch;
+Last synthesized: 2026-07-29 (SPEC-038 batching SPEC merged #799 — scaffolding IMPL in flight, land flag-off; throughput engine gated on upstream PR #263;
 SPEC-037 KV-survival shipped dormant #771; SPEC-036 compute-integrity SPEC merged
 #390, IMPL pending). Ranks research/e2e threads by expected impact on buyer UX
 (time-to-first-token, tokens/sec, reliability) and provider UX (model selection,
@@ -21,34 +21,29 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 
 ## Forward ranking (what to do next)
 
-### Decision gate — SPEC-038 continuous batching (NOT "unblocked, do now")
-1. **SPEC-038 batching is upstream-gated — the real IMPL needs a decision, not
-   just a session.** The SPEC is merged (#799), but `mlx-swift-lm` 3.31.4 ships no
-   released batch API (single-request iterators only; the shared-forward engine is
-   unmerged upstream PR #263). So the IMPL splits:
-   - **Scaffolding (buildable now, zero throughput):** the feature-gated scheduler
-     surface, unsupported-mode guards, telemetry/backpressure, and benchmark
-     harness — all keeping the runtime **serial** (identical to today) until a
-     reviewed upstream pin exists. Compiled+tested+safe, but no earnings gain yet.
-     Handoff `audits/_prompts/BUILD_SPEC_232_CONTINUOUS_BATCHING_DRIVE_TO_FULL_PROMPT.md`
-     (Phase C) delivers exactly this.
-   - **Real batching = pick a path:** **(A)** wait for / drive upstream PR #263 to
-     land, then pin + flip the flag; or **(B)** commit to the memo's fallback —
-     a macprovider-owned native Swift batch scheduler now (bigger, riskier,
-     diverges from upstream). This is the pacing decision, and it's the user's.
-   - **Recommended default: do NOT build speculative serial-only scaffolding and
-     wait.** Batching is a provider-earnings optimization, not a
-     correctness/reliability blocker, and there's no confirmed demand pressure
-     forcing it now — and #263's API shape can still change (incomplete for
-     quantized KV / spec-decode / some cache subclasses), so scaffolding built
-     ahead of it risks being the wrong scaffolding. Instead **park 232 behind an
-     upstream watch on PR #263** (same pattern as the Cluster-F PR #371 watch in
-     `beta/throughput-engineering/UPSTREAM_WATCH.json`), spend cycles on ship-now
-     threads (037 enable gate, 036 IMPL, oMLX #687), and revisit when upstream
-     moves or provider-earnings becomes the priority. Only pursue Approach A as an
-     active **upstream contribution** to #263 (the real, non-passive version) or
-     fallback B if you decide the throughput win can't wait.
-   - **When upstream lands (path A):** pin the reviewed tag/revision (FR-CB10
+### Tier A — SPEC-038 continuous batching: scaffolding IMPL in progress
+1. **Scaffolding IMPL is in flight — land it flag-off; it is NOT wasted.** The SPEC
+   is merged (#799). `mlx-swift-lm` 3.31.4 ships no released batch API (single-request
+   iterators only; the shared-forward *engine* is unmerged upstream PR #263), so the
+   throughput engine can't be wired yet — but the **scaffolding is the integration
+   surface every path needs** and is worth landing now:
+   - **Deliverable now (buildable, safe, mergeable):** the feature-gated scheduler
+     surface, unsupported-mode guards, telemetry/backpressure, and benchmark harness
+     — flag **OFF**, serial path **identical to today** (zero behavior change),
+     compiled+tested+audited. Merge it flag-off. Handoff
+     `audits/_prompts/BUILD_SPEC_232_CONTINUOUS_BATCHING_DRIVE_TO_FULL_PROMPT.md`
+     (Phase C). This is Path-A groundwork, not throwaway.
+   - **Only the engine flip is gated — a later, separate step,** not something the
+     current build must solve. Register **PR #263** in
+     `beta/throughput-engineering/UPSTREAM_WATCH.json` (same pattern as the
+     Cluster-F PR #371 watch) so the flip is tracked.
+   - **Turning batching ON = pick a path when the engine exists:** **(A)** upstream
+     #263 lands (or macprovider drives it) → pin + flip; or **(B)** the memo's
+     fallback — a native Swift batch scheduler (bigger, diverges from upstream) if
+     the earnings win can't wait. #263's API is still incomplete (quantized KV /
+     spec-decode / some cache subclasses), so the scaffolding stays engine-agnostic
+     at its seam.
+   - **When the engine lands (path A):** pin the reviewed tag/revision (FR-CB10
      version-pin) → wire behind the flag → **replicate MSB-01..05 on real catalog
      models** (prove the multiplier holds on macprovider hardware; every vendor
      number is unreplicated until measured) → run the Entry-199 real-hardware
@@ -67,9 +62,9 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 
 ### Delivered SPECs (merged; IMPL/verification state noted)
 - **SPEC-038 — continuous batching** — **SPEC merged** (PR #799, `1d78778a`,
-  2026-07-29; 0 C/H/M). Real IMPL is **upstream-gated** (no released
-  mlx-swift-lm batch API) — see the decision gate above; only serial scaffolding
-  is buildable now.
+  2026-07-29; 0 C/H/M). **Scaffolding IMPL in flight** (Tier A item 1); land it
+  flag-off as Path-A groundwork. Only the throughput *engine* is upstream-gated (no
+  released mlx-swift-lm batch API; PR #263).
 - **SPEC-037 — KV survival** — SPEC #702 + IMPL #771 **merged, dormant**. Next:
   the Entry-199 real-hardware enable gate (item 2 above).
 - **SPEC-036 — compute-integrity receipt companion** (settlement drift gate, from
