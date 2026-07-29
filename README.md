@@ -19,7 +19,7 @@
 
 # MacProvider
 
-**Make any Apple Silicon Mac a remote-addressable MLX inference endpoint.** Built on `mlx-lm`. OpenAI-compatible API — streaming, multi-turn tool calling, JSON-schema structured output, sticky conversations with KV-cache reuse. Every response carries a signed receipt binding (prompt, output, provider, and — with v0.3 receipts — the verified model hash) verifiable with the open-source [macprovider-verify](phase7-verify/README.md) CLI. Verifiable inference, without a datacenter.
+**Make any Apple Silicon Mac a remote-addressable MLX inference endpoint.** Built on `mlx-lm`. OpenAI-compatible API — streaming, multi-turn tool calling, JSON-schema structured output, sticky conversations with KV-cache reuse. Every response carries a signed receipt binding the prompt, output, provider key, catalog-resolved model hash, and timestamp; the open-source [macprovider-verify](phase7-verify/README.md) CLI verifies that a provider signing key signed that tuple. The receipt does not prove model honesty, hardware attestation, or detection of a provider falsifying its own model-hash measurement.
 
 A lot of the most interesting LLM applications — long-running personal agents, privacy-sensitive tooling, dev workflows that hammer a model thousands of times a day — don't really belong in a cloud datacenter. But the moment you want your Mac's MLX endpoint to be reachable from somewhere that isn't localhost, you fall off a cliff: auth, tunneling, multi-tenant routing, billing, observability, none of it exists out of the box. MacProvider is a thin layer over `mlx-lm` that fills that gap.
 

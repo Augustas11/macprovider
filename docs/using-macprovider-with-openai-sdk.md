@@ -199,7 +199,7 @@ served_by = resp.response.headers.get("X-MacProvider-Provider")
 
 ## Signed inference receipts
 
-Every response carries an ed25519-signed receipt in the `X-MacProvider-Receipt` response header. The receipt binds the canonical prompt hash, output hash, provider public key, model hash, and timestamp per [SPEC-015 v0.3](../specs/SPEC-015-receipts.md) — the provider signs the tuple, you verify it offline, no gateway trust required. This is what makes MacProvider verifiable inference.
+Every response carries an ed25519-signed receipt in the `X-MacProvider-Receipt` response header. The receipt binds the canonical prompt hash, output hash, provider public key, catalog-resolved model hash, and timestamp per [SPEC-015 v0.3](../specs/SPEC-015-receipts.md). You can verify offline that a provider signing key signed that tuple, without trusting the gateway for receipt verification. The receipt does not prove model honesty, hardware attestation, or detection of a provider falsifying its own model-hash measurement.
 
 Capture the receipt at request time:
 
