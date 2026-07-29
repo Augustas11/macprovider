@@ -944,7 +944,7 @@
     {
       "spec_id": "SPEC-034",
       "title": "Referral admission, provider invites, and advocacy rewards",
-      "version": "v0.4.5",
+      "version": "v0.4.6",
       "path": "specs/SPEC-034-referral-gated-prebeta.md",
       "status": "normative",
       "owner": "@Augustas11",

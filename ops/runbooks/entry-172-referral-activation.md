@@ -38,8 +38,11 @@ Fail closed if any checklist item below is unmet.
   - `referrals.current_key_id = "<KEY_ID>"`
   - `referrals.hmac_keys.<KEY_ID>` sourced from `$MAL_REFERRAL_SECRET`
   - optional `referrals.x_api_bearer_token` sourced from `$X_API_BEARER_TOKEN`
-- [ ] Checked-in defaults remain false in `phase4-coordinator/dist/coordinator.yaml`:
-  - `referrals.require_for_registration: false`
+- [ ] Checked-in config keeps public exposure disabled while B6 keeps fresh
+  provider registration invite-gated:
+  - `referrals.require_for_registration: true` whenever
+    `auth.allow_tokenless_provisional_bootstrap` or
+    `onboarding.app_track_register_enabled` is enabled
   - `referrals.enable_public_validation: false`
   - `referrals.enable_join_links: false`
   - `referrals.enable_social_invite_bonus: false`
@@ -165,11 +168,11 @@ ssh pearl 'sudo grep -A20 "^referrals:" /etc/macprovider/coordinator.yaml'
 
 Do not edit checked-in `phase4-coordinator/dist/coordinator.yaml`. Edit only Pearl overlay/live config.
 
-Current coordinator config validation requires `enable_join_links=true` to have both `require_for_registration=true` and `enable_public_validation=true`. Therefore:
+Current coordinator config validation requires `enable_join_links=true` to have both `require_for_registration=true` and `enable_public_validation=true`. B6 also requires `require_for_registration=true` whenever `auth.allow_tokenless_provisional_bootstrap` or `onboarding.app_track_register_enabled` is enabled. Therefore:
 
-- Default posture: keep `require_for_registration=false` unless the operator explicitly chooses Entry 172 registration enforcement.
-- If the operator does not choose registration enforcement, stop here; `enable_join_links=true` is not valid for the current coordinator.
-- If the operator explicitly chooses Entry 172 registration enforcement, set the live Pearl overlay as one reviewed config transaction:
+- Default posture: keep `require_for_registration=true` while any fresh provider-token mint surface remains enabled, and keep public exposure flags false.
+- If the operator does not choose public Entry 172 activation, stop here; `enable_join_links=true` is not valid without public validation.
+- If the operator explicitly chooses Entry 172 public activation, set the live Pearl overlay as one reviewed config transaction:
 
 ```yaml
 referrals:
@@ -277,14 +280,13 @@ Restart or reload through the same coordinator procedure and record the config b
 
 PASS: the operator may keep the reversible private-prebeta flags live under Entry 172 until the earliest expiry condition.
 
-FAIL or expiry: immediately roll back the four flags to prior values:
+FAIL or expiry: immediately roll back public exposure flags to prior values:
 
-- `require_for_registration`
 - `enable_public_validation`
 - `enable_join_links`
 - `enable_social_invite_bonus`
 
-`require_for_registration=true` is appropriate only when the Entry 172 controlled sequence is being executed and the operator explicitly chooses registration enforcement. Otherwise leave it false. This runbook does not create a broader registration policy.
+`require_for_registration` is not an Entry 172 public-exposure flag after B6. It remains governed by the B6 fresh-registration admission invariant: keep it true while any fresh provider-token mint surface remains enabled. Setting it false is valid only in the same reviewed config transaction that disables all fresh mint surfaces, or under a later reviewed normative exception.
 
 ## 4. Immediate Rollback
 
@@ -292,7 +294,6 @@ Restore exactly the recorded prior values:
 
 ```yaml
 referrals:
-  require_for_registration: <PRIOR_REQUIRE_FOR_REGISTRATION>
   enable_public_validation: <PRIOR_ENABLE_PUBLIC_VALIDATION>
   enable_join_links: <PRIOR_ENABLE_JOIN_LINKS>
   enable_social_invite_bonus: <PRIOR_ENABLE_SOCIAL_INVITE_BONUS>
@@ -302,7 +303,7 @@ If Entry 172 started from checked-in defaults, rollback values are:
 
 ```yaml
 referrals:
-  require_for_registration: false
+  require_for_registration: true  # B6 anti-wash gate; not rolled back by Entry 172
   enable_public_validation: false
   enable_join_links: false
   enable_social_invite_bonus: false
@@ -324,7 +325,7 @@ curl -i -sS \
 
 When `enable_public_validation=false`, confirm the public validate route is no longer mounted by the coordinator. The nginx exact route may still proxy, but the coordinator should return the normal disabled/not-found behavior rather than live validation.
 
-Confirm durable state is preserved per [SPEC-034 §8](../../specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance): committed attribution, tokens, invites, grants, and audit remain intact. Rollback suppresses admission/public validation/join/social exposure; it does not delete committed referral state.
+Confirm durable state is preserved per [SPEC-034 §8](../../specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance): committed attribution, tokens, invites, grants, and audit remain intact. Rollback suppresses public validation/join/social exposure; it does not delete committed referral state or disable the B6 fresh-registration admission gate.
 
 Notify:
 

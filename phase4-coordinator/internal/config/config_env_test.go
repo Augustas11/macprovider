@@ -151,6 +151,7 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	t.Setenv("ONBOARDING_HARDWARE_TRUST_REQUEST_DSN", "postgres://hwtrust_requester@localhost/macprovider")
 	t.Setenv("ONBOARDING_HARDWARE_TRUST_APPROVE_DSN", "postgres://hwtrust_approver@localhost/macprovider")
 	t.Setenv("APPLE_TEAM_ID", "TEAMID1234")
+	t.Setenv("MAL_REFERRAL_HMAC_K1", strings.Repeat("r", 32))
 	t.Setenv("MODEL_HASH_LEGACY_UNTIL", "2099-07-19T00:00:00Z")
 
 	cfg, err := Load(filepath.Join("..", "..", "dist", "coordinator.yaml"))
@@ -177,6 +178,12 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	}
 	if !slices.Contains(cfg.Stats.CORS.PartnerOriginAllowlist, "https://www.malibu.tech") {
 		t.Fatalf("Malibu origin missing from stats CORS allowlist: %#v", cfg.Stats.CORS.PartnerOriginAllowlist)
+	}
+	if !cfg.Referrals.RequireForRegistration {
+		t.Fatal("production config Referrals.RequireForRegistration=false, want true for fresh registration admission")
+	}
+	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.EnableSocialInviteBonus {
+		t.Fatalf("production config unexpectedly enabled public referral exposure: %#v", cfg.Referrals)
 	}
 	if got, want := cfg.Stats.PartnerKeys.ProductionSignoffPath, "/opt/macprovider/spec017-signoff.txt"; got != want {
 		t.Fatalf("ProductionSignoffPath=%q want %q", got, want)

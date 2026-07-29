@@ -1,12 +1,17 @@
 # SPEC-034 — Referral admission, provider invites, and advocacy rewards
 
-Version: v0.4.5
+Version: v0.4.6
 Status: recovery implementation; production activation prohibited except §8 one-time exception
 Owner: coordinator admission and referral services
 Product parent: https://github.com/MalibuAI/malibu/issues/46
 
 Changelog:
 
+- v0.4.6 (2026-07-29): closes the B6 identity re-registration wash by
+  requiring referral admission whenever a coordinator deployment enables a
+  fresh provider-token mint surface (`auth.allow_tokenless_provisional_bootstrap`
+  or `onboarding.app_track_register_enabled`). Public validation, join links,
+  and social rewards remain separately gated.
 - v0.4.5 (2026-07-19): adds stable requirement `SPEC-034-R001` for
   fragment-only public referral authority, capability negotiation, immutable
   download gating, and reversible activation.
@@ -59,6 +64,29 @@ consumes those authorities and owns only referral and advocacy policy.
 `pair_ot`, `claim_url`, and `provider_ownership` are GitHub ownership-binding
 surfaces; they MUST NOT be used as referral codes, admission grants, or invite
 capacity.
+
+### 1.1 Fresh registration admission invariant
+
+When `auth.allow_tokenless_provisional_bootstrap` or
+`onboarding.app_track_register_enabled` is true,
+`referrals.require_for_registration` MUST also be true. A deployment that can
+mint a provider token for a fresh `provider_id` MUST require operator-issued
+referral admission before token disclosure. This is the B6 anti-wash control: a
+sanctioned provider identity cannot be bypassed by generating a fresh keypair
+and self-registering a new `provider_id` through an open mint path.
+
+The coordinator's WS tokenless bootstrap, credential-bootstrap v2, admission
+pair-OT mint, and app-track registration paths MUST redeem referral admission in
+the same durable transaction as the fresh provider-token mint whenever this
+policy is enabled. Existing-provider recovery and reissue flows may bypass new
+referral capacity only when they preserve the same `provider_id` and prove
+current credential custody or the exact retained bootstrap receipt key defined
+by SPEC-003; they MUST NOT mint an unrelated fresh provider identity.
+
+Open fresh registration is valid only when all fresh provider-token mint
+surfaces are disabled, or under a future reviewed normative exception that
+supersedes this invariant and names its anti-abuse substitute. Enabling public
+validation, join links, or social rewards is not implied by this invariant.
 
 ## 2. Canonical provider journey
 
@@ -295,12 +323,15 @@ attaches to the existing launchd provider.
 
 ## 8. Activation, rollback, and acceptance
 
-Production flags remain disabled until all server and client PRs are merged and
-the exact signed artifacts pass the following physical journey. Configuration
-activation is a separate reviewed change with an explicit rollback. Rollback
-restores the prior admission policy, removes public validation/join and new
-social-reward exposure, and preserves committed attribution, tokens, invites,
-grants, and audit.
+Production public-validation, join-link, and social-reward flags remain disabled
+until all server and client PRs are merged and the exact signed artifacts pass
+the following physical journey. `referrals.require_for_registration` may be
+enabled independently as the §1.1 anti-wash admission gate when fresh
+provider-token mint surfaces are enabled; that setting alone is not public
+referral activation. Public configuration activation is a separate reviewed
+change with an explicit rollback. Rollback restores the prior public exposure
+policy, removes public validation/join and new social-reward exposure, and
+preserves committed attribution, tokens, invites, grants, and audit.
 
 Required automated evidence:
 
@@ -316,9 +347,9 @@ Required automated evidence:
 - X success, transient/terminal failure, author/link mismatch, replay,
   cross-provider reuse after an unverified rejection, rate limiting, audit,
   concurrent recheck, and exactly-once bonus;
-- referral admission, public validation, social reward, and public join flags
-  absent/false by default, safe route/config rollback, and retained durable
-  state;
+- referral admission required whenever fresh provider-token mint surfaces are
+  enabled, public validation, social reward, and public join flags absent/false
+  by default, safe route/config rollback, and retained durable state;
 - older/newer independent Malibu and CLI capability combinations with truthful
   unavailable states; and
 - fresh-bundle exact installer-digest match plus missing, symlinked, and
@@ -343,17 +374,18 @@ existing sponsor buyer-serving; enable public validation and join links; prove
 hostile-origin rejection, fragment-free edge requests, and Copy → Download →
 Paste; enable the social flag only for the sponsor test; then prove one real X
 initial-plus-dwell exactly-once reward. Passing that sequence may keep the
-reversible private-prebeta flags live. Any failure or expiry restores the prior
-values of `require_for_registration`, `enable_public_validation`,
-`enable_join_links`, and `enable_social_invite_bonus` immediately. This
-exception MUST NOT close #613, mark the two-Mac journey conformant, claim
-fresh-provider redemption evidence, or become precedent for another release.
-The first available fresh referred provider MUST complete the missing
-redemption journey. This exception expires at `2026-07-26T23:59:59Z`, on
-terminal success or failure of that first fresh referred-provider journey, or
-on any earlier controlled-sequence failure, whichever occurs first; keeping or
-re-enabling flags afterward requires the complete #613 journey or a new
-reviewed normative decision.
+reversible private-prebeta public flags live. Any failure or expiry restores the
+prior values of `enable_public_validation`, `enable_join_links`, and
+`enable_social_invite_bonus` immediately. The `require_for_registration` flag
+remains governed by §1.1 after the exception expires: if a fresh provider-token
+mint surface is enabled, it stays required. This exception MUST NOT close #613,
+mark the two-Mac journey conformant, claim fresh-provider redemption evidence,
+or become precedent for another release. The first available fresh referred
+provider MUST complete the missing redemption journey. This exception expires
+at `2026-07-26T23:59:59Z`, on terminal success or failure of that first fresh
+referred-provider journey, or on any earlier controlled-sequence failure,
+whichever occurs first; keeping or re-enabling public flags afterward requires
+the complete #613 journey or a new reviewed normative decision.
 
 ## 9. Recovery stack
 

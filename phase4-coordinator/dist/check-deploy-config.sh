@@ -610,6 +610,31 @@ elif aptb.lower() == "false":
 else:
     hard(f"auth.allow_tokenless_provisional_bootstrap must be true or false, got: {aptb!r}")
 
+# --- B6 fresh registration admission gate ---
+# Fresh provider-id creation must pass the operator-issued referral gate when
+# any self-minting registration surface is enabled. Otherwise a sanctioned
+# operator can generate a new keypair/provider_id and wash the old sanction.
+ref_require = g_section(coord, "referrals", "require_for_registration")
+apptrack_register = g_section(coord, "onboarding", "app_track_register_enabled")
+fresh_mint_surfaces = (
+    (aptb is not None and aptb.lower() == "true") or
+    (apptrack_register is not None and apptrack_register.lower() == "true")
+)
+if ref_require is None:
+    if fresh_mint_surfaces:
+        hard("referrals.require_for_registration is ABSENT — fresh provider registration mint surfaces require the operator-issued referral gate.")
+    else:
+        warn("referrals.require_for_registration absent (no fresh provider registration mint surface detected)")
+elif ref_require.lower() == "true":
+    ok("referrals.require_for_registration=true (fresh provider registration invite-gated)")
+elif ref_require.lower() == "false":
+    if fresh_mint_surfaces:
+        hard("referrals.require_for_registration=false while a fresh provider registration mint surface is enabled — this reopens identity re-registration wash.")
+    else:
+        warn("referrals.require_for_registration=false (fresh provider registration mint surfaces disabled)")
+else:
+    hard(f"referrals.require_for_registration must be true or false, got: {ref_require!r}")
+
 # --- bounded model-identity migration bridge ---
 # Absence means a canonical-only fleet and preserves the code's fail-closed
 # default. Presence means the operator is explicitly declaring a mixed fleet;

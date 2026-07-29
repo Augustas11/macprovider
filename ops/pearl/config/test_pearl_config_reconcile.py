@@ -85,8 +85,13 @@ class PearlConfigReconcileTest(unittest.TestCase):
             result.stdout,
         )
         self.assertIn(
-            "referrals.require_for_registration: tracked_only: tracked=False live=<ABSENT> "
-            "[base_product_defaults; class=overlay-owned Pearl production setting]",
+            "referrals.require_for_registration: tracked_only: tracked=True live=<ABSENT> "
+            "[referral_admission_policy; class=overlay-owned Pearl production setting]",
+            result.stdout,
+        )
+        self.assertIn(
+            "referrals.hmac_keys.k1: tracked_only: tracked=env:MAL_REFERRAL_HMAC_K1 "
+            "live=<ABSENT> [pearl_operator_secrets; class=secrets/env-owned setting]",
             result.stdout,
         )
         self.assertIn("Inference:", result.stdout)

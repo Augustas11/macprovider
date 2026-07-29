@@ -43,6 +43,10 @@ func proofOfWeightsOnboardingBaseline(cfg *config.Config) {
 	cfg.Onboarding.AppleTeamID = "TEAM12345"
 	cfg.Onboarding.ASNPrefixes = map[string]string{"198.51.100.0/24": "AS64500"}
 	cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
+	cfg.Referrals.RequireForRegistration = true
+	cfg.Referrals.Campaign = "prebeta_2026"
+	cfg.Referrals.CurrentKeyID = "k1"
+	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
 }
 
 func TestValidateProofOfWeightsHelloGateRejectsTTLBelowVerifierLimit(t *testing.T) {
