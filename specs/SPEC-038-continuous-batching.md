@@ -8,12 +8,24 @@ Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security /
 
 ## 1. Purpose and scope
 
-Raise provider aggregate throughput - and therefore provider earnings - by
-moving the shared-model decode step from today's **parallel single-stream
-decode** (each admitted request runs an independent `TokenIterator` under an
-`AsyncSemaphore` permit) to **continuous batching**: active decode rows share
-one model forward and join or leave the batch dynamically between decode
-steps.
+Build the provider's **multi-slot throughput axis** — the ability to serve
+several concurrent decode streams from one shared model forward — **ahead of
+deliberately-recruited multi-slot (Ultra) demand**, on the SPEC-039 servability
+flywheel. This SPEC moves the shared-model decode step from today's **parallel
+single-stream decode** (each admitted request runs an independent
+`TokenIterator` under an `AsyncSemaphore` permit) to **continuous batching**:
+active decode rows share one model forward and join or leave the batch
+dynamically between decode steps.
+
+The framing is deliberate and matches the RESEARCH_232 addendum decision:
+throughput is the **secondary axis, built ahead of the demand it serves**, the
+way datacenter batching was built before 50-stream demand existed — not behind
+it. Higher provider aggregate throughput (and therefore provider **earnings**)
+is the **downstream payoff once multi-slot demand is manufactured** by the
+deliberate Ultra-provider strategy that SPEC-039 memory-servability enables; it
+is not the standalone justification, and today's mostly-1-slot fleet is not an
+argument against building the capability (gating demand-enabling infrastructure
+on current demand is the addendum's rejected melting-ice-cream circularity).
 
 v0.2 replaces v0.1's falsified activation theory. v0.1 depended on a reviewed
 upstream `mlx-swift-lm` batch API and a dense contiguous KV layout. The
@@ -113,13 +125,22 @@ Out of scope for v0.2:
 - **SPEC-037** - KV survival across restarts. This SPEC registers as a
   consumer of that domain: batched state must either preserve SPEC-037's v1
   opaque-record round-trip at scheduler boundaries or remain flag-isolated
-  from persistence so SPEC-037's serial path is unaffected (FR-CB16).
-- **SPEC-039** - locally owned paged KV / paged-attention engine. This is a
-  forward reference to the companion spec. Until `SPEC-039` is present in the
-  structured conformance manifest, this dependency is recorded in prose only
-  to avoid a broken `CONFORMANCE.json` cross-reference. When `SPEC-039` lands,
-  it owns the paged engine authority domain and `SPEC-038` becomes its
-  scheduler/serving consumer.
+  from persistence so SPEC-037's serial path is unaffected (FR-CB16). Any
+  persisted batched or paged layout that breaks the SPEC-037 v1 round-trip
+  MUST require an explicit **payload codec-ID plus ABI-epoch bump and MUST NOT
+  be a silent format change** (SPEC-037 §8), cross-referencing SPEC-039
+  FR-PKV9's exposed layout metadata.
+- **SPEC-039** - locally owned paged KV / paged-attention engine, the
+  companion spec landing alongside this v0.2. It owns the paged engine
+  authority domain (`paged-kv-attention`) and `SPEC-038` is its
+  scheduler/serving consumer. The scheduler consumes SPEC-039 through two
+  named surfaces: the **capability descriptor** (SPEC-039 FR-PKV11) that this
+  spec's activation predicate matches against (FR-CB8, FR-CB10), and the
+  **cache-extraction / same-conversation retention primitive** (SPEC-039
+  FR-PKV10) that this spec's per-request block-table lifecycle uses to keep
+  SPEC-024 cross-turn reuse eligible (FR-CB4). The engine owns physical-block
+  allocation; the scheduler holds an engine-issued block-table handle and
+  drives request allocation/bind/extend/release through it (SPEC-039 FR-PKV2).
 
 SPEC-038 owns the authority domain `continuous-batching-serving`: the batch
 admission/scheduling contract, shared-forward per-request isolation
@@ -143,13 +164,16 @@ enable gates.
 | Per-request block table | The scheduler-owned mapping from one request's logical token positions to `SPEC-039` KV blocks. It is request-private and leaves the batch only through explicit scheduler lifecycle transitions. |
 | Served snapshot | The `(model artifact, model hash, weights generation)` bound to a request when it is accepted, immutable across a later warm swap (FR-CB13). |
 | Entry 110 capacity | The persisted `max_concurrency_override` from the SPEC-023 autotune pipeline; the exact active-row cap (FR-CB11). |
-| Local batching capability | The runtime-proved in-repo capability composed of the scheduler plus the `SPEC-039` paged engine, including support-matrix evidence for the requested model/cache/KV tuple. It replaces v0.1's upstream revision gate. |
+| Local batching capability | The runtime-proved in-repo capability composed of the scheduler plus the `SPEC-039` paged engine, where support for a requested model/cache/KV tuple is determined by membership in the SPEC-039 capability descriptor plus acceptance coverage. It replaces v0.1's upstream revision gate. |
+| Capability descriptor | The machine-readable advertisement the `SPEC-039` engine exposes (block size, model families, allowed cache classes, KV dtype, MoE-dispatch support); the scheduler's activation predicate is `requested tuple ∈ descriptor` (SPEC-039 FR-PKV11, FR-CB8/FR-CB10). |
+| Cache-extraction / retention primitive | The `SPEC-039` operation (FR-PKV10) that materializes one sequence's block table into a standalone contiguous `KVCache`, or retains-and-reattaches its own blocks across turns of the same conversation, preserving SPEC-024 token-granular LCP/trim; the scheduler uses it for cross-turn cache continuity (FR-CB4). |
+| Block-table handle | The engine-issued reference the scheduler holds for one request's block table; the engine allocates the physical blocks, the scheduler requests allocation/binds/extends/releases through the handle (SPEC-039 FR-PKV2, FR-CB4). |
 | Enable gate | The FR-CB15 real-hardware exercise required before the flag may serve real traffic; distinct from a green CI/audit pass. |
 | MSB-01..05 | The five throughput-replication scenarios of RESEARCH_232 Part 3, measured on real catalog models (FR-CB14). |
 
 ## 4. Normative requirements
 
-Requirement IDs `SPEC-038-R001`..`R016` are the conformance units; the
+Requirement IDs `SPEC-038-R001`..`R017` are the conformance units; the
 `FR-CB*` labels below are the human-readable anchors. MUST / MUST NOT / SHOULD
 are RFC-2119 normative.
 
@@ -163,6 +187,16 @@ unbounded prompt payloads or relay state accumulate. The queue limit MUST be a
 bounded configured value (benchmark default `2 x slots_total`, not a permanent
 policy). Relay and local HTTP admission MUST share one admission policy and
 one capacity accounting; they MUST NOT maintain independent unbounded queues.
+
+Admission MUST be gated by **paged-block-pool availability, not slot count
+alone.** A request MUST NOT be admitted to prefill/decode unless the SPEC-039
+engine can reserve the blocks its worst-case footprint requires within the
+shared pool; when the pool cannot fund a new row, admission applies
+back-pressure (holds the request in the bounded queue or rejects at the bound)
+rather than admitting a row that would later fail to extend mid-decode. This
+reconciles the Entry-110 active-row cap (FR-CB11) with real pool state: the cap
+is an upper bound on rows, and pool availability is the admission-time gate
+underneath it (FR-CB17).
 
 ### FR-CB2 - separate prompt and decode batches, decode-first (SPEC-038-R002)
 
@@ -189,16 +223,21 @@ telemetry (FR-CB14).
 ### FR-CB4 - scheduler ownership of per-request block tables (SPEC-038-R004)
 
 The scheduler MUST own each request's block table lifecycle over the
-`SPEC-039` paged engine. It MUST allocate, extend, filter, detach, and release
-request block-table mappings only at scheduler-owned lifecycle boundaries:
-admission, prefill completion, decode-step completion, cancellation, terminal
-stop, request-local failure, batch-level failure, cache commit, and warm-swap
-drain. The scheduler MUST NOT expose one request's block table, cache handle,
-or logical token positions to another request. The scheduler MUST NOT redefine
-`SPEC-039` storage layout, block size, paged-attention kernel semantics, or
-allocator internals; it consumes only the capability interface that `SPEC-039`
-declares. Per-request extraction back into standalone conversation-cache state
-MUST preserve exact SPEC-024 LCP/trim semantics.
+`SPEC-039` paged engine through the **engine-issued block-table handle**
+(SPEC-039 FR-PKV2). The verb **"allocate" is reserved for the engine**: the
+scheduler MUST **request allocation of, bind, extend, release-completed-rows,
+detach, and release** request block-table mappings only at scheduler-owned
+lifecycle boundaries: admission, prefill completion, decode-step completion,
+cancellation, terminal stop, request-local failure, batch-level failure, cache
+commit, and warm-swap drain. The scheduler MUST NOT expose one request's block
+table, cache handle, or logical token positions to another request. The
+scheduler MUST NOT redefine `SPEC-039` storage layout, block size,
+paged-attention kernel semantics, or allocator internals; it consumes only the
+capability the engine advertises in its **capability descriptor** (SPEC-039
+FR-PKV11). Per-request extraction back into standalone conversation-cache state
+MUST use the SPEC-039 **cache-extraction / same-conversation retention
+primitive** (SPEC-039 FR-PKV10) and MUST preserve exact SPEC-024 LCP/trim
+semantics (including a mid-block LCP boundary).
 
 ### FR-CB5 - dynamic insertion and removal between decode steps (SPEC-038-R005)
 
@@ -211,6 +250,15 @@ request-local failure MUST NOT terminate healthy rows when isolation is
 possible; a model-forward failure affecting the whole batch MAY fail every
 participating request, and that batch-level failure path MUST perform
 deterministic cleanup (FR-CB7).
+
+A **mid-decode block-extension failure** — an active decode row cannot extend
+its block table because the shared paged pool is exhausted — is a
+**request-local, deterministic failure of that row only** (FR-CB17): it fails
+that row through the request-local terminal path, releases the row's blocks,
+and leaves every other row's stream, sampler, stop state, and block table
+intact. It is **not** a whole-batch failure and **not** true preemption
+(evict-and-recompute); v0.2 does not preempt (FR-CB16, FR-CB17). Admission
+back-pressure (FR-CB1) is the primary defense that makes this path rare.
 
 ### FR-CB6 - per-request isolation under the shared forward (SPEC-038-R006)
 
@@ -247,12 +295,16 @@ deterministic.
 
 ### FR-CB8 - explicit rejection of unsupported cache / kv_bits modes (SPEC-038-R008)
 
-The scheduler MUST declare its supported cache classes, paged-engine
-capabilities, model families, and `kv_bits` modes. For an unsupported cache
-class, unsupported `SPEC-039` capability, unsupported MoE/expert-dispatch
-surface, or unsupported quantized-KV (`kv_bits`) configuration, the runtime
-MUST either route the request to the serial path when policy permits, or fail
-preflight with an observable, reason-coded error. It MUST NOT silently disable
+The scheduler's support determination MUST be `requested tuple ∈
+engine-advertised descriptor`: it reads the **SPEC-039 capability descriptor**
+(FR-PKV11 — block size, supported model families, allowed cache classes, KV
+dtype, MoE-dispatch support) and admits a tuple to batching only when the
+descriptor advertises it. The scheduler MUST NOT maintain a separately
+self-declared support matrix that could drift from what the engine actually
+serves. For a cache class, `SPEC-039` capability, MoE/expert-dispatch surface,
+or quantized-KV (`kv_bits`) configuration **outside** the engine-advertised
+descriptor, the runtime MUST either route the request to the serial path when
+policy permits, or fail preflight with an observable, reason-coded error. It MUST NOT silently disable
 configured KV quantization, silently reinterpret a quantized conversation
 cache as ordinary KV, or silently downgrade the request. A requested batching
 mode MUST NOT silently fall back to serial unless the operator has explicitly
@@ -292,8 +344,10 @@ API, upstream revision, or calendar fallback. The upstream pin path is removed
 from this SPEC. The continuous-batching `on` state MUST activate only when a
 locally owned batching capability exists for the requested
 hardware/model/cache/KV/runtime tuple: the scheduler defined here plus the
-`SPEC-039` paged engine capability, with support-matrix evidence and
-acceptance coverage for that tuple. Until that local capability exists,
+`SPEC-039` paged engine capability, where support is determined by
+**membership of the requested tuple in the SPEC-039 engine-advertised
+capability descriptor** (FR-PKV11, FR-CB8) plus acceptance coverage for that
+tuple — not a self-declared matrix. Until that local capability exists,
 strict `on` MUST fail closed with an observable reason naming the missing
 local capability; permissive/canary modes MAY route to serial only with
 explicit operator policy and reason-coded telemetry. The activation reason
@@ -350,7 +404,11 @@ remainder. No decode row may survive across model generations. The IMPL MUST
 choose explicitly between (a) binding accepted queued work to the resident
 generation and draining it, and (b) rejecting queued work at drain start; the
 receipt's model hash MUST always match the weight snapshot that served the
-request.
+request. **Operator disable-while-serving** (flipping the flag off on a live
+provider) MUST drain in-flight batched work through this same drain machinery —
+new admission rejected, active rows finished or cancelled under the bounded
+drain timeout — before the provider reverts to the serial path; it MUST NOT
+drop in-flight rows abruptly.
 
 Relay/HTTP reconnect and retry MUST be idempotent. A reconnect or retry of a
 request that is already queued, in prefill, in decode, or draining MUST NOT
@@ -374,6 +432,17 @@ at least one Entry 110 multi-slot tier > 1.3x aggregate TG, within the memory
 bound) are the promotion thresholds; failing them triggers profiling or pivot,
 not a shipped number.
 
+**MoE throughput risk (gating expectation-setter).** On the live 128-expert /
+8-active MoE (`Qwen3-Coder-30B-A3B`), a batch of 2-4 rows routes to largely
+**disjoint** experts, so per-step weight-load amortization - the main source of
+dense batching's uplift - is **weak**. Aggregate-TG on this MoE may therefore
+**trail the dense uplift** and could fall **below the MSB-04 floor**. MSB-04 is
+the **gating expectation-setter** for the MoE tuple: it MUST be measured on the
+live MoE model (not extrapolated from dense MSB-02/03), and a MoE tuple that
+fails MSB-04 does not ship a throughput number and remains unsupported for
+batching (FR-CB16, AC-23). This is a real risk to quantify, not a promise of
+dense-equivalent MoE speedup.
+
 ### FR-CB15 - real-hardware enable gate (SPEC-038-R015)
 
 Continuous batching is a runtime feature; a green audit, CI, or unit-test pass
@@ -393,7 +462,10 @@ complete a real-Mac exercise on that tuple demonstrating, at minimum:
 
 Absent this evidence the flag MUST remain off for real traffic. This mirrors
 the Entry-199 lesson: a dormant, default-off feature with green gates is not a
-production-enabled feature.
+production-enabled feature. The step-by-step enable-gate procedure for
+operators is captured in a provider runbook (forward reference:
+`docs/runbooks/continuous-batching-enable-gate.md`, authored with the IMPL PR),
+analogous to the SPEC-037 KVS graduation runbook.
 
 Promotion of continuous batching to a production default for a tier (as
 distinct from an operator-enabled canary above) additionally requires the Gate
@@ -405,33 +477,79 @@ below 5%. A tier failing any A5 condition MUST remain opt-in.
 ### FR-CB16 - SPEC-039 boundary and MoE scheduler obligations (SPEC-038-R016)
 
 This SPEC MUST maintain a clean boundary with `SPEC-039`: `SPEC-038` owns
-admission, preemption, decode-step ordering, dynamic insert/remove,
-per-request block-table assignment, per-request accounting, receipt
-bookkeeping, fallback, and serving telemetry; `SPEC-039` owns paged KV storage
-and paged-attention execution. The scheduler MUST NOT duplicate `SPEC-039`
-kernel/storage requirements in this spec or create an alternate engine
-authority path.
+admission, decode-step ordering, dynamic insert/remove, per-request
+block-table lifecycle over the engine-issued handle, per-request accounting,
+receipt bookkeeping, fallback, and serving telemetry; `SPEC-039` owns paged KV
+storage, physical-block allocation, and paged-attention execution. The
+scheduler MUST NOT duplicate `SPEC-039` kernel/storage requirements in this
+spec or create an alternate engine authority path.
 
-For MoE models, including the live `Qwen3-Coder-30B-A3B`, the scheduler MUST
-handle expert dispatch across batched sequences as a scheduler concern:
-per-token expert selection, load-balancing metadata, row-to-expert routing,
-and per-row terminal/cancel behavior MUST remain request-isolated under a
-shared forward. Attention paging is orthogonal to MoE per the Phase-3 spike,
-but continuous batching MUST NOT treat MoE as automatically supported until
-the batched expert-dispatch surface is exercised and included in the local
-capability support matrix (FR-CB8, FR-CB10, FR-CB15).
+**No true preemption in v0.2.** v0.2 does **not** perform true preemption
+(evict-and-recompute of an in-flight row's KV) at the Entry-110 batch depths in
+scope (`<= 4`). Under pool pressure the scheduler applies admission
+back-pressure (FR-CB1) and, if an active row still cannot extend mid-decode,
+fails that row request-locally (FR-CB5, FR-CB17) — it does not evict a healthy
+row's blocks to recompute later. Preemption is therefore not an FR-CB16
+ownership item; if a future revision adds evict-and-recompute it must specify
+it explicitly.
+
+**MoE — scheduler obligation is per-row input isolation, not expert routing.**
+The scheduler does **NOT** select or route experts; expert selection is
+**model-internal** (the model's own router runs inside the shared forward). For
+MoE models, including the live `Qwen3-Coder-30B-A3B`, the scheduler's
+obligation is to feed **each row's correct current token** into the shared
+`[B, 1]` forward so the model's router sees the correct per-row input, and to
+keep the **per-row expert-affected outputs, load-balancing telemetry, and
+terminal/cancel accounting request-isolated** under that shared forward.
+Attention paging is orthogonal to MoE per the Phase-3 spike, but continuous
+batching MUST NOT treat MoE as automatically supported until the batched
+shared-forward path is exercised on the live MoE tuple, meets the MSB-04 floor
+(FR-CB14), and is admitted by the SPEC-039 capability descriptor (FR-CB8,
+FR-CB10, FR-CB15).
+
+### FR-CB17 - paged-pool pressure: back-pressure, not preemption (SPEC-038-R017)
+
+Block-pool pressure under a shared paged pool MUST be handled by
+**admission-time back-pressure plus deterministic request-local failure**, not
+by preemption:
+
+- **Admission-time back-pressure (FR-CB1).** A request MUST NOT be admitted
+  unless the SPEC-039 engine can reserve its worst-case block footprint in the
+  shared pool. Admission is gated by **pool availability**, not by Entry-110
+  slot count alone (FR-CB11); when the pool cannot fund a new row, the request
+  is held in the bounded queue or rejected at the bound with the FR-CB1
+  client-visible backpressure signal.
+- **Deterministic request-local failure (FR-CB5).** If an already-admitted
+  decode row cannot extend its block table mid-decode, that **row alone** fails
+  deterministically through the request-local terminal path and releases its
+  blocks; healthy rows are undisturbed. This is not a whole-batch failure.
+- **No true preemption (FR-CB16).** v0.2 MUST NOT evict a healthy row's KV to
+  recompute it later at the Entry-110 depths in scope (`<= 4`). The active-row
+  cap and admission back-pressure together make the mid-decode extension
+  failure the rare, bounded fallback rather than the design's steady state.
+
+Both the admission-time and the mid-decode paths MUST be observable and
+reason-coded, and MUST NOT emit a settlement receipt for output stitched across
+a failed and a retried path (mirroring FR-CB9).
 
 ## 5. Outcome table - mode matrix
+
+The flag has the three states carried by the PR #804 scaffold: **`off`**
+(default, inert serial-identical), **`canary`** (operator-enabled above serial,
+reason-coded, not a production default until Gate A5 / FR-CB15), and **`on`**
+(the production-default state a tier reaches only after Gate A5). `canary` and
+`on` share the same serving path; they differ only in whether the tier has met
+the A5 production-economics conditions (FR-CB15, §8).
 
 | Draft model (SPEC-028) | Flag | Entry 110 depth | Local batching capability | Result |
 |---|---|---:|---|---|
 | Disabled | off (default) | any | any | Serial path - today's behavior, unchanged (FR-CB9) |
-| Disabled | on | 1 | present | Serial path (single slot); batching is a no-op at depth 1 |
-| Disabled | on | 2-4 (validated) | present for tuple | Continuous batch path - shared forward over `SPEC-039` paged blocks (FR-CB3, FR-CB4, FR-CB10) |
-| Disabled | on | 2-4 (validated) | absent or unsupported | Strict mode fails closed, or explicit permissive mode serial-routes with reason-coded telemetry (FR-CB8, FR-CB10) |
+| Disabled | canary or on | 1 | present | Serial path (single slot); batching is a no-op at depth 1 |
+| Disabled | canary or on | 2-4 (validated) | present for tuple | Continuous batch path - shared forward over `SPEC-039` paged blocks (FR-CB3, FR-CB4, FR-CB10); `on` additionally requires Gate A5 (FR-CB15) |
+| Disabled | canary or on | 2-4 (validated) | absent or unsupported | Strict mode fails closed, or explicit permissive mode serial-routes with reason-coded telemetry (FR-CB8, FR-CB10) |
 | Enabled | any | 1 | any | Existing SPEC-028 single-slot path (FR-CB12) |
 | Enabled | any | > 1 | any | Preflight failure `draft_model_capacity_shortfall` - unchanged (FR-CB12) |
-| Any | on | any | unsupported cache/`kv_bits`/MoE dispatch | Serial path or reason-coded preflight rejection - never silent downgrade (FR-CB8) |
+| Any | canary or on | any | unsupported cache/`kv_bits`/MoE dispatch | Serial path or reason-coded preflight rejection - never silent downgrade (FR-CB8) |
 
 ## 6. Capacity, telemetry, and OPoI boundary
 
@@ -562,11 +680,13 @@ hardware-capability run or a static-review obligation. Every
   interleaves with decode steps); prefill and decode never merge into one
   heterogeneous model call.
 - **AC-17 request block-table lifecycle over SPEC-039 blocks (FR-CB4):**
-  allocation, extension, filter-completed-rows, cancellation cleanup,
-  detach/extract-to-standalone, and release each preserve the target request's
-  logical token positions and never expose or mutate another request's block
-  table. The fixture uses a `SPEC-039`-compatible fake or real paged engine
-  interface rather than redefining the engine internals in scheduler tests.
+  request-allocation, bind, extension, release-completed-rows, cancellation
+  cleanup, extract-to-standalone (via the SPEC-039 FR-PKV10 primitive), and
+  release each preserve the target request's logical token positions and never
+  expose or mutate another request's block table. The fixture uses a
+  `SPEC-039`-compatible fake or real paged engine interface (its capability
+  descriptor and block-table handle) rather than redefining the engine
+  internals in scheduler tests.
 - **AC-18 single-owner actor isolation (FR-CB7):** a structural/static check
   plus a concurrency fixture proves all mutable batch state is owned by one
   actor and that supported batched rows and unsupported serial iterators are
@@ -600,13 +720,28 @@ hardware-capability run or a static-review obligation. Every
   capability is registered, activation is tied to the local support matrix for
   the requested tuple. No activation code path or error text names a reviewed
   upstream batch API or missing upstream revision as the path to success.
-- **AC-23 MoE batched expert-dispatch correctness placeholder (FR-CB16):**
+- **AC-23 MoE batched per-row input isolation + MSB-04 (FR-CB16, FR-CB14):**
   for a MoE model fixture representative of `Qwen3-Coder-30B-A3B`, batched
-  decode preserves per-row expert selection/routing metadata, load-balancing
-  accounting, stop/cancel lifecycle, output token accounting, and receipt
-  isolation. Until this fixture passes on the live MoE tuple, that tuple
-  remains unsupported for continuous batching even though attention paging is
-  separately proven orthogonal.
+  decode feeds each row's **correct current token** into the shared `[B, 1]`
+  forward (the model's own router sees correct per-row input — the scheduler
+  does not select experts), and the resulting **per-row expert-affected
+  outputs, load-balancing telemetry, stop/cancel lifecycle, output-token
+  accounting, and receipt state are request-isolated** with zero cross-row
+  attribution. This is a **required correctness fixture, not a placeholder**;
+  additionally, the MoE tuple's **MSB-04** aggregate-TG MUST be measured on the
+  live model (FR-CB14). Until this fixture passes and MSB-04 is measured on the
+  live MoE tuple, that tuple remains unsupported for continuous batching even
+  though attention paging is separately proven orthogonal.
+- **AC-24 paged-pool pressure: back-pressure + request-local failure, no
+  preemption (FR-CB17, FR-CB1, FR-CB5):** with a batch actively decoding,
+  admission of a further row that the shared paged pool cannot fund is held or
+  rejected with the FR-CB1 client-visible backpressure signal (never admitted
+  into a row that would fail to extend); and an injected mid-decode
+  block-extension failure against **an active batched row** fails **only that
+  row** deterministically, releasing its blocks, while every other row's
+  stream, sampler, stop state, and block table stay intact — no healthy row's
+  KV is evicted/recomputed (no preemption), and no settlement receipt is
+  emitted for stitched failed+retried output.
 
 ## 8. Go/no-go gates
 
@@ -654,7 +789,13 @@ hardware-capability run or a static-review obligation. Every
 These questions must be resolved before a production default but do not block
 this SPEC:
 
-1. The exact `SPEC-039` capability interface shape the scheduler consumes.
+1. *(Resolved in v0.2)* The `SPEC-039` capability interface the scheduler
+   consumes is now normative, not an open question: the scheduler matches
+   `requested tuple ∈ engine-advertised capability descriptor` (SPEC-039
+   FR-PKV11) for activation (FR-CB8, FR-CB10) and uses the SPEC-039
+   cache-extraction / same-conversation retention primitive (FR-PKV10) for
+   cross-turn cache continuity (FR-CB4). The remaining open item is only the
+   concrete Swift signature, settled with the IMPL.
 2. Actor boundary satisfying Swift Sendability without unnecessary KV copies.
 3. Cancellation removal latency for a decode row.
 4. Which `kv_bits` configurations must initially be rejected vs serial-routed.
@@ -662,6 +803,8 @@ this SPEC:
 6. Whether M-Ultra depth four outperforms depth three after tail-latency
    penalties.
 7. How aggregate-TG baselines are versioned for OPoI drift.
-8. The first MoE expert-dispatch fixture shape for `Qwen3-Coder-30B-A3B`.
+8. The first MoE **per-row input-isolation** fixture shape for
+   `Qwen3-Coder-30B-A3B` (AC-23 defines the required correctness properties;
+   the concrete fixture and the live-hardware MSB-04 run remain to be built).
 9. The promotion sequencing between the `SPEC-039` engine PR and the
    `SPEC-038` scheduler IMPL PR.

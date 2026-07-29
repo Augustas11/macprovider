@@ -2535,6 +2535,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-038-R017",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-CB17 (paged-pool pressure handled by admission back-pressure + deterministic request-local failure, not true preemption at Entry-110 depths <= 4): normative in SPEC-038 v0.2; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
       "requirement_id": "SPEC-039-R001",
       "spec_id": "SPEC-039",
       "state": "pending",
