@@ -111,6 +111,136 @@ python3 "$capture" --draft --notes-file "$work/release-notes.md" \
   "$work/draft-publication-manifest.json" "${local_assets[@]}"
 cmp "$work/publication-manifest.json" "$work/draft-publication-manifest.json"
 
+runtime="$work/runtime"
+mkdir -p "$runtime"
+printf 'runtime coordinator payload\n' > "$runtime/coordinator-linux-amd64"
+printf 'runtime coordinator cli payload\n' > "$runtime/coordinator-cli-linux-amd64"
+printf 'runtime gateway payload\n' > "$runtime/gateway-linux-amd64"
+printf 'runtime pearl metadata\n' > "$runtime/pearl-release.json"
+printf 'runtime pearl metadata signature\n' > "$runtime/pearl-release.json.sig"
+printf 'runtime release notes\n' > "$runtime/release-notes.md"
+cp "$work/release-toolchain.json" "$runtime/release-toolchain.json"
+python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
+  "$runtime/release-toolchain.json" "$runtime/release-provenance.json" \
+  "$runtime/coordinator-linux-amd64" "$runtime/coordinator-cli-linux-amd64" \
+  "$runtime/gateway-linux-amd64" "$runtime/pearl-release.json" \
+  "$runtime/pearl-release.json.sig"
+(
+  cd "$runtime"
+  shasum -a 256 \
+    coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 \
+    pearl-release.json pearl-release.json.sig release-provenance.json \
+    > checksums.txt
+)
+printf 'runtime checksum signature\n' > "$runtime/checksums.txt.sig"
+python3 - "$runtime" "$tag" "$commit" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root, tag, commit = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+names = [
+    "coordinator-linux-amd64",
+    "coordinator-cli-linux-amd64",
+    "gateway-linux-amd64",
+    "pearl-release.json",
+    "pearl-release.json.sig",
+    "release-provenance.json",
+    "checksums.txt",
+    "checksums.txt.sig",
+]
+assets = []
+for asset_id, name in enumerate(names, 701):
+    digest = hashlib.sha256((root / name).read_bytes()).hexdigest()
+    assets.append({"id": asset_id, "name": name, "digest": f"sha256:{digest}"})
+release = {
+    "id": 601,
+    "tag_name": tag,
+    "target_commitish": commit,
+    "draft": True,
+    "immutable": False,
+    "prerelease": False,
+    "name": f"Pearl runtime {tag}",
+    "body": "runtime release notes\n",
+    "assets": assets,
+}
+(root / "release-draft.json").write_text(json.dumps(release), encoding="utf-8")
+PY
+runtime_assets=(
+  "$runtime/coordinator-linux-amd64"
+  "$runtime/coordinator-cli-linux-amd64"
+  "$runtime/gateway-linux-amd64"
+  "$runtime/pearl-release.json"
+  "$runtime/pearl-release.json.sig"
+  "$runtime/release-provenance.json"
+  "$runtime/checksums.txt"
+  "$runtime/checksums.txt.sig"
+)
+python3 "$capture" --draft --runtime-only \
+  --notes-file "$runtime/release-notes.md" --expected-title "Pearl runtime $tag" \
+  "$runtime/release-draft.json" "$runtime/release-provenance.json" \
+  "$runtime/draft-publication-manifest.json" "${runtime_assets[@]}"
+python3 - "$runtime/release-draft.json" "$runtime/release-public.json" <<'PY'
+import json, pathlib, sys
+draft_path, public_path = map(pathlib.Path, sys.argv[1:])
+public = json.loads(draft_path.read_text())
+public["draft"] = False
+public["immutable"] = True
+public["prerelease"] = False
+public_path.write_text(json.dumps(public), encoding="utf-8")
+PY
+python3 "$capture" --runtime-only \
+  --notes-file "$runtime/release-notes.md" --expected-title "Pearl runtime $tag" \
+  "$runtime/release-public.json" "$runtime/release-provenance.json" \
+  "$runtime/final-publication-manifest.json" "${runtime_assets[@]}"
+cmp "$runtime/draft-publication-manifest.json" "$runtime/final-publication-manifest.json"
+
+python3 - "$runtime/release-draft.json" "$runtime/release-drift.json" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+data["assets"][1]["digest"] = "sha256:" + "0" * 64
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+if python3 "$capture" --draft --runtime-only \
+  --notes-file "$runtime/release-notes.md" --expected-title "Pearl runtime $tag" \
+  "$runtime/release-drift.json" "$runtime/release-provenance.json" \
+  "$runtime/drift-manifest.json" "${runtime_assets[@]}" >"$runtime/drift.out" 2>&1; then
+  echo "runtime draft capture accepted GitHub asset digest drift" >&2
+  exit 1
+fi
+grep -q 'GitHub digest differs from captured workflow asset' "$runtime/drift.out"
+
+python3 - "$runtime/release-draft.json" "$runtime/release-missing.json" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+data["assets"] = [row for row in data["assets"] if row["name"] != "gateway-linux-amd64"]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+if python3 "$capture" --draft --runtime-only \
+  --notes-file "$runtime/release-notes.md" --expected-title "Pearl runtime $tag" \
+  "$runtime/release-missing.json" "$runtime/release-provenance.json" \
+  "$runtime/missing-manifest.json" "${runtime_assets[@]}" >"$runtime/missing.out" 2>&1; then
+  echo "runtime draft capture accepted a missing GitHub asset" >&2
+  exit 1
+fi
+grep -q 'asset names differ from the signed release set' "$runtime/missing.out"
+
+python3 - "$runtime/release-draft.json" "$runtime/release-extra.json" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+data["assets"].append({"id": 999, "name": "unexpected", "digest": "sha256:" + "0" * 64})
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+if python3 "$capture" --draft --runtime-only \
+  --notes-file "$runtime/release-notes.md" --expected-title "Pearl runtime $tag" \
+  "$runtime/release-extra.json" "$runtime/release-provenance.json" \
+  "$runtime/extra-manifest.json" "${runtime_assets[@]}" >"$runtime/extra.out" 2>&1; then
+  echo "runtime draft capture accepted an unsigned extra GitHub asset" >&2
+  exit 1
+fi
+grep -q 'asset names differ from the signed release set' "$runtime/extra.out"
+
 cat > "$work/release-draft-cli.json" <<EOF
 {"databaseId":401,"isDraft":true,"tagName":"$tag","targetCommitish":"$commit"}
 EOF

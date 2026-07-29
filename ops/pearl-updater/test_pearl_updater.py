@@ -225,33 +225,54 @@ class PearlUpdaterTests(unittest.TestCase):
         advertised_version: str | None = None,
         rollout_mode: str = "bridge_required",
         channel: str | None = None,
-    ):
+        runtime_only: bool = False,
+        ):
         tag = "v" + version
         advertised_version = advertised_version or version
+        if runtime_only and rollout_mode == "bridge_required":
+            rollout_mode = "strict_post_migration"
         coordinator = self.bundle / updater_module.COORDINATOR_ASSET
+        coordinator_cli = self.bundle / updater_module.COORDINATOR_CLI_ASSET
         gateway = self.bundle / updater_module.GATEWAY_ASSET
         coordinator.write_bytes(fake_elf("coordinator"))
+        coordinator_cli.write_bytes(fake_elf("coordinator-cli"))
         gateway.write_bytes(fake_elf("gateway"))
-        catalog_sources = {
-            "release.json": REPO_ROOT / "phase3-binary/catalog/autotune/release.json",
-            "trusted-keys.json": REPO_ROOT / "phase3-binary/catalog/autotune/trusted-keys.json",
-            "tier2-catalog.json": REPO_ROOT / "phase3-binary/catalog/autotune/tier2-catalog.json",
-            "autotune-candidates.json": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json",
-            "autotune-candidates.json.sig": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json.sig",
-            "demand-rank.json": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json",
-            "demand-rank.json.sig": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json.sig",
-        }
-        for name, source in catalog_sources.items():
-            shutil.copyfile(source, self.bundle / name)
-        catalog_manifest = json.loads((self.bundle / "release.json").read_text(encoding="utf-8"))
+        for name in updater_module.CATALOG_ASSETS:
+            (self.bundle / name).unlink(missing_ok=True)
+        catalog_metadata = None
+        catalog_assets = []
+        release_lane = updater_module.RELEASE_LANE_RUNTIME
+        if not runtime_only:
+            catalog_sources = {
+                "release.json": REPO_ROOT / "phase3-binary/catalog/autotune/release.json",
+                "trusted-keys.json": REPO_ROOT / "phase3-binary/catalog/autotune/trusted-keys.json",
+                "tier2-catalog.json": REPO_ROOT / "phase3-binary/catalog/autotune/tier2-catalog.json",
+                "autotune-candidates.json": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json",
+                "autotune-candidates.json.sig": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json.sig",
+                "demand-rank.json": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json",
+                "demand-rank.json.sig": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json.sig",
+            }
+            for name, source in catalog_sources.items():
+                shutil.copyfile(source, self.bundle / name)
+            catalog_manifest = json.loads((self.bundle / "release.json").read_text(encoding="utf-8"))
+            catalog_assets = [self.bundle / name for name in updater_module.CATALOG_ASSETS]
+            catalog_metadata = {
+                "release_id": catalog_manifest["release_id"],
+                "policy_version": catalog_manifest["policy_version"],
+                "files": {
+                    name: updater_module.sha256_file(self.bundle / name)
+                    for name in updater_module.CATALOG_ASSETS
+                },
+            }
+            release_lane = updater_module.RELEASE_LANE_RUNTIME_WITH_CATALOG
         metadata = {
             "schema_version": 1,
+            "release_lane": release_lane,
             "repository": updater_module.PINNED_REPOSITORY,
             "tag": tag,
             "release_version": version,
             "commit": "a" * 40,
             "architecture": "linux-amd64",
-            "provider_advertised_version": advertised_version,
             "provider_admission_rollout": {
                 "mode": rollout_mode,
                 "enforce_provider_admission": rollout_mode == "strict_post_migration",
@@ -269,15 +290,16 @@ class PearlUpdaterTests(unittest.TestCase):
                     "embedded_version": tag,
                 },
             },
-            "catalog": {
-                "release_id": catalog_manifest["release_id"],
-                "policy_version": catalog_manifest["policy_version"],
-                "files": {
-                    name: updater_module.sha256_file(self.bundle / name)
-                    for name in updater_module.CATALOG_ASSETS
+            "catalog": catalog_metadata,
+            "operator_artifacts": {
+                "coordinator_cli": {
+                    "asset": coordinator_cli.name,
+                    "sha256": updater_module.sha256_file(coordinator_cli),
                 },
             },
         }
+        if not runtime_only:
+            metadata["provider_advertised_version"] = advertised_version
         if channel is not None:
             metadata["channel"] = channel
         metadata_path = self.bundle / "pearl-release.json"
@@ -287,8 +309,9 @@ class PearlUpdaterTests(unittest.TestCase):
             metadata_path,
             self.bundle / "pearl-release.json.sig",
             coordinator,
+            coordinator_cli,
             gateway,
-            *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
+            *catalog_assets,
         ]
         checksums = self.bundle / "checksums.txt"
         checksums.write_text("".join(f"{updater_module.sha256_file(path)}  {path.name}\n" for path in assets))
@@ -410,6 +433,128 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(recovered.version, updater_module.SemVer.parse("1.8.27"))
         self.assertEqual(recovered.provider_advertised_version, "1.8.26")
 
+    def test_runtime_only_release_verifies_without_catalog_feed_assets(self):
+        self.make_bundle(runtime_only=True)
+
+        release = self.verify()
+
+        self.assertEqual(release.release_lane, updater_module.RELEASE_LANE_RUNTIME)
+        self.assertIsNone(release.catalog)
+        for name in updater_module.CATALOG_ASSETS:
+            self.assertFalse((release.directory / name).exists(), name)
+
+    def test_runtime_only_release_requires_explicit_tag_for_remote_acquire(self):
+        self.make_bundle(runtime_only=True)
+        self.updater.release_tags = mock.Mock(return_value=["v1.8.27"])
+        self.updater.audit = mock.Mock()
+
+        def fake_download(url: str, destination: Path) -> None:
+            shutil.copyfile(self.bundle / url.rsplit("/", 1)[-1], destination)
+
+        self.updater.download = mock.Mock(side_effect=fake_download)
+        auto_work = self.root / "auto-acquire"
+        explicit_work = self.root / "explicit-acquire"
+        auto_work.mkdir()
+        explicit_work.mkdir()
+
+        with self.assertRaisesRegex(updater_module.NoEligibleRelease, "no signed Pearl runtime release"):
+            self.updater.acquire_release(auto_work, None, None)
+
+        self.updater.audit.assert_any_call(
+            "release_skipped",
+            "runtime_only_requires_explicit_tag",
+            candidate="v1.8.27",
+        )
+
+        release = self.updater.acquire_release(explicit_work, None, "v1.8.27")
+
+        self.assertEqual(release.release_lane, updater_module.RELEASE_LANE_RUNTIME)
+
+    def test_runtime_only_metadata_rejects_provider_config_authority(self):
+        self.make_bundle(runtime_only=True)
+        payload = json.loads((self.bundle / "pearl-release.json").read_text())
+        payload["provider_advertised_version"] = "1.8.27"
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "must not carry provider advertised version"):
+            self.updater.parse_metadata(payload, self.bundle)
+
+    def test_runtime_only_metadata_rejects_provider_bridge_policy(self):
+        self.make_bundle(runtime_only=True)
+        payload = json.loads((self.bundle / "pearl-release.json").read_text())
+        payload["provider_admission_rollout"] = {
+            "mode": "bridge_required",
+            "enforce_provider_admission": False,
+            "bridge_duration_s": 86400,
+        }
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "must not bind provider admission bridge policy"):
+            self.updater.parse_metadata(payload, self.bundle)
+
+    def test_runtime_only_plan_preserves_existing_catalog_pointer(self):
+        self.make_bundle(runtime_only=True)
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        base = install / "coordinator.yaml"
+        existing_catalog = "/opt/macprovider/autotune/current/tier2-catalog.json"
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
+            "tier2:\n"
+            f"  catalog_path: {existing_catalog}\n"
+            "  require_hash_verified: false\n"
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        release = self.stage(self.verify())
+
+        update = self.updater.prepare_config_update(release)
+
+        self.assertIsNone(update.catalog_target)
+        self.assertIsNone(update.catalog_staged)
+        self.assertEqual(update.previous_version, "1.8.26")
+        self.assertEqual(update.next_version, "1.8.26")
+        self.assertIn('latest_binary_version: "1.8.26"', update.staged.read_text())
+        self.assertIn(f"catalog_path: {existing_catalog}", update.staged.read_text())
+        self.assertEqual(
+            self.updater.release_identity(release),
+            updater_module.RuntimeIdentity("v1.8.27", "v1.8.27", "1.8.26"),
+        )
+
+    def test_runtime_only_success_preserves_durable_catalog_identity(self):
+        catalog_release = self.verify().catalog
+        self.assertIsNotNone(catalog_release)
+        self.updater.state_root.mkdir(parents=True, exist_ok=True)
+        self.updater.state_root.chmod(0o700)
+        state = self.updater.state_root / "current-release.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "schema_version": updater_module.CURRENT_RELEASE_SCHEMA_VERSION,
+                    "version": "1.8.26",
+                    "tag": "v1.8.26",
+                    "commit": "b" * 40,
+                    "coordinator_sha256": "0" * 64,
+                    "gateway_sha256": "1" * 64,
+                    "catalog_release_id": catalog_release.release_id,
+                    "catalog_policy_version": catalog_release.policy_version,
+                    "catalog_files": dict(catalog_release.files),
+                }
+            )
+            + "\n"
+        )
+        state.chmod(0o600)
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.transaction = self.root / "tx-runtime-success"
+
+        self.updater.persist_success(release, updater_module.SemVer.parse("1.8.26"))
+
+        persisted = json.loads(state.read_text())
+        self.assertEqual(persisted["release_lane"], updater_module.RELEASE_LANE_RUNTIME)
+        self.assertEqual(persisted["catalog_release_id"], catalog_release.release_id)
+        self.assertEqual(persisted["catalog_policy_version"], catalog_release.policy_version)
+        self.assertEqual(persisted["catalog_files"], catalog_release.files)
+
     def test_private_acceptance_opt_in_does_not_relax_production_metadata(self):
         self.make_bundle(advertised_version="1.8.26")
         self.updater.config = updater_module.dataclasses.replace(
@@ -445,6 +590,7 @@ class PearlUpdaterTests(unittest.TestCase):
             self.bundle / "pearl-release.json",
             self.bundle / "pearl-release.json.sig",
             self.bundle / updater_module.COORDINATOR_ASSET,
+            self.bundle / updater_module.COORDINATOR_CLI_ASSET,
             self.bundle / updater_module.GATEWAY_ASSET,
             *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
         ]
@@ -471,6 +617,7 @@ class PearlUpdaterTests(unittest.TestCase):
             metadata_path,
             self.bundle / "pearl-release.json.sig",
             self.bundle / updater_module.COORDINATOR_ASSET,
+            self.bundle / updater_module.COORDINATOR_CLI_ASSET,
             self.bundle / updater_module.GATEWAY_ASSET,
             *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
         ]
@@ -589,6 +736,73 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertFalse((install / "autotune" / "current").exists())
         self.assertFalse(legacy_tier2.exists())
+
+    def test_runtime_only_snapshot_does_not_capture_catalog_ownership(self):
+        self.make_bundle(runtime_only=True)
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        for name in ("coordinator", "gateway"):
+            (install / name).write_bytes(fake_elf("installed-" + name))
+            (install / name).chmod(0o750)
+        (install / "gateway.yaml").write_text("gateway: {}\n")
+        (install / "gateway.yaml").chmod(0o600)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
+            "tier2:\n"
+            f"  catalog_path: {install}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        base.chmod(0o600)
+        releases = install / "autotune" / "releases"
+        releases.mkdir(parents=True, mode=0o750)
+        (install / "autotune").chmod(0o750)
+        (releases / "catalog-a").mkdir(mode=0o750)
+        (install / "autotune" / "current").symlink_to("releases/catalog-a")
+        previous = install / "autotune" / ".previous-target"
+        previous.write_text("releases/catalog-a\n")
+        previous.chmod(0o600)
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        self.updater.previous_versions = {
+            "coordinator": "1.8.26",
+            "gateway": "1.8.26",
+        }
+        release = self.stage(self.verify())
+        self.updater.prepare_config_update(release)
+
+        tx = self.updater.snapshot(release)
+
+        manifest = json.loads((tx / "catalog-manifest.json").read_text())
+        self.assertEqual(manifest, {"owns_catalog": False})
+        self.assertFalse((tx / "previous-tier2-catalog.json").exists())
+
+    def test_runtime_only_catalog_rollback_is_noop(self):
+        install = self.updater.install_root
+        releases = install / "autotune" / "releases"
+        releases.mkdir(parents=True, mode=0o750)
+        (install / "autotune").chmod(0o750)
+        (releases / "catalog-b").mkdir(mode=0o750)
+        (install / "autotune" / "current").symlink_to("releases/catalog-b")
+        previous = install / "autotune" / ".previous-target"
+        previous.write_text("releases/catalog-b\n")
+        previous.chmod(0o600)
+        tx = self.root / "runtime-only-catalog-noop"
+        tx.mkdir(mode=0o700)
+        (tx / "catalog-manifest.json").write_text('{"owns_catalog":false}\n')
+        (tx / "catalog-manifest.json").chmod(0o600)
+        self.updater.audit = mock.Mock()
+
+        self.updater._restore_catalog(tx)
+
+        self.assertEqual(os.readlink(install / "autotune" / "current"), "releases/catalog-b")
+        self.assertEqual(previous.read_text().strip(), "releases/catalog-b")
+        self.updater.audit.assert_called_once_with(
+            "catalog_rollback",
+            "skipped",
+            reason="runtime-only transaction",
+        )
 
     def test_catalog_install_uses_service_group_and_repairs_restrictive_umask(self):
         release = self.stage(self.verify())
@@ -818,6 +1032,7 @@ class PearlUpdaterTests(unittest.TestCase):
             ),
             release.provider_admission_rollout,
             release.directory,
+            updater_module.RELEASE_LANE_RUNTIME_WITH_CATALOG,
         )
 
         original_name = self.updater._catalog_release_directory_name(release)
@@ -2475,6 +2690,37 @@ class PearlUpdaterTests(unittest.TestCase):
                 "exact_provider_canary"
             ),
         )
+
+    def test_runtime_only_rollout_requires_buyer_canary_mode(self):
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "runtime-only Pearl release requires buyer canary"):
+            self.updater.verify_rollout(release)
+
+    def test_runtime_only_apply_rejects_disabled_canary_before_journal_or_mutation(self):
+        self.make_bundle(runtime_only=True)
+        release = self.verify()
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.audit = mock.Mock()
+        self.updater._start_journal = mock.Mock()
+        self.updater.stop_for_rollout = mock.Mock()
+        self.updater.install_release = mock.Mock()
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "runtime-only Pearl release requires buyer canary"):
+            self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+
+        self.updater.audit.assert_not_called()
+        self.updater._start_journal.assert_not_called()
+        self.updater.stop_for_rollout.assert_not_called()
+        self.updater.install_release.assert_not_called()
 
     def test_run_canary_gate_rejects_disabled_mode(self):
         self.updater.config = updater_module.dataclasses.replace(
@@ -4549,6 +4795,7 @@ class PearlUpdaterTests(unittest.TestCase):
             ),
             updater_module.ProviderAdmissionRollout("bridge_required", False, 86400),
             work,
+            updater_module.RELEASE_LANE_RUNTIME_WITH_CATALOG,
         )
         for name in updater_module.CATALOG_ASSETS:
             shutil.copyfile(self.bundle / name, work / name)
@@ -5326,6 +5573,15 @@ class PearlUpdaterTests(unittest.TestCase):
             "grep -Fx 'PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900'",
             text,
         )
+        self.assertIn("Pearl has four separate release/config sources of truth", text)
+        self.assertIn("**Pearl runtime release**", text)
+        self.assertIn('release_lane: "pearl_runtime"', text)
+        self.assertIn("**Provider app release**", text)
+        self.assertIn("**Catalog/feed release**", text)
+        self.assertIn("**Pearl config release/reconciliation**", text)
+        self.assertIn("the updater leaves `tier2.catalog_path` unchanged", text)
+        self.assertIn("reported as missing Pearl\nruntime assets", text)
+        self.assertIn("CONFIG_MODE=preserve-live", text)
 
         example = SCRIPT.parent / "pearl-updater.conf.example"
         example_text = example.read_text(encoding="utf-8")

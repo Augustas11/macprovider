@@ -78,6 +78,7 @@ AUXILIARY_UNITS = (
     "stats-billing-mirror.service",
 )
 COORDINATOR_ASSET = "coordinator-linux-amd64"
+COORDINATOR_CLI_ASSET = "coordinator-cli-linux-amd64"
 GATEWAY_ASSET = "gateway-linux-amd64"
 CATALOG_ASSETS = (
     "release.json",
@@ -94,6 +95,13 @@ CONTROL_ASSETS = (
     "checksums.txt",
     "checksums.txt.sig",
 )
+RUNTIME_ASSETS = (
+    COORDINATOR_ASSET,
+    COORDINATOR_CLI_ASSET,
+    GATEWAY_ASSET,
+)
+RELEASE_LANE_RUNTIME = "pearl_runtime"
+RELEASE_LANE_RUNTIME_WITH_CATALOG = "pearl_runtime_catalog"
 SEMVER_RE = re.compile(r"^(?:v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 LEGACY_GIT_DESCRIBE_RE = re.compile(
     r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-([1-9][0-9]*)-g([0-9a-f]{7,40})$"
@@ -291,9 +299,14 @@ class Release:
     provider_advertised_version: str
     coordinator: Component
     gateway: Component
-    catalog: CatalogRelease
+    catalog: CatalogRelease | None
     provider_admission_rollout: ProviderAdmissionRollout
     directory: Path
+    release_lane: str = RELEASE_LANE_RUNTIME_WITH_CATALOG
+
+    @property
+    def has_catalog(self) -> bool:
+        return self.catalog is not None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -333,9 +346,10 @@ class InstalledRelease:
             "commit": release.commit,
             "coordinator_sha256": release.coordinator.sha256,
             "gateway_sha256": release.gateway.sha256,
-            "catalog_release_id": release.catalog.release_id,
-            "catalog_policy_version": release.catalog.policy_version,
         }
+        if release.catalog is not None:
+            expected["catalog_release_id"] = release.catalog.release_id
+            expected["catalog_policy_version"] = release.catalog.policy_version
         return all(self.durable.get(key) == value for key, value in expected.items())
 
 
@@ -1022,21 +1036,28 @@ class Updater:
         previous_advertised = (
             self.config_update.previous_version if self.config_update is not None else str(previous)
         )
+        release_record: dict[str, object] = {
+            "tag": release.tag,
+            "version": str(release.version),
+            "commit": release.commit,
+            "provider_advertised_version": self.release_identity(release).advertised_version,
+            "coordinator_sha256": release.coordinator.sha256,
+            "gateway_sha256": release.gateway.sha256,
+            "provider_admission_rollout": dataclasses.asdict(release.provider_admission_rollout),
+            "release_lane": release.release_lane,
+        }
+        if release.catalog is not None:
+            release_record.update(
+                {
+                    "catalog_release_id": release.catalog.release_id,
+                    "catalog_policy_version": release.catalog.policy_version,
+                    "catalog_files": dict(release.catalog.files),
+                }
+            )
         self.journal = {
             "schema_version": JOURNAL_SCHEMA_VERSION,
             "phase": "prepared",
-            "release": {
-                "tag": release.tag,
-                "version": str(release.version),
-                "commit": release.commit,
-                "provider_advertised_version": release.provider_advertised_version,
-                "coordinator_sha256": release.coordinator.sha256,
-                "gateway_sha256": release.gateway.sha256,
-                "catalog_release_id": release.catalog.release_id,
-                "catalog_policy_version": release.catalog.policy_version,
-                "catalog_files": dict(release.catalog.files),
-                "provider_admission_rollout": dataclasses.asdict(release.provider_admission_rollout),
-            },
+            "release": release_record,
             "previous_version": str(previous),
             "previous_advertised_version": previous_advertised,
             "buyer_canary_mode": self.config.buyer_canary_mode,
@@ -1218,11 +1239,12 @@ class Updater:
 
     def acquire_release(self, work: Path, source_dir: Path | None, requested_tag: str | None) -> Release:
         if source_dir is not None:
-            for asset in (*CONTROL_ASSETS, COORDINATOR_ASSET, GATEWAY_ASSET, *CATALOG_ASSETS):
+            for asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS, *CATALOG_ASSETS):
                 source = source_dir / asset
-                if not source.is_file():
+                if asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS) and not source.is_file():
                     raise UpdateError(f"test source missing asset: {asset}")
-                shutil.copyfile(source, work / asset)
+                if source.is_file():
+                    shutil.copyfile(source, work / asset)
             return self.verify_release(work, requested_tag)
 
         tags = [requested_tag] if requested_tag else self.release_tags()
@@ -1242,11 +1264,23 @@ class Updater:
                 continue
             for asset in CONTROL_ASSETS[1:]:
                 self.download(f"{base}/{asset}", candidate / asset)
-            for asset in (COORDINATOR_ASSET, GATEWAY_ASSET, *CATALOG_ASSETS):
+            for asset in RUNTIME_ASSETS:
                 self.download(f"{base}/{asset}", candidate / asset)
-            return self.verify_release(candidate, tag)
+            try:
+                metadata = json.loads((candidate / "pearl-release.json").read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise UpdateError("release metadata is invalid JSON") from exc
+            if isinstance(metadata, dict) and isinstance(metadata.get("catalog"), dict):
+                for asset in CATALOG_ASSETS:
+                    self.download(f"{base}/{asset}", candidate / asset)
+            release = self.verify_release(candidate, tag)
+            if requested_tag is None and release.release_lane == RELEASE_LANE_RUNTIME:
+                self.audit("release_skipped", "runtime_only_requires_explicit_tag", candidate=tag)
+                shutil.rmtree(candidate)
+                continue
+            return release
         self.audit("release_selection", "no_eligible_release")
-        raise NoEligibleRelease("no signed Pearl release with the required artifact set was found")
+        raise NoEligibleRelease("no signed Pearl runtime release with the required artifact set was found")
 
     def verify_release(self, directory: Path, expected_tag: str | None) -> Release:
         checksums_path = directory / "checksums.txt"
@@ -1257,12 +1291,10 @@ class Updater:
         for name in (
             "pearl-release.json",
             "pearl-release.json.sig",
-            COORDINATOR_ASSET,
-            GATEWAY_ASSET,
-            *CATALOG_ASSETS,
+            *RUNTIME_ASSETS,
         ):
             if name not in checksums:
-                raise UpdateError(f"signed checksums omit required asset: {name}")
+                raise UpdateError(f"signed checksums omit required Pearl runtime asset: {name}")
             if sha256_file(directory / name) != checksums[name]:
                 raise UpdateError(f"checksum mismatch for {name}")
         try:
@@ -1270,6 +1302,23 @@ class Updater:
         except (ValueError, OSError) as exc:
             raise UpdateError("release metadata is invalid JSON") from exc
         release = self.parse_metadata(metadata, directory)
+        operator_artifacts = metadata.get("operator_artifacts")
+        coordinator_cli = operator_artifacts.get("coordinator_cli") if isinstance(operator_artifacts, dict) else None
+        if not isinstance(coordinator_cli, dict):
+            raise UpdateError("release metadata coordinator CLI artifact is missing")
+        coordinator_cli_sha = coordinator_cli.get("sha256")
+        if coordinator_cli.get("asset") != COORDINATOR_CLI_ASSET:
+            raise UpdateError("release metadata coordinator CLI asset mismatch")
+        if not isinstance(coordinator_cli_sha, str) or not SHA256_RE.fullmatch(coordinator_cli_sha):
+            raise UpdateError("release metadata coordinator CLI checksum invalid")
+        if coordinator_cli_sha != checksums[COORDINATOR_CLI_ASSET]:
+            raise UpdateError("metadata/checksums disagreement for coordinator-cli-linux-amd64")
+        if release.catalog is not None:
+            for name in CATALOG_ASSETS:
+                if name not in checksums:
+                    raise UpdateError(f"signed checksums omit required catalog/feed asset: {name}")
+                if sha256_file(directory / name) != checksums[name]:
+                    raise UpdateError(f"checksum mismatch for {name}")
         if expected_tag and release.tag != expected_tag:
             raise UpdateError(f"signed metadata tag {release.tag} does not match selected tag {expected_tag}")
         for component in (release.coordinator, release.gateway):
@@ -1284,17 +1333,29 @@ class Updater:
                 asset=component.asset,
                 sha256=component.sha256,
             )
-        self.verify_catalog_release(release)
+        validate_elf_amd64(directory / COORDINATOR_CLI_ASSET)
+        self.audit(
+            "release_component_verified",
+            "static_success",
+            candidate=release.tag,
+            asset=COORDINATOR_CLI_ASSET,
+            sha256=coordinator_cli_sha,
+        )
+        if release.catalog is not None:
+            self.verify_catalog_release(release)
         self.audit(
             "release_control_set_verified",
             "success",
             candidate=release.tag,
             commit=release.commit,
             provider_advertised_version=release.provider_advertised_version,
+            release_lane=release.release_lane,
         )
         return release
 
     def verify_catalog_release(self, release: Release) -> None:
+        if release.catalog is None:
+            raise UpdateError("Pearl runtime release is not catalog-bound")
         catalog = release.catalog
         manifest_path = release.directory / "release.json"
         try:
@@ -1453,20 +1514,21 @@ class Updater:
             self._assert_candidate_validation_file(destination, executable=True)
             if sha256_file(destination) != component.sha256:
                 raise UpdateError(f"candidate staging checksum mismatch: {component.asset}")
-        for name in CATALOG_ASSETS:
-            source = release.directory / name
-            self._trusted_regular_file(source, f"verified catalog asset {name}")
-            if sha256_file(source) != release.catalog.files[name]:
-                raise UpdateError(f"verified catalog asset changed before staging: {name}")
-            destination = validation / name
-            self.atomic_replace(
-                source,
-                destination,
-                uid=self.trusted_uid,
-                gid=self.candidate_gid,
-                mode=0o640,
-            )
-            self._assert_candidate_validation_file(destination, executable=False)
+        if release.catalog is not None:
+            for name in CATALOG_ASSETS:
+                source = release.directory / name
+                self._trusted_regular_file(source, f"verified catalog asset {name}")
+                if sha256_file(source) != release.catalog.files[name]:
+                    raise UpdateError(f"verified catalog asset changed before staging: {name}")
+                destination = validation / name
+                self.atomic_replace(
+                    source,
+                    destination,
+                    uid=self.trusted_uid,
+                    gid=self.candidate_gid,
+                    mode=0o640,
+                )
+                self._assert_candidate_validation_file(destination, executable=False)
         _fsync_directory(validation)
         self._assert_candidate_validation_directory(validation)
         return dataclasses.replace(release, directory=validation)
@@ -1493,7 +1555,6 @@ class Updater:
             raise UpdateError("release metadata repository/architecture mismatch")
         tag = metadata.get("tag")
         commit = metadata.get("commit")
-        advertised = metadata.get("provider_advertised_version")
         channel = metadata.get("channel", "production")
         if not isinstance(tag, str) or not SEMVER_RE.fullmatch(tag):
             raise UpdateError("release metadata tag is invalid")
@@ -1502,9 +1563,19 @@ class Updater:
             raise UpdateError("release metadata version/tag mismatch")
         if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
             raise UpdateError("release metadata commit is invalid")
-        if not isinstance(advertised, str):
-            raise UpdateError("release metadata advertised version is missing")
-        SemVer.parse(advertised)
+        release_lane = metadata.get("release_lane", RELEASE_LANE_RUNTIME_WITH_CATALOG)
+        if release_lane not in (RELEASE_LANE_RUNTIME, RELEASE_LANE_RUNTIME_WITH_CATALOG):
+            raise UpdateError("release metadata lane is invalid")
+        advertised_raw = metadata.get("provider_advertised_version")
+        if release_lane == RELEASE_LANE_RUNTIME:
+            if advertised_raw is not None:
+                raise UpdateError("runtime-only Pearl release metadata must not carry provider advertised version")
+            advertised = str(version)
+        else:
+            if not isinstance(advertised_raw, str):
+                raise UpdateError("release metadata advertised version is missing")
+            SemVer.parse(advertised_raw)
+            advertised = advertised_raw
         if channel == "private_acceptance":
             if not self.config.allow_private_acceptance:
                 raise UpdateError(
@@ -1513,7 +1584,7 @@ class Updater:
                 )
         elif channel not in ("production",):
             raise UpdateError("release metadata channel is invalid")
-        elif advertised != str(version):
+        elif release_lane != RELEASE_LANE_RUNTIME and advertised != str(version):
             raise UpdateError("release metadata advertised version must match the release version")
         components = metadata.get("components")
         if not isinstance(components, dict):
@@ -1530,27 +1601,33 @@ class Updater:
                 raise UpdateError(f"release metadata {name} embedded version invalid")
             return Component(required_asset, digest, str(embedded))
 
+        catalog_release: CatalogRelease | None = None
         catalog = metadata.get("catalog")
-        if not isinstance(catalog, dict):
-            raise UpdateError("release metadata catalog is missing")
-        release_id = catalog.get("release_id")
-        policy_version = catalog.get("policy_version")
-        files = catalog.get("files")
-        if (
-            not isinstance(release_id, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_id)
-            or not isinstance(policy_version, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", policy_version)
-            or not isinstance(files, dict)
-            or set(files) != set(CATALOG_ASSETS)
-        ):
-            raise UpdateError("release metadata catalog identity/files are invalid")
-        catalog_files: dict[str, str] = {}
-        for name in CATALOG_ASSETS:
-            digest = files.get(name)
-            if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
-                raise UpdateError(f"release metadata catalog checksum invalid for {name}")
-            catalog_files[name] = digest
+        if release_lane == RELEASE_LANE_RUNTIME:
+            if catalog not in (None, {}):
+                raise UpdateError("runtime-only Pearl release metadata must not bind catalog/feed assets")
+        else:
+            if not isinstance(catalog, dict):
+                raise UpdateError("release metadata catalog is missing")
+            release_id = catalog.get("release_id")
+            policy_version = catalog.get("policy_version")
+            files = catalog.get("files")
+            if (
+                not isinstance(release_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_id)
+                or not isinstance(policy_version, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", policy_version)
+                or not isinstance(files, dict)
+                or set(files) != set(CATALOG_ASSETS)
+            ):
+                raise UpdateError("release metadata catalog identity/files are invalid")
+            catalog_files: dict[str, str] = {}
+            for name in CATALOG_ASSETS:
+                digest = files.get(name)
+                if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+                    raise UpdateError(f"release metadata catalog checksum invalid for {name}")
+                catalog_files[name] = digest
+            catalog_release = CatalogRelease(release_id, policy_version, catalog_files)
 
         rollout = metadata.get("provider_admission_rollout")
         rollout_shape_valid = (
@@ -1572,6 +1649,8 @@ class Updater:
         )
         if not bridge_rollout and not strict_rollout:
             raise UpdateError("release metadata provider-admission rollout policy is invalid")
+        if release_lane == RELEASE_LANE_RUNTIME and not strict_rollout:
+            raise UpdateError("runtime-only Pearl release metadata must not bind provider admission bridge policy")
 
         return Release(
             tag,
@@ -1580,13 +1659,14 @@ class Updater:
             advertised,
             component("coordinator", COORDINATOR_ASSET),
             component("gateway", GATEWAY_ASSET),
-            CatalogRelease(release_id, policy_version, catalog_files),
+            catalog_release,
             ProviderAdmissionRollout(
                 rollout["mode"],
                 rollout["enforce_provider_admission"],
                 rollout["bridge_duration_s"],
             ),
             directory,
+            release_lane,
         )
 
     def revoked_versions(self) -> set[SemVer]:
@@ -1708,14 +1788,17 @@ class Updater:
 
     def assess_candidate(self, release: Release) -> tuple[SemVer, str]:
         current, decision = self.eligibility(release)
-        self._preflight_legacy_tier2_cutover()
-        if _path_entry_exists(self._legacy_tier2_catalog_path()):
+        if release.catalog is not None:
+            self._preflight_legacy_tier2_cutover()
+        if release.catalog is not None and _path_entry_exists(self._legacy_tier2_catalog_path()):
             if decision != "repair_pair" or release.version != current:
                 raise UpdateError("legacy Tier-2 cutover requires same-version repair_pair before upgrade")
         self.verify_candidate_versions(release)
         return current, decision
 
     def installed_catalog_is_coherent(self, release: Release) -> bool:
+        if release.catalog is None:
+            return True
         catalog_root = self.install_root / "autotune"
         releases = catalog_root / "releases"
         current = catalog_root / "current"
@@ -2312,7 +2395,7 @@ class Updater:
                 effective_model_hash_legacy_until = model_hash_legacy_until
         if not located:
             raise UpdateError("effective coordinator configuration has no advertised binary version field")
-        if not tier2_catalog_owners:
+        if release.catalog is not None and not tier2_catalog_owners:
             raise UpdateError("effective coordinator configuration has no tier2.catalog_path field")
         if effective_require_hash_verified not in ("false", "true"):
             raise UpdateError("effective tier2.require_hash_verified must be explicitly false or true")
@@ -2323,46 +2406,53 @@ class Updater:
             raise UpdateError("enforced hash verification cannot retain the model hash algorithm legacy bridge")
         target, index, match, lines = located[-1]
         previous = next(value for value in match.groups()[1:4] if value is not None)
-        lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
         payloads = dict(config_texts)
-        if self.config.provider_admission_policy != release.provider_admission_rollout.mode:
-            raise UpdateError("signed provider-admission rollout policy does not match updater policy")
-        rollout = release.provider_admission_rollout
         bridge_deadline: str | None = None
-        if rollout.mode == "bridge_required":
-            bridge_budget = rollout.bridge_duration_s
-            required_budget = (
-                self.config.provider_recovery_timeout_s
-                + self.config.service_health_timeout_s
-                + self.config.minimum_bridge_remaining_s
+        next_version = previous
+        if release.catalog is not None:
+            lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
+            next_version = release.provider_advertised_version
+            if self.config.provider_admission_policy != release.provider_admission_rollout.mode:
+                raise UpdateError("signed provider-admission rollout policy does not match updater policy")
+            rollout = release.provider_admission_rollout
+            if rollout.mode == "bridge_required":
+                bridge_budget = rollout.bridge_duration_s
+                required_budget = (
+                    self.config.provider_recovery_timeout_s
+                    + self.config.service_health_timeout_s
+                    + self.config.minimum_bridge_remaining_s
+                )
+                if bridge_budget <= required_budget:
+                    raise UpdateError("signed provider-admission bridge duration is below the recovery safety budget")
+                bridge_deadline = (
+                    datetime.datetime.now(datetime.timezone.utc)
+                    + datetime.timedelta(seconds=bridge_budget)
+                ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            payloads[target] = self._set_yaml_section_scalars(
+                "".join(lines),
+                target,
+                "autotune",
+                {
+                    "enforce_provider_admission": "true" if rollout.enforce_provider_admission else "false",
+                    "provider_admission_bridge_deadline": (
+                        json.dumps(bridge_deadline) if bridge_deadline is not None else None
+                    ),
+                },
             )
-            if bridge_budget <= required_budget:
-                raise UpdateError("signed provider-admission bridge duration is below the recovery safety budget")
-            bridge_deadline = (
-                datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(seconds=bridge_budget)
-            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        payloads[target] = self._set_yaml_section_scalars(
-            "".join(lines),
-            target,
-            "autotune",
-            {
-                "enforce_provider_admission": "true" if rollout.enforce_provider_admission else "false",
-                "provider_admission_bridge_deadline": (
-                    json.dumps(bridge_deadline) if bridge_deadline is not None else None
-                ),
-            },
-        )
-        catalog_target, previous_catalog_path = tier2_catalog_owners[-1]
-        next_catalog_path = str(self._current_tier2_catalog_path())
-        payloads[catalog_target] = self._set_yaml_section_scalars(
-            payloads[catalog_target],
-            catalog_target,
-            "tier2",
-            {
-                "catalog_path": next_catalog_path,
-            },
-        )
+        catalog_target: Path | None = None
+        previous_catalog_path: str | None = None
+        next_catalog_path: str | None = None
+        if release.catalog is not None:
+            catalog_target, previous_catalog_path = tier2_catalog_owners[-1]
+            next_catalog_path = str(self._current_tier2_catalog_path())
+            payloads[catalog_target] = self._set_yaml_section_scalars(
+                payloads[catalog_target],
+                catalog_target,
+                "tier2",
+                {
+                    "catalog_path": next_catalog_path,
+                },
+            )
         staged_configs: dict[Path, Path] = {}
         for config_index, path in enumerate(config_paths):
             payload = payloads[path]
@@ -2395,7 +2485,7 @@ class Updater:
             )
             if candidate_require_hash is not None:
                 staged_require_hash_verified = candidate_require_hash
-        if staged_catalog_path != next_catalog_path:
+        if release.catalog is not None and staged_catalog_path != next_catalog_path:
             raise UpdateError("staged effective tier2.catalog_path is not the release-bound current catalog path")
         if staged_require_hash_verified != effective_require_hash_verified:
             raise UpdateError("staged effective tier2.require_hash_verified must preserve the live enforcement state")
@@ -2426,10 +2516,10 @@ class Updater:
             staged=staged,
             original_sha256=config_hashes[target],
             previous_version=previous,
-            next_version=release.provider_advertised_version,
+            next_version=next_version,
             catalog_target=catalog_target,
-            catalog_staged=staged_configs[catalog_target],
-            catalog_original_sha256=config_hashes[catalog_target],
+            catalog_staged=staged_configs[catalog_target] if catalog_target is not None else None,
+            catalog_original_sha256=config_hashes[catalog_target] if catalog_target is not None else None,
             previous_catalog_path=previous_catalog_path,
             next_catalog_path=next_catalog_path,
         )
@@ -2440,12 +2530,15 @@ class Updater:
             candidate=release.tag,
             target=str(target),
             previous_version=previous,
-            next_version=release.provider_advertised_version,
-            catalog_target=str(catalog_target),
-            previous_catalog_path=previous_catalog_path,
-            next_catalog_path=next_catalog_path,
-            provider_admission_policy=release.provider_admission_rollout.mode,
+            next_version=next_version,
+            catalog_target=str(catalog_target) if catalog_target is not None else "",
+            previous_catalog_path=previous_catalog_path or "",
+            next_catalog_path=next_catalog_path or "",
+            provider_admission_policy=(
+                release.provider_admission_rollout.mode if release.catalog is not None else "preserved"
+            ),
             provider_admission_bridge_deadline=bridge_deadline,
+            release_lane=release.release_lane,
         )
         return update
 
@@ -3578,50 +3671,51 @@ class Updater:
             self._durable_copy(current_state, tx / "previous-current-release.json")
             state_manifest["sha256"] = sha256_file(tx / "previous-current-release.json")
         self._write_json(tx / "state-manifest.json", state_manifest)
-        catalog_root = self.install_root / "autotune"
-        current = catalog_root / "current"
-        previous = catalog_root / ".previous-target"
-        current_target: str | None = None
-        if _path_entry_exists(current):
-            current_info = current.lstat()
-            if not stat.S_ISLNK(current_info.st_mode):
-                raise UpdateError("catalog current pointer is not a symlink")
-            current_target = os.readlink(current)
-            self._validate_catalog_target(current_target)
-        previous_target: str | None = None
-        if _path_entry_exists(previous):
-            previous_target = _read_trusted_text(
-                previous,
-                "catalog previous pointer",
-                trusted_uid=self.trusted_uid,
-            ).strip()
-            if previous_target:
-                self._validate_catalog_target(previous_target)
-        candidate_directory_name = self._catalog_release_directory_name(release)
-        candidate_path = catalog_root / "releases" / candidate_directory_name
-        legacy_tier2 = self.install_root / "tier2-catalog.json"
-        legacy_tier2_manifest: dict[str, object] = {"existed": _path_entry_exists(legacy_tier2)}
-        if legacy_tier2_manifest["existed"]:
-            legacy_info = self._trusted_regular_file(legacy_tier2, "legacy Tier-2 catalog")
-            self._durable_copy(legacy_tier2, tx / "previous-tier2-catalog.json")
-            legacy_tier2_manifest.update(
-                {
-                    "sha256": sha256_file(tx / "previous-tier2-catalog.json"),
-                    "uid": legacy_info.st_uid,
-                    "gid": legacy_info.st_gid,
-                    "mode": stat.S_IMODE(legacy_info.st_mode),
-                }
-            )
-        self._write_json(
-            tx / "catalog-manifest.json",
-            {
+        catalog_manifest: dict[str, object] = {"owns_catalog": False}
+        if release.catalog is not None:
+            catalog_root = self.install_root / "autotune"
+            current = catalog_root / "current"
+            previous = catalog_root / ".previous-target"
+            current_target: str | None = None
+            if _path_entry_exists(current):
+                current_info = current.lstat()
+                if not stat.S_ISLNK(current_info.st_mode):
+                    raise UpdateError("catalog current pointer is not a symlink")
+                current_target = os.readlink(current)
+                self._validate_catalog_target(current_target)
+            previous_target: str | None = None
+            if _path_entry_exists(previous):
+                previous_target = _read_trusted_text(
+                    previous,
+                    "catalog previous pointer",
+                    trusted_uid=self.trusted_uid,
+                ).strip()
+                if previous_target:
+                    self._validate_catalog_target(previous_target)
+            candidate_directory_name = self._catalog_release_directory_name(release)
+            candidate_path = catalog_root / "releases" / candidate_directory_name
+            legacy_tier2 = self.install_root / "tier2-catalog.json"
+            legacy_tier2_manifest: dict[str, object] = {"existed": _path_entry_exists(legacy_tier2)}
+            if legacy_tier2_manifest["existed"]:
+                legacy_info = self._trusted_regular_file(legacy_tier2, "legacy Tier-2 catalog")
+                self._durable_copy(legacy_tier2, tx / "previous-tier2-catalog.json")
+                legacy_tier2_manifest.update(
+                    {
+                        "sha256": sha256_file(tx / "previous-tier2-catalog.json"),
+                        "uid": legacy_info.st_uid,
+                        "gid": legacy_info.st_gid,
+                        "mode": stat.S_IMODE(legacy_info.st_mode),
+                    }
+                )
+            catalog_manifest = {
+                "owns_catalog": True,
                 "current_target": current_target,
                 "previous_target": previous_target,
                 "candidate_existed": _path_entry_exists(candidate_path),
                 "candidate_release_id": candidate_directory_name,
                 "legacy_tier2": legacy_tier2_manifest,
-            },
-        )
+            }
+        self._write_json(tx / "catalog-manifest.json", catalog_manifest)
         db_dir = tx / "databases"
         db_dir.mkdir(mode=0o700)
         manifest = []
@@ -3711,6 +3805,8 @@ class Updater:
 
     @staticmethod
     def _catalog_release_content_digest(release: Release) -> str:
+        if release.catalog is None:
+            raise UpdateError("Pearl runtime release is not catalog-bound")
         digest = hashlib.sha256()
         for name in CATALOG_ASSETS:
             asset_digest = release.catalog.files.get(name, "")
@@ -3724,6 +3820,8 @@ class Updater:
 
     @staticmethod
     def _catalog_release_directory_name(release: Release) -> str:
+        if release.catalog is None:
+            raise UpdateError("Pearl runtime release is not catalog-bound")
         manifest_digest = release.catalog.files.get("release.json", "")
         if not SHA256_RE.fullmatch(manifest_digest):
             raise UpdateError("catalog release manifest checksum is invalid")
@@ -3791,6 +3889,8 @@ class Updater:
         _fsync_directory(catalog_root)
 
     def install_catalog(self, release: Release) -> None:
+        if release.catalog is None:
+            raise UpdateError("Pearl runtime release is not catalog-bound")
         self._preflight_legacy_tier2_cutover()
         catalog_root = self.install_root / "autotune"
         releases = catalog_root / "releases"
@@ -3895,7 +3995,8 @@ class Updater:
         self.audit("release_component_installed", "success", candidate=release.tag, component="coordinator")
         self.atomic_install(release.directory / release.gateway.asset, self.install_root / "gateway")
         self.audit("release_component_installed", "success", candidate=release.tag, component="gateway")
-        self.install_catalog(release)
+        if release.catalog is not None:
+            self.install_catalog(release)
         installed_config_targets = []
         for staged, destination in (
             (self.config_update.staged, self.config_update.target),
@@ -3950,9 +4051,11 @@ class Updater:
         health = self.get_json("http://127.0.0.1:9443/healthz")
         return health.get("status") == "ok" and health.get("version") == identity.gateway_version
 
-    @staticmethod
-    def release_identity(release: Release) -> RuntimeIdentity:
-        return RuntimeIdentity(release.tag, release.tag, release.provider_advertised_version)
+    def release_identity(self, release: Release) -> RuntimeIdentity:
+        advertised_version = release.provider_advertised_version
+        if release.catalog is None and self.config_update is not None:
+            advertised_version = self.config_update.next_version
+        return RuntimeIdentity(release.tag, release.tag, advertised_version)
 
     def local_coordinator_ready(self, release: Release, require_pool: bool) -> bool:
         return self.local_coordinator_identity_ready(self.release_identity(release), require_pool)
@@ -4069,7 +4172,8 @@ class Updater:
         release: Release,
         expected_require_hash_verified: str | None = None,
     ) -> None:
-        self.assert_effective_tier2_catalog_path(expected_require_hash_verified)
+        if release.catalog is not None:
+            self.assert_effective_tier2_catalog_path(expected_require_hash_verified)
         identity = self.release_identity(release)
         if not self.local_coordinator_identity_ready(identity, False):
             raise UpdateError("live coordinator version does not match signed release")
@@ -4083,8 +4187,9 @@ class Updater:
         publication_paths = [
             *effective_config_paths,
             gateway_config,
-            self.install_root / "autotune" / "current",
         ]
+        if release.catalog is not None:
+            publication_paths.append(self.install_root / "autotune" / "current")
         try:
             min_start_after_ns = max(path.lstat().st_mtime_ns for path in publication_paths)
         except OSError as exc:
@@ -4103,15 +4208,24 @@ class Updater:
             release.tag,
             min_start_after_ns,
         )
+        audit_fields: dict[str, object] = {
+            "coordinator_pid": coordinator["pid"],
+            "gateway_pid": gateway["pid"],
+            "coordinator_inode": coordinator["inode"],
+            "gateway_inode": gateway["inode"],
+            "release_lane": release.release_lane,
+        }
+        if release.catalog is not None:
+            audit_fields.update(
+                {
+                    "tier2_catalog_path": str(self._current_tier2_catalog_path()),
+                    "tier2_catalog_sha256": release.catalog.files["tier2-catalog.json"],
+                }
+            )
         self.audit(
             "live_runtime_binding",
             "success",
-            coordinator_pid=coordinator["pid"],
-            gateway_pid=gateway["pid"],
-            coordinator_inode=coordinator["inode"],
-            gateway_inode=gateway["inode"],
-            tier2_catalog_path=str(self._current_tier2_catalog_path()),
-            tier2_catalog_sha256=release.catalog.files["tier2-catalog.json"],
+            **audit_fields,
         )
 
     def verify_live_sighup_binding(
@@ -4119,6 +4233,8 @@ class Updater:
         release: Release,
         expected_require_hash_verified: str,
     ) -> None:
+        if release.catalog is None:
+            raise UpdateError("hash-enforced proof requires a catalog-bound Pearl release")
         self.assert_effective_tier2_catalog_path(expected_require_hash_verified)
         identity = self.release_identity(release)
         if not self.local_coordinator_identity_ready(identity, False):
@@ -4182,6 +4298,8 @@ class Updater:
         return self.public_identity_ready(self.release_identity(release))
 
     def catalog_manifest_path(self, release: Release) -> Path:
+        if release.catalog is None:
+            raise UpdateError("Pearl runtime release is not catalog-bound")
         candidate = release.directory / "release.json"
         if not candidate.is_file():
             candidate = self.install_root / "autotune" / "current" / "release.json"
@@ -4897,7 +5015,12 @@ class Updater:
             bridge_remaining_s=remaining_s,
         )
 
+    def verify_runtime_only_buyer_canary_policy(self, release: Release) -> None:
+        if release.catalog is None and self.config.buyer_canary_mode != BUYER_CANARY_MODE_REQUIRED:
+            raise UpdateError("runtime-only Pearl release requires buyer canary mode required")
+
     def verify_rollout(self, release: Release) -> None:
+        self.verify_runtime_only_buyer_canary_policy(release)
         self.systemctl("start", "macprovider-coordinator.service")
         self.wait_for(
             "coordinator systemd active state",
@@ -4905,7 +5028,8 @@ class Updater:
             lambda: self.service_active("macprovider-coordinator.service"),
         )
         self.wait_for("coordinator health/version", self.config.service_health_timeout_s, lambda: self.local_coordinator_ready(release, False))
-        self.assert_effective_tier2_catalog_path()
+        if release.catalog is not None:
+            self.assert_effective_tier2_catalog_path()
         self.systemctl("start", "macprovider-gateway.service")
         self.wait_for(
             "gateway systemd active state",
@@ -4916,8 +5040,16 @@ class Updater:
         self.verify_live_runtime_binding(release)
         self.restore_auxiliary_services()
         self.prove_serving_recovery(self.release_identity(release))
-        self.verify_provider_admission_rollout_policy()
-        self.verify_exact_catalog_admission(release)
+        if release.catalog is not None:
+            self.verify_provider_admission_rollout_policy()
+            self.verify_exact_catalog_admission(release)
+        else:
+            self.audit(
+                "provider_admission_rollout_policy",
+                "preserved",
+                release_lane=release.release_lane,
+                operator_policy=self.config.provider_admission_policy or "unspecified",
+            )
         if self.rollback_armed and not self.reconciling:
             self._journal_transition(
                 "provider_install_ready",
@@ -4930,7 +5062,8 @@ class Updater:
                 candidate=release.tag,
                 provider_recovery_timeout_s=self.config.provider_recovery_timeout_s,
             )
-        self.verify_exact_provider_canary(release)
+        if release.catalog is not None:
+            self.verify_exact_provider_canary(release)
         self.verify_buyer_canary_rollout_posture()
         self.restore_auxiliary_timers()
         self._restore_canary_timer()
@@ -4992,39 +5125,55 @@ class Updater:
             if state_manifest.get("sha256") != sha256_file(previous_state):
                 raise UpdateError("rollback installed release state checksum mismatch")
         catalog_manifest = self._transaction_json(tx, "catalog-manifest.json")
-        if not isinstance(catalog_manifest, dict) or set(catalog_manifest) != {
-            "current_target",
-            "previous_target",
-            "candidate_existed",
-            "candidate_release_id",
-            "legacy_tier2",
-        }:
+        if not isinstance(catalog_manifest, dict):
             raise UpdateError("rollback catalog manifest is invalid")
-        for key in ("current_target", "previous_target"):
-            value = catalog_manifest[key]
-            if value is not None:
-                if not isinstance(value, str):
-                    raise UpdateError("rollback catalog pointer is invalid")
-                if value:
-                    self._validate_catalog_target(value)
-        if type(catalog_manifest["candidate_existed"]) is not bool or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", str(catalog_manifest["candidate_release_id"])
-        ):
-            raise UpdateError("rollback catalog release identity is invalid")
-        legacy_tier2 = catalog_manifest["legacy_tier2"]
-        if not isinstance(legacy_tier2, dict) or type(legacy_tier2.get("existed")) is not bool:
-            raise UpdateError("rollback legacy Tier-2 manifest is invalid")
-        if legacy_tier2["existed"]:
-            if set(legacy_tier2) != {"existed", "sha256", "uid", "gid", "mode"}:
+        owns_catalog = catalog_manifest.get("owns_catalog", True)
+        if type(owns_catalog) is not bool:
+            raise UpdateError("rollback catalog ownership flag is invalid")
+        if not owns_catalog:
+            if set(catalog_manifest) != {"owns_catalog"}:
+                raise UpdateError("rollback runtime-only catalog manifest is invalid")
+        else:
+            catalog_keys = set(catalog_manifest)
+            owned_keys = {
+                "current_target",
+                "previous_target",
+                "candidate_existed",
+                "candidate_release_id",
+                "legacy_tier2",
+            }
+            if "owns_catalog" in catalog_keys:
+                owned_keys.add("owns_catalog")
+            if catalog_keys != owned_keys:
+                raise UpdateError("rollback catalog manifest is invalid")
+        if not owns_catalog:
+            catalog_manifest = None
+        if catalog_manifest is not None:
+            for key in ("current_target", "previous_target"):
+                value = catalog_manifest[key]
+                if value is not None:
+                    if not isinstance(value, str):
+                        raise UpdateError("rollback catalog pointer is invalid")
+                    if value:
+                        self._validate_catalog_target(value)
+            if type(catalog_manifest["candidate_existed"]) is not bool or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", str(catalog_manifest["candidate_release_id"])
+            ):
+                raise UpdateError("rollback catalog release identity is invalid")
+            legacy_tier2 = catalog_manifest["legacy_tier2"]
+            if not isinstance(legacy_tier2, dict) or type(legacy_tier2.get("existed")) is not bool:
                 raise UpdateError("rollback legacy Tier-2 manifest is invalid")
-            previous_tier2 = tx / "previous-tier2-catalog.json"
-            self._trusted_regular_file(previous_tier2, "rollback legacy Tier-2 snapshot", private=True)
-            if legacy_tier2["sha256"] != sha256_file(previous_tier2):
-                raise UpdateError("rollback legacy Tier-2 snapshot checksum mismatch")
-            if any(type(legacy_tier2[field]) is not int for field in ("uid", "gid", "mode")):
-                raise UpdateError("rollback legacy Tier-2 metadata is invalid")
-        elif set(legacy_tier2) != {"existed"}:
-            raise UpdateError("rollback absent legacy Tier-2 manifest is invalid")
+            if legacy_tier2["existed"]:
+                if set(legacy_tier2) != {"existed", "sha256", "uid", "gid", "mode"}:
+                    raise UpdateError("rollback legacy Tier-2 manifest is invalid")
+                previous_tier2 = tx / "previous-tier2-catalog.json"
+                self._trusted_regular_file(previous_tier2, "rollback legacy Tier-2 snapshot", private=True)
+                if legacy_tier2["sha256"] != sha256_file(previous_tier2):
+                    raise UpdateError("rollback legacy Tier-2 snapshot checksum mismatch")
+                if any(type(legacy_tier2[field]) is not int for field in ("uid", "gid", "mode")):
+                    raise UpdateError("rollback legacy Tier-2 metadata is invalid")
+            elif set(legacy_tier2) != {"existed"}:
+                raise UpdateError("rollback absent legacy Tier-2 manifest is invalid")
         previous_versions = self._transaction_json(tx, "previous-versions.json")
         if not isinstance(previous_versions, dict) or set(previous_versions) != {"coordinator", "gateway"}:
             raise UpdateError("rollback previous versions manifest is invalid")
@@ -5116,6 +5265,9 @@ class Updater:
 
     def _restore_catalog(self, tx: Path) -> None:
         manifest = self._transaction_json(tx, "catalog-manifest.json")
+        if manifest.get("owns_catalog") is False:
+            self.audit("catalog_rollback", "skipped", reason="runtime-only transaction")
+            return
         catalog_root = self.install_root / "autotune"
         self._replace_catalog_pointer("current", manifest["current_target"])
         legacy_tier2 = self.install_root / "tier2-catalog.json"
@@ -5390,11 +5542,13 @@ class Updater:
             "provider_advertised_version",
             "coordinator_sha256",
             "gateway_sha256",
-            "catalog_release_id",
-            "catalog_policy_version",
-            "catalog_files",
             "provider_admission_rollout",
         }
+        if "release_lane" in payload:
+            required.add("release_lane")
+        has_catalog = "catalog_release_id" in payload or "catalog_policy_version" in payload or "catalog_files" in payload
+        if has_catalog:
+            required.update({"catalog_release_id", "catalog_policy_version", "catalog_files"})
         if set(payload) != required:
             raise UpdateError("phase journal committed release fields are invalid")
         tag = payload["tag"]
@@ -5403,9 +5557,7 @@ class Updater:
         advertised = payload["provider_advertised_version"]
         coordinator_sha = payload["coordinator_sha256"]
         gateway_sha = payload["gateway_sha256"]
-        catalog_release_id = payload["catalog_release_id"]
-        catalog_policy_version = payload["catalog_policy_version"]
-        catalog_files = payload["catalog_files"]
+        release_lane = payload.get("release_lane", RELEASE_LANE_RUNTIME_WITH_CATALOG)
         rollout = payload["provider_admission_rollout"]
         if not isinstance(tag, str) or not SEMVER_RE.fullmatch(tag):
             raise UpdateError("phase journal committed release tag is invalid")
@@ -5421,16 +5573,26 @@ class Updater:
             raise UpdateError("phase journal committed coordinator hash is invalid")
         if not isinstance(gateway_sha, str) or not SHA256_RE.fullmatch(gateway_sha):
             raise UpdateError("phase journal committed gateway hash is invalid")
-        if (
-            not isinstance(catalog_release_id, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", catalog_release_id)
-            or not isinstance(catalog_policy_version, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", catalog_policy_version)
-            or not isinstance(catalog_files, dict)
-            or set(catalog_files) != set(CATALOG_ASSETS)
-            or any(not isinstance(value, str) or not SHA256_RE.fullmatch(value) for value in catalog_files.values())
-        ):
-            raise UpdateError("phase journal committed catalog identity is invalid")
+        if release_lane not in (RELEASE_LANE_RUNTIME, RELEASE_LANE_RUNTIME_WITH_CATALOG):
+            raise UpdateError("phase journal committed release lane is invalid")
+        catalog_release: CatalogRelease | None = None
+        if has_catalog:
+            catalog_release_id = payload["catalog_release_id"]
+            catalog_policy_version = payload["catalog_policy_version"]
+            catalog_files = payload["catalog_files"]
+            if (
+                not isinstance(catalog_release_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", catalog_release_id)
+                or not isinstance(catalog_policy_version, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", catalog_policy_version)
+                or not isinstance(catalog_files, dict)
+                or set(catalog_files) != set(CATALOG_ASSETS)
+                or any(not isinstance(value, str) or not SHA256_RE.fullmatch(value) for value in catalog_files.values())
+            ):
+                raise UpdateError("phase journal committed catalog identity is invalid")
+            catalog_release = CatalogRelease(catalog_release_id, catalog_policy_version, dict(catalog_files))
+        elif release_lane != RELEASE_LANE_RUNTIME:
+            raise UpdateError("phase journal catalog-bound release omits catalog identity")
         rollout_shape_valid = (
             isinstance(rollout, dict)
             and set(rollout) == {"mode", "enforce_provider_admission", "bridge_duration_s"}
@@ -5457,13 +5619,14 @@ class Updater:
             advertised,
             Component(COORDINATOR_ASSET, coordinator_sha, tag),
             Component(GATEWAY_ASSET, gateway_sha, tag),
-            CatalogRelease(catalog_release_id, catalog_policy_version, dict(catalog_files)),
+            catalog_release,
             ProviderAdmissionRollout(
                 rollout["mode"],
                 rollout["enforce_provider_admission"],
                 rollout["bridge_duration_s"],
             ),
             Path("/committed-release"),
+            release_lane,
         )
 
     def reconcile_committed_success(self, payload: dict[str, Any]) -> None:
@@ -5474,6 +5637,20 @@ class Updater:
         self._journal_transition("committed_success_reverified")
 
     def persist_success(self, release: Release, previous: SemVer) -> None:
+        path = self.state_root / "current-release.json"
+        previous_state: dict[str, Any] | None = None
+        if _path_entry_exists(path):
+            self._trusted_regular_file(path, "installed release state", private=True)
+            previous_payload = json.loads(
+                _read_trusted_text(
+                    path,
+                    "installed release state",
+                    trusted_uid=self.trusted_uid,
+                    private=True,
+                )
+            )
+            if isinstance(previous_payload, dict):
+                previous_state = previous_payload
         state = {
             "schema_version": CURRENT_RELEASE_SCHEMA_VERSION,
             "version": str(release.version),
@@ -5483,15 +5660,22 @@ class Updater:
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "coordinator_sha256": release.coordinator.sha256,
             "gateway_sha256": release.gateway.sha256,
-            "catalog_release_id": release.catalog.release_id,
-            "catalog_policy_version": release.catalog.policy_version,
-            "catalog_files": dict(release.catalog.files),
+            "release_lane": release.release_lane,
             "transaction": str(self.transaction),
         }
+        if release.catalog is not None:
+            state.update(
+                {
+                    "catalog_release_id": release.catalog.release_id,
+                    "catalog_policy_version": release.catalog.policy_version,
+                    "catalog_files": dict(release.catalog.files),
+                }
+            )
+        elif previous_state is not None:
+            catalog_keys = ("catalog_release_id", "catalog_policy_version", "catalog_files")
+            if all(key in previous_state for key in catalog_keys):
+                state.update({key: previous_state[key] for key in catalog_keys})
         self._ensure_private_directory(self.state_root, "updater state directory")
-        path = self.state_root / "current-release.json"
-        if _path_entry_exists(path):
-            self._trusted_regular_file(path, "installed release state", private=True)
         self._journal_transition(
             "success_state_persist_pending",
             pending_action={"kind": "state_replace", "destination": str(path)},
@@ -5503,6 +5687,7 @@ class Updater:
         self._journal_transition("success_state_persisted", pending_action=None, success_persisted=True)
 
     def apply(self, release: Release, previous: SemVer) -> None:
+        self.verify_runtime_only_buyer_canary_policy(release)
         self.audit("rollout_started", "in_progress", candidate=release.tag, previous=str(previous))
         self._start_journal(release, previous)
         try:
@@ -5891,9 +6076,11 @@ def main(argv: list[str]) -> int:
             return 0
         current, decision = updater.assess_candidate(release)
         config_update = updater.prepare_config_update(release)
+        updater.verify_runtime_only_buyer_canary_policy(release)
         updater.verify_buyer_canary_rollout_posture()
         updater.validate_deadman_configuration()
-        updater.validate_catalog_canary_configuration()
+        if release.catalog is not None:
+            updater.validate_catalog_canary_configuration()
         if decision == "already_current" and config_update.previous_version != config_update.next_version:
             decision = "repair_config"
             updater.audit(
@@ -5909,8 +6096,9 @@ def main(argv: list[str]) -> int:
             "candidate": release.tag,
             "candidate_commit": release.commit,
             "current_version": str(current),
-            "provider_advertised_version": release.provider_advertised_version,
+            "provider_advertised_version": config_update.next_version,
             "advertised_version_config": str(config_update.target),
+            "release_lane": release.release_lane,
             "canary_rollout_authority": (
                 CANARY_AUTHORITY_VERSION
                 if config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED

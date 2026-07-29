@@ -85,13 +85,22 @@ scripts/verify-pearl-runtime-release.sh \
 
 If the tag exists but peels to a different commit, stop and select or cut a new
 reviewed release target. Do not move an existing public tag to make it fit. If
-the GitHub Release is missing `pearl-release.json`, `coordinator-linux-amd64`,
-`gateway-linux-amd64`, or the signed checksum/catalog assets, stop before
-`macprovider-pearl-update --apply`; the release is not a usable Pearl runtime
-release for this deploy.
+the GitHub Release is missing `pearl-release.json`,
+`coordinator-linux-amd64`, `gateway-linux-amd64`,
+`coordinator-cli-linux-amd64`, or the signed checksum controls, stop before
+`macprovider-pearl-update --apply`; the release is missing Pearl runtime
+assets and is not usable for this deploy. Catalog/feed assets are required only
+when `pearl-release.json` declares or defaults to the catalog-bound
+`pearl_runtime_catalog` lane. Runtime-only `pearl_runtime` releases deliberately
+leave Pearl's existing `tier2.catalog_path` and static feed state unchanged.
 
 For issue #785, this check is the boundary between the solved config-drift
-blocker and the remaining signed-pair release blocker. The broader release-lane
-split is tracked separately in #792 and is not required before finishing #785,
-provided the selected Pearl runtime release passes this preflight and the
-updater's own plan/apply gates.
+blocker and the signed-pair release blocker. Publish a runtime-only Pearl
+release from the exact reviewed source as a GitHub prerelease/non-latest
+runtime bundle, run
+`macprovider-pearl-update --plan --tag vX.Y.Z`, then
+`macprovider-pearl-update --apply --tag vX.Y.Z` with the buyer canary gate
+reviewed/enabled and `PEARL_UPDATER_BUYER_CANARY_MODE=required`. After the
+signed coordinator/gateway pair is live, retry the direct deploy with
+`CONFIG_MODE=preserve-live` so the reviewed config classification is preserved
+without smuggling runtime or catalog changes through the deploy script.

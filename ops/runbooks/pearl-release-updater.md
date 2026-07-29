@@ -7,16 +7,45 @@ The authenticated recovery action from PR #538 remains operator-only.
 
 ## Release trust contract
 
-Every ordinary `vMAJOR.MINOR.PATCH` GitHub release now contains:
+Pearl has four separate release/config sources of truth:
 
-- `coordinator-linux-amd64`, `coordinator-cli-linux-amd64`, and
-  `gateway-linux-amd64`;
-- `pearl-release.json` with the exact repository, tag, commit, component
-  hashes, embedded versions, architecture, and provider version advertised by
-  the coordinator configuration, plus the operator-selected signed provider
-  admission policy (`bridge_required` during migration or
-  `strict_post_migration` after closure);
-- detached signatures for `pearl-release.json` and `checksums.txt`.
+- **Pearl runtime release**: the signed coordinator/gateway runtime bundle for
+  Pearl. Its required assets are `coordinator-linux-amd64`,
+  `coordinator-cli-linux-amd64`, `gateway-linux-amd64`,
+  `pearl-release.json`, `pearl-release.json.sig`, `checksums.txt`, and
+  `checksums.txt.sig`. Runtime-only releases set
+  `release_lane: "pearl_runtime"` and do not carry provider app,
+  Malibu.app, catalog, or static-feed assets. The updater preserves the live
+  `tier2.catalog_path` and feed state for this lane. The protected runtime
+  workflow publishes this lane as a GitHub prerelease with `make_latest=false`,
+  so it never takes over the provider-app stable `/releases/latest` authority
+  and is applied only by explicit tag.
+- **Provider app release**: the signed Mac provider CLI, Malibu.app package,
+  standalone tarball, and provider artifact index. Release verification for
+  this lane proves the standalone CLI and Malibu-embedded CLI byte identity;
+  it is not proof that Pearl has a usable coordinator/gateway runtime bundle.
+- **Catalog/feed release**: the Tier-2 catalog, trusted keys,
+  autotune-candidates feed, demand-rank feed, signatures, release ledger, and
+  provider-side catalog admission evidence. This lane owns policy/feed
+  identity and static-feed signatures; it is not a coordinator/gateway binary
+  rollout.
+- **Pearl config release/reconciliation**: the reviewed
+  `ops/pearl/config/source-of-truth.yaml` classification plus the live
+  Pearl config preserved by `CONFIG_MODE=preserve-live`. This lane decides
+  which live fields may remain operator-owned; it does not publish or install
+  runtime binaries.
+
+The older catalog-bound Pearl bundle remains supported as
+`release_lane: "pearl_runtime_catalog"` for backwards-compatible releases that
+intentionally couple coordinator/gateway runtime assets with catalog/feed
+assets. In that lane, `pearl-release.json` must include the exact repository,
+tag, commit, component hashes, embedded versions, architecture, provider
+version advertised by the coordinator configuration, signed provider admission
+policy (`bridge_required` during migration or `strict_post_migration` after
+closure), and the catalog release identity/files. Runtime-only releases carry
+only the signed runtime component hashes plus a strict no-op admission shape;
+they must not carry `provider_advertised_version`, and `catalog` is absent or
+`null`.
 
 The protected release workflow first builds a complete unsigned candidate from
 the exact fresh `origin/main` tip while the requested tag is absent. After that
@@ -107,6 +136,9 @@ posture before state capture, after stable public fleet recovery, and after
 the exact physical catalog-provider proof. Public identity, three consecutive
 protected-fleet samples, admission policy, exact catalog admission, and the
 physical provider canary remain mandatory. The default remains `required`.
+Runtime-only `pearl_runtime` releases are not eligible for this disabled mode:
+because they deliberately omit the exact catalog/provider gates, apply requires
+`PEARL_UPDATER_BUYER_CANARY_MODE=required` and a passing buyer canary.
 
 From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
@@ -248,16 +280,40 @@ scripts/verify-pearl-runtime-release.sh \
 
 This preflight checks the immutable git tag target, `pearl-release.json`,
 `coordinator-linux-amd64`, `gateway-linux-amd64`,
-`coordinator-cli-linux-amd64`, signed checksum controls, and the catalog files
-the Pearl updater needs. It is intentionally not a substitute for
-`macprovider-pearl-update`: the updater still performs signature verification,
-transaction staging, rollback, provider-drain protection, and serving gates
-before any live mutation.
+`coordinator-cli-linux-amd64`, and signed checksum controls. If
+`pearl-release.json` declares `release_lane: "pearl_runtime_catalog"` or omits
+`release_lane` for a legacy catalog-bound bundle, the preflight also requires
+the catalog/feed assets and their signed hashes. If it declares
+`release_lane: "pearl_runtime"`, missing catalog/feed assets are accepted and
+the updater leaves `tier2.catalog_path` unchanged. A GitHub tag that exists
+without coordinator or gateway runtime assets must be reported as missing Pearl
+runtime assets, not as a generic CLI/provider-app release failure. It is
+intentionally not a substitute for `macprovider-pearl-update`: the updater
+still performs signature verification, transaction staging, rollback,
+provider-drain protection, and serving gates before any live mutation.
 
 If the preflight fails because the GitHub Release is missing Pearl runtime
 assets, do not apply an older available release just because its plan succeeds.
 Select or cut a reviewed runtime release whose tag, metadata commit, and deploy
 source match. Do not move an existing public tag to repair identity drift.
+
+For the safe issue #785 path, publish a runtime-only Pearl release from the
+exact reviewed source commit. Runtime-only GitHub releases are deliberately
+published as prereleases with `make_latest=false`; they are never selected by
+the updater's automatic stable-release discovery and must be applied by
+explicit tag. Verify that tag with the command above, then run the updater
+against that same tag with `PEARL_UPDATER_BUYER_CANARY_MODE` left at
+`required` and the buyer canary gate reviewed/enabled:
+
+```bash
+sudo /usr/local/sbin/macprovider-pearl-update --plan --tag vX.Y.Z
+sudo /usr/local/sbin/macprovider-pearl-update --apply --tag vX.Y.Z
+```
+
+After the signed coordinator/gateway pair is live, resume the direct deploy
+with `CONFIG_MODE=preserve-live`. That deploy may reconcile reviewed Pearl
+config ownership, but it must not be used to replace only one runtime binary or
+to smuggle a catalog/feed change into the runtime lane.
 
 ## First production rollout
 

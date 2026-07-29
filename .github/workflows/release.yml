@@ -1408,6 +1408,7 @@ jobs:
               raise SystemExit("unsupported provider admission rollout policy")
           metadata = {
               "schema_version": 1,
+              "release_lane": "pearl_runtime_catalog",
               "repository": "Augustas11/macprovider",
               "tag": tag,
               "release_version": tag.removeprefix("v"),

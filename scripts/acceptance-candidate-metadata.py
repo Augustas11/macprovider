@@ -326,24 +326,45 @@ def build_pearl(args: argparse.Namespace) -> dict:
     tag = require_string(args.tag, TAG, "tag")
     commit = require_string(args.commit, HEX40, "commit")
     compatibility_set_id = f"{repository}:{tag}@{commit}"
-    provider_cli_version = compatibility_provider_cli_version(
-        args.compatibility_manifest,
-        compatibility_set_id,
-    )
-    catalog = args.catalog_directory
-    files = {name: sha256(catalog / name, f"catalog {name}") for name in CATALOG_NAMES}
-    release = strict_json(catalog / "release.json", "catalog release", catalog_release=True)
-    release_id = release.get("release_id")
-    policy_version = release.get("policy_version")
-    if not isinstance(release_id, str) or not release_id or not isinstance(policy_version, str) or not policy_version:
-        fail("catalog release: release_id and policy_version are required")
+    if args.runtime_only and args.catalog_directory is not None:
+        fail("Pearl runtime metadata: --runtime-only cannot bind --catalog-directory")
+    if not args.runtime_only and args.catalog_directory is None:
+        fail("Pearl runtime metadata: --catalog-directory is required unless --runtime-only is set")
+    if not args.runtime_only and args.compatibility_manifest is None:
+        fail("Pearl runtime metadata: --compatibility-manifest is required for catalog-bound releases")
+    if not args.runtime_only and args.provider_advertised_version is not None:
+        fail("Pearl runtime metadata: catalog-bound releases derive provider version from --compatibility-manifest")
+    if args.runtime_only and args.compatibility_manifest is not None:
+        fail("Pearl runtime metadata: --runtime-only cannot bind --compatibility-manifest")
+    if args.runtime_only and args.provider_advertised_version is not None:
+        fail("Pearl runtime metadata: --runtime-only cannot bind --provider-advertised-version")
+    if args.runtime_only and args.provider_admission_policy != "strict_post_migration":
+        fail("Pearl runtime metadata: --runtime-only cannot bind provider admission bridge policy")
+    provider_cli_version = None
+    if not args.runtime_only:
+        provider_cli_version = compatibility_provider_cli_version(
+            args.compatibility_manifest,
+            compatibility_set_id,
+        )
+    catalog_metadata = None
+    release_lane = "pearl_runtime"
+    if args.catalog_directory is not None:
+        catalog = args.catalog_directory
+        files = {name: sha256(catalog / name, f"catalog {name}") for name in CATALOG_NAMES}
+        release = strict_json(catalog / "release.json", "catalog release", catalog_release=True)
+        release_id = release.get("release_id")
+        policy_version = release.get("policy_version")
+        if not isinstance(release_id, str) or not release_id or not isinstance(policy_version, str) or not policy_version:
+            fail("catalog release: release_id and policy_version are required")
+        catalog_metadata = {"files": files, "policy_version": policy_version, "release_id": release_id}
+        release_lane = "pearl_runtime_catalog"
     rollout = {
         "bridge_required": {"bridge_duration_s": 86400, "enforce_provider_admission": False, "mode": "bridge_required"},
         "strict_post_migration": {"bridge_duration_s": 0, "enforce_provider_admission": True, "mode": "strict_post_migration"},
     }[args.provider_admission_policy]
-    return {
+    metadata = {
         "architecture": "linux-amd64",
-        "catalog": {"files": files, "policy_version": policy_version, "release_id": release_id},
+        "catalog": catalog_metadata,
         "channel": args.channel,
         "commit": commit,
         "components": {
@@ -365,12 +386,15 @@ def build_pearl(args: argparse.Namespace) -> dict:
             }
         },
         "provider_admission_rollout": rollout,
-        "provider_advertised_version": provider_cli_version,
+        "release_lane": release_lane,
         "release_version": tag.removeprefix("v"),
         "repository": repository,
         "schema_version": 1,
         "tag": tag,
     }
+    if provider_cli_version is not None:
+        metadata["provider_advertised_version"] = provider_cli_version
+    return metadata
 
 
 def command_build_pearl(args: argparse.Namespace) -> None:
@@ -655,10 +679,12 @@ def parser() -> argparse.ArgumentParser:
     pearl.add_argument("--repository", required=True)
     pearl.add_argument("--tag", required=True)
     pearl.add_argument("--commit", required=True)
-    pearl.add_argument("--compatibility-manifest", required=True, type=pathlib.Path)
+    pearl.add_argument("--compatibility-manifest", type=pathlib.Path)
+    pearl.add_argument("--provider-advertised-version")
     pearl.add_argument("--provider-admission-policy", choices=("bridge_required", "strict_post_migration"), required=True)
     pearl.add_argument("--channel", choices=("private_acceptance", "production"), default="private_acceptance")
-    pearl.add_argument("--catalog-directory", required=True, type=pathlib.Path)
+    pearl.add_argument("--catalog-directory", type=pathlib.Path)
+    pearl.add_argument("--runtime-only", action="store_true")
     pearl.add_argument("--coordinator", required=True, type=pathlib.Path)
     pearl.add_argument("--coordinator-cli", required=True, type=pathlib.Path)
     pearl.add_argument("--gateway", required=True, type=pathlib.Path)
