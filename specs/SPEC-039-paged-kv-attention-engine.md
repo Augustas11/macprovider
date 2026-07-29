@@ -485,7 +485,10 @@ the values are IMPL-set**, exactly as FR-PKV2's capacity bound is:
 - the **minimum model/context envelope the paged path serves that the stock
   contiguous path cannot** — the differentiated servability the layout buys —
   recorded with real model/context memory evidence (an obligation to define
-  and record, not a fixed v0.1 number);
+  and record, not a fixed v0.1 number). Consistent with §1, this delta **MAY be
+  recorded as null or negligible for the v0.1 batch-1 fp16 path** (the payoff
+  arrives with batching and quantized KV); the obligation is to record the
+  measured value honestly, not to manufacture a positive envelope;
 - a **paged-attention overhead ceiling**: a bound on the per-op gather (and,
   for the fused path when it exists, per-op attention) overhead versus the
   stock contiguous path, enforced as an **IMPL gate** — paged mode that
@@ -603,7 +606,8 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   reattach is rejected.
 - **AC-16 servability / sizing obligation (FR-PKV13):** the IMPL records the
   32 GB live-30B sizing table (weights + activation + block pool), the minimum
-  model/context envelope paged serves that stock cannot, and enforces the
+  model/context envelope paged serves that stock cannot (which **MAY be recorded
+  as null/negligible for the batch-1 fp16 path**), and enforces the
   paged-attention overhead ceiling as an IMPL gate (paged mode exceeding the
   recorded ceiling fails the gate).
 - **AC-17 operator config surface (FR-PKV14):** the triple-source

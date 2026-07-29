@@ -190,10 +190,14 @@ one capacity accounting; they MUST NOT maintain independent unbounded queues.
 
 Admission MUST be gated by **paged-block-pool availability, not slot count
 alone.** A request MUST NOT be admitted to prefill/decode unless the SPEC-039
-engine can reserve the blocks its worst-case footprint requires within the
-shared pool; when the pool cannot fund a new row, admission applies
-back-pressure (holds the request in the bounded queue or rejects at the bound)
-rather than admitting a row that would later fail to extend mid-decode. This
+engine can reserve the blocks the row's **initial footprint — prompt plus a
+configured decode headroom, not the full generation ceiling** — requires within
+the shared pool; when the pool cannot fund that initial footprint, admission
+applies back-pressure (holds the request in the bounded queue or rejects at the
+bound). A multi-row batch MUST NOT reserve each row's full worst-case generation
+ceiling — that would collapse effective concurrency toward depth 1 — so an
+admitted row MAY still exhaust the pool mid-decode and is then resolved by the
+deterministic request-local failure path (FR-CB5), never by preemption. This
 reconciles the Entry-110 active-row cap (FR-CB11) with real pool state: the cap
 is an upper bound on rows, and pool availability is the admission-time gate
 underneath it (FR-CB17).
@@ -514,11 +518,16 @@ Block-pool pressure under a shared paged pool MUST be handled by
 by preemption:
 
 - **Admission-time back-pressure (FR-CB1).** A request MUST NOT be admitted
-  unless the SPEC-039 engine can reserve its worst-case block footprint in the
+  unless the SPEC-039 engine can reserve the row's **initial footprint — prompt
+  plus a configured decode headroom, not the full generation ceiling** — in the
   shared pool. Admission is gated by **pool availability**, not by Entry-110
-  slot count alone (FR-CB11); when the pool cannot fund a new row, the request
-  is held in the bounded queue or rejected at the bound with the FR-CB1
-  client-visible backpressure signal.
+  slot count alone (FR-CB11); when the pool cannot fund that initial footprint,
+  the request is held in the bounded queue or rejected at the bound with the
+  FR-CB1 client-visible backpressure signal. SPEC-039 FR-PKV2's stricter
+  full-worst-case reservation applies **only to the batch-1 case** (reserving
+  the whole single-sequence context there makes mid-decode exhaustion
+  structurally impossible); a multi-row batch reserves only prompt-plus-headroom,
+  so mid-decode block-extension failure remains a real path — see FR-CB5.
 - **Deterministic request-local failure (FR-CB5).** If an already-admitted
   decode row cannot extend its block table mid-decode, that **row alone** fails
   deterministically through the request-local terminal path and releases its
