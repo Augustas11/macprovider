@@ -20,8 +20,8 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         XCTAssertEqual(request.buyerTTFTCeilingMS, 1_800)
         XCTAssertEqual(request.benchmarks["qwen3-coder-30b-a3b-instruct"]?.modelKey, "qwen3-coder-30b-a3b-instruct")
         XCTAssertEqual(request.rateCard.version, "baked-2026-07-07-p2-drift")
-        XCTAssertEqual(request.candidateCatalog.version, "published-2026-07-10-catalog-recovery-v1")
-        XCTAssertEqual(request.demandRank.version, "published-2026-07-10-catalog-recovery-v1")
+        XCTAssertEqual(request.candidateCatalog.version, "published-2026-07-29-inband-provenance-v1")
+        XCTAssertEqual(request.demandRank.version, "published-2026-07-29-inband-provenance-v1")
     }
 
     func testSimulateRecommendationMatchesDirectEngineCall() async throws {
@@ -61,11 +61,11 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
 
         XCTAssertEqual(fetchedURL, AutotuneRecommendSimulator.liveRateCardURL)
         XCTAssertEqual(result.rateCardVersion, "baked-2026-07-07-p2-drift")
-        XCTAssertEqual(result.candidateCatalogVersion, "published-2026-07-10-catalog-recovery-v1")
-        XCTAssertEqual(result.demandRankVersion, "published-2026-07-10-catalog-recovery-v1")
+        XCTAssertEqual(result.candidateCatalogVersion, "published-2026-07-29-inband-provenance-v1")
+        XCTAssertEqual(result.demandRankVersion, "published-2026-07-29-inband-provenance-v1")
     }
 
-    func testInlineExactLegacyCatalogUsesSHAForProvenanceBridge() async throws {
+    func testInlineExactCatalogCarriesInBandProvenance() async throws {
         let envelopeData = try makeEnvelopeData(candidateCatalog: AutotuneStaticInputs.bakedCandidateCatalogJSON)
         let simulator = AutotuneRecommendSimulator(
             fetchRateCard: { _ in throw URLError(.badURL) },
@@ -80,7 +80,7 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         )
     }
 
-    func testInlineMutatedLegacyCatalogWithoutProvenanceIsRejected() async throws {
+    func testInlineMutatedCatalogSHAIsRejected() async throws {
         let mutatedCatalog = AutotuneStaticInputs.bakedCandidateCatalogJSON.replacingOccurrences(
             of: "\"min_ram_gb\":48",
             with: "\"min_ram_gb\":47",

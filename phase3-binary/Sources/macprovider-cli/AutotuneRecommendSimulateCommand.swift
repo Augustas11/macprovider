@@ -285,7 +285,7 @@ enum CandidateCatalogEnvelope: Decodable {
             }
             try AutotuneStrictJSON.validate(data, kind: .candidateCatalog)
             return try JSONDecoder.autotuneSim.decode(CandidateCatalog.self, from: data)
-                .validated(candidateCatalogSHA256: actualSHA256)
+                .validated()
         }
     }
 }
