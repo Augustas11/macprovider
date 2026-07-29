@@ -497,6 +497,15 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "continuous-batching-serving",
+      "owner_spec": "SPEC-038",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/614"
     }
   ]
 }
