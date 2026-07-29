@@ -1,6 +1,8 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.1
+> **⚠ SUPERSEDED — pending v0.2 paged rewrite (do NOT implement this version).** v0.1 was written on the original RESEARCH_232 memo's now-**falsified** framing: Approach-A "pin a reviewed upstream `mlx-swift-lm` batch API" (FR-CB10) and dense/contiguous KV. Upstream will never deliver that API (PR #263 abandoned), and the strategic engine is **paged** (memory-servability), built **in-house** — proven additively feasible with no `mlx` fork (spikes `e5ded571` + `acc30b1e`). The serving-safety/correctness half (feature flag, serial-fallback-identical, per-request usage/receipt isolation, actor isolation, admission, spec-decode exclusion, telemetry) **survives**; the upstream-pin spine and dense-KV assumption do **not**. Rewrite path: reframe activation to *locally-owned capability* + split the paged-KV/paged-attention engine into its own spec. See `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`. PR #804 (scaffold) is held pending this reframe.
+
+Version: v0.1 (SUPERSEDED)
 Status: draft (normative design; no IMPL in this SPEC — implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (landed decision memo, commit `8d80f6c4`)
