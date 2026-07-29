@@ -1,7 +1,7 @@
 # SPEC-035 — Provider connection diagnostics and failure history
 
-Version: v0.3.0
-Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts)
+Version: v0.4.0
+Status: draft (Partial #535 coordinator journal + provider diagnostic snapshot + monitor alerts + admission-ceiling drift diagnostics)
 Owner: coordinator operator observability
 Issue: https://github.com/Augustas11/macprovider/issues/535
 
@@ -28,6 +28,8 @@ In scope for v0.2 (this Partial):
   authenticated provider WebSocket.
 - Pearl-side monitor alerting over the existing operator-authenticated
   coordinator admin endpoints.
+- Coordinator-observed proof-of-weights admission-ceiling drift diagnostics on
+  heartbeat model changes.
 
 Out of scope (later Partials of #535):
 
@@ -117,8 +119,24 @@ missing-auth windows. Alerts MUST NOT expose raw tokens, Authorization values,
 raw protocol payloads, local paths, or provider diagnostics to buyer/gateway
 APIs.
 
+**SPEC-035-R009 — Admission-ceiling drift diagnostics.** When a live provider
+heartbeat changes `model_id`, the coordinator SHOULD compare the new model's
+signed catalog `min_ram_gb` against the provider session's observed
+proof-of-weights admission cap when both values are available. If the session has
+no observed admission cap, the coordinator MUST emit a bounded redacted
+operator-visible event with kind `missing_admission_cap`. If the new catalogued
+model exceeds the observed cap, the coordinator MUST emit a bounded redacted
+operator-visible event with kind `model_ceiling_drift`. These diagnostics MUST
+be coalesced or rate-limited per provider and event kind so a compromised
+provider cannot create an unbounded durable-event or warning-log stream by
+toggling model IDs or reconnecting. These diagnostics MUST NOT evict, exclude, degrade, or
+otherwise alter buyer routing by themselves; they are observe-only operator
+signals. They MUST NOT expose raw protocol payloads, tokens, Authorization
+values, local paths, or buyer-visible diagnostics.
+
 ## 4. Rollout
 
-v0.3 ships coordinator-side journal/admin GETs, provider `status --json`,
-authenticated WSS `diagnostic_status` snapshots, and Pearl monitor diagnostic
-alerts. CLI inspect wrappers and any HTTPS beacon remain deferred under #535.
+v0.4 ships coordinator-side journal/admin GETs, provider `status --json`,
+authenticated WSS `diagnostic_status` snapshots, Pearl monitor diagnostic
+alerts, and coordinator observe-only admission-ceiling drift events. CLI inspect
+wrappers and any HTTPS beacon remain deferred under #535.

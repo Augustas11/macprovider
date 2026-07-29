@@ -584,6 +584,19 @@ func main() {
 			wsOpts = append(wsOpts, providerws.WithHardwareTrustAdminStore(onboardingStore))
 		}
 	}
+	var autotuneEvidenceStore autotune.EvidenceStore
+	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
+		autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
+		wsOpts = append(wsOpts, providerws.WithAutotuneEvidenceStore(autotuneEvidenceStore))
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Msg("proof-of-weights admission cap observation enabled")
+	} else if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Msg("proof-of-weights admission cap observation disabled because evidence TTL is not positive")
+	}
 	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
 		if autotuneCatalog == nil {
 			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires autotune candidate catalog feeds")
@@ -591,7 +604,10 @@ func main() {
 		if onboardingStore == nil || onboardingStore.DB() == nil {
 			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires onboarding postgres store")
 		}
-		wsOpts = append(wsOpts, providerws.WithAutotuneHelloGate(autotuneCatalog, autotune.NewPGEvidenceStore(onboardingStore.DB())))
+		if autotuneEvidenceStore == nil {
+			autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
+		}
+		wsOpts = append(wsOpts, providerws.WithAutotuneHelloGate(autotuneCatalog, autotuneEvidenceStore))
 		// Issue #582 FIX A/B: active-session trust enforcement (bounded
 		// revalidation sweep + advisory-locked registration re-check) rides the
 		// same provider_onboarding handle and is wired alongside the admission
@@ -624,9 +640,11 @@ func main() {
 		if err != nil {
 			logger.Fatal().Err(err).Msg("proof_of_weights.telemetry_drift config invalid")
 		}
-		evidenceStore := autotune.NewPGEvidenceStore(onboardingStore.DB())
+		if autotuneEvidenceStore == nil {
+			autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
+		}
 		ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
-		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, evidenceStore, ttl)))
+		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore, ttl)))
 		logger.Info().
 			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
 			Int("tps_min_requests_window", driftCfg.TPSMinRequestsWindow).
