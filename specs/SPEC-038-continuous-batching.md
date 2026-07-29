@@ -4,7 +4,7 @@ Version: v0.1
 Status: draft (normative design; no IMPL in this SPEC — implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (landed decision memo, commit `8d80f6c4`)
-Audit history: three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings recorded in the SPEC PR body and `specs/SPEC-038-rN-audit.md`.
+Audit history: three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-rN-audit.md`.
 
 ## 1. Purpose and scope
 
@@ -72,8 +72,9 @@ Out of scope for v0.1 (recorded, not silently dropped):
 - Combined speculative decoding and continuous batching — deferred to a
   future research memo and SPEC (FR-CB12, §9).
 - Batch-aware **quantized** KV. `kv_bits` batching is a separate future
-  promotion gate; unsupported quantized-KV configurations are rejected at
-  preflight in v0.1 (FR-CB8).
+  promotion gate; in v0.1 unsupported quantized-KV configurations are rejected
+  at preflight, or reason-coded serial-routed only when the operator explicitly
+  selects permissive behavior (FR-CB8).
 - Mixed-phase (prefill-plus-decode in one heterogeneous model call)
   batching; v0.1 keeps prompt and decode phases separate (FR-CB2).
 - Priority, deadline, or buyer-class scheduling economics; v0.1 is FCFS
@@ -126,7 +127,7 @@ throughput-replication and enable gates.
 | Decode row | An admitted request that has completed prefill and is participating in the shared decode forward. |
 | Prompt-processing batch | The bounded set of newly admitted requests undergoing prefill before they become decode rows. |
 | Active rows | Requests currently consuming inference capacity (prefill or decode). Capped by Entry 110 (FR-CB11). |
-| Waiting queue | Accepted work not yet admitted to an active phase. Bounded (FR-CB1); never counted as capacity. |
+| Waiting queue | Received work not yet admitted to an active phase; entries are either **pre-admission queued** or **accepted queued** per FR-CB13 (only accepted queued work is snapshot-bound and drain-obligated). Bounded (FR-CB1); never counted as capacity. |
 | Batch-aware KV cache | A dense, contiguous, per-request-extractable cache representation (mlx-lm `BatchKVCache`-style), padded to the longest active row. Not a paged allocator. |
 | Served snapshot | The `(model artifact, model hash, weights generation)` bound to a request when it is accepted, immutable across a later warm swap (FR-CB13). |
 | Entry 110 capacity | The persisted `max_concurrency_override` from the SPEC-023 autotune pipeline; the exact active-row cap (FR-CB11). |
@@ -465,11 +466,18 @@ in AC-22.
   and `slots_total`/`slots_free`; under greedy (temperature-0) decoding with
   no cache-residency difference, response bodies are byte-identical; the only
   permitted difference where batching legitimately overlaps requests is
-  aggregate timing, never a field or accounting difference.
+  aggregate timing, never a field or accounting difference. The parity fixture
+  MUST also cover the other two serial-path entries of FR-CB9 — permissive-mode
+  unsupported-cache/`kv_bits` serial routing, and post-scheduler-failure
+  safe-mode for subsequent requests — asserting unchanged buyer-visible
+  response/receipt/accounting/`slots_total`/`slots_free`/greedy bytes, with only
+  reason-coded non-receipt telemetry permitted to differ.
 - **AC-6 deterministic output equivalence (FR-CB6):** for a fixed
   temperature-0 request, the batched-path output matches the serial-path
-  output within the accepted numerical tolerance, both as a lone row and as
-  one row among a full batch.
+  output, both as a lone row and as one row among a full batch. Under greedy
+  decoding the sampled token sequence MUST be identical (byte/token-identical);
+  a numerical tolerance applies only where the fixture explicitly compares raw
+  logits, and then the exact threshold MUST be stated in the fixture.
 - **AC-7 unsupported cache/`kv_bits` rejection (FR-CB8):** a `newCache`-
   overriding model family (e.g. gpt-oss / gemma / nemotron) and an
   unsupported quantized-KV (`kv_bits`) configuration each either route to the

@@ -76,3 +76,38 @@ commit following this file.
 
 **INFO** — security lane confirmed "no batch ID in the receipt identity tuple"
 (FR-CB6) is clean against SPEC-015's strict tuple. No action.
+
+---
+
+# Round 2 (re-audit after r1 fixes)
+
+| Lane | CRITICAL | HIGH | MEDIUM | LOW/INFO |
+|---|---:|---:|---:|---|
+| security | 0 | 0 | 0 | 2 LOW + 1 INFO |
+| architect | 0 | 0 | 0 | 1 LOW |
+| code | 0 | 0 | 2 | 1 LOW |
+
+Security and architect reached the 0 C/H/M bar and are not re-fired. Code
+raised 2 MEDIUM, both fixed here:
+
+- **R2-M1 — glossary drift.** §3 `Waiting queue` term still read "Accepted
+  work," contradicting the FR-CB13 two-state model (security flagged the same
+  as LOW). *Fix:* glossary now says "Received work not yet admitted… entries
+  are either pre-admission queued or accepted queued per FR-CB13."
+- **R2-M2 — audit file location.** `specs/SPEC-038-r1-audit.md` is a
+  non-canonical file in `specs/` root; `gen_spec_index.py --lint` (which uses
+  `git ls-files`) and `check_spec_governance.py` reject it once tracked.
+  *Fix:* relocated to `audits/2026-07-29/SPEC-038-r1-audit.md`; SPEC header
+  reference updated. (Supersedes the stale "specs/SPEC-NNN-rN-audit.md"
+  convention — the current lint requires audit records under `audits/`.)
+
+LOW/INFO also folded in: §1 quantized-KV out-of-scope bullet aligned to FR-CB8
+(reject-or-permissive-serial-route); AC-6 greedy output stated as
+token-identical with tolerance only for explicit logit comparison; AC-5
+extended to cover the permissive-serial and post-failure safe-mode entries of
+FR-CB9.
+
+# Round 3 (code lane re-audit only)
+
+Code lane re-fired against the R2 fixes; security/architect skipped (passed at
+R2). Result recorded below on convergence.
