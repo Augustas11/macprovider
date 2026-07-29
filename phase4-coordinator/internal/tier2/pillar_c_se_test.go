@@ -1,6 +1,7 @@
 package tier2
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +113,30 @@ func buildSEAttestationToken(
 	return raw
 }
 
+func resignSEAttestationClaims(t *testing.T, raw json.RawMessage, signer *ecdsa.PrivateKey, claims map[string]any) json.RawMessage {
+	t.Helper()
+	var token AttestationToken
+	if err := json.Unmarshal(raw, &token); err != nil {
+		t.Fatalf("unmarshal SE token: %v", err)
+	}
+	if token.Claimed == nil {
+		token.Claimed = map[string]any{}
+	}
+	for key, value := range claims {
+		token.Claimed[key] = value
+	}
+	signature, err := BuildAttestationBindingSignature(token, "auth-test", signer)
+	if err != nil {
+		t.Fatalf("rebuild binding sig: %v", err)
+	}
+	token.Signature = signature
+	out, err := json.Marshal(token)
+	if err != nil {
+		t.Fatalf("marshal SE token: %v", err)
+	}
+	return out
+}
+
 // TestSEAttestationRoundtrip verifies a well-formed macprovider-se-p256-v1 token
 // is accepted and returns AttestationStatusAttested with the correct SE pubkey.
 func TestSEAttestationRoundtrip(t *testing.T) {
@@ -143,6 +169,139 @@ func TestSEAttestationRoundtrip(t *testing.T) {
 	}
 	if recovered.X.Cmp(seKey.PublicKey.X) != 0 || recovered.Y.Cmp(seKey.PublicKey.Y) != 0 {
 		t.Fatal("recovered SE public key does not match original")
+	}
+}
+
+func TestSEAttestationSignedModelHashMismatchWarnsButAttests(t *testing.T) {
+	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("model-hash-mismatch")
+	ecdhKey := "dGVzdC1lY2RoLXB1YmxpY2tleQ"
+	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-1", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
+	raw = resignSEAttestationClaims(t, raw, seKey, map[string]any{
+		"model_id":   "model-a",
+		"model_hash": otherHash,
+	})
+	catalogRaw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	cfg := config.Default().Tier2
+	cfg.CatalogPath = writeTempCatalog(t, catalogRaw)
+	cfg.CatalogPublicKey = publicKey
+	catalog := NewCatalog()
+	if err := catalog.ConfigureStrict(cfg, zerolog.Nop()); err != nil {
+		t.Fatalf("configure catalog: %v", err)
+	}
+	var logs bytes.Buffer
+
+	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
+
+	if result.Status != pool.AttestationStatusAttested {
+		t.Fatalf("status=%q want attested", result.Status)
+	}
+	rawLog := logs.String()
+	for _, want := range []string{
+		`"event":"attestation_model_hash_mismatch"`,
+		`"category":"T2.C"`,
+		`"severity":"WARN"`,
+		`"provider_id":"provider-se-1"`,
+		`"model_id":"model-a"`,
+		`"claimed_hash_prefix":"ffffffff"`,
+		`"expected_hash_prefix":"01234567"`,
+		`"catalog_id":"test-catalog"`,
+		`"decision":"observe"`,
+		`"reason":"signed_model_hash_mismatch"`,
+		`"message":"tier2 attestation event"`,
+	} {
+		if !strings.Contains(rawLog, want) {
+			t.Fatalf("attestation model-hash log missing %s: %s", want, rawLog)
+		}
+	}
+}
+
+func TestSEAttestationSignedModelHashMatchDoesNotWarn(t *testing.T) {
+	seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("model-hash-match")
+	ecdhKey := "dGVzdC1lY2RoLXB1YmxpY2tleQ"
+	raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-1", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
+	raw = resignSEAttestationClaims(t, raw, seKey, map[string]any{
+		"model_id":   "model-a",
+		"model_hash": testHash,
+	})
+	catalogRaw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	cfg := config.Default().Tier2
+	cfg.CatalogPath = writeTempCatalog(t, catalogRaw)
+	cfg.CatalogPublicKey = publicKey
+	catalog := NewCatalog()
+	if err := catalog.ConfigureStrict(cfg, zerolog.Nop()); err != nil {
+		t.Fatalf("configure catalog: %v", err)
+	}
+	var logs bytes.Buffer
+
+	result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
+
+	if result.Status != pool.AttestationStatusAttested {
+		t.Fatalf("status=%q want attested", result.Status)
+	}
+	if strings.Contains(logs.String(), `"event":"attestation_model_hash_mismatch"`) {
+		t.Fatalf("matching model hash emitted mismatch warning: %s", logs.String())
+	}
+}
+
+func TestSEAttestationInvalidSignedModelHashWarnsButAttests(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim any
+	}{
+		{name: "uppercase", claim: strings.ToUpper(testHash)},
+		{name: "blank", claim: "   "},
+		{name: "non_string", claim: 123},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				t.Fatalf("generate key: %v", err)
+			}
+			now := time.Unix(1716768000, 0).UTC()
+			challenge := []byte("model-hash-invalid")
+			ecdhKey := "dGVzdC1lY2RoLXB1YmxpY2tleQ"
+			raw := buildSEAttestationToken(t, seKey, nil, challenge, "provider-se-1", ecdhKey, now.Add(-time.Minute), now.Add(time.Minute))
+			raw = resignSEAttestationClaims(t, raw, seKey, map[string]any{
+				"model_id":   "model-a",
+				"model_hash": tc.claim,
+			})
+			catalogRaw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+			cfg := config.Default().Tier2
+			cfg.CatalogPath = writeTempCatalog(t, catalogRaw)
+			cfg.CatalogPublicKey = publicKey
+			catalog := NewCatalog()
+			if err := catalog.ConfigureStrict(cfg, zerolog.Nop()); err != nil {
+				t.Fatalf("configure catalog: %v", err)
+			}
+			var logs bytes.Buffer
+
+			result := VerifyAttestationTokenExtWithCatalog(raw, cfg, challenge, "auth-test", "provider-se-1", ecdhKey, "model-a", catalog, now, zerolog.New(&logs))
+
+			if result.Status != pool.AttestationStatusAttested {
+				t.Fatalf("status=%q want attested", result.Status)
+			}
+			rawLog := logs.String()
+			for _, want := range []string{
+				`"event":"attestation_model_hash_mismatch"`,
+				`"decision":"observe"`,
+				`"reason":"signed_model_hash_invalid"`,
+				`"message":"tier2 attestation event"`,
+			} {
+				if !strings.Contains(rawLog, want) {
+					t.Fatalf("invalid signed model-hash log missing %s: %s", want, rawLog)
+				}
+			}
+		})
 	}
 }
 

@@ -88,22 +88,39 @@ type AttestationVerifyResult struct {
 	SEResult *SEAttestationResult
 }
 
+type attestationModelHashCheck struct {
+	Catalog *Catalog
+	ModelID string
+}
+
 // VerifyAttestationTokenExt is the full-result variant of VerifyAttestationToken.
 // It returns an AttestationVerifyResult so the caller can access SE-specific
 // output (e.g. the verified SE public key) without a second parse pass.
 func VerifyAttestationTokenExt(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
-	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger)
+	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{})
+	return AttestationVerifyResult{Status: status, SEResult: seResult}
+}
+
+// VerifyAttestationTokenExtWithCatalog is the catalog-aware variant used by
+// provider admission. It preserves attestation status semantics while emitting
+// observe-mode diagnostics when the already-signed claimed.model_hash disagrees
+// with the active catalog row for modelID.
+func VerifyAttestationTokenExtWithCatalog(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey, modelID string, catalog *Catalog, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
+	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{
+		Catalog: catalog,
+		ModelID: modelID,
+	})
 	return AttestationVerifyResult{Status: status, SEResult: seResult}
 }
 
 // VerifyAttestationToken verifies an attestation token and returns the status.
 // Use VerifyAttestationTokenExt when the caller needs format-specific results.
 func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) pool.AttestationStatus {
-	status, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger)
+	status, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger, attestationModelHashCheck{})
 	return status
 }
 
-func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) (pool.AttestationStatus, *SEAttestationResult) {
+func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, *SEAttestationResult) {
 	if !cfg.RequireAttestation && len(raw) == 0 {
 		return pool.AttestationStatusNotRequired, nil
 	}
@@ -174,6 +191,7 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
 	if token.Format == seAttestationFormat {
 		status, seResult := verifySEAttestationToken(token, challenge, authAttemptID)
 		if status == pool.AttestationStatusAttested {
+			observeSignedModelHashAgainstCatalog(token, modelHashCheck, providerID, logger)
 			logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "se_p256_attested", "tier2.attestation_formats")
 		} else {
 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "se_p256_verification_failed", "tier2.attestation_formats")
@@ -198,7 +216,7 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
 	// Production Apple MDA roots must not become a positive hardware signal
 	// until certificate-chain, freshness-code, public-key, device-property,
 	// and ACME CSR key-binding validation all pass.
-	if status, ok := verifyProductionMDAChainShape(token, cfg, now, authAttemptID, providerID, logger); ok {
+	if status, ok := verifyProductionMDAChainShape(token, cfg, now, authAttemptID, providerID, logger, modelHashCheck); ok {
 		return status, nil
 	}
 	decision := "observe"
@@ -212,7 +230,7 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
 	return pool.AttestationStatusUnsupported, nil
 }
 
-func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, authAttemptID, providerID string, logger zerolog.Logger) (pool.AttestationStatus, bool) {
+func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, authAttemptID, providerID string, logger zerolog.Logger, modelHashCheck attestationModelHashCheck) (pool.AttestationStatus, bool) {
 	certs, ok, err := extractAttestationCertificateChain(token)
 	if !ok {
 		return "", false
@@ -269,6 +287,7 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.require_attestation")
 		return pool.AttestationStatusFailed, true
 	}
+	observeSignedModelHashAgainstCatalog(token, modelHashCheck, providerID, logger)
 	logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_attested", "tier2.attestation_roots")
 	return pool.AttestationStatusAttested, true
 }
@@ -295,6 +314,44 @@ func verifyMDALeafPublicKey(leaf *x509.Certificate) error {
 func attestationHardwareFamilyAllowed(token AttestationToken) bool {
 	hardwareFamily, ok := token.Claimed["hardware_family"].(string)
 	return ok && hardwareFamily == "apple_silicon"
+}
+
+func observeSignedModelHashAgainstCatalog(token AttestationToken, check attestationModelHashCheck, providerID string, logger zerolog.Logger) {
+	if check.Catalog == nil {
+		return
+	}
+	modelID := strings.TrimSpace(check.ModelID)
+	if modelID == "" {
+		modelID = tokenClaimedModelID(token)
+	}
+	if modelID == "" {
+		return
+	}
+	claimedValue, present := token.Claimed["model_hash"]
+	if !present {
+		return
+	}
+	claimedRaw, claimedStringOK := claimedValue.(string)
+	if claimedStringOK {
+		claimedRaw = strings.TrimSpace(claimedRaw)
+	}
+	material, ok := check.Catalog.RouteSnapshotMaterial(modelID, claimedRaw)
+	if !ok {
+		return
+	}
+	if !claimedStringOK || claimedRaw == "" || !hashPattern.MatchString(claimedRaw) {
+		logAttestationModelHashMismatch(logger, providerID, modelID, claimedRaw, material.ExpectedModelHash, material.CatalogID, "signed_model_hash_invalid")
+		return
+	}
+	claimed := strings.ToLower(claimedRaw)
+	if material.HashStatus == pool.HashStatusMismatch || subtle.ConstantTimeCompare([]byte(claimed), []byte(material.ExpectedModelHash)) != 1 {
+		logAttestationModelHashMismatch(logger, providerID, modelID, claimed, material.ExpectedModelHash, material.CatalogID, "signed_model_hash_mismatch")
+	}
+}
+
+func tokenClaimedModelID(token AttestationToken) string {
+	modelID, _ := token.Claimed["model_id"].(string)
+	return strings.TrimSpace(modelID)
 }
 
 func verifyMDAFreshness(leaf *x509.Certificate, deviceAttestToken string) string {
@@ -731,6 +788,23 @@ func logAttestationEvent(logger zerolog.Logger, event, severity, providerID, dec
 		Str("decision", decision).
 		Str("reason", reason).
 		Str("config_flag", configFlag).
+		Msg("tier2 attestation event")
+}
+
+func logAttestationModelHashMismatch(logger zerolog.Logger, providerID, modelID, claimedHash, expectedHash, catalogID, reason string) {
+	logger.Warn().
+		Str("event", "attestation_model_hash_mismatch").
+		Str("category", "T2.C").
+		Str("severity", "WARN").
+		Str("provider_id", providerID).
+		Str("model_id", modelID).
+		Str("pillar", "C").
+		Str("claimed_hash_prefix", hashPrefix(claimedHash)).
+		Str("expected_hash_prefix", hashPrefix(expectedHash)).
+		Str("catalog_id", catalogID).
+		Str("decision", "observe").
+		Str("reason", reason).
+		Str("config_flag", "tier2.catalog_path").
 		Msg("tier2 attestation event")
 }
 

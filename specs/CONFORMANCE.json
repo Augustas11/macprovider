@@ -203,7 +203,7 @@
     {
       "spec_id": "SPEC-008",
       "title": "Tier-2 Trust Layer",
-      "version": "0.5",
+      "version": "0.5.1",
       "path": "specs/SPEC-008-tier2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1094,6 +1094,30 @@
     }
   ],
   "requirements": [
+    {
+      "requirement_id": "SPEC-008-R001",
+      "spec_id": "SPEC-008",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/tier2/pillar_c.go:VerifyAttestationTokenExtWithCatalog",
+        "phase4-coordinator/internal/tier2/pillar_c.go:observeSignedModelHashAgainstCatalog",
+        "phase4-coordinator/internal/tier2/pillar_c.go:logAttestationModelHashMismatch",
+        "phase4-coordinator/internal/ws/server.go:handleV2Conn"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/tier2/pillar_c_se_test.go::TestSEAttestationSignedModelHashMismatchWarnsButAttests",
+        "phase4-coordinator/internal/tier2/pillar_c_se_test.go::TestSEAttestationSignedModelHashMatchDoesNotWarn",
+        "phase4-coordinator/internal/tier2/pillar_c_se_test.go::TestSEAttestationInvalidSignedModelHashWarnsButAttests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "A7 logs signed attestation model-hash mismatches against the active catalog in observe mode, but SPEC-008 remains pending reconciliation until signed physical journey evidence proves the production coordinator receives and records the diagnostic on live providers."
+      }
+    },
     {
       "requirement_id": "SPEC-017-R001",
       "spec_id": "SPEC-017",

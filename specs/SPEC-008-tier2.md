@@ -1,8 +1,16 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.5 (2026-07-13, zero-gap in-band Pillar-B AEAD rekey)
+**Version:** 0.5.1 (2026-07-29, signed attestation model-hash mismatch observation)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
+
+**Change log v0.5.1 (2026-07-29, A7 signed attestation model-hash observation):**
+- **§7.5/§15.3/AC-C-10:** when a cryptographically valid attestation token carries
+  `claimed.model_hash`, the coordinator compares that already-signed claim to the active
+  catalog row for the provider's admitted model and emits a `T2.C`
+  `attestation_model_hash_mismatch` WARN/observe diagnostic on mismatch or invalid signed
+  hash. This is an observability check only: it does not reject admission, exclude routing,
+  alter attestation status, or add any wire/schema field.
 
 **Change log v0.5 (2026-07-13, issue #540 — zero-gap mandatory AEAD rekey):**
 - **§6.9 replaces reconnect rotation with a negotiated in-band epoch handoff.**
@@ -2243,6 +2251,11 @@ its signature ever being checked** (§7.3):
    provider pool entry.
 9. Emit `T2.C` audit events for failures, unsupported formats, and successful
    attestations when audit sampling permits.
+10. If the cryptographically valid token carries `claimed.model_hash`, compare that
+    already-signed value against the active catalog row for the provider's admitted model.
+    On mismatch or invalid signed hash, emit `T2.C attestation_model_hash_mismatch` with
+    `decision: observe`; do **not** reject admission, exclude routing, or change the
+    attestation status from `attested`.
 
 The coordinator MUST reject replayed challenges.
 
@@ -2431,6 +2444,13 @@ Given an SE-attested provider, after `se_liveness_max_failures` consecutive live
 probes fail (bad ES256 signature over `SHA-256(nonce‖timestamp)`, echo mismatch, or
 timeout), the coordinator marks attestation stale and closes the session with
 `se_liveness_stale`; a single passing probe resets the consecutive-failure counter (§7.4b).
+
+**AC-C-10. Signed attestation model-hash mismatch is observe-only.**
+Given a cryptographically valid attestation token whose signed `claimed.model_hash` differs
+from the active catalog row for the admitted model, the coordinator logs `T2.C
+attestation_model_hash_mismatch` with `decision: observe`, the claimed and expected hash
+prefixes, and the active catalog ID. The provider remains `attested` and the mismatch does
+not reject admission, exclude routing, or change the provider's Pillar A hash status.
 
 ---
 
@@ -3933,19 +3953,26 @@ production logger's `time`):
 
 - `event` (e.g. `attestation_valid`, `attestation_failed`, `attestation_stale`,
   `attestation_replay`, `provider_binding_mismatch`, `attestation_unsupported`,
-  `attestation_root_missing`, `attestation_token_too_large`)
+  `attestation_root_missing`, `attestation_token_too_large`,
+  `attestation_model_hash_mismatch`)
 - `category` (always `"T2.C"`)
 - `severity` (`INFO` | `WARN`)
 - `provider_id`
 - `pillar` (always `"C"`)
 - `decision` (`allow` | `reject` | `observe`)
 - `reason` (short machine token, e.g. `se_p256_attested`, `challenge_mismatch`,
-  `missing_attestation_roots`)
+  `missing_attestation_roots`, `signed_model_hash_mismatch`,
+  `signed_model_hash_invalid`)
 - `config_flag` (the governing config key, e.g. `tier2.attestation_formats`)
 
-`event`/`reason` preserve a coarse failed-vs-unsupported-vs-replay distinction, but the
-per-session/trust context below is **not** currently available to operators. T2.C events
-MUST NOT include raw attestation token bytes or JWS body.
+For `attestation_model_hash_mismatch`, the shipped event additionally carries
+`model_id`, `claimed_hash_prefix`, `expected_hash_prefix`, and `catalog_id`. These are
+bounded diagnostics over already-public/catalog hashes; raw attestation token bytes and JWS
+body bytes remain forbidden in T2.C logs.
+
+`event`/`reason` preserve a coarse failed-vs-unsupported-vs-replay distinction. For legacy
+attestation events other than `attestation_model_hash_mismatch`, the richer per-session/
+trust context below is **not** currently available to operators.
 
 **Deferred (forward enhancement).** A richer T2.C schema — adding `assigned_id`,
 `attestation_format`, `trust_root_id`, `challenge_id` (a coordinator-assigned short ID,
