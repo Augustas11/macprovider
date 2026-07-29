@@ -46,6 +46,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-035 | Provider connection diagnostics and failure history | v0.3.0 | draft | complete | pending: 8 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
 | SPEC-036 | Compute-Integrity Receipt Companion | v0.1 | draft | complete | pending: 17 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.1.1 | draft | complete | pending: 13 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
+| SPEC-038 | Continuous batching for concurrent provider inference | v0.1 | draft | complete | pending: 16 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**
