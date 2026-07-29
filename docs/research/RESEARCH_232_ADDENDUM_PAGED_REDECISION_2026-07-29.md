@@ -59,7 +59,9 @@ The correct framing splits the two axes and **re-prioritizes them for the networ
 
 **What survives from the rejected re-run (kept because it is timeline-independent):** the two-axis decomposition itself; the finding that PR #804's FR-CB10 activation theory is dead (below); and the engine-swap no-go.
 
-**Immediate next action is the spike, NOT a fleet measurement.** The real unknown and cost driver is whether paged attention attaches additively to the pinned tag (custom Metal kernel, 3a) or forces an `mlx` fork (3b) — see "The spike" below. The only *forward* demand signal worth watching in parallel is **unmet model/context requests** (buyers asking for models/contexts a Mac can't serve — the servability signal), which is a future signal, not a current-occupancy one.
+**Immediate next action is the spike, NOT a fleet measurement.** The real unknown and cost driver is whether paged attention attaches additively to the pinned tag (custom Metal kernel, 3a) or forces an `mlx` fork (3b) — see "The spike" below.
+
+> **SPIKE RESULT (`docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md`, commit `e5ded571`): 3a CONFIRMED.** `mlx-swift 0.31.6` ships a public JIT custom-Metal-kernel API (`MLXFast.metalKernel`); a custom kernel compiled + dispatched + eval'd (exact match), and a paged KV gather matched contiguous SDPA at float32 epsilon. **Paged batching is an additive build on the current Apple tag — no `mlx` fork.** Cost/risk moved off kernel registration (proven cheap) onto **per-model attention injection + quantized KV + real-perf**; est. multi-week, dominated by injection + scheduler. **Next gate = Phase-2 spike** (route a real Llama/Qwen forward through the paged op, handle 4-bit KV) before committing the build. Packaging note: `swift build` alone doesn't regenerate `default.metallib` — the provider build must wire it deliberately. The only *forward* demand signal worth watching in parallel is **unmet model/context requests** (buyers asking for models/contexts a Mac can't serve — the servability signal), which is a future signal, not a current-occupancy one.
 
 ## PR #804 — reframe to locally-owned activation
 
