@@ -69,7 +69,8 @@
         "SPEC-015",
         "SPEC-016",
         "SPEC-022",
-        "SPEC-024"
+        "SPEC-024",
+        "SPEC-038"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -136,7 +137,8 @@
         "SPEC-022",
         "SPEC-023",
         "SPEC-032",
-        "SPEC-037"
+        "SPEC-037",
+        "SPEC-038"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -219,7 +221,8 @@
         "SPEC-016",
         "SPEC-022",
         "SPEC-024",
-        "SPEC-030"
+        "SPEC-030",
+        "SPEC-038"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -320,7 +323,8 @@
         "SPEC-025",
         "SPEC-026",
         "SPEC-032",
-        "SPEC-033"
+        "SPEC-033",
+        "SPEC-038"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -335,7 +339,8 @@
         "SPEC-005",
         "SPEC-006",
         "SPEC-015",
-        "SPEC-037"
+        "SPEC-037",
+        "SPEC-038"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -383,7 +388,8 @@
       "owner_spec": "SPEC-028",
       "consumers": [
         "SPEC-001",
-        "SPEC-030"
+        "SPEC-030",
+        "SPEC-038"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -483,7 +489,9 @@
     {
       "id": "kv-cache-persistence",
       "owner_spec": "SPEC-037",
-      "consumers": [],
+      "consumers": [
+        "SPEC-038"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
