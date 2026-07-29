@@ -22,6 +22,8 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(config.kvBitsOverride)
         XCTAssertNil(config.maxContextOverride)
         XCTAssertNil(config.maxConcurrencyOverride)
+        XCTAssertEqual(config.continuousBatching, .off)
+        XCTAssertNil(config.continuousBatchQueueLimit)
         XCTAssertFalse(config.enableReceipts)
     }
 
@@ -131,6 +133,56 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.maxConcurrencyOverride, 2)
     }
 
+    // MARK: - continuous batching controls
+
+    func testContinuousBatchingCLIOverridesEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatching: "on", continuousBatchQueueLimit: 7),
+            environment: [
+                "MACPROVIDER_CONTINUOUS_BATCHING": "canary",
+                "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT": "5",
+            ],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: off\ncontinuous_batch_queue_limit: 3\n" }
+        )
+        XCTAssertEqual(config.continuousBatching, .on)
+        XCTAssertEqual(config.continuousBatchQueueLimit, 7)
+    }
+
+    func testContinuousBatchingEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [
+                "MACPROVIDER_CONTINUOUS_BATCHING": "canary",
+                "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT": "6",
+            ],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: off\ncontinuous_batch_queue_limit: 2\n" }
+        )
+        XCTAssertEqual(config.continuousBatching, .canary)
+        XCTAssertEqual(config.continuousBatchQueueLimit, 6)
+    }
+
+    func testContinuousBatchingYAMLApplied() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: canary\ncontinuous_batch_queue_limit: 4\n" }
+        )
+        XCTAssertEqual(config.continuousBatching, .canary)
+        XCTAssertEqual(config.continuousBatchQueueLimit, 4)
+    }
+
+    func testContinuousBatchingRejectsInvalidMode() throws {
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatching: "maybe"),
+            environment: [:],
+            fileExists: { _ in false },
+            readFile: { _ in "" }
+        ))
+    }
+
     // MARK: - Preflight validation
 
     func testKvBitsPreflightRejectsInvalidValue() throws {
@@ -168,6 +220,50 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
     }
 
+    func testContinuousBatchQueueLimitPreflightRejectsZero() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatchQueueLimit = 0
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
+    func testContinuousBatchingStrictOnFailsUntilUpstreamBatchAPIPinned() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatching = .on
+        config.maxConcurrencyOverride = 2
+        XCTAssertThrowsError(try ServeCommand.runContinuousBatchingPreflight(config))
+    }
+
+    func testContinuousBatchingCanarySerialRoutesUnsupportedPin() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatching = .canary
+        config.maxConcurrencyOverride = 2
+        XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
+    }
+
+    func testContinuousBatchingPolicyReportsKvBitsBeforeMissingPin() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: 4,
+            draftConfigured: false
+        )
+        XCTAssertEqual(capability.queueLimit, 4)
+        XCTAssertEqual(capability.unsupportedReason, .kvBitsUnsupported)
+    }
+
+    func testContinuousBatchingPolicyReportsDraftMutualExclusion() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: 9,
+            kvBits: nil,
+            draftConfigured: true
+        )
+        XCTAssertEqual(capability.queueLimit, 9)
+        XCTAssertEqual(capability.unsupportedReason, .draftSpecDecodeMutualExclusion)
+    }
+
     // MARK: - Runtime threading
 
     func testRuntimeReceivesKvBitsOverride() async throws {
@@ -200,6 +296,22 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
         let observed = await runtime.maxBatchForTest()
         XCTAssertEqual(observed, 3)
+    }
+
+    func testRuntimeReceivesContinuousBatchingControls() async throws {
+        let runtime = ModelRuntime(
+            modelID: "test-model",
+            maxBatch: 3,
+            continuousBatchingMode: .canary,
+            continuousBatchQueueLimit: 5,
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let observed = await runtime.continuousBatchingCapabilityForTest()
+        XCTAssertEqual(observed.mode, .canary)
+        XCTAssertEqual(observed.maxActiveRows, 3)
+        XCTAssertEqual(observed.queueLimit, 5)
+        XCTAssertEqual(observed.unsupportedReason, .upstreamBatchAPIUnpinned)
     }
 
     func testRuntimeDefaultMaxBatchIsOne() async throws {

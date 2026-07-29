@@ -448,6 +448,49 @@ func decodeBenchFormatTPS(_ v: Double) -> String {
     String(format: "%.1f", v)
 }
 
+struct MSBAggregateThroughputInput: Sendable, Equatable {
+    let decodedTokens: Int
+    let decodeStartedAt: Date
+    let decodeEndedAt: Date
+}
+
+struct MSBAggregateThroughputReport: Sendable, Equatable {
+    let totalDecodedTokens: Int
+    let commonWallSeconds: TimeInterval
+    let aggregateTokensPerSecond: Double
+}
+
+enum MSBAggregateThroughputError: Error, Equatable {
+    case emptySamples
+    case invalidSample
+}
+
+func msbAggregateThroughput(_ samples: [MSBAggregateThroughputInput]) throws -> MSBAggregateThroughputReport {
+    guard !samples.isEmpty else {
+        throw MSBAggregateThroughputError.emptySamples
+    }
+    var totalDecodedTokens = 0
+    var start = samples[0].decodeStartedAt
+    var end = samples[0].decodeEndedAt
+    for sample in samples {
+        guard sample.decodedTokens >= 0, sample.decodeEndedAt > sample.decodeStartedAt else {
+            throw MSBAggregateThroughputError.invalidSample
+        }
+        totalDecodedTokens += sample.decodedTokens
+        start = min(start, sample.decodeStartedAt)
+        end = max(end, sample.decodeEndedAt)
+    }
+    let commonWallSeconds = end.timeIntervalSince(start)
+    guard commonWallSeconds > 0 else {
+        throw MSBAggregateThroughputError.invalidSample
+    }
+    return MSBAggregateThroughputReport(
+        totalDecodedTokens: totalDecodedTokens,
+        commonWallSeconds: commonWallSeconds,
+        aggregateTokensPerSecond: Double(totalDecodedTokens) / commonWallSeconds
+    )
+}
+
 /// Reduce an operator-supplied string to a basename-safe slug.
 /// Prevents path-traversal sequences (`../`) from reaching the output path.
 func decodeBenchSanitizeFilenameComponent(_ input: String) -> String {
