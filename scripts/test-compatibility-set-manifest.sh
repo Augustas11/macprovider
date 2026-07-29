@@ -31,7 +31,8 @@ cp "$root/phase3-binary/dist/compatibility-set-assets/updater-rollback.json" "$l
 cp -R "$local_artifacts" "$payload/compatibility-set-local"
 cp "$catalog/release.json" "$catalog/trusted-keys.json" "$catalog/tier2-catalog.json" "$payload/catalog-release/"
 cp "$catalog_feeds/autotune-candidates.json" "$catalog_feeds/autotune-candidates.json.sig" \
-  "$catalog_feeds/demand-rank.json" "$catalog_feeds/demand-rank.json.sig" "$payload/catalog-release/"
+  "$catalog_feeds/demand-rank.json" "$catalog_feeds/demand-rank.json.sig" \
+  "$catalog_feeds/rate-card.json" "$catalog_feeds/rate-card.json.sig" "$payload/catalog-release/"
 
 python3 "$tool" generate \
   --tag "$tag" \
@@ -128,6 +129,7 @@ for required in (
     'STAGE_DIR="$PACKAGE_WORK_DIR/stage"',
     'cp "$COMPATIBILITY_SET_MANIFEST" "$STAGE_DIR/compatibility-set.json"',
     'cp "$PHASE3_DIR/catalog/autotune/tier2-catalog.json" "$STAGE_DIR/catalog-release/"',
+    'cp "$PHASE3_DIR/dist/static/rate-card.json" "$STAGE_DIR/catalog-release/"',
     '--provider-cli-version "$PROVIDER_CLI_VERSION"',
     '--malibu-app-version "$MALIBU_APP_VERSION"',
     'cp -R "$LOCAL_COMPATIBILITY_SET_DIR" "$STAGE_DIR/compatibility-set-local"',

@@ -2277,6 +2277,8 @@ struct ProviderReleasePayloadTransaction {
             "autotune-candidates.json.sig",
             "demand-rank.json",
             "demand-rank.json.sig",
+            "rate-card.json",
+            "rate-card.json.sig",
         ] {
             let requiredURL = catalogDirectory.appendingPathComponent(requiredName)
             let values = try requiredURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])

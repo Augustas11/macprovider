@@ -201,6 +201,8 @@ cp "$PHASE3_DIR/dist/static/autotune-candidates.json" "$STAGE_DIR/catalog-releas
 cp "$PHASE3_DIR/dist/static/autotune-candidates.json.sig" "$STAGE_DIR/catalog-release/"
 cp "$PHASE3_DIR/dist/static/demand-rank.json" "$STAGE_DIR/catalog-release/"
 cp "$PHASE3_DIR/dist/static/demand-rank.json.sig" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/dist/static/rate-card.json" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/dist/static/rate-card.json.sig" "$STAGE_DIR/catalog-release/"
 
 python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
   --input "$STAGE_DIR/compatibility-set.json" \

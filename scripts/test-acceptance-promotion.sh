@@ -173,6 +173,8 @@ release_names=(
   "coordinator-linux-amd64"
   "demand-rank.json"
   "demand-rank.json.sig"
+  "rate-card.json"
+  "rate-card.json.sig"
   "gateway-linux-amd64"
   "macprovider-release-discovery.json"
   "macprovider-release-discovery.json.sig"
@@ -216,6 +218,8 @@ catalog_names = (
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "rate-card.json",
+    "rate-card.json.sig",
 )
 value = {
     "architecture": "linux-amd64",

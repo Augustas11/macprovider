@@ -213,6 +213,8 @@ expected_catalog_assets = {
     "autotune-candidates.json.sig",
     "demand-rank.json",
     "demand-rank.json.sig",
+    "rate-card.json",
+    "rate-card.json.sig",
 }
 if lane == "pearl_runtime":
     if catalog not in (None, {}):
@@ -318,6 +320,8 @@ if [[ "$lane" = "pearl_runtime_catalog" ]]; then
     autotune-candidates.json.sig
     demand-rank.json
     demand-rank.json.sig
+    rate-card.json
+    rate-card.json.sig
   )
   PEARL_RELEASE_VIEW="$work/release.json" \
   PEARL_RELEASE_CATALOG_ASSETS="$(printf '%s\n' "${catalog_assets[@]}")" \
@@ -343,7 +347,8 @@ PY
     --pattern release.json --pattern trusted-keys.json \
     --pattern tier2-catalog.json --pattern autotune-candidates.json \
     --pattern autotune-candidates.json.sig --pattern demand-rank.json \
-    --pattern demand-rank.json.sig --clobber >/dev/null
+    --pattern demand-rank.json.sig --pattern rate-card.json \
+    --pattern rate-card.json.sig --clobber >/dev/null
 else
   PEARL_RELEASE_VIEW="$work/release.json" python3 - <<'PY'
 import json

@@ -134,6 +134,8 @@ def verify_directory(args: argparse.Namespace) -> None:
         "autotune-candidates.json.sig",
         "demand-rank.json",
         "demand-rank.json.sig",
+        "rate-card.json",
+        "rate-card.json.sig",
         "pearl-release.json",
         "pearl-release.json.sig",
         "compatibility-artifact-index.json",
@@ -250,6 +252,8 @@ def verify_directory(args: argparse.Namespace) -> None:
         "autotune-candidates.json.sig",
         "demand-rank.json",
         "demand-rank.json.sig",
+        "rate-card.json",
+        "rate-card.json.sig",
     }
     catalog = pearl.get("catalog")
     if (

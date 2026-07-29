@@ -67,6 +67,8 @@ struct CompatibilityArtifactIndex: Equatable, Sendable {
         "catalog_demand",
         "catalog_demand_signature",
         "catalog_manifest",
+        "catalog_rate_card",
+        "catalog_rate_card_signature",
         "catalog_tier2",
         "catalog_trusted_keys",
         "compatibility_manifest",
@@ -177,6 +179,8 @@ struct CompatibilityArtifactIndex: Equatable, Sendable {
             "catalog_demand": "demand-rank.json",
             "catalog_demand_signature": "demand-rank.json.sig",
             "catalog_manifest": "release.json",
+            "catalog_rate_card": "rate-card.json",
+            "catalog_rate_card_signature": "rate-card.json.sig",
             "catalog_tier2": "tier2-catalog.json",
             "catalog_trusted_keys": "trusted-keys.json",
             "compatibility_manifest": CompatibilitySetManifest.fileName,
@@ -491,7 +495,8 @@ struct CompatibilitySetManifest: Equatable, Sendable {
         guard let files = value["files"] as? [String: Any] else { throw UpdateError.compatibilityManifestInvalid("catalog_files") }
         let names = [
             "autotune-candidates.json", "autotune-candidates.json.sig", "demand-rank.json",
-            "demand-rank.json.sig", "release.json", "tier2-catalog.json", "trusted-keys.json",
+            "demand-rank.json.sig", "rate-card.json", "rate-card.json.sig", "release.json",
+            "tier2-catalog.json", "trusted-keys.json",
         ]
         try requireExactKeys(files, Set(names), "catalog_files")
         let directory = payloadDirectory.appendingPathComponent("catalog-release", isDirectory: true)

@@ -84,6 +84,8 @@ CATALOG_ASSETS = (
     "release.json",
     "trusted-keys.json",
     "tier2-catalog.json",
+    "rate-card.json",
+    "rate-card.json.sig",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
     "demand-rank.json",
@@ -1367,7 +1369,7 @@ class Updater:
         if manifest.get("release_id") != catalog.release_id or manifest.get("policy_version") != catalog.policy_version:
             raise UpdateError("catalog metadata/release identity mismatch")
         feeds = manifest.get("feeds")
-        if not isinstance(feeds, dict) or set(feeds) != {"autotune-candidates.json", "demand-rank.json", "tier2-catalog.json"}:
+        if not isinstance(feeds, dict) or set(feeds) != {"autotune-candidates.json", "demand-rank.json", "rate-card.json", "tier2-catalog.json"}:
             raise UpdateError("catalog release manifest feed set is invalid")
         try:
             trusted_keys = json.loads((release.directory / "trusted-keys.json").read_text(encoding="utf-8"))
@@ -1381,19 +1383,27 @@ class Updater:
             self._trusted_regular_file(path, f"verified catalog asset {name}")
             if sha256_file(path) != catalog.files[name]:
                 raise UpdateError(f"catalog metadata checksum mismatch for {name}")
-        for feed_name in ("autotune-candidates.json", "demand-rank.json"):
+        for feed_name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
             row = feeds[feed_name]
             feed_path = release.directory / feed_name
             if not isinstance(row, dict) or row.get("sha256") != sha256_file(feed_path) or row.get("bytes") != feed_path.stat().st_size:
                 raise UpdateError(f"catalog release manifest binding mismatch for {feed_name}")
-            if row.get("version") != catalog.release_id or row.get("signer_key_id") not in keys:
+            if row.get("signer_key_id") not in keys:
                 raise UpdateError(f"catalog release feed identity mismatch for {feed_name}")
             try:
                 feed = json.loads(feed_path.read_text(encoding="utf-8"))
                 signature = json.loads((release.directory / f"{feed_name}.sig").read_text(encoding="utf-8"))
             except (ValueError, OSError) as exc:
                 raise UpdateError(f"catalog feed/signature JSON is invalid for {feed_name}") from exc
-            if not isinstance(feed, dict) or feed.get("version") != catalog.release_id:
+            if not isinstance(feed, dict):
+                raise UpdateError(f"catalog feed version mismatch for {feed_name}")
+            feed_version = feed.get("version")
+            if not isinstance(feed_version, str) or not feed_version:
+                raise UpdateError(f"catalog feed version mismatch for {feed_name}")
+            expected_version = feed_version
+            if feed_name != "rate-card.json":
+                expected_version = catalog.release_id
+            if row.get("version") != expected_version or feed_version != expected_version:
                 raise UpdateError(f"catalog feed version mismatch for {feed_name}")
             if not isinstance(signature, dict) or signature.get("alg") != "ed25519" or signature.get("key_id") != row.get("signer_key_id"):
                 raise UpdateError(f"catalog signature identity mismatch for {feed_name}")
@@ -4326,6 +4336,7 @@ class Updater:
         for endpoint_name, asset_name in (
             ("autotune_candidates", "autotune-candidates.json"),
             ("demand_rank", "demand-rank.json"),
+            ("rate_card", "rate-card.json"),
         ):
             expected = manifest["feeds"][asset_name]
             actual = feeds.get(endpoint_name)

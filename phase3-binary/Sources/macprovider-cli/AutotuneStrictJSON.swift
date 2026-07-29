@@ -3,6 +3,7 @@ import Foundation
 enum AutotuneStaticSchemaKind {
     case candidateCatalog
     case demandRank
+    case rateCard
 }
 
 enum AutotuneStrictJSON {
@@ -21,6 +22,8 @@ enum AutotuneStrictJSON {
             try validateCandidate(object)
         case .demandRank:
             try validateDemand(object)
+        case .rateCard:
+            try validateRateCard(object)
         }
     }
 
@@ -101,6 +104,28 @@ enum AutotuneStrictJSON {
                 throw AutotuneRecommendError.invalidStaticJSON("demand row \(key)")
             }
             try exactKeys(row, allowed: allowed, required: required, label: "demand row \(key)")
+        }
+    }
+
+    private static func validateRateCard(_ object: [String: Any]) throws {
+        try exactKeys(
+            object,
+            allowed: ["version", "policy_version", "generated_at", "usd_per_million_credits", "rows"],
+            required: ["version", "policy_version", "generated_at", "usd_per_million_credits", "rows"],
+            label: "rate card"
+        )
+        guard let rows = object["rows"] as? [String: Any], !rows.isEmpty else {
+            throw AutotuneRecommendError.invalidStaticJSON("rate card rows")
+        }
+        let allowed = Set([
+            "prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok",
+            "provider_share_bps", "global_multiplier_ppm",
+        ])
+        for (key, rawRow) in rows {
+            guard let row = rawRow as? [String: Any] else {
+                throw AutotuneRecommendError.invalidStaticJSON("rate card row \(key)")
+            }
+            try exactKeys(row, allowed: allowed, required: allowed, label: "rate card row \(key)")
         }
     }
 

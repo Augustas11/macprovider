@@ -352,7 +352,7 @@ for name in THIRD-PARTY-NOTICES.txt compatibility-set.json macprovider-cli mlx.m
   printf 'fixture:%s\n' "$name" > "$work/provider/$name"
 done
 chmod 755 "$work/provider/macprovider-cli"
-for name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+for name in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
   printf 'fixture:%s\n' "$name" > "$work/provider/catalog-release/$name"
 done
 for name in install.sh provider-launch-agent.plist.template updater-rollback.json watchdog-launch-agent.plist.template watchdog.sh; do
@@ -378,6 +378,8 @@ cp "$root/phase3-binary/catalog/autotune/release.json" \
   "$root/phase3-binary/dist/static/autotune-candidates.json.sig" \
   "$root/phase3-binary/dist/static/demand-rank.json" \
   "$root/phase3-binary/dist/static/demand-rank.json.sig" \
+  "$root/phase3-binary/dist/static/rate-card.json" \
+  "$root/phase3-binary/dist/static/rate-card.json.sig" \
   "$work/pearl-catalog/"
 cat > "$work/pearl-compatibility.json.tmp" <<EOF
 {"schema_version":"macprovider.compatibility-set-envelope.v1","signatures":[{"algorithm":"fixture"}],"signed":{"compatibility_set_id":"Augustas11/macprovider:${tag}@${candidate_commit}","components":{"provider_cli":{"version":"1.8.31"}},"release":{"commit":"${candidate_commit}","repository":"Augustas11/macprovider","tag":"${tag}","version":"1.8.33"}}}

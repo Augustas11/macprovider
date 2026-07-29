@@ -38,6 +38,9 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case demandRankStale = "demand_rank_stale"
     case hardwareTierUnknown = "hardware_tier_unknown"
     case rateCardFallbackUsed = "rate_card_fallback_used"
+    case rateCardIntegrityFailure = "rate_card_integrity_failure"
+    case rateCardUpdateRequired = "rate_card_update_required"
+    case rateCardStale = "rate_card_stale"
     case noEligibleModel = "no_eligible_model"
     /// v1.7.6 Track A1: at least one recommended candidate had no
     /// specific rate-card row and is being priced against the coord's
@@ -1056,33 +1059,66 @@ struct CandidateCatalog: Decodable, Equatable {
 struct RateCardProjection: Decodable, Equatable {
     struct Row: Decodable, Equatable {
         var promptRatePerMtok: Int64
+        var promptCacheHitRatePerMtok: Int64
         var completionRatePerMtok: Int64
         var providerShareBPS: Int64
         var globalMultiplierPPM: Int64
 
         enum CodingKeys: String, CodingKey {
             case promptRatePerMtok = "prompt_rate_per_mtok"
+            case promptCacheHitRatePerMtok = "prompt_cache_hit_rate_per_mtok"
             case completionRatePerMtok = "completion_rate_per_mtok"
             case providerShareBPS = "provider_share_bps"
             case globalMultiplierPPM = "global_multiplier_ppm"
         }
+
+        init(
+            promptRatePerMtok: Int64,
+            promptCacheHitRatePerMtok: Int64? = nil,
+            completionRatePerMtok: Int64,
+            providerShareBPS: Int64,
+            globalMultiplierPPM: Int64
+        ) {
+            self.promptRatePerMtok = promptRatePerMtok
+            self.promptCacheHitRatePerMtok = promptCacheHitRatePerMtok ?? promptRatePerMtok
+            self.completionRatePerMtok = completionRatePerMtok
+            self.providerShareBPS = providerShareBPS
+            self.globalMultiplierPPM = globalMultiplierPPM
+        }
     }
 
     var version: String
+    var policyVersion: String
     var generatedAt: Date
     var usdPerMillionCredits: Double
     var rows: [String: Row]
 
     enum CodingKeys: String, CodingKey {
         case version
+        case policyVersion = "policy_version"
         case generatedAt = "generated_at"
         case usdPerMillionCredits = "usd_per_million_credits"
         case rows
     }
 
+    init(
+        version: String,
+        policyVersion: String,
+        generatedAt: Date,
+        usdPerMillionCredits: Double,
+        rows: [String: Row]
+    ) {
+        self.version = version
+        self.policyVersion = policyVersion
+        self.generatedAt = generatedAt
+        self.usdPerMillionCredits = usdPerMillionCredits
+        self.rows = rows
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decode(String.self, forKey: .version)
+        policyVersion = try c.decode(String.self, forKey: .policyVersion)
         usdPerMillionCredits = try c.decode(Double.self, forKey: .usdPerMillionCredits)
         rows = try c.decode([String: Row].self, forKey: .rows)
         let rawDate = try c.decode(String.self, forKey: .generatedAt)
@@ -1093,19 +1129,43 @@ struct RateCardProjection: Decodable, Equatable {
     }
 
     func validated() throws -> RateCardProjection {
-        guard !version.isEmpty, usdPerMillionCredits.isFinite, usdPerMillionCredits >= 0 else {
+        guard !version.isEmpty, !policyVersion.isEmpty, !rows.isEmpty, rows["default"] != nil, usdPerMillionCredits.isFinite, usdPerMillionCredits >= 0 else {
             throw AutotuneRecommendError.invalidRateCard("version/usd_per_million_credits")
         }
         for (key, row) in rows {
             guard row.promptRatePerMtok >= 0,
+                  row.promptCacheHitRatePerMtok >= 0,
                   row.completionRatePerMtok >= 0,
                   row.providerShareBPS >= 0,
+                  row.providerShareBPS <= 10_000,
                   row.globalMultiplierPPM >= 0
             else {
                 throw AutotuneRecommendError.invalidRateCard("negative value for \(key)")
             }
         }
+        guard version == projectionHash else {
+            throw AutotuneRecommendError.invalidRateCard("version must equal projection hash")
+        }
         return self
+    }
+
+    var projectionHash: String {
+        let defaultRow = rows["default"]
+        let globalMultiplier = defaultRow?.globalMultiplierPPM ?? 0
+        let providerShare = defaultRow?.providerShareBPS ?? 0
+        var fields: [String] = [
+            "\"global_multiplier_ppm\":\(globalMultiplier)",
+            "\"provider_share_bps\":\(providerShare)",
+        ]
+        let rowsJSON = rows.keys.sorted().map { key -> String in
+            let row = rows[key]!
+            let encodedKey = key.jsonEscaped.replacingOccurrences(of: "\\/", with: "/")
+            return "\(encodedKey):{\"completion_rate_per_mtok\":\(row.completionRatePerMtok),\"global_multiplier_ppm\":\(row.globalMultiplierPPM),\"prompt_cache_hit_rate_per_mtok\":\(row.promptCacheHitRatePerMtok),\"prompt_rate_per_mtok\":\(row.promptRatePerMtok),\"provider_share_bps\":\(row.providerShareBPS)}"
+        }.joined(separator: ",")
+        fields.append("\"rows\":{\(rowsJSON)}")
+        fields.append("\"usd_per_million_credits\":\(usdPerMillionCredits.canonicalProjectionJSONNumber)")
+        let body = "{\(fields.joined(separator: ","))}"
+        return Data(SHA256.hash(data: Data(body.utf8))).hexLower
     }
 
     func rowForRecommendation(modelKey: String) -> (key: String, row: Row)? {
@@ -1273,16 +1333,32 @@ struct AutotuneStaticInputs {
         return (demand, candidate)
     }
 
-    func loadRateCard() async -> AutotuneStaticSelection<RateCardProjection> {
-        let baked = Data(Self.bakedRateCardJSON.utf8)
-        let bakedValue = (try? Self.decodeRateCard(baked))!
-        do {
-            let bytes = try await fetch(URL(string: "https://coordinator.streamvc.live/v1/rate-card")!)
-            let value = try Self.decodeRateCard(bytes)
-            return AutotuneStaticSelection(value: value, selectedBytes: bytes, warnings: [], usedFallback: false)
-        } catch {
-            return AutotuneStaticSelection(value: bakedValue, selectedBytes: baked, warnings: [.rateCardFallbackUsed], usedFallback: true)
+    func loadRecommendationInputs() async -> (
+        demand: AutotuneStaticSelection<DemandRank>,
+        candidate: AutotuneStaticSelection<CandidateCatalog>,
+        rateCard: AutotuneStaticSelection<RateCardProjection>
+    ) {
+        var release = await loadCatalogRelease()
+        var rateCard = await loadRateCard()
+        let rateCardPaired = rateCard.value.generatedAt == release.candidate.value.generatedAt
+            && rateCard.value.policyVersion == release.candidate.value.policyVersion
+        if !rateCardPaired {
+            rateCard.warnings.insert(.rateCardIntegrityFailure)
+            release.demand.warnings.insert(.demandRankIntegrityFailure)
+            release.candidate.warnings.insert(.candidateCatalogIntegrityFailure)
         }
+        return (release.demand, release.candidate, rateCard)
+    }
+
+    func loadRateCard() async -> AutotuneStaticSelection<RateCardProjection> {
+        await loadSignedStatic(
+            name: "rate-card",
+            bakedBytes: Data(Self.bakedRateCardJSON.utf8),
+            fallbackWarning: .rateCardFallbackUsed,
+            integrityWarning: .rateCardIntegrityFailure,
+            updateWarning: .rateCardUpdateRequired,
+            staleWarning: .rateCardStale
+        ) { try Self.decodeRateCard($0) }
     }
 
     private func loadSignedStatic<T>(
@@ -1457,7 +1533,8 @@ struct AutotuneStaticInputs {
     }
 
     static func decodeRateCard(_ data: Data) throws -> RateCardProjection {
-        try JSONDecoder.autotune.decode(RateCardProjection.self, from: data).validated()
+        try AutotuneStrictJSON.validate(data, kind: .rateCard)
+        return try JSONDecoder.autotune.decode(RateCardProjection.self, from: data).validated()
     }
 
     static func candidateCatalogSHA256(bytes: Data) -> String {
@@ -1617,6 +1694,8 @@ struct AutotuneRecommendEngine {
         .candidateCatalogUpdateRequired,
         .demandRankIntegrityFailure,
         .demandRankUpdateRequired,
+        .rateCardIntegrityFailure,
+        .rateCardUpdateRequired,
     ]
 
     /// Warnings that must fail closed before network apply / evidence submit /
@@ -1657,7 +1736,7 @@ struct AutotuneRecommendEngine {
         if warnings.contains(.candidateCatalogFallbackUsed) {
             return "signed live catalog unavailable (\(failures)); reconnect and retry when the coordinator candidate catalog is reachable — baked-catalog evidence cannot be submitted"
         }
-        return "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
+        return "autotune trust verification failed (\(failures)); upgrade macprovider or retry when the signed static inputs are available"
     }
 
     static func paidTrustBlockMessage(_ warnings: Set<AutotuneRecommendWarning>) -> String {
@@ -2358,10 +2437,11 @@ struct RecommendationFreshnessChecker {
 
     func status() async -> Status {
         let stored = try? RecommendationStateStore.read(from: stateURL)
-        let release = await staticInputs.loadCatalogRelease()
-        let demand = release.demand
-        let catalog = release.candidate
-        let trustWarnings = demand.warnings.union(catalog.warnings)
+        let inputs = await staticInputs.loadRecommendationInputs()
+        let demand = inputs.demand
+        let catalog = inputs.candidate
+        let rateCard = inputs.rateCard
+        let trustWarnings = demand.warnings.union(catalog.warnings).union(rateCard.warnings)
         // Freshness gates network evidence resubmit, so include catalog fallback
         // even though offline recommend diagnostics remain allowed (#582).
         let blockingWarnings = trustWarnings.intersection(AutotuneRecommendEngine.networkSubmissionBlockingWarnings)
@@ -2376,7 +2456,6 @@ struct RecommendationFreshnessChecker {
             return .stale(stored.generatedAt)
         }
 
-        let rateCard = await staticInputs.loadRateCard()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: providerID)
         let current = LastRecommendationState(
             generatedAt: now,
@@ -3267,6 +3346,16 @@ private extension Double {
         }
         return "0"
     }
+
+    var canonicalProjectionJSONNumber: String {
+        if isFinite {
+            if rounded() == self, self >= Double(Int64.min), self <= Double(Int64.max) {
+                return String(Int64(self))
+            }
+            return String(format: "%.15f", self).replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+        }
+        return "0"
+    }
 }
 
 private extension String {
@@ -3279,11 +3368,4 @@ private extension String {
     func prefixString(_ count: Int) -> String {
         String(prefix(count))
     }
-}
-
-extension AutotuneStaticInputs {
-    // Rate card remains an independently refreshed coordinator projection.
-    static let bakedRateCardJSON = """
-    {"version":"baked-2026-07-07-p2-drift","generated_at":"2026-07-07T10:47:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":500000,"completion_rate_per_mtok":1000000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-32b":{"prompt_rate_per_mtok":110000,"completion_rate_per_mtok":220000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"openai/gpt-oss-20b":{"prompt_rate_per_mtok":50000,"completion_rate_per_mtok":100000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-coder-30b-a3b-instruct":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"nemotron-3-nano-30b-a3b":{"prompt_rate_per_mtok":80000,"completion_rate_per_mtok":160000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"meta-llama/llama-3.1-8b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"meta-llama/llama-3.2-3b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen2.5-coder-32b-instruct":{"prompt_rate_per_mtok":425000,"completion_rate_per_mtok":850000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"google-gemma-4-26b-a4b-it":{"prompt_rate_per_mtok":60000,"completion_rate_per_mtok":240000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"gemma-4-26b-a4b-it":{"prompt_rate_per_mtok":60000,"completion_rate_per_mtok":240000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-8b":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
-    """
 }

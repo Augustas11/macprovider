@@ -219,9 +219,12 @@ type MalibuEmissionConfig struct {
 }
 
 // AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds
-// served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates, and
-// their .sig sidecars). Empty paths disable that feed (404).
+// served on the buyer mux (/v1/rate-card, /v1/demand-rank,
+// /v1/autotune-candidates, and their .sig sidecars). Empty paths disable that
+// feed (404).
 type AutotuneFeedsConfig struct {
+	RateCardPath              string `yaml:"rate_card_path"`
+	RateCardSigPath           string `yaml:"rate_card_sig_path"`
 	DemandRankPath            string `yaml:"demand_rank_path"`
 	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
 	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
@@ -2205,11 +2208,13 @@ func (c Config) validateAutotuneFeeds() error {
 		}
 	}
 	configured := false
+	var missingPairs []string
 	pairs := []struct {
 		label    string
 		jsonPath string
 		sigPath  string
 	}{
+		{"rate_card", a.RateCardPath, a.RateCardSigPath},
 		{"demand_rank", a.DemandRankPath, a.DemandRankSigPath},
 		{"autotune_candidates", a.AutotuneCandidatesPath, a.AutotuneCandidatesSigPath},
 	}
@@ -2217,12 +2222,17 @@ func (c Config) validateAutotuneFeeds() error {
 		jsonPath := strings.TrimSpace(p.jsonPath)
 		sigPath := strings.TrimSpace(p.sigPath)
 		if jsonPath == "" && sigPath == "" {
+			missingPairs = append(missingPairs, p.label)
 			continue
 		}
 		if jsonPath == "" || sigPath == "" {
 			return fmt.Errorf("autotune.%s_path and autotune.%s_sig_path must both be set", p.label, p.label)
 		}
 		configured = true
+	}
+	if configured && len(missingPairs) > 0 {
+		label := missingPairs[0]
+		return fmt.Errorf("autotune.%s_path and autotune.%s_sig_path are required when any autotune feed is configured", label, label)
 	}
 	keyring, err := a.DecodePublicKeyring()
 	if err != nil {

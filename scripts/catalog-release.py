@@ -32,8 +32,10 @@ TIER2_BINDING_PATH = CATALOG_DIR / "tier2-identity-binding.json"
 TIER2_BINDING_SCHEMA = "macprovider.tier2-identity-binding.v1"
 TIER2_CATALOG_PATH = CATALOG_DIR / "tier2-catalog.json"
 TIER2_CATALOG_FEED_NAME = "tier2-catalog.json"
+RATE_CARD_FEED_NAME = "rate-card.json"
 LEGACY_LEDGER_FEEDS = frozenset({"autotune-candidates.json", "demand-rank.json"})
 TIER2_BOUND_LEDGER_FEEDS = LEGACY_LEDGER_FEEDS | {TIER2_CATALOG_FEED_NAME}
+RATE_CARD_BOUND_LEDGER_FEEDS = TIER2_BOUND_LEDGER_FEEDS | {RATE_CARD_FEED_NAME}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental"}
@@ -522,7 +524,7 @@ def verify_ed25519(public_key: bytes, signature: bytes, message: bytes, label: s
         fail(f"{label}: signature verification failed")
 
 
-def generated_swift(candidate: bytes, demand: bytes, signer_key_id: str | None = None) -> str:
+def generated_swift(candidate: bytes, demand: bytes, rate_card: bytes, signer_key_id: str | None = None) -> str:
     trusted = keyring()
     swift_keys = "\n".join(
         f'        "{key_id}": "{base64.b64encode(raw).decode()}",'
@@ -543,6 +545,9 @@ def generated_swift(candidate: bytes, demand: bytes, signer_key_id: str | None =
         "    static let bakedCandidateCatalogJSON = \"\"\"\n"
         + "    " + candidate.decode("utf-8")
         + "\n    \"\"\"\n"
+        + "\n    static let bakedRateCardJSON = \"\"\"\n"
+        + "    " + rate_card.decode("utf-8")
+        + "\n    \"\"\"\n"
         + "\n    static let generatedTrustedPublicKeys = [\n"
         + swift_keys
         + "\n    ]\n"
@@ -557,25 +562,125 @@ def validate_pair(candidate_obj: dict, demand_obj: dict) -> None:
             fail(f"candidate and demand {field} must match the atomic release")
 
 
+def validate_release_inputs(candidate_obj: dict, demand_obj: dict, rate_card_obj: dict) -> None:
+    validate_pair(candidate_obj, demand_obj)
+    for field in ("generated_at", "policy_version"):
+        if candidate_obj[field] != rate_card_obj[field]:
+            fail(f"rate-card {field} must match the atomic release")
+
+
+def rate_card_projection_hash(value: dict) -> str:
+    def json_number(raw: int | float) -> str:
+        if isinstance(raw, int):
+            return str(raw)
+        if raw.is_integer():
+            return str(int(raw))
+        return f"{raw:.15f}".rstrip("0").rstrip(".")
+
+    default_row = value["rows"]["default"]
+    parts = [
+        '{"global_multiplier_ppm":',
+        str(default_row["global_multiplier_ppm"]),
+        ',"provider_share_bps":',
+        str(default_row["provider_share_bps"]),
+        ',"rows":{',
+    ]
+    for index, key in enumerate(sorted(value["rows"])):
+        if index > 0:
+            parts.append(",")
+        row = value["rows"][key]
+        parts.extend([
+            json.dumps(key, separators=(",", ":")),
+            ':{"completion_rate_per_mtok":',
+            str(row["completion_rate_per_mtok"]),
+            ',"global_multiplier_ppm":',
+            str(row["global_multiplier_ppm"]),
+            ',"prompt_cache_hit_rate_per_mtok":',
+            str(row["prompt_cache_hit_rate_per_mtok"]),
+            ',"prompt_rate_per_mtok":',
+            str(row["prompt_rate_per_mtok"]),
+            ',"provider_share_bps":',
+            str(row["provider_share_bps"]),
+            "}",
+        ])
+    parts.extend([
+        '},"usd_per_million_credits":',
+        json_number(value["usd_per_million_credits"]),
+        "}",
+    ])
+    return sha256("".join(parts).encode())
+
+
+def validate_rate_card(data: bytes) -> dict:
+    value = strict_json(data, "rate-card")
+    exact_keys(
+        value,
+        {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"},
+        {"version", "policy_version", "generated_at", "usd_per_million_credits", "rows"},
+        "rate-card",
+    )
+    if not isinstance(value["version"], str) or not value["version"].strip() or value["version"].strip() != value["version"]:
+        fail("rate-card: version required")
+    if not isinstance(value["policy_version"], str) or not value["policy_version"].strip() or value["policy_version"].strip() != value["policy_version"]:
+        fail("rate-card: policy_version required")
+    parse_time(value["generated_at"], "rate-card generated_at")
+    usd = value["usd_per_million_credits"]
+    if not isinstance(usd, (int, float)) or isinstance(usd, bool) or not math.isfinite(usd) or usd < 0:
+        fail("rate-card: usd_per_million_credits must be finite and >= 0")
+    rows = value["rows"]
+    if not isinstance(rows, dict) or not rows:
+        fail("rate-card: rows required")
+    if "default" not in rows:
+        fail("rate-card: default row required")
+    row_fields = {
+        "prompt_rate_per_mtok",
+        "prompt_cache_hit_rate_per_mtok",
+        "completion_rate_per_mtok",
+        "provider_share_bps",
+        "global_multiplier_ppm",
+    }
+    for key, row in rows.items():
+        if key != "default" and not MODEL_KEY.fullmatch(key):
+            fail(f"rate-card row {key}: invalid model key")
+        if not isinstance(row, dict):
+            fail(f"rate-card row {key}: row must be an object")
+        exact_keys(row, row_fields, row_fields, f"rate-card row {key}")
+        for field in ("prompt_rate_per_mtok", "prompt_cache_hit_rate_per_mtok", "completion_rate_per_mtok", "global_multiplier_ppm"):
+            value_int = row[field]
+            if not isinstance(value_int, int) or isinstance(value_int, bool) or value_int < 0:
+                fail(f"rate-card row {key}: {field} must be >= 0")
+        share = row["provider_share_bps"]
+        if not isinstance(share, int) or isinstance(share, bool) or not 0 <= share <= 10000:
+            fail(f"rate-card row {key}: provider_share_bps must be in [0,10000]")
+    expected_version = rate_card_projection_hash(value)
+    if value["version"] != expected_version:
+        fail(f"rate-card: version must equal projection hash {expected_version}")
+    return value
+
+
 def manifest(
     candidate: bytes,
     demand: bytes,
+    rate_card: bytes,
     candidate_obj: dict,
     demand_obj: dict,
+    rate_card_obj: dict,
     sidecar_directory: pathlib.Path = STATIC_DIR,
     signer_key_id: str | None = None,
     tier2: bytes | None = None,
     tier2_obj: dict | None = None,
     tier2_signer_key_id: str | None = None,
 ) -> bytes:
+    validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     signer_ids = {}
     if signer_key_id is not None:
         signer_ids = {
             "autotune-candidates.json": signer_key_id,
             "demand-rank.json": signer_key_id,
+            RATE_CARD_FEED_NAME: signer_key_id,
         }
     else:
-        for name in ("autotune-candidates.json", "demand-rank.json"):
+        for name in ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME):
             sidecar_path = sidecar_directory / f"{name}.sig"
             if sidecar_path.exists():
                 signer_ids[name] = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)[0]
@@ -587,6 +692,10 @@ def manifest(
         "demand-rank.json": {
             "sha256": sha256(demand), "bytes": len(demand), "version": demand_obj["version"],
             "signer_key_id": signer_ids.get("demand-rank.json"),
+        },
+        RATE_CARD_FEED_NAME: {
+            "sha256": sha256(rate_card), "bytes": len(rate_card), "version": rate_card_obj["version"],
+            "signer_key_id": signer_ids.get(RATE_CARD_FEED_NAME),
         },
     }
     if tier2 is not None:
@@ -679,20 +788,21 @@ def validate_release_ledger(data: bytes, label: str = "release ledger") -> dict[
             fail(f"{label}: invalid release entry {release_id!r}")
         parse_time(record["generated_at"], f"{label} release {release_id}")
         feed_names = set(record["feeds"])
-        # Historical-safe: releases published before #608 Tier-2 ledger
-        # membership keep their original 2-feed shape. Only the 3-feed shape
-        # (with tier2-catalog.json bound) is accepted for anything new.
-        if feed_names not in (LEGACY_LEDGER_FEEDS, TIER2_BOUND_LEDGER_FEEDS):
+        # Historical-safe: old releases keep their original 2-feed or
+        # Tier-2-bound 3-feed shape. Current releases bind the signed
+        # rate-card feed as the fourth immutable SPEC-023 input.
+        if feed_names not in (LEGACY_LEDGER_FEEDS, TIER2_BOUND_LEDGER_FEEDS, RATE_CARD_BOUND_LEDGER_FEEDS):
             fail(
                 f"{label}: release {release_id!r} feeds must be exactly "
                 f"{sorted(LEGACY_LEDGER_FEEDS)} (historical) or "
-                f"{sorted(TIER2_BOUND_LEDGER_FEEDS)} (Tier-2 bound)"
+                f"{sorted(TIER2_BOUND_LEDGER_FEEDS)} (Tier-2 bound) or "
+                f"{sorted(RATE_CARD_BOUND_LEDGER_FEEDS)} (rate-card bound)"
             )
         for feed_name, feed in record["feeds"].items():
             validate_ledger_feed(feed, f"{label} release {release_id} {feed_name}")
-            # tier2-catalog.json is versioned by its own catalog_id, not the
-            # autotune release train (see manifest()).
-            if feed_name != TIER2_CATALOG_FEED_NAME and feed["version"] != release_id:
+            # tier2-catalog.json and rate-card.json are versioned by their own
+            # content identities, not the autotune release train (see manifest()).
+            if feed_name not in {TIER2_CATALOG_FEED_NAME, RATE_CARD_FEED_NAME} and feed["version"] != release_id:
                 fail(f"{label}: feed version does not match release ID {release_id!r}")
     for release_id, tombstone in value["tombstones"].items():
         if not isinstance(release_id, str) or not release_id or not isinstance(tombstone, dict):
@@ -788,11 +898,33 @@ def is_tier2_enrichment(base_record: dict, current_record: dict) -> bool:
     return True
 
 
+def is_rate_card_enrichment(base_record: dict, current_record: dict) -> bool:
+    """Return true only for one-way Tier-2-bound -> rate-card-bound enrichment."""
+    if base_record.get("generated_at") != current_record.get("generated_at"):
+        return False
+    if base_record.get("policy_version") != current_record.get("policy_version"):
+        return False
+    base_feeds = base_record.get("feeds")
+    current_feeds = current_record.get("feeds")
+    if not isinstance(base_feeds, dict) or not isinstance(current_feeds, dict):
+        return False
+    if set(base_feeds) != TIER2_BOUND_LEDGER_FEEDS or set(current_feeds) != RATE_CARD_BOUND_LEDGER_FEEDS:
+        return False
+    for feed_name in TIER2_BOUND_LEDGER_FEEDS:
+        if current_feeds.get(feed_name) != base_feeds.get(feed_name):
+            return False
+    return True
+
+
 def require_ledger_evolution(base: dict[str, dict], current: dict[str, dict]) -> None:
     for release_id, base_record in base["releases"].items():
         if release_id not in current["releases"]:
             fail(f"release ledger: published release {release_id!r} was removed")
-        if current["releases"][release_id] != base_record and not is_tier2_enrichment(base_record, current["releases"][release_id]):
+        if (
+            current["releases"][release_id] != base_record
+            and not is_tier2_enrichment(base_record, current["releases"][release_id])
+            and not is_rate_card_enrichment(base_record, current["releases"][release_id])
+        ):
             fail(f"release ledger: published release {release_id!r} was rebound to different content")
     for release_id, base_tombstone in base["tombstones"].items():
         if release_id not in current["tombstones"]:
@@ -800,10 +932,12 @@ def require_ledger_evolution(base: dict[str, dict], current: dict[str, dict]) ->
         if current["tombstones"][release_id] != base_tombstone:
             fail(f"release ledger: tombstone {release_id!r} was changed")
     for release_id, current_record in current["releases"].items():
-        if set(current_record["feeds"]) == LEGACY_LEDGER_FEEDS and current_record != base["releases"].get(release_id):
+        if release_id in base["releases"]:
+            continue
+        if set(current_record["feeds"]) != RATE_CARD_BOUND_LEDGER_FEEDS:
             fail(
                 f"release ledger: new release {release_id!r} is missing mandatory "
-                f"{TIER2_CATALOG_FEED_NAME!r} feed membership"
+                f"{sorted(RATE_CARD_BOUND_LEDGER_FEEDS)} feed membership"
             )
 
 
@@ -1466,7 +1600,7 @@ def updated_release_ledger(manifest_bytes: bytes) -> bytes:
     if release_id in current["tombstones"]:
         fail(f"release ledger: release ID {release_id!r} is permanently rejected")
     existing = current["releases"].get(release_id)
-    if existing is not None and existing != record and not is_tier2_enrichment(existing, record):
+    if existing is not None and existing != record and not is_tier2_enrichment(existing, record) and not is_rate_card_enrichment(existing, record):
         fail(f"release ledger: release ID {release_id!r} is already bound to different content")
     updated = {
         "releases": dict(current["releases"]),
@@ -1480,11 +1614,14 @@ def updated_release_ledger(manifest_bytes: bytes) -> bytes:
 def generate(signer_key_id: str | None = None) -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
+    rate_card_path = CATALOG_DIR / RATE_CARD_FEED_NAME
     candidate_obj = validate_candidate(candidate_path.read_bytes(), require_provenance=True)
     demand_obj = validate_demand(demand_path.read_bytes())
-    validate_pair(candidate_obj, demand_obj)
+    rate_card_obj = validate_rate_card(rate_card_path.read_bytes())
+    validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
     candidate = canonical_bytes(candidate_obj)
     demand = canonical_bytes(demand_obj)
+    rate_card = canonical_bytes(rate_card_obj)
     if signer_key_id is not None and signer_key_id not in keyring():
         fail(f"cannot generate for unknown or retired signer key ID: {signer_key_id}")
     tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
@@ -1492,20 +1629,22 @@ def generate(signer_key_id: str | None = None) -> None:
     # Compute every derived artifact before mutating on-disk release state so a
     # binding/derivation failure cannot leave a partially updated ledger.
     manifest_bytes = manifest(
-        candidate, demand, candidate_obj, demand_obj,
+        candidate, demand, rate_card, candidate_obj, demand_obj, rate_card_obj,
         signer_key_id=signer_key_id, tier2=tier2, tier2_obj=tier2_obj,
         tier2_signer_key_id=tier2_signer_key_id,
     )
     binding_bytes = derive_tier2_identity_binding(candidate, candidate_obj)
-    swift_text = generated_swift(candidate, demand, signer_key_id)
+    swift_text = generated_swift(candidate, demand, rate_card, signer_key_id)
     next_ledger = updated_release_ledger(manifest_bytes)
     rejected_go = generated_rejected_releases_go(validate_release_ledger(next_ledger))
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     candidate_path.write_bytes(candidate)
     demand_path.write_bytes(demand)
+    rate_card_path.write_bytes(rate_card)
     (STATIC_DIR / "autotune-candidates.json").write_bytes(candidate)
     (STATIC_DIR / "demand-rank.json").write_bytes(demand)
+    (STATIC_DIR / RATE_CARD_FEED_NAME).write_bytes(rate_card)
     SWIFT_GENERATED.write_text(swift_text)
     MANIFEST_PATH.write_bytes(manifest_bytes)
     LEDGER_PATH.write_bytes(next_ledger)
@@ -1513,7 +1652,7 @@ def generate(signer_key_id: str | None = None) -> None:
     GO_REJECTED_RELEASES_GENERATED.write_text(rejected_go)
     print(
         f"generated catalog release {candidate_obj['version']} "
-        f"candidate={sha256(candidate)} demand={sha256(demand)} "
+        f"candidate={sha256(candidate)} demand={sha256(demand)} rate_card={sha256(rate_card)} "
         f"tier2_binding={sha256(binding_bytes)} tier2_catalog={sha256(tier2)}"
     )
 
@@ -1565,26 +1704,30 @@ def bootstrap(release_id: str, generated_at: str, policy_version: str) -> None:
 def verify() -> None:
     candidate_path = CATALOG_DIR / "autotune-candidates.json"
     demand_path = CATALOG_DIR / "demand-rank.json"
+    rate_card_path = CATALOG_DIR / RATE_CARD_FEED_NAME
     candidate = candidate_path.read_bytes()
     demand = demand_path.read_bytes()
+    rate_card = rate_card_path.read_bytes()
     candidate_obj = validate_candidate(candidate)
     demand_obj = validate_demand(demand)
-    validate_pair(candidate_obj, demand_obj)
-    if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj):
+    rate_card_obj = validate_rate_card(rate_card)
+    validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
+    if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj) or rate_card != canonical_bytes(rate_card_obj):
         fail("canonical feed files must use deterministic compact JSON with no trailing newline")
     expected = {
         STATIC_DIR / "autotune-candidates.json": candidate,
         STATIC_DIR / "demand-rank.json": demand,
+        STATIC_DIR / RATE_CARD_FEED_NAME: rate_card,
     }
     for path, body in expected.items():
         if path.read_bytes() != body:
             fail(f"generated drift: {path}")
-    if SWIFT_GENERATED.read_text() != generated_swift(candidate, demand):
+    if SWIFT_GENERATED.read_text() != generated_swift(candidate, demand, rate_card):
         fail(f"generated drift: {SWIFT_GENERATED}")
     tier2, tier2_obj, tier2_signer_key_id = require_tier2_catalog()
     check_tier2_binding(candidate, tier2)
     expected_manifest = manifest(
-        candidate, demand, candidate_obj, demand_obj,
+        candidate, demand, rate_card, candidate_obj, demand_obj, rate_card_obj,
         tier2=tier2, tier2_obj=tier2_obj, tier2_signer_key_id=tier2_signer_key_id,
     )
     if MANIFEST_PATH.read_bytes() != expected_manifest:
@@ -1613,7 +1756,7 @@ def verify() -> None:
         verify_ed25519(public_key, signature, body, sidecar_path.name)
     print(
         f"verified catalog release {candidate_obj['version']} "
-        f"candidate={sha256(candidate)} demand={sha256(demand)} "
+        f"candidate={sha256(candidate)} demand={sha256(demand)} rate_card={sha256(rate_card)} "
         f"tier2_binding={sha256(TIER2_BINDING_PATH.read_bytes())} tier2_catalog={sha256(tier2)}"
     )
 
@@ -1625,12 +1768,18 @@ def verify_directory(
 ) -> None:
     candidate_path = directory / "autotune-candidates.json"
     demand_path = directory / "demand-rank.json"
+    rate_card_path = directory / RATE_CARD_FEED_NAME
+    for path in (candidate_path, demand_path, rate_card_path):
+        if not path.exists():
+            fail(f"release directory is missing required {path.name} feed")
     candidate = candidate_path.read_bytes()
     demand = demand_path.read_bytes()
+    rate_card = rate_card_path.read_bytes()
     candidate_obj = validate_candidate(candidate)
     demand_obj = validate_demand(demand)
-    validate_pair(candidate_obj, demand_obj)
-    if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj):
+    rate_card_obj = validate_rate_card(rate_card)
+    validate_release_inputs(candidate_obj, demand_obj, rate_card_obj)
+    if candidate != canonical_bytes(candidate_obj) or demand != canonical_bytes(demand_obj) or rate_card != canonical_bytes(rate_card_obj):
         fail("release directory feeds are not deterministic canonical bytes")
     tier2_path = directory / "tier2-catalog.json"
     if not tier2_path.exists():
@@ -1640,13 +1789,13 @@ def verify_directory(
     tier2_signer_key_id = verify_tier2_signature(tier2, tier2_public_key_file, tier2_coordinator_config)
     check_tier2_binding(candidate, tier2)
     expected_manifest = manifest(
-        candidate, demand, candidate_obj, demand_obj, directory,
+        candidate, demand, rate_card, candidate_obj, demand_obj, rate_card_obj, directory,
         tier2=tier2, tier2_obj=tier2_obj, tier2_signer_key_id=tier2_signer_key_id,
     )
     if (directory / "release.json").read_bytes() != expected_manifest:
         fail("release directory manifest does not bind the feed bytes")
     keys = keyring(directory / "trusted-keys.json")
-    for path, body in ((candidate_path, candidate), (demand_path, demand)):
+    for path, body in ((candidate_path, candidate), (demand_path, demand), (rate_card_path, rate_card)):
         sidecar_path = pathlib.Path(str(path) + ".sig")
         key_id, signature = parse_sidecar(sidecar_path.read_bytes(), sidecar_path.name)
         public_key = keys.get(key_id)
@@ -1658,7 +1807,7 @@ def verify_directory(
         validate_tier2_identity_binding(binding_path.read_bytes(), candidate, candidate_obj)
         print(f"verified repo-local tier2 identity binding for {candidate_obj['version']}")
     print(f"verified tier2 catalog {tier2_obj['catalog_id']} feed membership against release {candidate_obj['version']}")
-    print(f"verified release directory {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)}")
+    print(f"verified release directory {candidate_obj['version']} candidate={sha256(candidate)} demand={sha256(demand)} rate_card={sha256(rate_card)}")
 
 
 def cmd_check_tier2_binding(candidate_path: pathlib.Path, tier2_path: pathlib.Path) -> None:

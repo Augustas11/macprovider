@@ -69,6 +69,8 @@ grep -q 'os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW' "$DE
 
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read autotune feeds"
+grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/rate-card.json' "$DEPLOY_SH" ||
+  fail "deploy smoke must verify macprovider can read the signed rate-card feed"
 
 grep -q 'mv -Tf.*current.next.*current' "$DEPLOY_SH" ||
   fail "deploy must atomically activate the verified release"
@@ -426,6 +428,8 @@ grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'dir_fd=' "$DEPLOY_SH" ||
 
 grep -q '/v1/demand-rank' "$DEPLOY_SH" ||
   fail "deploy smoke must probe /v1/demand-rank"
+grep -q '/v1/rate-card.sig' "$DEPLOY_SH" ||
+  fail "deploy smoke must probe /v1/rate-card.sig"
 
 grep -q 'chmod o+x /opt/macprovider' "$DEPLOY_SH" &&
   fail "deploy must not chmod o+x /opt/macprovider for legacy nginx static feeds"

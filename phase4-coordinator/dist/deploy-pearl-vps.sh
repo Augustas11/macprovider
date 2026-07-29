@@ -476,7 +476,7 @@ NGINX_STATS_PROXY_PUBLIC="$DIST_DIR/nginx-snippets/stats-proxy-public.conf"
 NGINX_STATS_PROXY_PARTNER="$DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
 # SPEC-023 signed recommendation feeds served on the buyer mux at
-# /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
+# /v1/rate-card, /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
 # Files live in phase3-binary/dist/static/ in the repo. Deploy installs
 # them into /opt/macprovider/autotune/ for coordinator startup load.
 STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
@@ -484,6 +484,8 @@ STATIC_DEMAND_JSON="$STATIC_FEEDS_DIR/demand-rank.json"
 STATIC_DEMAND_SIG="$STATIC_FEEDS_DIR/demand-rank.json.sig"
 STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
+STATIC_RATE_CARD_JSON="$STATIC_FEEDS_DIR/rate-card.json"
+STATIC_RATE_CARD_SIG="$STATIC_FEEDS_DIR/rate-card.json.sig"
 AUTOTUNE_RELEASE_MANIFEST="$DIST_DIR/../../phase3-binary/catalog/autotune/release.json"
 AUTOTUNE_TRUSTED_KEYS="$DIST_DIR/../../phase3-binary/catalog/autotune/trusted-keys.json"
 AUTOTUNE_TIER2_JSON="$DIST_DIR/../../phase3-binary/catalog/autotune/tier2-catalog.json"
@@ -524,7 +526,9 @@ AUTOTUNE_RELEASE_CONTENT_SHA256="$(python3 - \
   "$STATIC_AUTOTUNE_JSON" \
   "$STATIC_AUTOTUNE_SIG" \
   "$STATIC_DEMAND_JSON" \
-  "$STATIC_DEMAND_SIG" <<'PY'
+  "$STATIC_DEMAND_SIG" \
+  "$STATIC_RATE_CARD_JSON" \
+  "$STATIC_RATE_CARD_SIG" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -537,6 +541,8 @@ assets = (
     ("autotune-candidates.json.sig", pathlib.Path(sys.argv[5])),
     ("demand-rank.json", pathlib.Path(sys.argv[6])),
     ("demand-rank.json.sig", pathlib.Path(sys.argv[7])),
+    ("rate-card.json", pathlib.Path(sys.argv[8])),
+    ("rate-card.json.sig", pathlib.Path(sys.argv[9])),
 )
 digest = hashlib.sha256()
 for name, path in assets:
@@ -567,6 +573,7 @@ for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRRO
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG" \
+         "$STATIC_RATE_CARD_JSON" "$STATIC_RATE_CARD_SIG" \
          "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_TIER2_JSON" \
          "$AUTOTUNE_RELEASE_VERIFY" "$AUTOTUNE_TIER2_VERIFIER"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
@@ -859,6 +866,10 @@ trap '
   rm -f "${C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP:-}"
   rm -f "${C2_TIMER_MIGRATED_OVERLAY_TMP:-}"
   rm -f "${C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP:-}"
+  rm -f "${RATE_CARD_MIGRATED_CONFIG_TMP:-}"
+  rm -f "${RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP:-}"
+  rm -f "${RATE_CARD_MIGRATED_OVERLAY_TMP:-}"
+  rm -f "${RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   rm -rf "${STATIC_SMOKE_DIR:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
@@ -1047,6 +1058,7 @@ CHECK_SCRIPT="$DIST_DIR/check-deploy-config.sh"
 C2C_PROOF_SCRIPT="$DIST_DIR/lib/c2c_runtime_proof.py"
 MERGE_OVERLAY_SCRIPT="$DIST_DIR/merge-yaml-overlay.py"
 C2_TIMER_MIGRATION_SCRIPT="$DIST_DIR/c2-timer-config-migration.py"
+RATE_CARD_CONFIG_MIGRATION_SCRIPT="$DIST_DIR/autotune-rate-card-config-migration.py"
 if [ ! -x "$CHECK_SCRIPT" ]; then
   echo "aborting deploy: check-deploy-config.sh missing or not executable: $CHECK_SCRIPT" >&2
   exit 5
@@ -1061,6 +1073,10 @@ if [ ! -x "$MERGE_OVERLAY_SCRIPT" ]; then
 fi
 if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] && [ ! -x "$C2_TIMER_MIGRATION_SCRIPT" ]; then
   echo "aborting deploy: C2 timer migration helper missing or not executable: $C2_TIMER_MIGRATION_SCRIPT" >&2
+  exit 5
+fi
+if [ ! -x "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" ]; then
+  echo "aborting deploy: rate-card config migration helper missing or not executable: $RATE_CARD_CONFIG_MIGRATION_SCRIPT" >&2
   exit 5
 fi
 if [ "$DRY_RUN_LOCAL" = "1" ]; then
@@ -1138,8 +1154,31 @@ else
     DEPLOY_CONFIG="$C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP"
     echo "  C2_TIMER_CONFIG_MIGRATION=1 — validating reviewed field-scoped timer raise"
   fi
+  RATE_CARD_CONFIG_MIGRATION_ACTIVE=0
+  RATE_CARD_MIGRATION_INPUT="${C2_TIMER_MIGRATED_CONFIG_TMP:-${LIVE_COORDINATOR_CONFIG_RAW_TMP:-$DEPLOY_CONFIG}}"
+  RATE_CARD_MIGRATED_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-config.XXXXXXXX)" || {
+    echo "aborting deploy: mktemp failed for rate-card migrated coordinator config" >&2; exit 5;
+  }
+  RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-config-validation.XXXXXXXX)" || {
+    echo "aborting deploy: mktemp failed for sanitized rate-card migrated coordinator config" >&2; exit 5;
+  }
+  python3 "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" "$RATE_CARD_MIGRATION_INPUT" "$CONFIG" > "$RATE_CARD_MIGRATED_CONFIG_TMP" || {
+    echo "aborting deploy: could not render reviewed rate-card feed config migration" >&2
+    exit 5
+  }
+  reject_redacted_install_candidate "$RATE_CARD_MIGRATED_CONFIG_TMP" "coordinator.yaml"
+  if ! cmp -s "$RATE_CARD_MIGRATION_INPUT" "$RATE_CARD_MIGRATED_CONFIG_TMP"; then
+    RATE_CARD_CONFIG_MIGRATION_ACTIVE=1
+    sanitize_live_config_for_local_validation < "$RATE_CARD_MIGRATED_CONFIG_TMP" > "$RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP" || {
+      echo "aborting deploy: could not sanitize rate-card migrated coordinator config for local validation" >&2
+      exit 5
+    }
+    DEPLOY_CONFIG="$RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP"
+    echo "  B10 rate-card migration — adding release-bound autotune.rate_card_* paths"
+  fi
   COORDINATOR_REMOTE_OVERLAY="/etc/macprovider/coordinator.pearl-overlays.yaml"
   C2_TIMER_MIGRATION_OVERLAY_ACTIVE=0
+  RATE_CARD_MIGRATION_OVERLAY_ACTIVE=0
   COORDINATOR_EFFECTIVE_OVERLAY_TMP=""
   if $SSH "test -f '$COORDINATOR_REMOTE_OVERLAY'"; then
     COORDINATOR_OVERLAY_CONFIG_RAW_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-overlay-raw.XXXXXXXX)" || {
@@ -1180,6 +1219,27 @@ else
         COORDINATOR_EFFECTIVE_OVERLAY_TMP="$C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP"
         echo "  C2_TIMER_CONFIG_MIGRATION=1 — Pearl overlay carries timer fields and will be migrated field-scope"
       fi
+    fi
+    RATE_CARD_OVERLAY_MIGRATION_INPUT="${C2_TIMER_MIGRATED_OVERLAY_TMP:-$COORDINATOR_OVERLAY_CONFIG_RAW_TMP}"
+    RATE_CARD_MIGRATED_OVERLAY_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-overlay.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for rate-card migrated coordinator overlay" >&2; exit 5;
+    }
+    RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-overlay-validation.XXXXXXXX)" || {
+      echo "aborting deploy: mktemp failed for sanitized rate-card migrated coordinator overlay" >&2; exit 5;
+    }
+    python3 "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" --only-static-feed-overlays "$RATE_CARD_OVERLAY_MIGRATION_INPUT" "$CONFIG" > "$RATE_CARD_MIGRATED_OVERLAY_TMP" || {
+      echo "aborting deploy: could not render reviewed rate-card overlay migration" >&2
+      exit 5
+    }
+    reject_redacted_install_candidate "$RATE_CARD_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"
+    if ! cmp -s "$RATE_CARD_OVERLAY_MIGRATION_INPUT" "$RATE_CARD_MIGRATED_OVERLAY_TMP"; then
+      RATE_CARD_MIGRATION_OVERLAY_ACTIVE=1
+      sanitize_live_config_for_local_validation < "$RATE_CARD_MIGRATED_OVERLAY_TMP" > "$RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP" || {
+        echo "aborting deploy: could not sanitize rate-card migrated coordinator overlay for local validation" >&2
+        exit 5
+      }
+      COORDINATOR_EFFECTIVE_OVERLAY_TMP="$RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP"
+      echo "  B10 rate-card migration — Pearl overlay carries static feed fields and will receive rate-card paths"
     fi
     DEPLOY_EFFECTIVE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-effective-config.XXXXXXXX)" || {
       echo "aborting deploy: mktemp failed for effective coordinator config" >&2; exit 5;
@@ -2845,13 +2905,17 @@ $SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billi
 $SCP "$STATS_HARDWARE_VERIFIER_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-hardware-verifier-linux-amd64"
 if [ "$CONFIG_MODE" = "apply-tracked" ]; then
   $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
+elif [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ]; then
+  $SCP "$RATE_CARD_MIGRATED_CONFIG_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.rate-card-migration.yaml"
 elif [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
   $SCP "$C2_TIMER_MIGRATED_CONFIG_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.c2-timer-migration.yaml"
-  if [ "${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
-    $SCP "$C2_TIMER_MIGRATED_OVERLAY_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml"
-  fi
 else
   log "  CONFIG_MODE=preserve-live — not uploading tracked coordinator.yaml"
+fi
+if [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
+  $SCP "$RATE_CARD_MIGRATED_OVERLAY_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.rate-card-migration.yaml"
+elif [ "${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
+  $SCP "$C2_TIMER_MIGRATED_OVERLAY_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml"
 fi
 $SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
 $SCP "$STATS_INVENTORY_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.service"
@@ -2878,6 +2942,8 @@ $SCP "$STATIC_DEMAND_JSON"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json
 $SCP "$STATIC_DEMAND_SIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json.sig"
 $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json"
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
+$SCP "$STATIC_RATE_CARD_JSON"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/rate-card.json"
+$SCP "$STATIC_RATE_CARD_SIG"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/rate-card.json.sig"
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
@@ -2897,7 +2963,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$TMP_CATALOG_PUBKEY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.pub"
 fi
 
-if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
+if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] || [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ] || [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
   # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
   # BEFORE we overwrite it. Step 1b already aborted on drift, but the audit
   # also calls for a persistent remote-side backup so a bad deploy can be
@@ -2912,7 +2978,7 @@ if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" 
         else
           echo '  no live coordinator.yaml — first deploy, skipping backup'
         fi
-        if [ '${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
+        if [ '${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ] || [ '${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
           install -d -o root -g macprovider -m 0750 /etc/macprovider
           if [ -f /etc/macprovider/coordinator.pearl-overlays.yaml ]; then
             install -o root -g macprovider -m 0640 /etc/macprovider/coordinator.pearl-overlays.yaml /etc/macprovider/coordinator.pearl-overlays.yaml.prev
@@ -2974,13 +3040,17 @@ $SSH "set -e
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-hardware-verifier-linux-amd64 /opt/macprovider-stats/stats-hardware-verifier
   if [ '$CONFIG_MODE' = 'apply-tracked' ]; then
     install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
+  elif [ '${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}' = '1' ]; then
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.rate-card-migration.yaml /opt/macprovider/coordinator.yaml
   elif [ '$C2_TIMER_CONFIG_MIGRATION' = '1' ]; then
     install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.c2-timer-migration.yaml /opt/macprovider/coordinator.yaml
-    if [ '${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
-      install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml /etc/macprovider/coordinator.pearl-overlays.yaml
-    fi
   else
     echo '  preserving live /opt/macprovider/coordinator.yaml'
+  fi
+  if [ '${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.pearl-overlays.rate-card-migration.yaml /etc/macprovider/coordinator.pearl-overlays.yaml
+  elif [ '${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' ]; then
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml /etc/macprovider/coordinator.pearl-overlays.yaml
   fi
   install -d -o root -g macprovider -m 0750 /etc/macprovider
   if [ -e /etc/macprovider/coordinator.pearl-overlays.yaml ] && [ ! -f /etc/macprovider/coordinator.pearl-overlays.yaml ]; then
@@ -3028,6 +3098,8 @@ $SSH "set -e
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig \$_autotune_stage/demand-rank.json.sig
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json \$_autotune_stage/rate-card.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/rate-card.json.sig \$_autotune_stage/rate-card.json.sig
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json \$_autotune_stage/tier2-catalog.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
@@ -3508,6 +3580,7 @@ log "  verifying coordinator can read autotune feeds as macprovider"
 $SSH "set -e
   sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json
   sudo -u macprovider test -r /opt/macprovider/autotune/current/demand-rank.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/current/rate-card.json
 " || {
   echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
@@ -3517,6 +3590,8 @@ STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-autotune-probe.XXXXXXXX
   exit 1
 }
 for STATIC_SPEC in \
+    "/v1/rate-card|rate-card.json|$STATIC_RATE_CARD_JSON" \
+    "/v1/rate-card.sig|rate-card.json.sig|$STATIC_RATE_CARD_SIG" \
     "/v1/demand-rank|demand-rank.json|$STATIC_DEMAND_JSON" \
     "/v1/demand-rank.sig|demand-rank.json.sig|$STATIC_DEMAND_SIG" \
     "/v1/autotune-candidates|autotune-candidates.json|$STATIC_AUTOTUNE_JSON" \
@@ -3540,6 +3615,8 @@ done
 cp "$AUTOTUNE_RELEASE_MANIFEST" "$STATIC_SMOKE_DIR/release.json"
 cp "$AUTOTUNE_TRUSTED_KEYS" "$STATIC_SMOKE_DIR/trusted-keys.json"
 cp "$AUTOTUNE_TIER2_JSON" "$STATIC_SMOKE_DIR/tier2-catalog.json"
+cp "$STATIC_RATE_CARD_JSON" "$STATIC_SMOKE_DIR/rate-card.json"
+cp "$STATIC_RATE_CARD_SIG" "$STATIC_SMOKE_DIR/rate-card.json.sig"
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
 AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
 STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
@@ -3552,7 +3629,7 @@ import json, sys
 status = json.load(open(sys.argv[1], encoding="utf-8"))
 if status.get("status") != "live_verified" or status.get("release_id") != sys.argv[2]:
     raise SystemExit("coordinator autotune release metadata does not match activated release")
-for name in ("autotune_candidates", "demand_rank"):
+for name in ("autotune_candidates", "demand_rank", "rate_card"):
     feed = status.get("feeds", {}).get(name, {})
     if len(feed.get("sha256", "")) != 64 or not feed.get("signer_key_id"):
         raise SystemExit(f"coordinator autotune release metadata is incomplete for {name}")
@@ -3800,6 +3877,8 @@ try:
         "autotune-candidates.json.sig",
         "demand-rank.json",
         "demand-rank.json.sig",
+        "rate-card.json",
+        "rate-card.json.sig",
         "tier2-catalog.json",
     )
     hashes = {}

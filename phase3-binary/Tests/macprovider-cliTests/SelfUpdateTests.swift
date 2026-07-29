@@ -510,6 +510,8 @@ final class SelfUpdateTests: XCTestCase {
             "autotune-candidates.json.sig",
             "demand-rank.json",
             "demand-rank.json.sig",
+            "rate-card.json",
+            "rate-card.json.sig",
         ] {
             try Data("\(marker)-\(name)".utf8).write(to: directory.appendingPathComponent(name))
         }

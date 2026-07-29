@@ -540,6 +540,10 @@ func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
 	next.ProofOfWeights.RequireAutotuneHelloGate = true
 	next.ProofOfWeights.AutotuneEvidenceTTLDays = 30
 	feedDir := t.TempDir()
+	next.AutotuneFeeds.RateCardPath = filepath.Join(feedDir, "rate-card.json")
+	next.AutotuneFeeds.RateCardSigPath = filepath.Join(feedDir, "rate-card.json.sig")
+	next.AutotuneFeeds.DemandRankPath = filepath.Join(feedDir, "demand-rank.json")
+	next.AutotuneFeeds.DemandRankSigPath = filepath.Join(feedDir, "demand-rank.json.sig")
 	next.AutotuneFeeds.AutotuneCandidatesPath = filepath.Join(feedDir, "autotune-candidates.json")
 	next.AutotuneFeeds.AutotuneCandidatesSigPath = filepath.Join(feedDir, "autotune-candidates.json.sig")
 	publicKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize)).Public().(ed25519.PublicKey)

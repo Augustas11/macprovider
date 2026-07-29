@@ -40,9 +40,13 @@ var (
 )
 
 // AutotuneFeeds holds the literal signed bytes for SPEC-023 recommendation
-// inputs. Served on the buyer mux at /v1/demand-rank(+ .sig) and
-// /v1/autotune-candidates(+ .sig), replacing nginx /static/* hosting.
+// inputs. Served on the buyer mux at /v1/rate-card(+ .sig),
+// /v1/demand-rank(+ .sig), and /v1/autotune-candidates(+ .sig),
+// replacing nginx /static/* hosting.
 type AutotuneFeeds struct {
+	RateCardJSON                   []byte
+	RateCardSig                    []byte
+	RateCardVerification           AutotuneFeedVerification
 	DemandRankJSON                 []byte
 	DemandRankSig                  []byte
 	DemandRankVerification         AutotuneFeedVerification
@@ -67,16 +71,27 @@ func (f AutotuneFeeds) demandRankEnabled() bool {
 	return len(f.DemandRankJSON) > 0 && len(f.DemandRankSig) > 0
 }
 
+func (f AutotuneFeeds) rateCardEnabled() bool {
+	return len(f.RateCardJSON) > 0 && len(f.RateCardSig) > 0
+}
+
 func (f AutotuneFeeds) autotuneCandidatesEnabled() bool {
 	return len(f.AutotuneCandidatesJSON) > 0 && len(f.AutotuneCandidatesSig) > 0
 }
 
 // LoadAutotuneFeeds reads and verifies signed feed files from cfg paths. Empty
-// paths disable that feed (handler returns 404). A configured feed fails closed
-// unless its literal JSON bytes have a valid signature from cfg.PublicKeys and
-// pass the locked feed schema.
+// paths disable the static SPEC-023 feed set. A configured feed set fails
+// closed unless every required feed pair is present, each literal JSON body has
+// a valid signature from cfg.PublicKeys, and every body passes the locked feed
+// schema.
 func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	keyring, err := cfg.DecodePublicKeyring()
+	if err != nil {
+		return AutotuneFeeds{}, err
+	}
+	rateCard, err := loadAutotuneFeedPair(
+		cfg.RateCardPath, cfg.RateCardSigPath, "rate_card", keyring, validateRateCardFeed,
+	)
 	if err != nil {
 		return AutotuneFeeds{}, err
 	}
@@ -92,7 +107,16 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 	if err != nil {
 		return AutotuneFeeds{}, err
 	}
-	if demand.enabled() && candidates.enabled() {
+	enabledCount := 0
+	for _, feed := range []loadedAutotuneFeed{rateCard, demand, candidates} {
+		if feed.enabled() {
+			enabledCount++
+		}
+	}
+	if enabledCount > 0 && enabledCount != 3 {
+		return AutotuneFeeds{}, fmt.Errorf("autotune feed set incomplete: rate_card, demand_rank, and autotune_candidates must all be configured together")
+	}
+	if enabledCount == 3 {
 		if demand.verification.Version != candidates.verification.Version {
 			return AutotuneFeeds{}, fmt.Errorf(
 				"autotune feed release mismatch: demand_rank version %q != autotune_candidates version %q",
@@ -114,8 +138,25 @@ func LoadAutotuneFeeds(cfg config.AutotuneFeedsConfig) (AutotuneFeeds, error) {
 				candidates.verification.GeneratedAt.Format(time.RFC3339),
 			)
 		}
+		if rateCard.verification.PolicyVersion != candidates.verification.PolicyVersion {
+			return AutotuneFeeds{}, fmt.Errorf(
+				"autotune feed release mismatch: rate_card policy_version %q != autotune_candidates policy_version %q",
+				rateCard.verification.PolicyVersion,
+				candidates.verification.PolicyVersion,
+			)
+		}
+		if !rateCard.verification.GeneratedAt.Equal(candidates.verification.GeneratedAt) {
+			return AutotuneFeeds{}, fmt.Errorf(
+				"autotune feed release mismatch: rate_card generated_at %q != autotune_candidates generated_at %q",
+				rateCard.verification.GeneratedAt.Format(time.RFC3339),
+				candidates.verification.GeneratedAt.Format(time.RFC3339),
+			)
+		}
 	}
 	return AutotuneFeeds{
+		RateCardJSON:                   rateCard.jsonBytes,
+		RateCardSig:                    rateCard.sigBytes,
+		RateCardVerification:           rateCard.verification,
 		DemandRankJSON:                 demand.jsonBytes,
 		DemandRankSig:                  demand.sigBytes,
 		DemandRankVerification:         demand.verification,
@@ -302,6 +343,82 @@ func (r *nullableRank) UnmarshalJSON(raw []byte) error {
 	}
 	r.value = &value
 	return nil
+}
+
+type rateCardFeed struct {
+	Version              string                     `json:"version"`
+	PolicyVersion        string                     `json:"policy_version"`
+	GeneratedAt          string                     `json:"generated_at"`
+	USDPerMillionCredits *float64                   `json:"usd_per_million_credits"`
+	Rows                 map[string]rateCardFeedRow `json:"rows"`
+}
+
+type rateCardFeedRow struct {
+	PromptRatePerMtok         *int64 `json:"prompt_rate_per_mtok"`
+	PromptCacheHitRatePerMtok *int64 `json:"prompt_cache_hit_rate_per_mtok"`
+	CompletionRatePerMtok     *int64 `json:"completion_rate_per_mtok"`
+	ProviderShareBPS          *int64 `json:"provider_share_bps"`
+	GlobalMultiplierPPM       *int64 `json:"global_multiplier_ppm"`
+}
+
+func validateRateCardFeed(raw []byte, _ string) (feedRelease, error) {
+	var feed rateCardFeed
+	if err := decodeStrictJSON(raw, &feed); err != nil {
+		return feedRelease{}, err
+	}
+	release, err := validateFeedEnvelope(feed.Version, feed.PolicyVersion, feed.GeneratedAt, "", "", len(feed.Rows))
+	if err != nil {
+		return feedRelease{}, err
+	}
+	if feed.USDPerMillionCredits == nil || math.IsNaN(*feed.USDPerMillionCredits) || math.IsInf(*feed.USDPerMillionCredits, 0) || *feed.USDPerMillionCredits < 0 {
+		return feedRelease{}, fmt.Errorf("usd_per_million_credits must be finite and >= 0")
+	}
+	for key, row := range feed.Rows {
+		if key != "default" {
+			if err := validateModelKey(key); err != nil {
+				return feedRelease{}, fmt.Errorf("row %q: %w", key, err)
+			}
+		}
+		if row.PromptRatePerMtok == nil || *row.PromptRatePerMtok < 0 {
+			return feedRelease{}, fmt.Errorf("row %q prompt_rate_per_mtok must be >= 0", key)
+		}
+		if row.PromptCacheHitRatePerMtok == nil || *row.PromptCacheHitRatePerMtok < 0 {
+			return feedRelease{}, fmt.Errorf("row %q prompt_cache_hit_rate_per_mtok must be >= 0", key)
+		}
+		if row.CompletionRatePerMtok == nil || *row.CompletionRatePerMtok < 0 {
+			return feedRelease{}, fmt.Errorf("row %q completion_rate_per_mtok must be >= 0", key)
+		}
+		if row.ProviderShareBPS == nil || *row.ProviderShareBPS < 0 || *row.ProviderShareBPS > 10000 {
+			return feedRelease{}, fmt.Errorf("row %q provider_share_bps must be in [0,10000]", key)
+		}
+		if row.GlobalMultiplierPPM == nil || *row.GlobalMultiplierPPM < 0 {
+			return feedRelease{}, fmt.Errorf("row %q global_multiplier_ppm must be >= 0", key)
+		}
+	}
+	defaultRow, ok := feed.Rows["default"]
+	if !ok {
+		return feedRelease{}, fmt.Errorf("default row required")
+	}
+	rows := make(map[string]recommendationRateCardRow, len(feed.Rows))
+	for key, row := range feed.Rows {
+		rows[key] = recommendationRateCardRow{
+			PromptRatePerMtok:         *row.PromptRatePerMtok,
+			PromptCacheHitRatePerMtok: *row.PromptCacheHitRatePerMtok,
+			CompletionRatePerMtok:     *row.CompletionRatePerMtok,
+			ProviderShareBPS:          *row.ProviderShareBPS,
+			GlobalMultiplierPPM:       *row.GlobalMultiplierPPM,
+		}
+	}
+	expectedVersion := recommendationRateCardVersion(
+		rows,
+		*defaultRow.ProviderShareBPS,
+		*defaultRow.GlobalMultiplierPPM,
+		*feed.USDPerMillionCredits,
+	)
+	if feed.Version != expectedVersion {
+		return feedRelease{}, fmt.Errorf("version must equal projection hash %q", expectedVersion)
+	}
+	return release, nil
 }
 
 func validateDemandRankFeed(raw []byte, _ string) (feedRelease, error) {
@@ -868,9 +985,28 @@ func (s *Server) handleAutotuneRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	feeds := s.autotuneFeedsSnapshot()
-	if !feeds.demandRankEnabled() || !feeds.autotuneCandidatesEnabled() {
+	if !feeds.rateCardEnabled() || !feeds.demandRankEnabled() || !feeds.autotuneCandidatesEnabled() {
 		writeError(w, http.StatusNotFound, "autotune_feed_not_found", "Autotune release not found")
 		return
+	}
+	feedStatus := map[string]any{
+		"autotune_candidates": map[string]any{
+			"sha256":        feeds.AutotuneCandidatesVerification.SHA256,
+			"signer_key_id": feeds.AutotuneCandidatesVerification.KeyID,
+			"verified_at":   feeds.AutotuneCandidatesVerification.VerifiedAt.Format(time.RFC3339Nano),
+		},
+		"demand_rank": map[string]any{
+			"sha256":        feeds.DemandRankVerification.SHA256,
+			"signer_key_id": feeds.DemandRankVerification.KeyID,
+			"verified_at":   feeds.DemandRankVerification.VerifiedAt.Format(time.RFC3339Nano),
+		},
+	}
+	if feeds.rateCardEnabled() {
+		feedStatus["rate_card"] = map[string]any{
+			"sha256":        feeds.RateCardVerification.SHA256,
+			"signer_key_id": feeds.RateCardVerification.KeyID,
+			"verified_at":   feeds.RateCardVerification.VerifiedAt.Format(time.RFC3339Nano),
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -879,18 +1015,7 @@ func (s *Server) handleAutotuneRelease(w http.ResponseWriter, r *http.Request) {
 		"release_id":     feeds.AutotuneCandidatesVerification.Version,
 		"policy_version": feeds.AutotuneCandidatesVerification.PolicyVersion,
 		"generated_at":   feeds.AutotuneCandidatesVerification.GeneratedAt.Format(time.RFC3339),
-		"feeds": map[string]any{
-			"autotune_candidates": map[string]any{
-				"sha256":        feeds.AutotuneCandidatesVerification.SHA256,
-				"signer_key_id": feeds.AutotuneCandidatesVerification.KeyID,
-				"verified_at":   feeds.AutotuneCandidatesVerification.VerifiedAt.Format(time.RFC3339Nano),
-			},
-			"demand_rank": map[string]any{
-				"sha256":        feeds.DemandRankVerification.SHA256,
-				"signer_key_id": feeds.DemandRankVerification.KeyID,
-				"verified_at":   feeds.DemandRankVerification.VerifiedAt.Format(time.RFC3339Nano),
-			},
-		},
+		"feeds":          feedStatus,
 	})
 }
 

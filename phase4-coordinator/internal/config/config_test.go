@@ -30,8 +30,7 @@ func enableReferralAdmissionForTest(cfg *Config) {
 
 func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 	cfg := validTestConfig()
-	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
-	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+	setSignedAutotuneFeedPathsForTest(&cfg)
 
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "autotune.public_keys") {
@@ -44,6 +43,29 @@ func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate configured signed feed: %v", err)
 	}
+}
+
+func TestAutotuneFeedsRejectPartialFeedSet(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
+	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": testAutotunePublicKeyBase64,
+	}
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "required when any autotune feed is configured") {
+		t.Fatalf("Validate error=%v, want partial feed-set rejection", err)
+	}
+}
+
+func setSignedAutotuneFeedPathsForTest(cfg *Config) {
+	cfg.AutotuneFeeds.RateCardPath = "/tmp/rate-card.json"
+	cfg.AutotuneFeeds.RateCardSigPath = "/tmp/rate-card.json.sig"
+	cfg.AutotuneFeeds.DemandRankPath = "/tmp/demand-rank.json"
+	cfg.AutotuneFeeds.DemandRankSigPath = "/tmp/demand-rank.json.sig"
+	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
+	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
 }
 
 func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
@@ -647,6 +669,23 @@ func TestCoordinatorYAMLExamplesIncludePromptCacheHitRate(t *testing.T) {
 				t.Fatalf("%s missing prompt_cache_hit_credits_per_mtok", rel)
 			}
 		})
+	}
+}
+
+func TestCoordinatorYAMLExampleSignedFeedsIncludePublicKeys(t *testing.T) {
+	b, err := os.ReadFile(filepath.Clean("../../dist/coordinator.yaml.example"))
+	if err != nil {
+		t.Fatalf("read dist coordinator example: %v", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("parse dist coordinator example: %v", err)
+	}
+	if cfg.AutotuneFeeds.RateCardPath == "" || cfg.AutotuneFeeds.DemandRankPath == "" || cfg.AutotuneFeeds.AutotuneCandidatesPath == "" {
+		t.Fatal("dist coordinator example must show the complete signed feed set")
+	}
+	if len(cfg.AutotuneFeeds.PublicKeys) == 0 {
+		t.Fatal("dist coordinator example signed feeds must include autotune.public_keys")
 	}
 }
 

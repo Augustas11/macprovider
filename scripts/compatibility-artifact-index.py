@@ -20,6 +20,8 @@ REQUIRED_ROLES = (
     "catalog_demand",
     "catalog_demand_signature",
     "catalog_manifest",
+    "catalog_rate_card",
+    "catalog_rate_card_signature",
     "catalog_tier2",
     "catalog_trusted_keys",
     "compatibility_manifest",
