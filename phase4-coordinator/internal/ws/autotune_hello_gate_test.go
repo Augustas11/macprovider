@@ -161,6 +161,9 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	if provider.MaxAdmittedModelID != "mlx-community/Llama-3.2-3B-Instruct-4bit" {
 		t.Fatalf("MaxAdmittedModelID = %q", provider.MaxAdmittedModelID)
 	}
+	if provider.MaxAdmittedMinRAMGB != 4 {
+		t.Fatalf("MaxAdmittedMinRAMGB = %d, want 4", provider.MaxAdmittedMinRAMGB)
+	}
 }
 
 func TestAutotuneHelloGateRejectsMissingEvidence(t *testing.T) {
@@ -1176,6 +1179,115 @@ func TestAutotuneCatalogAdmissionWorksWithDefaultDisabledEvidenceGate(t *testing
 	}
 	if ack["type"] != "hello_ack" || ack["catalog_compatible"] != true || ack["catalog_release_id"] != catalog.Version {
 		t.Fatalf("catalog admission ack = %+v", ack)
+	}
+}
+
+func TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{
+			{
+				ModelKey:               "small",
+				ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+				SustainedTPS:           20,
+				TTFTMS:                 1000,
+				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+				CandidateCatalogSHA256: catalog.SHA256,
+			},
+		},
+	}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
+	}, func(cfg *config.Config) {
+		if cfg.ProofOfWeights.RequireAutotuneHelloGate {
+			t.Fatal("test requires the default-disabled evidence gate")
+		}
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack["type"] != "hello_ack" {
+		t.Fatalf("ack type = %v", ack["type"])
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+	if !ok {
+		t.Fatal("provider not registered")
+	}
+	if provider.MaxAdmittedModelKey != "small" || provider.MaxAdmittedMinRAMGB != 4 {
+		t.Fatalf("observed admission cap = key %q ram %d, want small/4", provider.MaxAdmittedModelKey, provider.MaxAdmittedMinRAMGB)
+	}
+}
+
+func TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{
+			{
+				ModelKey:               "small",
+				ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+				SustainedTPS:           20,
+				TTFTMS:                 1000,
+				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+				CandidateCatalogSHA256: catalog.SHA256,
+			},
+		},
+	}
+	store := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{{evidence: evidence, ok: true}}}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, store),
+	}, func(cfg *config.Config) {
+		if cfg.ProofOfWeights.RequireAutotuneHelloGate {
+			t.Fatal("test requires the default-disabled evidence gate")
+		}
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["model_id"] = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, initial, catalog)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth response = %+v", response)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", response.AssignedID)
+	if !ok {
+		t.Fatal("provider not registered")
+	}
+	if provider.MaxAdmittedModelKey != "small" || provider.MaxAdmittedMinRAMGB != 4 {
+		t.Fatalf("observed admission cap = key %q ram %d, want small/4", provider.MaxAdmittedModelKey, provider.MaxAdmittedMinRAMGB)
+	}
+	if got := store.callCount(); got != 1 {
+		t.Fatalf("evidence lookups = %d, want 1", got)
 	}
 }
 

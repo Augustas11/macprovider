@@ -175,9 +175,9 @@ type Provider struct {
 	// count for this live session. Zero is omitted from generic Provider JSON
 	// to preserve L-1 default wire compatibility; /poolz adds the field
 	// explicitly for every provider.
-	CanaryFailCount     int             `json:"canary_fail_count,omitempty"`
-	CanaryLastCheckedAt *time.Time      `json:"canary_last_checked_at,omitempty"`
-	CanaryLastFailedAt  *time.Time      `json:"canary_last_failed_at,omitempty"`
+	CanaryFailCount     int        `json:"canary_fail_count,omitempty"`
+	CanaryLastCheckedAt *time.Time `json:"canary_last_checked_at,omitempty"`
+	CanaryLastFailedAt  *time.Time `json:"canary_last_failed_at,omitempty"`
 	// CanaryLastTTFTMS / CanaryLastSustainedTPS are the wall-time latency
 	// metrics of the most recent completed canary probe. They are the only
 	// coordinator-measured live TTFT/TPS signal (buyer relays are not timed
@@ -196,7 +196,7 @@ type Provider struct {
 	// buyer relay for this provider (HTTP 2xx / completed stream). Used by
 	// FR-CAN23 observed-serving residual so a peer that never served buyers
 	// cannot lift the last-provider floor. Omitted from wire JSON.
-	LastBuyerSuccessAt *time.Time `json:"-"`
+	LastBuyerSuccessAt  *time.Time      `json:"-"`
 	LastAutoupdateEvent json.RawMessage `json:"last_autoupdate_event,omitempty"`
 	// HardwareCapacity is live, provider-reported capacity metadata carried on
 	// heartbeats for public aggregate stats. It is deliberately separate from
@@ -208,11 +208,12 @@ type Provider struct {
 	// operators so remote canaries can enforce queue, memory, thermal, restart,
 	// and runtime invariants without a provider-local network route.
 	SafetyTelemetry *ProviderSafetyTelemetry `json:"safety_telemetry,omitempty"`
-	// Proof of Weights W2 — coordinator-side autotune hello gate cap derived
-	// from latest verified hardware-evidence benchmarks. Empty when gate off
-	// or provider admitted before W2 rollout.
+	// Proof of Weights W2 — coordinator-side autotune admission cap derived
+	// from latest verified hardware-evidence benchmarks. Empty/zero when
+	// evidence observation is not wired or provider admitted before W2 rollout.
 	MaxAdmittedModelKey string `json:"max_admitted_model_class,omitempty"`
 	MaxAdmittedModelID  string `json:"max_admitted_model_id,omitempty"`
+	MaxAdmittedMinRAMGB int    `json:"max_admitted_min_ram_gb,omitempty"`
 	// Admitted hardware-trust tuple (issue #582 FIX B). Captured at the hello
 	// gate from the exact verified evidence that authorized this session, so the
 	// bounded trust-revalidation sweep can re-check the SAME hardware tuple that
@@ -1853,7 +1854,20 @@ type HeartbeatUpdate struct {
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
-	cp, gap, ok, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
+	result := r.ApplyHeartbeatDetailed(providerID, assignedID, hb)
+	return result.Provider, result.Gap, result.OK
+}
+
+type HeartbeatResult struct {
+	Provider       *Provider
+	Gap            time.Duration
+	OK             bool
+	ModelIDChanged bool
+	PriorModelID   string
+}
+
+func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
+	cp, gap, ok, modelIDChanged, priorModelID, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
 	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
 	// can stall on busy_timeout; running it under the global pool lock
 	// stalled all routing/liveness. The emitter contract is now relaxed
@@ -1862,15 +1876,21 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 	if hasSwap && r.swapEmitter != nil {
 		r.swapEmitter(swap)
 	}
-	return cp, gap, ok
+	return HeartbeatResult{
+		Provider:       cp,
+		Gap:            gap,
+		OK:             ok,
+		ModelIDChanged: modelIDChanged,
+		PriorModelID:   priorModelID,
+	}
 }
 
-func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool, SwapEvent, bool) {
+func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool, bool, string, SwapEvent, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
-		return nil, 0, false, SwapEvent{}, false
+		return nil, 0, false, false, "", SwapEvent{}, false
 	}
 	prev := p.LastHeartbeatAt
 	priorModelID := p.ModelID
@@ -1976,7 +1996,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if !prev.IsZero() {
 		gap = hb.At.Sub(prev)
 	}
-	return &cp, gap, true, swap, swapCompleted
+	return &cp, gap, true, modelIDChanged, priorModelID, swap, swapCompleted
 }
 
 // Touch records that an inbound frame was received from the provider,

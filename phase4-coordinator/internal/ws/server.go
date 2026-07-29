@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,19 @@ const (
 	CloseTier2KeyExchangeFailed    gobwas.StatusCode = 4013
 	ClosePoolFull                  gobwas.StatusCode = 4429
 )
+
+const (
+	autotuneEvidenceLookupTimeout       = 2 * time.Second
+	admissionCeilingEventCooldown       = 5 * time.Minute
+	admissionCeilingEventStateTTL       = 24 * time.Hour
+	admissionCeilingEventStateMaxKeys   = 4096
+	admissionCeilingDiagnosticValueRune = 48
+)
+
+type admissionCeilingEventRateState struct {
+	last       time.Time
+	suppressed uint64
+}
 
 type Server struct {
 	cfg                       config.Config
@@ -152,6 +166,8 @@ type Server struct {
 	connectionEventStopOnce        sync.Once
 	connectionEventDone            chan struct{}
 	connectionEventsStopped        atomic.Bool
+	admissionCeilingEventMu        sync.Mutex
+	admissionCeilingEvents         map[string]admissionCeilingEventRateState
 	providerConnWG                 sync.WaitGroup
 	anonymousEventMu               sync.Mutex
 	anonymousEventWindow           time.Time
@@ -407,6 +423,12 @@ func WithAutotuneCatalogEnforcement(enforced bool, bridgeDeadline time.Time) Opt
 func WithAutotuneHelloGate(catalog *autotune.Catalog, store autotune.EvidenceStore) Option {
 	return func(s *Server) {
 		s.autotuneCatalog = catalog
+		s.autotuneEvidence = store
+	}
+}
+
+func WithAutotuneEvidenceStore(store autotune.EvidenceStore) Option {
+	return func(s *Server) {
 		s.autotuneEvidence = store
 	}
 }
@@ -1861,16 +1883,19 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
 	// provided AuthState; eviction defense protects existing routable
 	// sessions from bearer-less duplicates.
-	maxAdmittedModelKey, maxAdmittedModelID, admittedTuple, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
-	if !gateOK {
-		return "", ""
+	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		admissionObservation, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
+		if !gateOK {
+			return "", ""
+		}
+		entry.MaxAdmittedModelKey = admissionObservation.MaxAdmittedModelKey
+		entry.MaxAdmittedModelID = admissionObservation.MaxAdmittedModelID
+		entry.MaxAdmittedMinRAMGB = admissionObservation.MaxAdmittedMinRAMGB
+		// FIX B (issue #582): admitted hardware-trust tuple for the revalidation sweep.
+		entry.AdmittedHardwareIdentityHash = admissionObservation.AdmittedTuple.HardwareIdentityHash
+		entry.AdmittedChipNormalized = admissionObservation.AdmittedTuple.ChipNormalized
+		entry.AdmittedUnifiedMemoryGB = admissionObservation.AdmittedTuple.UnifiedMemoryGB
 	}
-	entry.MaxAdmittedModelKey = maxAdmittedModelKey
-	entry.MaxAdmittedModelID = maxAdmittedModelID
-	// FIX B (issue #582): admitted hardware-trust tuple for the revalidation sweep.
-	entry.AdmittedHardwareIdentityHash = admittedTuple.HardwareIdentityHash
-	entry.AdmittedChipNormalized = admittedTuple.ChipNormalized
-	entry.AdmittedUnifiedMemoryGB = admittedTuple.UnifiedMemoryGB
 	// Reserve after the post-challenge evidence recheck, but defer the durable
 	// admission record until credential minting succeeds.
 	if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
@@ -2258,6 +2283,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	var (
 		maxAdmittedModelKey string
 		maxAdmittedModelID  string
+		maxAdmittedMinRAMGB int
 		admittedTuple       onboarding.AdmittedTuple
 	)
 	if firstHopOnly {
@@ -2269,10 +2295,14 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			Msg("admitting update-only first-hop bridge session")
 	} else {
 		var gateOK bool
-		maxAdmittedModelKey, maxAdmittedModelID, admittedTuple, gateOK = s.checkAutotuneHelloGate(conn, hello)
+		admissionObservation, gateOK := s.checkAutotuneHelloGate(conn, hello)
 		if !gateOK {
 			return nil, false
 		}
+		maxAdmittedModelKey = admissionObservation.MaxAdmittedModelKey
+		maxAdmittedModelID = admissionObservation.MaxAdmittedModelID
+		maxAdmittedMinRAMGB = admissionObservation.MaxAdmittedMinRAMGB
+		admittedTuple = admissionObservation.AdmittedTuple
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -2329,6 +2359,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		CandidateRowIdentity:   hello.CandidateRowIdentity,
 		MaxAdmittedModelKey:    maxAdmittedModelKey,
 		MaxAdmittedModelID:     maxAdmittedModelID,
+		MaxAdmittedMinRAMGB:    maxAdmittedMinRAMGB,
 		// FIX B (issue #582): admitted hardware-trust tuple for the sweep.
 		AdmittedHardwareIdentityHash: admittedTuple.HardwareIdentityHash,
 		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
@@ -2370,33 +2401,42 @@ func (s *Server) expectedProviderModelHash(providerID, assignedID, modelID strin
 	return strings.TrimSpace(row.ModelSHA256)
 }
 
-// checkAutotuneHelloGate is the hardware-trust AUTHORIZATION POINT for the
-// admission path (issue #582 FIX A). LatestVerified below joins live
+type autotuneAdmissionObservation struct {
+	MaxAdmittedModelKey string
+	MaxAdmittedModelID  string
+	MaxAdmittedMinRAMGB int
+	AdmittedTuple       onboarding.AdmittedTuple
+}
+
+// checkAutotuneHelloGate is the hardware-trust AUTHORIZATION POINT when the
+// strict gate is enabled (issue #582 FIX A). LatestVerified joins live
 // hardware_verification_trust and admits only a provider whose verified hardware
-// tuple is still backed by an active (unexpired, unrevoked) trust root. It runs
-// BEFORE resolveProvisionalToken mints the token / PairOT / redeems the referral,
-// so the "authorize before any durable mutation" requirement is satisfied here —
-// NOT by a post-mint registration re-check (which would commit-then-refuse and
-// deadlock onboarding/recovery). The returned tuple binds the admitted session
-// to the EXACT trust root that authorized it, so the bounded revalidation sweep
-// (FIX B) can later re-check that specific tuple rather than the provider_id
-// alone. The residual revoke-between-gate-and-register window is bounded (evicted,
-// never refused) by that sweep.
-func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, string, onboarding.AdmittedTuple, bool) {
-	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
-		return "", "", onboarding.AdmittedTuple{}, true
-	}
+// tuple is still backed by an active trust root. When the strict gate is off,
+// the same evidence read runs observe-only so heartbeat model changes can be
+// compared against the admitted RAM ceiling without affecting routing.
+func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdmissionObservation, bool) {
+	requireGate := s.cfg.ProofOfWeights.RequireAutotuneHelloGate
 	if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
-		s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
-		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-		return "", "", onboarding.AdmittedTuple{}, false
+		if requireGate {
+			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
+			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+			return autotuneAdmissionObservation{}, false
+		}
+		return autotuneAdmissionObservation{}, true
 	}
 	ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
-	evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
+	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
+	defer cancel()
+	evidence, ok, err := s.autotuneEvidence.LatestVerified(ctx, hello.ProviderID, ttl)
 	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
-		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-		return "", "", onboarding.AdmittedTuple{}, false
+		event := s.log.Warn().Err(err).Str("provider_id", hello.ProviderID)
+		if requireGate {
+			event.Msg("autotune hello gate evidence lookup failed")
+			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+			return autotuneAdmissionObservation{}, false
+		}
+		event.Msg("autotune evidence observation lookup failed")
+		return autotuneAdmissionObservation{}, true
 	}
 	if !ok {
 		// SPEC-032 redundancy decision (runbook item 1c): rejecting a would-be
@@ -2407,21 +2447,37 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 		// full SPEC-032 FR-HG5 below-two operator alert (which additionally requires
 		// a catalogued-demand-filtered structural count across ALL gate actions +
 		// episode dedup/cooldown — still a Gap). Count buyer-serving providers.
-		serving := s.pool.BuyerServingCountForModel(hello.ModelID)
-		event := s.log.Info().
-			Str("provider_id", hello.ProviderID).
-			Str("event", "autotune_evidence_required").
-			Str("model_id", hello.ModelID).
-			Int("buyer_serving_for_model", serving)
-		if serving < 2 {
-			event = event.Bool("pool_redundancy_low", true)
+		if requireGate {
+			serving := s.pool.BuyerServingCountForModel(hello.ModelID)
+			event := s.log.Info().
+				Str("provider_id", hello.ProviderID).
+				Str("event", "autotune_evidence_required").
+				Str("model_id", hello.ModelID).
+				Int("buyer_serving_for_model", serving)
+			if serving < 2 {
+				event = event.Bool("pool_redundancy_low", true)
+			}
+			event.Msg("autotune hello gate rejected connect without verified hardware evidence")
+			s.close(conn, CloseInvalidHello, "autotune_evidence_required")
+			return autotuneAdmissionObservation{}, false
 		}
-		event.Msg("autotune hello gate rejected connect without verified hardware evidence")
-		s.close(conn, CloseInvalidHello, "autotune_evidence_required")
-		return "", "", onboarding.AdmittedTuple{}, false
+		return autotuneAdmissionObservation{}, true
 	}
 	decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
 	if !decision.Allowed {
+		if !requireGate {
+			return autotuneAdmissionObservation{
+				MaxAdmittedModelKey: decision.MaxAdmittedModelKey,
+				MaxAdmittedModelID:  decision.MaxAdmittedModelID,
+				MaxAdmittedMinRAMGB: decision.MaxAdmittedMinRAMGB,
+				AdmittedTuple: onboarding.AdmittedTuple{
+					ProviderID:           hello.ProviderID,
+					HardwareIdentityHash: evidence.HardwareIdentityHash,
+					ChipNormalized:       evidence.ChipNormalized,
+					UnifiedMemoryGB:      evidence.UnifiedMemoryGB,
+				},
+			}, true
+		}
 		s.log.Info().
 			Str("provider_id", hello.ProviderID).
 			Str("event", decision.Reason).
@@ -2433,7 +2489,7 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 			Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
 			Msg("autotune hello gate rejected provider model claim")
 		s.close(conn, CloseInvalidHello, decision.Reason)
-		return "", "", onboarding.AdmittedTuple{}, false
+		return autotuneAdmissionObservation{}, false
 	}
 	// FIX B (issue #582): bind the admitted session to the exact trust tuple that
 	// authorized it, for the tuple-aware revalidation sweep.
@@ -2443,7 +2499,12 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 		ChipNormalized:       evidence.ChipNormalized,
 		UnifiedMemoryGB:      evidence.UnifiedMemoryGB,
 	}
-	return decision.MaxAdmittedModelKey, decision.MaxAdmittedModelID, tuple, true
+	return autotuneAdmissionObservation{
+		MaxAdmittedModelKey: decision.MaxAdmittedModelKey,
+		MaxAdmittedModelID:  decision.MaxAdmittedModelID,
+		MaxAdmittedMinRAMGB: decision.MaxAdmittedMinRAMGB,
+		AdmittedTuple:       tuple,
+	}, true
 }
 
 func (s *Server) catalogAdmission(hello Hello) (string, bool) {
@@ -4403,7 +4464,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("effective_slots_total", capacity.SlotsTotal).
 			Msg("provider capacity claim exceeds the operator ceiling; clamped")
 	}
-	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
+	heartbeatResult := s.pool.ApplyHeartbeatDetailed(providerID, assignedID, pool.HeartbeatUpdate{
 		Status:                    state,
 		ModelID:                   hb.ModelID,
 		ModelParamsB:              hb.ModelParamsB,
@@ -4429,9 +4490,13 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		SafetyTelemetry:           hb.SafetyTelemetry,
 		At:                        s.now(),
 	})
+	entry, gap, ok := heartbeatResult.Provider, heartbeatResult.Gap, heartbeatResult.OK
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
 		return
+	}
+	if heartbeatResult.ModelIDChanged {
+		s.observeAdmissionCeilingDrift(*entry, heartbeatResult.PriorModelID)
 	}
 	s.rememberProviderSnapshotCoalesced(*entry)
 	threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
@@ -4476,6 +4541,137 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		// the verdict is Unknown and routing is untouched.
 		s.applyBenchmarkQuarantine(providerID, assignedID, entry.ModelID, verdict)
 	}
+}
+
+func (s *Server) observeAdmissionCeilingDrift(provider pool.Provider, priorModelID string) {
+	if provider.MaxAdmittedMinRAMGB <= 0 {
+		s.recordAdmissionCeilingEvent(provider, priorModelID, 0, providerevents.KindMissingAdmissionCap)
+		return
+	}
+	claimedMinRAMGB, ok := s.catalogMinRAMForProviderModel(provider, provider.ModelID)
+	if !ok || claimedMinRAMGB <= provider.MaxAdmittedMinRAMGB {
+		return
+	}
+	s.recordAdmissionCeilingEvent(provider, priorModelID, claimedMinRAMGB, providerevents.KindModelCeilingDrift)
+}
+
+func (s *Server) catalogMinRAMForProviderModel(provider pool.Provider, modelID string) (int, bool) {
+	catalog := s.autotuneCatalog
+	if provider.CatalogAdmissionMode == "previous" {
+		catalog = s.autotuneCompatibleCatalogs[provider.CatalogReleaseID]
+	}
+	if catalog == nil {
+		return 0, false
+	}
+	_, row, ok := catalog.HighestClaimedTier(modelID)
+	if !ok {
+		return 0, false
+	}
+	return row.MinRAMGB, true
+}
+
+func (s *Server) recordAdmissionCeilingEvent(provider pool.Provider, priorModelID string, claimedMinRAMGB int, kind string) {
+	suppressed, ok := s.reserveAdmissionCeilingEvent(provider.ProviderID, kind)
+	if !ok {
+		return
+	}
+	logger := s.log.Warn().
+		Str("event", kind).
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Str("from_model_id", priorModelID).
+		Str("to_model_id", provider.ModelID).
+		Int("claimed_min_ram_gb", claimedMinRAMGB).
+		Int("max_admitted_min_ram_gb", provider.MaxAdmittedMinRAMGB)
+	if provider.MaxAdmittedModelID != "" {
+		logger = logger.Str("max_admitted_model_id", provider.MaxAdmittedModelID)
+	}
+	if suppressed > 0 {
+		logger = logger.Uint64("suppressed_events", suppressed)
+	}
+	if kind == providerevents.KindMissingAdmissionCap {
+		logger.Msg("provider heartbeat changed model without an observed admission cap")
+	} else {
+		logger.Msg("provider heartbeat model exceeds observed admission cap")
+	}
+	s.recordConnectionEvent(providerevents.Event{
+		ProviderID:    provider.ProviderID,
+		SessionID:     provider.AssignedID,
+		Kind:          kind,
+		Outcome:       providerevents.OutcomeFailure,
+		FailureReason: providerevents.ReasonOther,
+		AuthStage:     providerevents.AuthStageLiveness,
+		MessageFamily: providerevents.MessageFamilyNone,
+		BinaryVersion: provider.BinaryVersion,
+		Diagnostic:    admissionCeilingDiagnostic(priorModelID, provider.ModelID, claimedMinRAMGB, provider.MaxAdmittedMinRAMGB, suppressed),
+	})
+}
+
+func (s *Server) reserveAdmissionCeilingEvent(providerID, kind string) (uint64, bool) {
+	now := s.now().UTC()
+	key := providerID + "\x00" + kind
+	s.admissionCeilingEventMu.Lock()
+	defer s.admissionCeilingEventMu.Unlock()
+	if s.admissionCeilingEvents == nil {
+		s.admissionCeilingEvents = make(map[string]admissionCeilingEventRateState)
+	}
+	if len(s.admissionCeilingEvents) >= admissionCeilingEventStateMaxKeys {
+		s.pruneAdmissionCeilingEventsLocked(now)
+	}
+	state := s.admissionCeilingEvents[key]
+	if now.Before(state.last) {
+		state = admissionCeilingEventRateState{}
+	}
+	if !state.last.IsZero() && now.Sub(state.last) < admissionCeilingEventCooldown {
+		state.suppressed++
+		s.admissionCeilingEvents[key] = state
+		return 0, false
+	}
+	suppressed := state.suppressed
+	s.admissionCeilingEvents[key] = admissionCeilingEventRateState{last: now}
+	return suppressed, true
+}
+
+func (s *Server) pruneAdmissionCeilingEventsLocked(now time.Time) {
+	for key, state := range s.admissionCeilingEvents {
+		if state.last.IsZero() || now.Before(state.last) || now.Sub(state.last) > admissionCeilingEventStateTTL {
+			delete(s.admissionCeilingEvents, key)
+		}
+	}
+	for len(s.admissionCeilingEvents) >= admissionCeilingEventStateMaxKeys {
+		var oldestKey string
+		var oldest time.Time
+		for key, state := range s.admissionCeilingEvents {
+			if oldestKey == "" || state.last.Before(oldest) {
+				oldestKey = key
+				oldest = state.last
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.admissionCeilingEvents, oldestKey)
+	}
+}
+
+func admissionCeilingDiagnostic(fromModelID, toModelID string, claimedMinRAMGB, maxAdmittedMinRAMGB int, suppressed uint64) string {
+	diagnostic := "from_model_id=" + compactDiagnosticValue(fromModelID, admissionCeilingDiagnosticValueRune) +
+		" to_model_id=" + compactDiagnosticValue(toModelID, admissionCeilingDiagnosticValueRune) +
+		" claimed_min_ram_gb=" + strconv.Itoa(claimedMinRAMGB) +
+		" max_admitted_min_ram_gb=" + strconv.Itoa(maxAdmittedMinRAMGB)
+	if suppressed > 0 {
+		diagnostic += " suppressed_events=" + strconv.FormatUint(suppressed, 10)
+	}
+	return diagnostic
+}
+
+func compactDiagnosticValue(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	if maxRunes <= 0 || len([]rune(value)) <= maxRunes {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:maxRunes])
 }
 
 func (s *Server) fenceInvalidModelIdentity(conn net.Conn, providerID, assignedID string) {

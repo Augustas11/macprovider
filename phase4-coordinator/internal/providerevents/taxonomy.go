@@ -28,12 +28,14 @@ const (
 )
 
 const (
-	KindUpgradeFailed  = "upgrade_failed"
-	KindAuthRejected   = "auth_rejected"
-	KindAuthAccepted   = "auth_accepted"
-	KindDisconnect     = "disconnect"
-	KindWarmupFailed   = "warmup_failed"
-	KindHeartbeatStale = "heartbeat_stale"
+	KindUpgradeFailed       = "upgrade_failed"
+	KindAuthRejected        = "auth_rejected"
+	KindAuthAccepted        = "auth_accepted"
+	KindDisconnect          = "disconnect"
+	KindWarmupFailed        = "warmup_failed"
+	KindHeartbeatStale      = "heartbeat_stale"
+	KindMissingAdmissionCap = "missing_admission_cap"
+	KindModelCeilingDrift   = "model_ceiling_drift"
 )
 
 const (
@@ -99,12 +101,14 @@ var (
 		ReasonOther:                         {},
 	}
 	knownKinds = map[string]struct{}{
-		KindUpgradeFailed:  {},
-		KindAuthRejected:   {},
-		KindAuthAccepted:   {},
-		KindDisconnect:     {},
-		KindWarmupFailed:   {},
-		KindHeartbeatStale: {},
+		KindUpgradeFailed:       {},
+		KindAuthRejected:        {},
+		KindAuthAccepted:        {},
+		KindDisconnect:          {},
+		KindWarmupFailed:        {},
+		KindHeartbeatStale:      {},
+		KindMissingAdmissionCap: {},
+		KindModelCeilingDrift:   {},
 	}
 	knownOutcomes = map[string]struct{}{
 		OutcomeSuccess: {},

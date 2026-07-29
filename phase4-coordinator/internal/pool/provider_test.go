@@ -1328,6 +1328,24 @@ func TestApplyHeartbeatOmittedIdentityClearsCachedVerification(t *testing.T) {
 	}
 }
 
+func TestApplyHeartbeatDetailedReportsModelIDChange(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	unchanged := registry.ApplyHeartbeatDetailed("p1", "current", heartbeatUpdateAt("model-a", start.Add(time.Minute)))
+	if !unchanged.OK || unchanged.ModelIDChanged || unchanged.PriorModelID != "model-a" {
+		t.Fatalf("unchanged result = %+v", unchanged)
+	}
+	changed := registry.ApplyHeartbeatDetailed("p1", "current", heartbeatUpdateAt("model-b", start.Add(2*time.Minute)))
+	if !changed.OK || !changed.ModelIDChanged || changed.PriorModelID != "model-a" {
+		t.Fatalf("changed result = %+v", changed)
+	}
+	if changed.Provider == nil || changed.Provider.ModelID != "model-b" {
+		t.Fatalf("changed provider = %+v", changed.Provider)
+	}
+}
+
 func TestApplyHeartbeatStoresHardwareCapacity(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
