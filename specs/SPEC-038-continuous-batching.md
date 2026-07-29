@@ -457,10 +457,13 @@ in AC-22.
   output for it, and leaves every other row's stream, sampler state, stop
   state, and cache intact; the cancelled row commits cache only per existing
   semantics and releases every reservation.
-- **AC-4 join/leave mid-decode (FR-CB5):** a request admitted while a batch is
-  already decoding joins after prefill without disturbing in-flight rows; a
-  row that terminates is filtered out and its freed capacity admits queued
-  work; the shared forward shape tracks the live row set.
+- **AC-4 join/leave mid-decode + shared-forward invocation count (FR-CB5,
+  FR-CB3):** a request admitted while a batch is already decoding joins after
+  prefill without disturbing in-flight rows; a row that terminates is filtered
+  out and its freed capacity admits queued work; the shared forward shape
+  tracks the live row set. The fixture MUST assert the shared-forward
+  invariant: `B` active decode rows produce exactly **one** model forward per
+  decode step, not `B` independent forwards.
 - **AC-5 serial-fallback parity (FR-CB9):** flag-off vs flag-on-at-depth-1
   produce identical response/receipt schemas, field sets, computation rules,
   and `slots_total`/`slots_free`; under greedy (temperature-0) decoding with
@@ -495,11 +498,12 @@ in AC-22.
   speculative-routed request acquires no batch row and triggers no shared
   forward.
 - **AC-10 warm-swap drain + snapshot binding (FR-CB13):** a warm swap with
-  active prompt rows, active decode rows, and accepted queued work bound to
-  the old snapshot drains (or rejects, per the IMPL's declared policy) every
-  bound request before weights change; no row executes against new weights
-  under the old hash; each receipt's model hash matches the serving weights;
-  drain timeout cancels/fails the remainder deterministically.
+  active prompt rows, active decode rows, and accepted queued work: accepted
+  queued work (snapshot-bound) drains, cancels, or fails under the old snapshot
+  before weights change, while pre-admission queued work may be rejected at
+  drain start per the IMPL's declared policy; no row executes against new
+  weights under the old hash; each receipt's model hash matches the serving
+  weights; drain timeout cancels/fails the remainder deterministically.
 - **AC-11 batch-level failure cleanup (FR-CB5, FR-CB7):** an injected
   whole-batch model-forward failure fails every participating request with
   deterministic cleanup (no leaked rows, caches, or busy keys), while a

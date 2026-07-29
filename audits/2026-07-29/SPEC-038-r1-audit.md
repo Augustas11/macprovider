@@ -111,3 +111,23 @@ FR-CB9.
 
 Code lane re-fired against the R2 fixes; security/architect skipped (passed at
 R2). Result recorded below on convergence.
+
+Result: code lane **0 C / 0 H / 0 M**. All three lanes now at 0/0/0 (security
+r2, architect r2, code r3). Converged.
+
+Two LOWs folded in (no re-fire; LOW-only):
+- AC-4 now tags FR-CB3 and asserts the shared-forward invocation-count
+  invariant (B rows → one forward per decode step).
+- AC-10 wording aligned to the FR-CB13 two-state model (accepted queued work
+  drains/cancels/fails; pre-admission queued work may be rejected at drain
+  start).
+
+No LOW/INFO carried unresolved.
+
+## Convergence summary
+
+| Round | code | security | architect |
+|---|---|---|---|
+| R1 | 0/0/4M | 0/2H/2M | 0/0/2M |
+| R2 | 0/0/2M | **0/0/0** | **0/0/0** |
+| R3 | **0/0/0** | (skipped, passed) | (skipped, passed) |
