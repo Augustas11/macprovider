@@ -1,9 +1,9 @@
 # macprovider research roadmap
 
 **Living doc — state drifts; verify against `origin/main` before acting.**
-Last synthesized: 2026-07-27 (SPEC-037 KV-survival shipped dormant #771; SPEC-036
-compute-integrity SPEC merged #390, IMPL pending; 232/SPEC-038 batching now the
-top unblocked lever). Ranks research/e2e threads by expected impact on buyer UX
+Last synthesized: 2026-07-29 (SPEC-038 batching SPEC merged #799, IMPL next;
+SPEC-037 KV-survival shipped dormant #771; SPEC-036 compute-integrity SPEC merged
+#390, IMPL pending). Ranks research/e2e threads by expected impact on buyer UX
 (time-to-first-token, tokens/sec, reliability) and provider UX (model selection,
 earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 `audits/_prompts/RESEARCH_2*`, `beta/DECISION_CRITERIA.md`.
@@ -16,22 +16,21 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
 | **235** P3 thermal-soak INSTRUMENT | **MERGED** (PR **#698**, 2026-07-22; B10 sustained-TPS retention) | instrument only; soak **campaign parked** for lab Mac | run campaign on lab Mac → safe-sustained-load envelope for #584 (Tier C) |
 | **234** cold/warm TTFT | harness merged (#668); campaign armed + accumulating | — | calibration PR / prewarm rec / cold-start SLO pend passive data; cold idle-evict cell = post-reboot-only (no lab Mac) |
 | **233 / SPEC-037** KV survival on restart | **SHIPPED DORMANT** — SPEC merged (PR **#702** v0.1.0, 2026-07-23) + IMPL merged (PR **#771** v0.1.1, `d53e8650`, 2026-07-27). Encrypted provider-local KV disk tier behind `ConversationCache`; default-off, synthetic-key-only, residency-only — merge enables nothing, worst-case defect = fallback to normal prefill. | **Approach A** delivered; no receipt change | **blind + real-hardware verification is the runtime-feature enable gate** (Entry **199**): a 5-lane R5 PASS + green CI + unit tests all passed while the feature was inert, so audits are *not* the enable gate — a real-Mac restart-persistence run is. Feature stays off until that passes. |
-| **232 / SPEC-038** continuous batching | memo landed (`8d80f6c4`); **now unblocked** — the 037-before-038 IMPL sequencing constraint is satisfied (037 shipped) | **Approach A** (upstream mlx-swift-lm batch API), fallback B; INDEPENDENT of 037 | **THE next SPEC-draft** — see Tier A |
+| **232 / SPEC-038** continuous batching | **SPEC MERGED** (PR **#799**, `1d78778a`, 2026-07-29; three-lane codex audit R1→R3 to 0 C/H/M; authority domain `continuous-batching-serving`, reqs `SPEC-038-R001..R016`). IMPL not started. | **Approach A** (upstream mlx-swift-lm batch API behind a flag), fallback B; INDEPENDENT of 037; SPEC-028 spec-decode mutually exclusive in v1 | **IMPL is the next build** — handoff `audits/_prompts/BUILD_SPEC_232_CONTINUOUS_BATCHING_DRIVE_TO_FULL_PROMPT.md` (Phase C onward); Entry-199 real-hardware enable gate applies |
 | **231** oMLX calibration | synthesized + refreshed | advisory-only, ~zero shipped impact, blocked on >32GB Mac; Entry 179 + `UPSTREAM_WATCH` refreshed (oMLX v0.5.3, board ~340k rows) | FB-02/03/04 benches (lab-Mac cluster); oMLX-seeded gates = issue #687 |
 
 ## Forward ranking (what to do next)
 
 ### Tier A — unblocked, do now
-1. **RESEARCH_232 / SPEC-038 continuous batching — THE next work** (provider
-   earnings via one shared forward). 233/SPEC-037 shipped, so its "037-before-038"
-   IMPL sequencing constraint is satisfied and 038 is fully unblocked. Memo
-   `8d80f6c4`, **Approach A** = contribute/pin an upstream mlx-swift-lm batch API
-   behind a macprovider flag, fallback B = narrow native Swift scheduler. Handoff:
-   `audits/_prompts/BUILD_SPEC_232_CONTINUOUS_BATCHING_DRIVE_TO_FULL_PROMPT.md`.
-   Claim **SPEC-038** (036/037 taken; verify-and-bump at runtime). **Apply the
-   Entry-199 lesson:** for the batching IMPL, treat a real-hardware throughput +
-   per-request-usage-correctness run as the enable gate — green audits/CI/unit
-   tests alone did NOT catch 037 shipping inert.
+1. **SPEC-038 continuous batching IMPL — THE next build** (provider earnings via
+   one shared forward). The SPEC is merged (#799); the build phase is unblocked
+   (037 shipped, so no sequencing wait) and reserved for a dedicated IMPL session
+   via `audits/_prompts/BUILD_SPEC_232_CONTINUOUS_BATCHING_DRIVE_TO_FULL_PROMPT.md`
+   (Phase C onward). **Apply the Entry-199 lesson:** treat a real-hardware
+   throughput + per-request-usage-correctness run as the enable gate — green
+   audits/CI/unit tests alone did NOT catch 037 shipping inert. On IMPL, rebase on
+   the merged 037 KV changes and confirm 038's batch-aware KV layout doesn't break
+   037's opaque serialization.
 2. **SPEC-037 real-hardware verification** (small, unblocks a shipped feature).
    037 is merged but dormant; the enable gate per Entry 199 is a blind +
    real-Mac restart-persistence run (deploy/crash/relaunch/reboot re-prefill hit
@@ -40,6 +39,8 @@ earnings). Source: session synthesis of `docs/research/RESEARCH_2*`,
    run it — pairs with the Tier-C lab-Mac need.
 
 ### Delivered SPECs (merged; IMPL/verification state noted)
+- **SPEC-038 — continuous batching** — **SPEC merged** (PR #799, `1d78778a`,
+  2026-07-29; 0 C/H/M). IMPL not started (Tier A item 1).
 - **SPEC-037 — KV survival** — SPEC #702 + IMPL #771 **merged, dormant**. Next:
   the Entry-199 real-hardware enable gate (item 2 above).
 - **SPEC-036 — compute-integrity receipt companion** (settlement drift gate, from
