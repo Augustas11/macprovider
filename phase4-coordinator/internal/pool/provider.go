@@ -214,6 +214,16 @@ type Provider struct {
 	MaxAdmittedModelKey string `json:"max_admitted_model_class,omitempty"`
 	MaxAdmittedModelID  string `json:"max_admitted_model_id,omitempty"`
 	MaxAdmittedMinRAMGB int    `json:"max_admitted_min_ram_gb,omitempty"`
+	// AdmissionCeilingExcluded marks a live session whose mutable heartbeat
+	// model_id is no longer within the autotune admission ceiling captured at
+	// hello. The session stays operator-visible, but buyer routing and serving
+	// capacity fail closed until the model/evidence revalidates.
+	AdmissionCeilingExcluded bool `json:"admission_ceiling_excluded,omitempty"`
+	// AdmissionEvidenceStale marks a live session whose admitted autotune
+	// evidence could not be revalidated within the configured TTL. Kept
+	// separate from AdmissionCeilingExcluded so a heartbeat that returns to an
+	// in-ceiling model cannot clear a stale-evidence fail-closed verdict.
+	AdmissionEvidenceStale bool `json:"admission_evidence_stale,omitempty"`
 	// Admitted hardware-trust tuple (issue #582 FIX B). Captured at the hello
 	// gate from the exact verified evidence that authorized this session, so the
 	// bounded trust-revalidation sweep can re-check the SAME hardware tuple that
@@ -443,7 +453,10 @@ type ReceiptPubkeyPrevious struct {
 // window. Once strict admission is enabled or that deadline expires, those
 // sessions become legacy and are excluded here. Catalog and health surfaces
 // separately exclude pending receipt-key publication while preserving ready
-// providers that are temporarily out of free slots.
+// providers that are temporarily out of free slots. When the strict autotune
+// hello gate is enabled, a heartbeat model outside the verified hello cap is an
+// integrity violation and is excluded here even when it is the sole provider for
+// that model.
 func (p Provider) RoutingEligible() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
 		return false
@@ -455,6 +468,9 @@ func (p Provider) RoutingEligible() bool {
 		return false
 	}
 	if p.BenchmarkQuarantined {
+		return false
+	}
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale {
 		return false
 	}
 	return p.State == StateReady && p.SlotsFree > 0
@@ -477,6 +493,9 @@ func (p Provider) ServingCapable() bool {
 		return false
 	}
 	if p.BenchmarkQuarantined {
+		return false
+	}
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale {
 		return false
 	}
 	return p.State == StateReady || p.State == StateBusy
@@ -1620,6 +1639,39 @@ func (r *Registry) SetBenchmarkQuarantine(providerID, assignedID string, quarant
 		return false
 	}
 	p.BenchmarkQuarantined = quarantined
+	return true
+}
+
+// SetAdmissionCeilingExcluded flips the SPEC-032 FR-HG7 route-exclusion bucket
+// for a live session. Returns true only when the flag changed so callers can log
+// the transition once while still revalidating on every heartbeat/sweep.
+func (r *Registry) SetAdmissionCeilingExcluded(providerID, assignedID string, excluded bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.AdmissionCeilingExcluded == excluded {
+		return false
+	}
+	p.AdmissionCeilingExcluded = excluded
+	return true
+}
+
+// SetAdmissionEvidenceStale flips the session-time autotune evidence TTL gate
+// for a live session. Returns true only when the flag changed.
+func (r *Registry) SetAdmissionEvidenceStale(providerID, assignedID string, stale bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	if p.AdmissionEvidenceStale == stale {
+		return false
+	}
+	p.AdmissionEvidenceStale = stale
 	return true
 }
 
