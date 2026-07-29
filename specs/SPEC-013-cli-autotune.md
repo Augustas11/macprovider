@@ -1,6 +1,6 @@
 # SPEC-013 — `macprovider-cli autotune` subcommand
 
-**Version:** 0.3 (round-2 audit response — LOCK candidate)
+**Version:** 0.3.1 (A2 egress-drift reconciliation)
 **Status:** Implemented & shipped — the `autotune` subcommand has been
 in production for weeks and is the substrate SPEC-023 v0.5 builds on.
 Core mechanics match this spec; the installer-integrated recommend surface
@@ -20,6 +20,16 @@ pre-SPEC-013.
 ---
 
 ## Change log
+
+### v0.3.1 (2026-07-29) — A2 egress-drift reconciliation
+
+SPEC-013's classic benchmark privacy rule still forbids telemetry, analytics,
+remote logging, and recipe upload. The prior NFR-4 wording incorrectly implied
+that every command under the modern autotune umbrella had no network egress
+except HuggingFace pre-warm. That was stale after SPEC-023 added installer
+recommendation, signed static-feed fetches, rate-card fetches, and authenticated
+hardware-evidence submission. NFR-4 now separates classic benchmark/probe egress
+from the explicit SPEC-023-owned network paths.
 
 ### Triage note 2026-06-26 (no version bump, no normative change)
 
@@ -1275,9 +1285,9 @@ telemetry — no upload, no analytics, no remote logging. The machine
 fingerprint (`ram_gb`, `chip`, `os_version`, `binary_version`)
 appears in `tune_runs.machine_*` columns and in the FR-F.2 JSON
 output for local consumption by `console.streamvc.live` (when the
-operator chooses to share that JSON), but `autotune` itself
-performs no network egress except the **HuggingFace pre-warm
-fetch path selected by FR-D.1** — i.e. either:
+operator chooses to share that JSON). A classic SPEC-013 benchmark/probe run
+performs no network egress except the **HuggingFace pre-warm fetch path selected
+by FR-D.1** — i.e. either:
 
 - **Shape A:** explicit `macprovider-cli models pull <id>` (or
   equivalent operator-invoked fetch) per FR-D.1.
@@ -1286,11 +1296,25 @@ fetch path selected by FR-D.1** — i.e. either:
   when the local snapshot is not cached) per FR-D.1's
   measurement-isolation contract.
 
-Both shapes egress only to HuggingFace and only for weight
-fetches — no telemetry, no observability beacons, no recipe
-upload. An implementation that performs ANY other network egress
-during a `autotune` run is a contract violation. (Round-2 N-D.1
-closure.)
+Both shapes egress only to HuggingFace and only for weight fetches — no
+telemetry, no observability beacons, no recipe upload.
+
+SPEC-023-owned installer recommendation and evidence-submission surfaces are
+explicit exceptions to the classic benchmark/probe egress rule. They may perform
+only the network calls named in their owning specs and code contracts:
+
+- unauthenticated signed static-feed fetches for the candidate catalog and
+  demand rank (`GET /v1/autotune-candidates[.sig]` and
+  `GET /v1/demand-rank[.sig]`);
+- unauthenticated recommendation rate-card fetches (`GET /v1/rate-card`);
+- authenticated hardware-evidence submission
+  (`POST /v1/providers/hardware-evidence`) when the operator invokes the
+  hardware-evidence flow.
+
+Those SPEC-023 paths still MUST NOT upload telemetry, analytics, remote logs, or
+recipes. Any other network egress during a classic SPEC-013 benchmark/probe run,
+or any unowned egress during a SPEC-023 recommendation/evidence flow, is a
+contract violation. (Round-2 N-D.1 closure; A2 drift reconciliation.)
 
 The coordinator-side recipe registry is v2 territory — see §11.
 Even when it ships, it MUST be opt-in. The v1 design intentionally

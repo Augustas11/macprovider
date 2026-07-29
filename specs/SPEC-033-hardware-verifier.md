@@ -1,7 +1,7 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.6.1-draft
-**Date:** 2026-07-17
+**Status:** v0.6.2-draft
+**Date:** 2026-07-29
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
 **Producer / enqueue boundary (see §3.1):** the provider **binary** builds the evidence envelope (`phase3-binary/Sources/macprovider-cli/AutotuneHardwareEvidence.swift`) and submits it over an **authenticated HTTP `POST /v1/providers/hardware-evidence`** (`phase4-coordinator/internal/onboarding/hardware_evidence.go` `HandleHardwareEvidence`), which enqueues a `hardware_verification_jobs` row. SPEC-023 owns the *content* (benchmarks, recommended model); the HTTP envelope + enqueue + replay state machine are owned here.
@@ -14,7 +14,7 @@ production-live coordinator trust signal that ships **unspecced**.
 **Source-of-truth discipline.** This is documentation of shipped behavior. The **code and
 migrations are authoritative**; this spec MUST byte-match them and any disagreement is a spec
 bug. The contract spans: the verifier (`phase4-coordinator/internal/stats/hardwareverify/verify.go`),
-migrations **007, 008, 013, 015, 016, 017** (`phase4-coordinator/internal/stats/migrations/`), the
+migrations **007, 008, 013, 015, 016, 017, 019** (`phase4-coordinator/internal/stats/migrations/`), the
 deployment/role SQL (`phase4-coordinator/dist/stats-inventory-writer.sql`,
 `dist/stats-hardware-verifier-bootstrap.sql`), the HTTP enqueue path
 (`internal/onboarding/hardware_evidence.go`) and its producer
@@ -80,8 +80,9 @@ lifecycle; it does not define admission or tier weighting.
 
 ## 2. Data model
 
-Four tables plus **two** guard triggers and least-privilege **column-level** grants. Migrations
-**007, 008, 013, 015, 016, 017** plus the role SQL in `dist/stats-inventory-writer.sql` and
+Four tables plus **two** guard triggers, the migration-019 dual-control approval workflow, and
+least-privilege **column-level** grants. Migrations
+**007, 008, 013, 015, 016, 017, 019** plus the role SQL in `dist/stats-inventory-writer.sql` and
 `dist/stats-hardware-verifier-bootstrap.sql` are the byte-authoritative DDL; the tables below are a
 load-bearing summary — a reimplementation MUST read those files for exact column lists,
 `NOT NULL`/`DEFAULT` clauses, `CHECK` constraints, indexes, roles, and grants.
@@ -100,13 +101,18 @@ Columns include `id BIGSERIAL PK`, `provider_id`, `source CHECK (source IN ('aut
 Note `benchmark_count` and `max_sustained_tps` are **persisted summary columns** the onboarding
 enqueue path fills from the evidence; the migration-016 trigger re-checks them at promotion (§7).
 
-### 2.2 `hardware_verification_trust` — operator-curated trust roots (migration 008)
+### 2.2 `hardware_verification_trust` — operator-curated trust roots (migrations 008 + 019)
 
-`(provider_id, hardware_identity_hash)` PK, plus `chip_normalized`, `unified_memory_gb`,
-`trusted_by`, `trusted_at`, `expires_at NULL`, `notes`. A row asserts an operator vouches that
+Migration 008 introduced trust roots keyed by `(provider_id, hardware_identity_hash)`.
+Migration 019 is now authoritative for the effective shape: primary key
+`(provider_id, hardware_identity_hash, source)`, plus `chip_normalized`, `unified_memory_gb`,
+`trusted_by`, `trusted_at`, `expires_at NULL`, `notes`, and
+`source CHECK (source IN ('inventory', 'operator_api'))`. A row asserts an operator vouches that
 `hardware_identity_hash` for this provider is a genuine device with this chip + memory.
-`expires_at IS NULL` or in the future ⇒ active. Written only by the operator trust-curation role
-(`stats_trust_inventory_writer`); the verifier only reads it.
+`expires_at IS NULL` or in the future ⇒ active. Inventory rows are written by the operator
+trust-curation role (`stats_trust_inventory_writer`); durable dual-control approval rows are
+written by migration-019 SECURITY DEFINER functions as `source='operator_api'`. The verifier reads
+either active source.
 
 ### 2.3 `provider_hardware_profiles` — the verified output (migration 007)
 
@@ -177,6 +183,36 @@ DB-level counterpart of the application's terminal-safe `WHERE` (§6).
   is an **operator-authority** path, not a provider-reachable one (§10.1).
 - **`stats_trust_inventory_writer`** (also `dist/stats-inventory-writer.sql`): writes
   `hardware_verification_trust` (the trust roots).
+- **`hardware_trust_definer` / `hardware_trust_requester` /
+  `hardware_trust_approver`** (migration 019): the durable operator approval path for
+  providers parked in `waiting_trust` with
+  `decision_reason='missing_trusted_hardware_identity'`. The request and approve roles are split
+  so one operator key cannot both request and approve the same hardware trust root. The
+  SECURITY DEFINER functions derive `(provider_id, hardware_identity_hash, chip_normalized,
+  unified_memory_gb)` from the bound `hardware_verification_jobs` row instead of trusting
+  caller-supplied tuple values, require two distinct operators, and write only
+  `hardware_verification_trust.source='operator_api'` rows. Inventory roots remain
+  `source='inventory'`; migration 019 widens the trust-root primary key to
+  `(provider_id, hardware_identity_hash, source)` so operator API approvals and inventory sync
+  own independent rows and cannot clobber each other.
+
+### 2.8 Migration 019 operator approval coupling
+
+Migration 019 is part of this spec's byte-authoritative data model even though it was added after
+the reconstructed v0.6.1 baseline. It changes trust-root storage and approval workflow, not
+provider-submitted evidence semantics:
+
+- `hardware_verification_trust.source` distinguishes inventory-managed roots from
+  `operator_api` roots created by the dual-control approval functions.
+- `hardware_trust_pending` records open approval requests bound to a real
+  `hardware_verification_jobs` row. Approval is allowed only while that job remains
+  `waiting_trust` for `missing_trusted_hardware_identity`.
+- request/approve/revoke functions are SECURITY DEFINER functions owned by
+  `hardware_trust_definer`; EXECUTE is split across requester and approver roles.
+- deploy/rollback sequencing is coupled to the stats-inventory-sync binary because the migration
+  widens the trust-root primary key from two columns to three. Operators MUST quiesce old
+  two-column inventory sync before applying the migration and MUST pair rollback with the matching
+  older binary, as documented in the migration file.
 
 ---
 
@@ -611,6 +647,13 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.6.2-draft (2026-07-29) — A2 migration-019 roster reconciliation.**
+SPEC-033's source-of-truth roster now includes migration 019, which added the durable
+dual-control operator hardware-trust approval path. §2.7/§2.8 document the
+`operator_api` trust-root source, three-column trust-root primary key, split
+requester/approver roles, SECURITY DEFINER functions, and stats-inventory-sync deploy/rollback
+coupling. No verifier algorithm or evidence-document semantics changed.
 
 **v0.6.1-draft (2026-07-17) — stable requirement mapping for physical acceptance.**
 Defines SPEC-033-R001 for the existing §2.7/§3.1 least-privilege hardware-profile write contract.

@@ -1,10 +1,14 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8.3
+version: v0.8.4
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-29
 
 ## Change log
+
+- **v0.8.4 (2026-07-29)** — A2 signature-caveat reconciliation.
+  1. **Catalog signature proof is bounded.** §3.2 now names exactly what the signed candidate catalog proves and what it does not prove, mirroring the SPEC-015 negative-list pattern.
+  2. **No new trust authority.** The caveat does not change row eligibility, scoring, catalog bytes, signature verification, or coordinator admission behavior.
 
 - **v0.8.3 (2026-07-29)** — Signed candidate-catalog row reconciliation (A8).
   1. **The normative row table follows the signed candidate catalog.** The §3.2 row table records the current `published-2026-07-10-catalog-recovery-v1` candidate catalog rows and gate values from `phase3-binary/dist/static/autotune-candidates.json`, which matches Pearl's live `/v1/autotune-candidates` bytes.
@@ -224,6 +228,21 @@ baked autotune-candidates snapshot compiled into the installer/CLI release
 ```
 
 Catalog selection happens before row eligibility. Transport failure, timeout, or unavailable HTTP response MAY select the baked catalog and MUST emit `candidate_catalog_fallback_used`; this state is `safe_offline_fallback` and MUST NOT claim buyer-serving readiness. Invalid signature, unknown signer, malformed sidecar, or invalid schema MUST additionally emit `candidate_catalog_integrity_failure`. A cryptographically valid but older-than-baked, future, expired, or policy-incompatible catalog MUST emit `candidate_catalog_update_required`. Integrity and update-required warnings block paid recommendation and coordinator join. After selecting either a valid fetched catalog or the baked catalog for local diagnostics, a demand/rate-card row missing metadata in the selected catalog is ineligible and MUST NOT be downloaded or benchmarked. The baked catalog is part of the release artifact and is trusted only for that binary version.
+
+**What the candidate-catalog signature proves.** A valid detached signature proves only that the
+operator-controlled static-feed key signed the exact catalog bytes selected by the client or
+coordinator, and that those bytes satisfy the schema and release-compatibility rules above. It
+binds model keys to operator-curated metadata such as `model_id`, immutable `model_revision`,
+canonical `model_sha256`, minimum RAM/bandwidth gates, advisory benchmark-gate metadata, and
+`runtime_status` for that release.
+
+**What the candidate-catalog signature does not prove.** The signature does **not** prove that a
+provider actually downloaded, loaded, or served those weights; does not prove benchmark honesty;
+does not prove hardware identity, Secure Enclave custody, Apple attestation, RAM capacity, thermal
+behavior, or network admission; does not prove rate-card correctness; and does not prove that a
+future provider heartbeat or request path still matches the row. Runtime enforcement remains owned
+by the separate catalog/hash checks, hardware-evidence verifier, Tier-2 attestation surfaces,
+autotune recommendation gates, and coordinator admission/routing logic named in their owning specs.
 
 The v0.1 candidate catalog schema is:
 
