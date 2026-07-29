@@ -306,6 +306,12 @@ struct ServeCommand: AsyncParsableCommand {
     )
     var prefillStepSize: Int?
 
+    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails until a reviewed mlx-swift-lm batch API is pinned. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
+    var continuousBatching: String?
+
+    @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
+    var continuousBatchQueueLimit: Int?
+
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
@@ -491,6 +497,12 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+        if let queueLimit = resolved.continuousBatchQueueLimit, queueLimit < 1 {
+            FileHandle.standardError.write(Data((
+                "--continuous-batch-queue-limit \(queueLimit) must be >= 1\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
         if let draftModel = resolved.draftModel,
            draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             FileHandle.standardError.write(Data("--draft-model must be non-empty\n".utf8))
@@ -509,6 +521,25 @@ struct ServeCommand: AsyncParsableCommand {
                 "\(Self.pagedKVStrictStartupRejectEvent)\n"
                 + "paged_kv strict fallback is unavailable until packaged metallib, kernel, parity, and sizing proof are installed\n"
             ).utf8))
+            throw ExitCode(2)
+        }
+    }
+
+    static func runContinuousBatchingPreflight(_ resolved: AppConfig) throws {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: resolved.continuousBatching,
+            maxBatch: resolved.maxConcurrencyOverride ?? 1,
+            queueLimit: resolved.continuousBatchQueueLimit,
+            kvBits: resolved.kvBitsOverride,
+            draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        )
+        if resolved.continuousBatching == .canary {
+            ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
+        }
+        do {
+            try ContinuousBatchingPolicy.validateStrictStartup(capability)
+        } catch let error as APIError {
+            FileHandle.standardError.write(Data("\(error.code): \(error.message)\n".utf8))
             throw ExitCode(2)
         }
     }
@@ -890,6 +921,8 @@ struct ServeCommand: AsyncParsableCommand {
                 idlePrewarmRunOnBattery: idlePrewarmRunOnBattery,
                 streamInterval: streamInterval,
                 prefillStepSize: prefillStepSize,
+                continuousBatching: continuousBatching,
+                continuousBatchQueueLimit: continuousBatchQueueLimit,
                 // SPEC-037 FR-KVP11 (MEDIUM-5): forward the KV disk-tier flags so the
                 // triple-source config surface (CLI → env → YAML) is complete.
                 kvDiskCache: kvDiskCacheCLIOverrides,
@@ -1117,6 +1150,8 @@ struct ServeCommand: AsyncParsableCommand {
                 pagedKVConfig: resolved.pagedKV,
                 prefillStepSize: resolved.prefillStepSize,
                 maxBatch: resolved.maxConcurrencyOverride ?? 1,
+                continuousBatchingMode: resolved.continuousBatching,
+                continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
                 warmSwapEnabled: resolved.enableWarmSwap,
                 swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                 catalogModelIDAlias: catalogModelIDAlias,
@@ -2133,6 +2168,7 @@ struct ServeCommand: AsyncParsableCommand {
             coordinatorAcceptsSpecDecodeTelemetry: coordinatorAcceptsSpecDecodeTelemetry
         )
         try Self.runSpecDecodeCapacityPreflight(&resolved)
+        try Self.runContinuousBatchingPreflight(resolved)
 
         let serveLock = try acquireServeLock(resolved)
         do {
@@ -2436,6 +2472,8 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  kv_bits: \(config.kvBitsOverride.map(String.init) ?? "<unset, mlx default>")")
     print("  max_context: \(config.maxContextOverride.map(String.init) ?? "<unset, per-tier default>")")
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
+    print("  continuous_batching: \(config.continuousBatching.rawValue)")
+    print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")
     print("  idle_prewarm.idle_threshold_seconds: \(config.idlePrewarmIdleThresholdSeconds)")

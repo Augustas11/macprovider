@@ -599,6 +599,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private let inferenceGate: AsyncSemaphore
     private let blockingInferenceExecutor: BlockingInferenceExecutor
     private let maxBatch: Int
+    private let continuousBatchingMode: ContinuousBatchingMode
+    private let continuousBatchQueueLimit: Int?
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -902,6 +904,8 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
+        continuousBatchingMode: ContinuousBatchingMode = .off,
+        continuousBatchQueueLimit: Int? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -937,6 +941,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
+        self.continuousBatchingMode = continuousBatchingMode
+        self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
@@ -1048,6 +1054,8 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
+        continuousBatchingMode: ContinuousBatchingMode = .off,
+        continuousBatchQueueLimit: Int? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -1095,6 +1103,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
+        self.continuousBatchingMode = continuousBatchingMode
+        self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
@@ -1317,6 +1327,30 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func maxBatchForTest() -> Int {
         maxBatch
+    }
+
+    func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
+        continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+    }
+
+    private func continuousBatchingCapability(draftConfigured: Bool) -> ContinuousBatchingCapability {
+        ContinuousBatchingPolicy.capability(
+            mode: continuousBatchingMode,
+            maxBatch: maxBatch,
+            queueLimit: continuousBatchQueueLimit,
+            kvBits: kvBitsOverride,
+            draftConfigured: draftConfigured
+        )
+    }
+
+    private func applyContinuousBatchingPolicy(snapshot: RuntimeSnapshot) throws {
+        let capability = continuousBatchingCapability(
+            draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil
+        )
+        if continuousBatchingMode == .canary {
+            ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
+        }
+        try ContinuousBatchingPolicy.validateStrictStartup(capability)
     }
 
     func maxContextTokensForTest() -> Int {
@@ -1584,6 +1618,7 @@ actor ModelRuntime: ModelRuntimeServing {
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
+        try applyContinuousBatchingPolicy(snapshot: handle.snapshot)
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
                 return
@@ -1754,6 +1789,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let drainCancelled = handle.drainCancelled
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
+        try applyContinuousBatchingPolicy(snapshot: snapshot)
         if let testSpeculativeCompletion,
            Self.speculativeRoute(
                for: request,
@@ -2167,6 +2203,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        try applyContinuousBatchingPolicy(snapshot: snapshot)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         if let testSpeculativeStream,
