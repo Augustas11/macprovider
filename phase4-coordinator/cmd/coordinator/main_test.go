@@ -33,6 +33,12 @@ import (
 const reloadTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const reloadOtherHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
+type reloadStubAutotuneEvidence struct{}
+
+func (reloadStubAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+	return autotune.VerifiedEvidence{}, false, nil
+}
+
 func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	server := newHTTPServer("127.0.0.1:0", http.NewServeMux())
 	if server.ReadHeaderTimeout != 10*time.Second {
@@ -494,6 +500,94 @@ func TestReloadTier2RejectsStartupOnlyTier2FieldChange(t *testing.T) {
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || got.ModelHash.Active {
 		t.Fatalf("tier2 metadata after rejected reload = %+v", got)
+	}
+}
+
+func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
+	defer tier2.ResetForTest()
+	startup, registry, wsServer, buyerServer := reloadTestServers(config.Default())
+	registry.Register(&pool.Provider{
+		ProviderID:     "provider-a",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	autotuneCatalog, err := autotune.ParseCatalog([]byte(`{
+		"version":"release-under-test",
+		"policy_version":"autotune-policy-v1",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"rows":{
+			"model-a":{
+				"model_id":"model-a",
+				"model_revision":"0123456789abcdef0123456789abcdef01234567",
+				"model_sha256":"` + reloadTestHash + `",
+				"min_ram_gb":12,
+				"min_bandwidth_tier":"C",
+				"bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":4500},
+				"runtime_status":"recommendable"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseCatalog: %v", err)
+	}
+
+	next := startup
+	next.ProofOfWeights.RequireAutotuneHelloGate = true
+	next.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	feedDir := t.TempDir()
+	next.AutotuneFeeds.AutotuneCandidatesPath = filepath.Join(feedDir, "autotune-candidates.json")
+	next.AutotuneFeeds.AutotuneCandidatesSigPath = filepath.Join(feedDir, "autotune-candidates.json.sig")
+	publicKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+	next.AutotuneFeeds.PublicKeys = map[string]string{"test-key": base64.StdEncoding.EncodeToString(publicKey)}
+	next.Onboarding.AppTrackRegisterEnabled = true
+	next.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.AuthPolicyRequestDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.AuthPolicyApproveDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.HardwareTrustRequestDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.HardwareTrustApproveDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.BundleID = "live.streamvc.MacProvider"
+	next.Onboarding.AppleTeamID = "ABCDE12345"
+	next.Onboarding.CoordinatorDomain = "coordinator.streamvc.live"
+	next.Onboarding.ASNPrefixes = map[string]string{"192.0.2.0/24": "AS64512"}
+	next.Auth.OperatorKeys = map[string]string{
+		"alice": "alice-secret-0123456789abcdef0123456789",
+		"bob":   "bob-secret-0123456789abcdef012345678901",
+	}
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{})
+	provider, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider missing after proof_of_weights enable reload")
+	}
+	if !provider.AdmissionEvidenceStale || provider.RoutingEligible() {
+		t.Fatalf("proof_of_weights enable reload must pre-quarantine provider: %+v logs=%s", provider, logs.String())
+	}
+	if changed := registry.SetBenchmarkQuarantine("provider-a", "session-a", true); !changed {
+		t.Fatal("failed to seed benchmark quarantine before telemetry-drift disable reload")
+	}
+
+	next.ProofOfWeights.RequireAutotuneHelloGate = false
+	next.ProofOfWeights.TelemetryDrift.Enabled = false
+	logs.Reset()
+	reloadCoordinatorConfig(writeReloadConfig(t, next), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{})
+	provider, ok = registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider missing after proof_of_weights disable reload")
+	}
+	if provider.AdmissionEvidenceStale || provider.AdmissionSandboxed || provider.AdmissionCeilingExcluded || !provider.RoutingEligible() {
+		t.Fatalf("proof_of_weights disable reload must clear gate exclusions: %+v logs=%s", provider, logs.String())
+	}
+	if provider.BenchmarkQuarantined {
+		t.Fatalf("telemetry-drift disable reload must clear benchmark quarantine: %+v logs=%s", provider, logs.String())
+	}
+	if !strings.Contains(logs.String(), `"benchmark_quarantines_cleared":1`) {
+		t.Fatalf("reload log did not report cleared benchmark quarantine: %s", logs.String())
 	}
 }
 

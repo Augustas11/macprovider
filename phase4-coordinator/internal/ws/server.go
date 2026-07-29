@@ -67,6 +67,10 @@ type admissionCeilingEventRateState struct {
 
 type Server struct {
 	cfg                       config.Config
+	proofOfWeightsAdmissionMu sync.RWMutex
+	proofOfWeightsMu          sync.RWMutex
+	proofOfWeights            config.ProofOfWeightsConfig
+	proofOfWeightsGeneration  uint64
 	tier2Mu                   sync.RWMutex
 	tier2                     config.Tier2Config
 	modelHashLegacyMu         sync.Mutex
@@ -146,7 +150,9 @@ type Server struct {
 	autotuneCatalogBridgeDeadline  time.Time
 	autotuneCatalogBridgeMu        sync.Mutex
 	autotuneEvidence               autotune.EvidenceStore
+	telemetryDriftMu               sync.RWMutex
 	telemetryDrift                 *pow.Evaluator
+	telemetryDriftGeneration       uint64
 	identitySignatures             IdentitySignatureStore
 	authPolicyAdmin                ProviderAuthPolicyAdminStore
 	hardwareTrustAdmin             HardwareTrustAdminStore
@@ -443,7 +449,7 @@ func WithAutotuneEvidenceStore(store autotune.EvidenceStore) Option {
 
 func WithTelemetryDriftEvaluator(evaluator *pow.Evaluator) Option {
 	return func(s *Server) {
-		s.telemetryDrift = evaluator
+		s.SetTelemetryDriftEvaluator(evaluator)
 	}
 }
 
@@ -651,6 +657,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	providerAdmissionBridgeDeadline, _ := cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadlineTime()
 	s := &Server{
 		cfg:                           cfg,
+		proofOfWeights:                cfg.ProofOfWeights,
 		tier2:                         cfg.Tier2,
 		pool:                          registry,
 		log:                           logger,
@@ -715,7 +722,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	// strict autotune evidence TTL checks run only when the hello gate is enabled
 	// and its catalog+evidence dependencies are wired. Both use the same 30s
 	// sweep cadence.
-	if (s.providerTrust != nil || (s.cfg.ProofOfWeights.RequireAutotuneHelloGate && s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
+	if (s.providerTrust != nil || (s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
 		go s.runTrustRevalidationLoop()
 	}
 	return s
@@ -851,6 +858,125 @@ func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	} else {
 		s.cancelModelHashLegacyDeadline()
 	}
+}
+
+func (s *Server) proofOfWeightsConfig() config.ProofOfWeightsConfig {
+	s.proofOfWeightsMu.RLock()
+	defer s.proofOfWeightsMu.RUnlock()
+	return s.proofOfWeights
+}
+
+func (s *Server) SetTelemetryDriftEvaluator(evaluator *pow.Evaluator) {
+	s.telemetryDriftMu.Lock()
+	s.telemetryDrift = evaluator
+	s.telemetryDriftGeneration++
+	s.telemetryDriftMu.Unlock()
+}
+
+func (s *Server) ClearBenchmarkQuarantines() int {
+	if s == nil || s.pool == nil {
+		return 0
+	}
+	return s.pool.ClearBenchmarkQuarantines()
+}
+
+func (s *Server) telemetryDriftEvaluator() (*pow.Evaluator, uint64) {
+	s.telemetryDriftMu.RLock()
+	defer s.telemetryDriftMu.RUnlock()
+	return s.telemetryDrift, s.telemetryDriftGeneration
+}
+
+type ProofOfWeightsReloadResult struct {
+	Generation            uint64
+	PreQuarantined        int
+	Revalidated           int
+	Sandboxed             int
+	RouteExcluded         int
+	StillEvidenceStale    int
+	ClearedGateExclusions int
+}
+
+func (s *Server) SetProofOfWeightsConfig(next config.ProofOfWeightsConfig) ProofOfWeightsReloadResult {
+	s.proofOfWeightsAdmissionMu.Lock()
+	defer s.proofOfWeightsAdmissionMu.Unlock()
+
+	result := ProofOfWeightsReloadResult{}
+	if next.RequireAutotuneHelloGate && s.pool != nil {
+		result.PreQuarantined = s.pool.QuarantineForProofOfWeightsReload()
+	}
+
+	s.proofOfWeightsMu.Lock()
+	s.proofOfWeights = next
+	s.proofOfWeightsGeneration++
+	result.Generation = s.proofOfWeightsGeneration
+	s.proofOfWeightsMu.Unlock()
+
+	if s.pool == nil {
+		return result
+	}
+	if !next.RequireAutotuneHelloGate {
+		for _, provider := range s.pool.Snapshot() {
+			if !provider.AdmissionSandboxCredentialBypassed && s.pool.SetAdmissionSandboxed(provider.ProviderID, provider.AssignedID, false) {
+				result.ClearedGateExclusions++
+			}
+			if s.pool.SetAdmissionEvidenceStale(provider.ProviderID, provider.AssignedID, false) {
+				result.ClearedGateExclusions++
+			}
+			if s.pool.SetAdmissionCeilingExcluded(provider.ProviderID, provider.AssignedID, false) {
+				result.ClearedGateExclusions++
+			}
+		}
+		return result
+	}
+
+	return s.revalidateProofOfWeightsAdmissions(next, result)
+}
+
+func (s *Server) revalidateProofOfWeightsAdmissions(cfg config.ProofOfWeightsConfig, result ProofOfWeightsReloadResult) ProofOfWeightsReloadResult {
+	if s.autotuneCatalog == nil || s.autotuneEvidence == nil || cfg.AutotuneEvidenceTTLDays <= 0 {
+		for _, provider := range s.pool.Snapshot() {
+			if s.pool.SetAdmissionEvidenceStale(provider.ProviderID, provider.AssignedID, true) {
+				result.StillEvidenceStale++
+			}
+		}
+		return result
+	}
+	ttl := time.Duration(cfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	ctx, cancel := context.WithTimeout(context.Background(), trustRevalidationSweepDeadlineCap)
+	defer cancel()
+	for _, provider := range s.pool.Snapshot() {
+		if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
+			continue
+		}
+		result.Revalidated++
+		if provider.MaxAdmittedMinRAMGB <= 0 || !providerHasAdmittedTuple(provider) {
+			prior, _, ok := s.pool.SetAdmissionGateFlags(provider.ProviderID, provider.AssignedID, pool.AdmissionGateFlags{
+				AdmissionSandboxed: true,
+			})
+			if ok && !prior.AdmissionSandboxed {
+				result.Sandboxed++
+			}
+			continue
+		}
+		stale, _ := s.admissionEvidenceStaleVerdict(ctx, provider, ttl)
+		if stale {
+			prior, _, ok := s.pool.SetAdmissionGateFlags(provider.ProviderID, provider.AssignedID, pool.AdmissionGateFlags{
+				AdmissionEvidenceStale: true,
+			})
+			if ok && !prior.AdmissionEvidenceStale {
+				result.StillEvidenceStale++
+			}
+			continue
+		}
+		verdict := s.admissionCeilingRouteVerdict(provider)
+		prior, _, ok := s.pool.SetAdmissionGateFlags(provider.ProviderID, provider.AssignedID, pool.AdmissionGateFlags{
+			AdmissionCeilingExcluded: verdict.excluded,
+		})
+		if ok && verdict.excluded && !prior.AdmissionCeilingExcluded {
+			result.RouteExcluded++
+		}
+	}
+	return result
 }
 
 func (s *Server) cancelModelHashLegacyDeadline() {
@@ -1381,6 +1507,30 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 	return provisionalTokenMinted, token, "", "", pool.AuthSelfMinted
 }
 
+func (s *Server) resolveSandboxAuthState(conn net.Conn, authParam providerAuth, providerID string) (pool.AuthState, bool) {
+	if authParam.validated {
+		if !s.confirmAdmittedProviderToken(conn, authParam) {
+			return "", false
+		}
+		return pool.AuthBearerValidated, true
+	}
+	if s.issuer == nil {
+		return "", true
+	}
+	hasActive, err := s.issuer.HasActiveTokenForProvider(context.Background(), providerID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("sandbox TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", false
+	}
+	if hasActive {
+		s.log.Info().Str("provider_id", providerID).Str("event", "sandbox_tofu_reject").Msg("sandbox tokenless connect refused; an active token already exists for this provider_id and mutation requires existing-token proof or operator recovery")
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", false
+	}
+	return "", true
+}
+
 func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
@@ -1436,21 +1586,26 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseIdentitySignatureRequired, "durable_identity_requires_v2")
 		return "", ""
 	}
+	s.proofOfWeightsAdmissionMu.RLock()
+	admissionLockHeld := true
+	defer func() {
+		if admissionLockHeld {
+			s.proofOfWeightsAdmissionMu.RUnlock()
+		}
+	}()
 	entry, ok := s.prepareProviderAdmission(conn, connectionAuth, hello)
 	if !ok {
 		return "", ""
 	}
-	if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
-		return "", ""
-	} else {
-		entry.Tier = tier
-	}
 	registered := false
+	reservedAdmission := false
 	defer func() {
-		if !registered && entry.Tier == pool.TierProvisional {
+		if !registered && reservedAdmission && entry.Tier == pool.TierProvisional {
 			s.admission.ReleasePendingProvisional()
 		}
 	}()
+	var assignedProviderToken, pairOT, claimURL string
+	var authState pool.AuthState
 	// SPEC-003 FR-C9.1/FR-C9.2 plus Wave 2 token custody:
 	// reject any tokenless connect for a provider_id that already has
 	// an active token; keep the race-loss quarantine for concurrent
@@ -1459,15 +1614,41 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// the provided AuthState (BearerValidated / BearerlessDuplicate /
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, hello.Hostname, hello.ReferralCode)
-	if outcome == provisionalTokenRejectTOFU {
-		s.close(conn, CloseInvalidToken, "invalid_token")
-		return "", ""
+	if entry.AdmissionSandboxed {
+		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+			return "", ""
+		} else {
+			entry.Tier = tier
+			reservedAdmission = true
+		}
+		var ok bool
+		authState, ok = s.resolveSandboxAuthState(conn, connectionAuth, entry.ProviderID)
+		if !ok {
+			return "", ""
+		}
+		entry.AdmissionSandboxCredentialBypassed = authState != pool.AuthBearerValidated
+		entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
+	} else {
+		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+			return "", ""
+		} else {
+			entry.Tier = tier
+			reservedAdmission = true
+		}
+		outcome, token, ot, url, resolvedAuthState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, hello.Hostname, hello.ReferralCode)
+		if outcome == provisionalTokenRejectTOFU {
+			s.close(conn, CloseInvalidToken, "invalid_token")
+			return "", ""
+		}
+		if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
+			return "", ""
+		}
+		assignedProviderToken = token
+		pairOT = ot
+		claimURL = url
+		authState = resolvedAuthState
+		entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
 	}
-	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
-		return "", ""
-	}
-	entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
 	entry.AuthState = authState
 	session, _ := s.registerProviderSession(conn, entry)
 	if session == nil {
@@ -1477,8 +1658,12 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	registered = true
-	s.admission.ReleasePendingProvisional()
+	if reservedAdmission && entry.Tier == pool.TierProvisional {
+		s.admission.ReleasePendingProvisional()
+	}
 	releaseUnauth()
+	s.proofOfWeightsAdmissionMu.RUnlock()
+	admissionLockHeld = false
 
 	ack := HelloAck{
 		Type:                      "hello_ack",
@@ -1892,7 +2077,14 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
 	// provided AuthState; eviction defense protects existing routable
 	// sessions from bearer-less duplicates.
-	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+	s.proofOfWeightsAdmissionMu.RLock()
+	admissionLockHeld := true
+	defer func() {
+		if admissionLockHeld {
+			s.proofOfWeightsAdmissionMu.RUnlock()
+		}
+	}()
+	if s.proofOfWeightsConfig().RequireAutotuneHelloGate {
 		admissionObservation, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
 		if !gateOK {
 			return "", ""
@@ -1900,104 +2092,129 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.MaxAdmittedModelKey = admissionObservation.MaxAdmittedModelKey
 		entry.MaxAdmittedModelID = admissionObservation.MaxAdmittedModelID
 		entry.MaxAdmittedMinRAMGB = admissionObservation.MaxAdmittedMinRAMGB
+		entry.AdmissionSandboxed = admissionObservation.Sandboxed
 		// FIX B (issue #582): admitted hardware-trust tuple for the revalidation sweep.
 		entry.AdmittedHardwareIdentityHash = admissionObservation.AdmittedTuple.HardwareIdentityHash
 		entry.AdmittedChipNormalized = admissionObservation.AdmittedTuple.ChipNormalized
 		entry.AdmittedUnifiedMemoryGB = admissionObservation.AdmittedTuple.UnifiedMemoryGB
 	}
-	// Reserve after the post-challenge evidence recheck, but defer the durable
-	// admission record until credential minting succeeds.
-	if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
-		return "", ""
-	} else {
-		entry.Tier = tier
-	}
 	registered := false
+	reservedAdmission := false
 	defer func() {
-		if !registered && entry.Tier == pool.TierProvisional {
+		if !registered && reservedAdmission && entry.Tier == pool.TierProvisional {
 			s.admission.ReleasePendingProvisional()
 		}
 	}()
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname, initial.ReferralCode)
-	if outcome == provisionalTokenRejectTOFU {
-		s.close(conn, CloseInvalidToken, "invalid_token")
-		return "", ""
-	}
-	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
-		return "", ""
-	}
-	if len(identityProof.EnrollmentPubkey) > 0 {
-		identities, ok := s.bootstrapTokens.(admissionIdentityStore)
+	var assignedProviderToken, pairOT, claimURL string
+	var authState pool.AuthState
+	if entry.AdmissionSandboxed {
+		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+			return "", ""
+		} else {
+			entry.Tier = tier
+			reservedAdmission = true
+		}
+		var ok bool
+		authState, ok = s.resolveSandboxAuthState(conn, connectionAuth, entry.ProviderID)
 		if !ok {
-			s.close(conn, CloseIdentitySignatureRequired, "identity_enrollment_unavailable")
 			return "", ""
 		}
-		if err := identities.BindAdmissionIdentity(
-			context.Background(), initial.ProviderID, connectionAuth.token,
-			identityProof.EnrollmentPubkey, s.now(),
-		); err != nil {
-			s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity enrollment failed")
-			s.close(conn, CloseIdentitySignatureRequired, "identity_enrollment_failed")
+		entry.AdmissionSandboxCredentialBypassed = authState != pool.AuthBearerValidated
+		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
+	} else {
+		// Reserve after the post-challenge evidence recheck, but defer the durable
+		// admission record until credential minting succeeds.
+		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+			return "", ""
+		} else {
+			entry.Tier = tier
+			reservedAdmission = true
+		}
+		outcome, token, ot, url, resolvedAuthState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname, initial.ReferralCode)
+		if outcome == provisionalTokenRejectTOFU {
+			s.close(conn, CloseInvalidToken, "invalid_token")
 			return "", ""
 		}
-		s.log.Info().
-			Str("provider_id", initial.ProviderID).
-			Int("identity_generation", identityProof.Generation).
-			Msg("durable admission identity enrolled")
+		if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
+			return "", ""
+		}
+		assignedProviderToken = token
+		pairOT = ot
+		claimURL = url
+		authState = resolvedAuthState
+		if len(identityProof.EnrollmentPubkey) > 0 {
+			identities, ok := s.bootstrapTokens.(admissionIdentityStore)
+			if !ok {
+				s.close(conn, CloseIdentitySignatureRequired, "identity_enrollment_unavailable")
+				return "", ""
+			}
+			if err := identities.BindAdmissionIdentity(
+				context.Background(), initial.ProviderID, connectionAuth.token,
+				identityProof.EnrollmentPubkey, s.now(),
+			); err != nil {
+				s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity enrollment failed")
+				s.close(conn, CloseIdentitySignatureRequired, "identity_enrollment_failed")
+				return "", ""
+			}
+			s.log.Info().
+				Str("provider_id", initial.ProviderID).
+				Int("identity_generation", identityProof.Generation).
+				Msg("durable admission identity enrolled")
+		}
+		if len(identityProof.RotationPubkey) > 0 {
+			rotations, ok := s.bootstrapTokens.(admissionIdentityRotationStore)
+			if !ok {
+				s.close(conn, CloseIdentitySignatureRequired, "identity_rotation_unavailable")
+				return "", ""
+			}
+			state, err := rotations.RotateAdmissionIdentity(
+				context.Background(), initial.ProviderID, connectionAuth.token,
+				identityProof.VerifiedPubkey, identityProof.RotationPubkey,
+				identityProof.Generation, s.now(),
+			)
+			if err != nil {
+				s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity rotation failed")
+				s.close(conn, CloseIdentitySignatureRequired, "identity_rotation_failed")
+				return "", ""
+			}
+			identityProof.Generation = state.Generation
+			identityProof.ActivePubkey = append([]byte(nil), state.CurrentPublicKey...)
+			identityProof.PreviousValidUntil = state.PreviousValidUntil
+			s.log.Info().
+				Str("provider_id", initial.ProviderID).
+				Int("identity_generation", state.Generation).
+				Msg("durable admission identity rotated")
+		}
+		if len(identityProof.RecoveryPubkey) > 0 {
+			rotations, ok := s.bootstrapTokens.(admissionIdentityRotationStore)
+			if !ok {
+				s.close(conn, CloseIdentitySignatureRequired, "identity_recovery_unavailable")
+				return "", ""
+			}
+			state, authorization, err := rotations.RecoverAdmissionIdentity(
+				context.Background(), initial.ProviderID, connectionAuth.token,
+				identityProof.ActivePubkey, identityProof.RecoveryPubkey,
+				identityProof.Generation, s.now(),
+			)
+			if err != nil {
+				s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity recovery failed")
+				s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
+				s.close(conn, CloseIdentitySignatureRequired, "identity_recovery_failed")
+				return "", ""
+			}
+			identityProof.Generation = state.Generation
+			identityProof.ActivePubkey = append([]byte(nil), state.CurrentPublicKey...)
+			identityProof.RecoveryGrantedBy = authorization.ApprovedBy
+			s.log.Warn().
+				Str("provider_id", initial.ProviderID).
+				Str("recovery_authorization_id", authorization.PendingID).
+				Str("incident_id", authorization.IncidentID).
+				Str("granted_by", identityProof.RecoveryGrantedBy).
+				Int("identity_generation", state.Generation).
+				Msg("durable admission identity recovered under operator authorization")
+		}
+		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
 	}
-	if len(identityProof.RotationPubkey) > 0 {
-		rotations, ok := s.bootstrapTokens.(admissionIdentityRotationStore)
-		if !ok {
-			s.close(conn, CloseIdentitySignatureRequired, "identity_rotation_unavailable")
-			return "", ""
-		}
-		state, err := rotations.RotateAdmissionIdentity(
-			context.Background(), initial.ProviderID, connectionAuth.token,
-			identityProof.VerifiedPubkey, identityProof.RotationPubkey,
-			identityProof.Generation, s.now(),
-		)
-		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity rotation failed")
-			s.close(conn, CloseIdentitySignatureRequired, "identity_rotation_failed")
-			return "", ""
-		}
-		identityProof.Generation = state.Generation
-		identityProof.ActivePubkey = append([]byte(nil), state.CurrentPublicKey...)
-		identityProof.PreviousValidUntil = state.PreviousValidUntil
-		s.log.Info().
-			Str("provider_id", initial.ProviderID).
-			Int("identity_generation", state.Generation).
-			Msg("durable admission identity rotated")
-	}
-	if len(identityProof.RecoveryPubkey) > 0 {
-		rotations, ok := s.bootstrapTokens.(admissionIdentityRotationStore)
-		if !ok {
-			s.close(conn, CloseIdentitySignatureRequired, "identity_recovery_unavailable")
-			return "", ""
-		}
-		state, authorization, err := rotations.RecoverAdmissionIdentity(
-			context.Background(), initial.ProviderID, connectionAuth.token,
-			identityProof.ActivePubkey, identityProof.RecoveryPubkey,
-			identityProof.Generation, s.now(),
-		)
-		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("durable admission identity recovery failed")
-			s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
-			s.close(conn, CloseIdentitySignatureRequired, "identity_recovery_failed")
-			return "", ""
-		}
-		identityProof.Generation = state.Generation
-		identityProof.ActivePubkey = append([]byte(nil), state.CurrentPublicKey...)
-		identityProof.RecoveryGrantedBy = authorization.ApprovedBy
-		s.log.Warn().
-			Str("provider_id", initial.ProviderID).
-			Str("recovery_authorization_id", authorization.PendingID).
-			Str("incident_id", authorization.IncidentID).
-			Str("granted_by", identityProof.RecoveryGrantedBy).
-			Int("identity_generation", state.Generation).
-			Msg("durable admission identity recovered under operator authorization")
-	}
-	entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
 	entry.AuthState = authState
 	// Issue #582 FIX A: no post-mint hardware-trust re-check. Trust was authorized
 	// at the hello gate (checkAutotuneHelloGate) BEFORE resolveProvisionalToken
@@ -2016,8 +2233,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		return "", ""
 	}
 	registered = true
-	s.admission.ReleasePendingProvisional()
+	if reservedAdmission && entry.Tier == pool.TierProvisional {
+		s.admission.ReleasePendingProvisional()
+	}
 	releaseUnauth()
+	s.proofOfWeightsAdmissionMu.RUnlock()
+	admissionLockHeld = false
 	response := AuthResponse{
 		Type:                      "auth_response",
 		Version:                   2,
@@ -2294,6 +2515,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		maxAdmittedModelID  string
 		maxAdmittedMinRAMGB int
 		admittedTuple       onboarding.AdmittedTuple
+		admissionSandboxed  bool
 	)
 	if firstHopOnly {
 		s.log.Info().
@@ -2312,6 +2534,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		maxAdmittedModelID = admissionObservation.MaxAdmittedModelID
 		maxAdmittedMinRAMGB = admissionObservation.MaxAdmittedMinRAMGB
 		admittedTuple = admissionObservation.AdmittedTuple
+		admissionSandboxed = admissionObservation.Sandboxed
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -2374,8 +2597,9 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		AdmittedChipNormalized:       admittedTuple.ChipNormalized,
 		AdmittedUnifiedMemoryGB:      admittedTuple.UnifiedMemoryGB,
 	}
-	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+	if s.proofOfWeightsConfig().RequireAutotuneHelloGate {
 		entry.AdmissionCeilingExcluded = s.admissionCeilingRouteVerdict(*entry).excluded
+		entry.AdmissionSandboxed = admissionSandboxed
 	}
 	return entry, true
 }
@@ -2419,6 +2643,7 @@ type autotuneAdmissionObservation struct {
 	MaxAdmittedModelID  string
 	MaxAdmittedMinRAMGB int
 	AdmittedTuple       onboarding.AdmittedTuple
+	Sandboxed           bool
 }
 
 // checkAutotuneHelloGate is the hardware-trust AUTHORIZATION POINT when the
@@ -2428,7 +2653,8 @@ type autotuneAdmissionObservation struct {
 // the same evidence read runs observe-only so heartbeat model changes can be
 // compared against the admitted RAM ceiling without affecting routing.
 func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdmissionObservation, bool) {
-	requireGate := s.cfg.ProofOfWeights.RequireAutotuneHelloGate
+	powCfg := s.proofOfWeightsConfig()
+	requireGate := powCfg.RequireAutotuneHelloGate
 	if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
 		if requireGate {
 			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
@@ -2437,7 +2663,7 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdm
 		}
 		return autotuneAdmissionObservation{}, true
 	}
-	ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	ttl := time.Duration(powCfg.AutotuneEvidenceTTLDays) * 24 * time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), autotuneEvidenceLookupTimeout)
 	defer cancel()
 	evidence, ok, err := s.autotuneEvidence.LatestVerified(ctx, hello.ProviderID, ttl)
@@ -2470,9 +2696,8 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdm
 			if serving < 2 {
 				event = event.Bool("pool_redundancy_low", true)
 			}
-			event.Msg("autotune hello gate rejected connect without verified hardware evidence")
-			s.close(conn, CloseInvalidHello, "autotune_evidence_required")
-			return autotuneAdmissionObservation{}, false
+			event.Msg("autotune hello gate sandboxed connect without verified hardware evidence")
+			return autotuneAdmissionObservation{Sandboxed: true}, true
 		}
 		return autotuneAdmissionObservation{}, true
 	}
@@ -3710,7 +3935,7 @@ func (s *Server) canaryProbeEligible(provider pool.Provider) bool {
 		if provider.State != pool.StateDegraded {
 			return false
 		}
-	} else if !provider.RoutingEligible() {
+	} else if !provider.RoutingEligible() && !provider.AdmissionSandboxed {
 		return false
 	}
 	if provider.SlotsFree <= 0 {
@@ -3756,8 +3981,8 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 	if attempt.modelClassBank {
 		pass := outcome == canaryProbePass
 		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
-		if s.telemetryDrift != nil {
-			s.logTelemetryDriftAlerts(s.telemetryDrift.RecordModelClassCanary(provider, pass))
+		if telemetryDrift, _ := s.telemetryDriftEvaluator(); telemetryDrift != nil {
+			s.logTelemetryDriftAlerts(telemetryDrift.RecordModelClassCanary(provider, pass))
 		}
 	}
 	if outcome == canaryProbeSkip {
@@ -4405,7 +4630,7 @@ func (s *Server) recordCapacityOverClaim(phase string) {
 // applyBenchmarkQuarantine translates the issue-#765 verdict into the pool's
 // fail-suspect flag. BenchmarkVerdictUnknown (gate off, evaluator off, or an
 // evidence-store error) deliberately leaves the flag untouched.
-func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string, verdict pow.BenchmarkVerdict) {
+func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string, verdict pow.BenchmarkVerdict, telemetryGeneration uint64) {
 	var quarantined bool
 	switch verdict {
 	case pow.BenchmarkVerdictMissing:
@@ -4413,6 +4638,11 @@ func (s *Server) applyBenchmarkQuarantine(providerID, assignedID, modelID string
 	case pow.BenchmarkVerdictVerified:
 		quarantined = false
 	default:
+		return
+	}
+	s.telemetryDriftMu.RLock()
+	defer s.telemetryDriftMu.RUnlock()
+	if s.telemetryDriftGeneration != telemetryGeneration {
 		return
 	}
 	if !s.pool.SetBenchmarkQuarantine(providerID, assignedID, quarantined) {
@@ -4549,14 +4779,14 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("slots_total", entry.SlotsTotal).
 			Msg("provider heartbeat")
 	}
-	if s.telemetryDrift != nil {
-		alerts, verdict := s.telemetryDrift.EvaluateHeartbeatWithVerdict(context.Background(), *entry)
+	if telemetryDrift, telemetryGeneration := s.telemetryDriftEvaluator(); telemetryDrift != nil {
+		alerts, verdict := telemetryDrift.EvaluateHeartbeatWithVerdict(context.Background(), *entry)
 		s.logTelemetryDriftAlerts(alerts)
 		// Issue #765: absence of a verified benchmark is fail-suspect, not
 		// fail-open. Dormant unless BOTH telemetry_drift.enabled and
 		// telemetry_drift.quarantine_missing_benchmark are set, in which case
 		// the verdict is Unknown and routing is untouched.
-		s.applyBenchmarkQuarantine(providerID, assignedID, entry.ModelID, verdict)
+		s.applyBenchmarkQuarantine(providerID, assignedID, entry.ModelID, verdict, telemetryGeneration)
 	}
 }
 
@@ -4641,7 +4871,7 @@ func (s *Server) applyAdmissionCeilingRouteExclusion(provider *pool.Provider, ac
 	if provider == nil {
 		return
 	}
-	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+	if !s.proofOfWeightsConfig().RequireAutotuneHelloGate {
 		if s.pool.SetAdmissionCeilingExcluded(provider.ProviderID, provider.AssignedID, false) {
 			provider.AdmissionCeilingExcluded = false
 		}

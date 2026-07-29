@@ -585,14 +585,16 @@ func main() {
 		}
 	}
 	var autotuneEvidenceStore autotune.EvidenceStore
-	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
+	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {
 		autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
 		wsOpts = append(wsOpts, providerws.WithAutotuneEvidenceStore(autotuneEvidenceStore))
+	}
+	if autotuneEvidenceStore != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
 		logger.Info().
 			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Msg("proof-of-weights admission cap observation enabled")
-	} else if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {
+	} else if autotuneEvidenceStore != nil {
 		logger.Info().
 			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Msg("proof-of-weights admission cap observation disabled because evidence TTL is not positive")
@@ -1073,7 +1075,7 @@ func main() {
 		select {
 		case sig := <-signals:
 			if sig == syscall.SIGHUP {
-				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, billingStore)
+				reloadCoordinatorConfig(*configPath, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, billingStore)
 				continue
 			}
 			timeout := 30 * time.Second
@@ -1648,9 +1650,22 @@ func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
+	reloadCoordinatorConfig(configPath, startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, billingStores...)
+}
+
+func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, billingStores ...*billing.Store) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
+		return
+	}
+	telemetryDrift, err := telemetryDriftEvaluatorForReload(cfg, autotuneCatalog, autotuneEvidenceStore)
+	if err != nil {
+		logger.Error().Err(err).Msg("proof_of_weights config reload rejected")
+		return
+	}
+	if cfg.ProofOfWeights.RequireAutotuneHelloGate && (autotuneCatalog == nil || autotuneEvidenceStore == nil) {
+		logger.Error().Msg("proof_of_weights config reload rejected: autotune hello gate dependencies are not wired")
 		return
 	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
@@ -1712,8 +1727,24 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
 			Msg("quarantine force-void route-layer flag reloaded")
 	}
+	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
+	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
+	benchmarkQuarantinesCleared := 0
+	if telemetryDrift == nil || !cfg.ProofOfWeights.TelemetryDrift.QuarantineMissingBenchmark {
+		benchmarkQuarantinesCleared = wsServer.ClearBenchmarkQuarantines()
+	}
 	updated := wsServer.RefreshTier2HashStatuses()
-	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")
+	logger.Info().
+		Int("provider_hash_statuses_updated", updated).
+		Uint64("proof_of_weights_generation", proofReload.Generation).
+		Int("proof_of_weights_pre_quarantined", proofReload.PreQuarantined).
+		Int("proof_of_weights_revalidated", proofReload.Revalidated).
+		Int("proof_of_weights_sandboxed", proofReload.Sandboxed).
+		Int("proof_of_weights_route_excluded", proofReload.RouteExcluded).
+		Int("proof_of_weights_still_evidence_stale", proofReload.StillEvidenceStale).
+		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
+		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
+		Msg("tier2/proof_of_weights config reloaded")
 	// Issue #266 T1 — wire SPEC-004 FR-SR-5 paragraph 2 ("invalidate
 	// on class reconfig"): swap the buyer-server's routing.model_classes
 	// snapshot and purge sticky-affinity entries for any class whose
@@ -1727,6 +1758,35 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 			Str("event", "spec004_fr_sr_5_class_reload").
 			Msg("routing.model_classes reload: shape changed; sticky entries invalidated")
 	}
+}
+
+func telemetryDriftEvaluatorForReload(cfg config.Config, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore) (*pow.Evaluator, error) {
+	if !cfg.ProofOfWeights.TelemetryDrift.Enabled {
+		return nil, nil
+	}
+	if autotuneCatalog == nil {
+		return nil, fmt.Errorf("proof_of_weights.telemetry_drift.enabled requires autotune candidate catalog feeds")
+	}
+	if autotuneEvidenceStore == nil {
+		return nil, fmt.Errorf("proof_of_weights.telemetry_drift.enabled requires onboarding evidence store")
+	}
+	driftCfg, err := pow.TelemetryDriftConfigFrom(
+		true,
+		cfg.ProofOfWeights.TelemetryDrift.TPSRatioThreshold,
+		cfg.ProofOfWeights.TelemetryDrift.TPSMinAbsolute,
+		cfg.ProofOfWeights.TelemetryDrift.TPSMinRequestsWindow,
+		cfg.ProofOfWeights.TelemetryDrift.HashAlertOnStatus,
+		cfg.ProofOfWeights.TelemetryDrift.HashAlertOnArtifactDrift,
+		cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
+		cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateThreshold,
+		cfg.ProofOfWeights.TelemetryDrift.AlertCooldownSeconds,
+		cfg.ProofOfWeights.TelemetryDrift.QuarantineMissingBenchmark,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	return pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore, ttl), nil
 }
 
 func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {

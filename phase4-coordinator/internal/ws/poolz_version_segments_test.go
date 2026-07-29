@@ -89,14 +89,15 @@ func TestApplyBenchmarkQuarantineHonoursVerdict(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := NewServer(capacityTestConfig(8), registry, zerolog.Nop())
 	registerCapacityTestProvider(t, server, registry, 2)
+	_, generation := server.telemetryDriftEvaluator()
 
 	quarantined := func() bool { return registry.Snapshot()[0].BenchmarkQuarantined }
 
-	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictUnknown)
+	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictUnknown, generation)
 	if quarantined() {
 		t.Fatal("Unknown verdict must not quarantine")
 	}
-	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictMissing)
+	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictMissing, generation)
 	if !quarantined() {
 		t.Fatal("Missing verdict must quarantine")
 	}
@@ -104,16 +105,35 @@ func TestApplyBenchmarkQuarantineHonoursVerdict(t *testing.T) {
 		t.Fatal("a quarantined provider must not be routed buyer traffic")
 	}
 	// A store blip mid-quarantine must not release the provider.
-	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictUnknown)
+	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictUnknown, generation)
 	if !quarantined() {
 		t.Fatal("Unknown verdict must not release an existing quarantine")
 	}
-	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictVerified)
+	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictVerified, generation)
 	if quarantined() {
 		t.Fatal("Verified verdict must release the quarantine")
 	}
 	if !registry.Snapshot()[0].RoutingEligible() {
 		t.Fatal("a released provider must be routable again")
+	}
+}
+
+func TestApplyBenchmarkQuarantineSkipsStaleTelemetryGeneration(t *testing.T) {
+	t.Parallel()
+	registry := pool.NewRegistry(nil)
+	server := NewServer(capacityTestConfig(8), registry, zerolog.Nop())
+	registerCapacityTestProvider(t, server, registry, 2)
+	_, staleGeneration := server.telemetryDriftEvaluator()
+
+	server.SetTelemetryDriftEvaluator(nil)
+	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictMissing, staleGeneration)
+	if registry.Snapshot()[0].BenchmarkQuarantined {
+		t.Fatal("stale telemetry generation must not reapply benchmark quarantine after reload")
+	}
+	_, currentGeneration := server.telemetryDriftEvaluator()
+	server.applyBenchmarkQuarantine("provider-a", "assigned-a", "model-a", pow.BenchmarkVerdictMissing, currentGeneration)
+	if !registry.Snapshot()[0].BenchmarkQuarantined {
+		t.Fatal("current telemetry generation must still apply decisive benchmark verdict")
 	}
 }
 

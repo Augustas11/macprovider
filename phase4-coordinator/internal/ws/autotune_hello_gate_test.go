@@ -84,6 +84,7 @@ func TestAutotuneHelloGateRejectsOverTierClaim(t *testing.T) {
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
 	}, func(cfg *config.Config) {
+		cfg.Providers = nil
 		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
 	})
@@ -115,6 +116,7 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
 	}, func(cfg *config.Config) {
+		cfg.Providers = nil
 		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
 	})
@@ -166,7 +168,7 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	}
 }
 
-func TestAutotuneHelloGateRejectsMissingEvidence(t *testing.T) {
+func TestAutotuneHelloGateSandboxesMissingEvidence(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
@@ -176,9 +178,110 @@ func TestAutotuneHelloGateRejectsMissingEvidence(t *testing.T) {
 	})
 	defer h.HTTP.Close()
 
-	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-anon"))
-	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
-		t.Fatalf("code=%d reason=%q", code, reason)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op=%v, want text", op)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack["type"] != "hello_ack" {
+		t.Fatalf("ack type=%v", ack["type"])
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+	if !ok {
+		t.Fatal("provider not registered")
+	}
+	if !provider.AdmissionSandboxed || provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatalf("missing evidence provider must be sandboxed and buyer-unroutable: %+v", provider)
+	}
+
+	disabled := config.Default().ProofOfWeights
+	disabled.RequireAutotuneHelloGate = false
+	result := h.Provider.SetProofOfWeightsConfig(disabled)
+	afterDisable, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+	if !ok {
+		t.Fatal("provider disappeared after gate-disable reload")
+	}
+	if !afterDisable.AdmissionSandboxed || afterDisable.RoutingEligible() || afterDisable.ServingCapable() {
+		t.Fatalf("sandbox-only no-credential provider must not auto-promote on gate disable: result=%+v provider=%+v", result, afterDisable)
+	}
+}
+
+func TestProofOfWeightsReloadSandboxesExistingUnverifiedSession(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
+	}, func(cfg *config.Config) {
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = false
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	assignedID := ack["assigned_id"].(string)
+	before, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if !ok || !before.RoutingEligible() {
+		t.Fatalf("gate-off provider should start routable: %+v ok=%v", before, ok)
+	}
+
+	next := config.Default().ProofOfWeights
+	next.RequireAutotuneHelloGate = true
+	next.AutotuneEvidenceTTLDays = 30
+	result := h.Provider.SetProofOfWeightsConfig(next)
+	if result.PreQuarantined != 1 || result.Sandboxed != 1 {
+		t.Fatalf("reload result = %+v, want one pre-quarantined sandbox", result)
+	}
+	after, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if !ok {
+		t.Fatal("provider disappeared after proof_of_weights reload")
+	}
+	if !after.AdmissionSandboxed || after.AdmissionEvidenceStale || after.RoutingEligible() || after.ServingCapable() {
+		t.Fatalf("hot-enabled gate should sandbox existing unverified session: %+v", after)
+	}
+
+	disabled := next
+	disabled.RequireAutotuneHelloGate = false
+	result = h.Provider.SetProofOfWeightsConfig(disabled)
+	if result.ClearedGateExclusions == 0 {
+		t.Fatalf("disable reload did not report clearing gate exclusions: %+v", result)
+	}
+	cleared, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if !ok || cleared.AdmissionSandboxed || cleared.AdmissionEvidenceStale || !cleared.RoutingEligible() {
+		t.Fatalf("gate disable should restore observe-only routing: %+v ok=%v", cleared, ok)
 	}
 }
 
@@ -208,6 +311,7 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 		providerws.WithAutotuneHelloGate(catalog, evidenceStore),
 		providerws.WithTokenIssuer(tokenStore),
 	}, func(cfg *config.Config) {
+		cfg.Providers = nil
 		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
 	})
@@ -228,30 +332,37 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 
 	frame, err := gobwas.ReadFrame(conn)
 	if err != nil {
-		t.Fatalf("read post-proof close: %v", err)
+		t.Fatalf("read post-proof response: %v", err)
 	}
-	if frame.Header.OpCode != gobwas.OpClose {
-		t.Fatalf("post-proof opcode=%v, want close", frame.Header.OpCode)
+	if frame.Header.OpCode != gobwas.OpText {
+		t.Fatalf("post-proof opcode=%v, want text", frame.Header.OpCode)
 	}
-	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
-	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
-		t.Fatalf("post-proof close=%d reason=%q", code, reason)
+	var response providerws.AuthResponse
+	if err := json.Unmarshal(frame.Payload, &response); err != nil {
+		t.Fatalf("post-proof auth response json: %v", err)
+	}
+	if response.Status != "accepted" {
+		t.Fatalf("post-proof response = %+v", response)
 	}
 	if got := evidenceStore.callCount(); got != 2 {
 		t.Fatalf("autotune evidence lookups=%d, want initial and post-proof checks", got)
 	}
-	if got := h.Registry.Count(); got != 0 {
-		t.Fatalf("post-proof evidence loss registered %d providers", got)
+	provider, ok := h.Registry.Resolve("m4-anon", response.AssignedID)
+	if !ok {
+		t.Fatal("post-proof evidence loss did not register provider")
 	}
-	if records := h.Provider.Admission().Records(nil); len(records) != 0 {
-		t.Fatalf("post-proof evidence loss consumed durable admission: %+v", records)
+	if !provider.AdmissionSandboxed || provider.RoutingEligible() {
+		t.Fatalf("post-proof evidence loss must register sandboxed only: %+v", provider)
+	}
+	if records := h.Provider.Admission().Records(nil); len(records) != 1 {
+		t.Fatalf("post-proof evidence loss must still be admission-rate limited: %+v", records)
 	}
 	if active, err := tokenStore.HasActiveTokenForProvider(context.Background(), "m4-anon"); err != nil || active {
-		t.Fatalf("post-proof evidence loss left active token=%v err=%v", active, err)
+		t.Fatalf("post-proof sandbox must not mint a provider credential active=%v err=%v", active, err)
 	}
 }
 
-func TestAutotuneHelloGateV1RejectionDoesNotConsumeProvisionalCapacity(t *testing.T) {
+func TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
 		CandidateCatalogSHA256: catalog.SHA256,
@@ -281,35 +392,167 @@ func TestAutotuneHelloGateV1RejectionDoesNotConsumeProvisionalCapacity(t *testin
 
 	hello := validHello("m4-anon")
 	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
-	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
-	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
-		t.Fatalf("first close=%d reason=%q", code, reason)
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	firstConn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	defer firstConn.Close()
+	if err := wsutil.WriteClientText(firstConn, mustJSON(hello)); err != nil {
+		t.Fatalf("first hello: %v", err)
+	}
+	firstPayload, firstOp, err := wsutil.ReadServerData(firstConn)
+	if err != nil {
+		t.Fatalf("first response: %v", err)
+	}
+	if firstOp != gobwas.OpText {
+		t.Fatalf("first response opcode=%v, want text", firstOp)
+	}
+	var firstAck map[string]any
+	if err := json.Unmarshal(firstPayload, &firstAck); err != nil {
+		t.Fatalf("first ack json: %v", err)
+	}
+	firstProvider, ok := h.Registry.Resolve("m4-anon", firstAck["assigned_id"].(string))
+	if !ok {
+		t.Fatal("first provider not registered")
+	}
+	if !firstProvider.AdmissionSandboxed || firstProvider.RoutingEligible() {
+		t.Fatalf("first provider must be sandboxed and buyer-unroutable: %+v", firstProvider)
 	}
 
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	secondConn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
 		t.Fatalf("second dial: %v", err)
 	}
-	defer conn.Close()
-	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+	defer secondConn.Close()
+	secondHello := validHello("m4-anon-b")
+	secondHello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, secondHello, catalog)
+	if err := wsutil.WriteClientText(secondConn, mustJSON(secondHello)); err != nil {
 		t.Fatalf("second hello: %v", err)
 	}
-	payload, op, err := wsutil.ReadServerData(conn)
+	secondFrame, err := gobwas.ReadFrame(secondConn)
 	if err != nil {
 		t.Fatalf("second response: %v", err)
 	}
+	if secondFrame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("second response opcode=%v, want close", secondFrame.Header.OpCode)
+	}
+	closeCode, closeReason := gobwas.ParseCloseFrameData(secondFrame.Payload)
+	if closeCode != providerws.CloseProvisionalPoolFull || closeReason == "" {
+		t.Fatalf("second close=(%d,%q), want provisional pool full", closeCode, closeReason)
+	}
+	if got := evidenceStore.callCount(); got != 1 {
+		t.Fatalf("autotune evidence lookups=%d, want only the first sandbox before capacity refusal", got)
+	}
+}
+
+func TestAutotuneHelloGateSandboxRejectsTokenlessActiveTokenOwner(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	if _, _, err := store.IssueToken(context.Background(), "m4-anon", "M4 test provider"); err != nil {
+		t.Fatalf("seed provider token: %v", err)
+	}
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
+		providerws.WithTokenIssuer(store),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close=(%d,%q), want invalid token", code, reason)
+	}
+	if got := h.Registry.Count(); got != 0 {
+		t.Fatalf("tokenless active-token sandbox registered %d providers, want 0", got)
+	}
+}
+
+func TestAutotuneHelloGateBearerSandboxClearsOnGateDisable(t *testing.T) {
+	const providerID = "m4-anon"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	_, bearer, err := store.IssueToken(context.Background(), providerID, "M4 test provider")
+	if err != nil {
+		t.Fatalf("issue provider token: %v", err)
+	}
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
+		providerws.WithTokenIssuer(store),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := bearerDialer(bearer).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	hello := validHello(providerID)
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
 	if op != gobwas.OpText {
-		t.Fatalf("second response opcode=%v, want text", op)
+		t.Fatalf("op=%v, want text", op)
 	}
 	var ack map[string]any
 	if err := json.Unmarshal(payload, &ack); err != nil {
-		t.Fatalf("second response json: %v", err)
+		t.Fatalf("ack json: %v", err)
 	}
 	if ack["type"] != "hello_ack" {
-		t.Fatalf("second response type=%v, want hello_ack", ack["type"])
+		t.Fatalf("ack type=%v", ack["type"])
 	}
-	if got := evidenceStore.callCount(); got != 2 {
-		t.Fatalf("autotune evidence lookups=%d, want one per V1 attempt", got)
+	assignedID, _ := ack["assigned_id"].(string)
+	if assignedID == "" {
+		t.Fatalf("assigned_id missing from ack: %+v", ack)
+	}
+	if token, _ := ack["assigned_provider_token"].(string); token != "" {
+		t.Fatalf("bearer sandbox minted assigned_provider_token=%q", token)
+	}
+	provider, ok := h.Registry.Resolve(providerID, assignedID)
+	if !ok {
+		t.Fatal("provider not registered")
+	}
+	if !provider.AdmissionSandboxed || provider.AuthState != pool.AuthBearerValidated || provider.RoutingEligible() {
+		t.Fatalf("bearer provider must start authenticated but sandboxed: %+v", provider)
+	}
+
+	disabled := config.Default().ProofOfWeights
+	disabled.RequireAutotuneHelloGate = false
+	result := h.Provider.SetProofOfWeightsConfig(disabled)
+	afterDisable, ok := h.Registry.Resolve(providerID, assignedID)
+	if !ok {
+		t.Fatal("provider disappeared after gate-disable reload")
+	}
+	if result.ClearedGateExclusions == 0 {
+		t.Fatalf("disable reload did not report clearing gate exclusions: %+v", result)
+	}
+	if afterDisable.AdmissionSandboxed || !afterDisable.RoutingEligible() || !afterDisable.ServingCapable() {
+		t.Fatalf("bearer-authenticated sandbox should promote on gate disable: result=%+v provider=%+v", result, afterDisable)
 	}
 }
 

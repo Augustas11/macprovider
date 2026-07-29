@@ -72,6 +72,21 @@ func TestAdmissionEvidenceStaleRemovesProviderFromRouting(t *testing.T) {
 	}
 }
 
+func TestAdmissionSandboxedRemovesProviderFromRouting(t *testing.T) {
+	t.Parallel()
+	p := quarantineTestProvider()
+	p.AdmissionSandboxed = true
+	if p.RoutingEligible() {
+		t.Fatal("sandboxed provider must not be routing eligible")
+	}
+	if p.ServingCapable() {
+		t.Fatal("sandboxed provider must not count as buyer-serving capacity")
+	}
+	if p.State != StateReady {
+		t.Fatalf("sandboxing must not mutate provider state, got %q", p.State)
+	}
+}
+
 func TestSetBenchmarkQuarantineReportsTransitionsOnly(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry(nil)
@@ -181,6 +196,111 @@ func TestSetAdmissionEvidenceStaleReportsTransitionsOnly(t *testing.T) {
 
 	if changed := r.SetAdmissionEvidenceStale("provider-a", "stale-assigned", true); changed {
 		t.Fatal("stale assigned_id must not flip the stale-evidence flag")
+	}
+}
+
+func TestSetAdmissionSandboxedReportsTransitionsOnly(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(nil)
+	if _, ok := r.RegisterAt(quarantineTestProvider(), nil, time.Now().UTC()); !ok {
+		t.Fatal("register failed")
+	}
+
+	if changed := r.SetAdmissionSandboxed("provider-a", "assigned-a", true); !changed {
+		t.Fatal("first sandbox verdict must report a transition")
+	}
+	r.providers["provider-a"].AdmissionSandboxCredentialBypassed = true
+	if changed := r.SetAdmissionSandboxed("provider-a", "assigned-a", true); changed {
+		t.Fatal("repeat sandbox verdict must not report a transition")
+	}
+	snap := r.Snapshot()
+	if len(snap) != 1 || !snap[0].AdmissionSandboxed {
+		t.Fatalf("snapshot did not carry the sandbox flag: %+v", snap)
+	}
+	if snap[0].RoutingEligible() {
+		t.Fatal("sandboxed provider is still routing eligible in the snapshot")
+	}
+
+	if changed := r.SetAdmissionSandboxed("provider-a", "assigned-a", false); !changed {
+		t.Fatal("sandbox release must report a transition")
+	}
+	snap = r.Snapshot()
+	if snap[0].AdmissionSandboxed {
+		t.Fatal("sandbox release did not clear the flag")
+	}
+	if snap[0].AdmissionSandboxCredentialBypassed {
+		t.Fatal("sandbox release did not clear the credential-bypass marker")
+	}
+	if !snap[0].RoutingEligible() {
+		t.Fatal("released sandbox provider must be routable again")
+	}
+
+	if changed := r.SetAdmissionSandboxed("provider-a", "stale-assigned", true); changed {
+		t.Fatal("stale assigned_id must not flip the sandbox flag")
+	}
+}
+
+func TestSetAdmissionGateFlagsPublishesAtomically(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(nil)
+	if _, ok := r.RegisterAt(quarantineTestProvider(), nil, time.Now().UTC()); !ok {
+		t.Fatal("register failed")
+	}
+	if changed := r.SetAdmissionSandboxed("provider-a", "assigned-a", true); !changed {
+		t.Fatal("seed sandbox flag failed")
+	}
+	if changed := r.SetAdmissionEvidenceStale("provider-a", "assigned-a", true); !changed {
+		t.Fatal("seed stale flag failed")
+	}
+
+	prior, changed, ok := r.SetAdmissionGateFlags("provider-a", "assigned-a", AdmissionGateFlags{
+		AdmissionCeilingExcluded: true,
+	})
+	if !ok || !changed {
+		t.Fatalf("atomic gate update ok=%v changed=%v", ok, changed)
+	}
+	if !prior.AdmissionSandboxed || !prior.AdmissionEvidenceStale || prior.AdmissionCeilingExcluded {
+		t.Fatalf("unexpected prior flags: %+v", prior)
+	}
+	snap := r.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot length=%d", len(snap))
+	}
+	if !snap[0].AdmissionCeilingExcluded || snap[0].AdmissionEvidenceStale || snap[0].AdmissionSandboxed {
+		t.Fatalf("atomic flags not published as one replacement: %+v", snap[0])
+	}
+
+	_, changed, ok = r.SetAdmissionGateFlags("provider-a", "stale-assigned", AdmissionGateFlags{})
+	if ok || changed {
+		t.Fatalf("stale assigned_id update ok=%v changed=%v", ok, changed)
+	}
+}
+
+func TestClearBenchmarkQuarantinesClearsOnlyBenchmarkFlag(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry(nil)
+	p := quarantineTestProvider()
+	p.BenchmarkQuarantined = true
+	p.AdmissionSandboxed = true
+	if _, ok := r.RegisterAt(p, nil, time.Now().UTC()); !ok {
+		t.Fatal("register failed")
+	}
+
+	if cleared := r.ClearBenchmarkQuarantines(); cleared != 1 {
+		t.Fatalf("cleared=%d, want 1", cleared)
+	}
+	if cleared := r.ClearBenchmarkQuarantines(); cleared != 0 {
+		t.Fatalf("second clear=%d, want 0", cleared)
+	}
+	snap := r.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot length=%d", len(snap))
+	}
+	if snap[0].BenchmarkQuarantined {
+		t.Fatalf("benchmark quarantine still set: %+v", snap[0])
+	}
+	if !snap[0].AdmissionSandboxed {
+		t.Fatalf("clear benchmark quarantine must not clear proof sandbox: %+v", snap[0])
 	}
 }
 
