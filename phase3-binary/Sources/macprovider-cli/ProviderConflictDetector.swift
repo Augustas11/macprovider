@@ -175,6 +175,7 @@ struct ProviderDrainer {
     typealias ProcessRunningProbe = (Int32) -> Bool
     typealias PortProbe = (Int) -> Bool
     typealias ForegroundRestarter = ([String]) throws -> Void
+    typealias LaunchdRestoreGuardStarter = (_ launchdDomain: String, _ plistPath: String) throws -> ProviderLaunchdRestoreGuard
 
     static let launchctlPath = "/bin/launchctl"
     static let launchdLabel = ProviderConflictDetector.launchdLabel
@@ -186,6 +187,7 @@ struct ProviderDrainer {
     private let processIsRunning: ProcessRunningProbe
     private let portIsOpen: PortProbe
     private let foregroundRestarter: ForegroundRestarter
+    private let launchdRestoreGuardStarter: LaunchdRestoreGuardStarter
     private let warningWriter: (String) -> Void
 
     init(
@@ -197,6 +199,7 @@ struct ProviderDrainer {
         processIsRunning: @escaping ProcessRunningProbe = ProviderDrainer.defaultProcessIsRunning,
         portIsOpen: @escaping PortProbe = MacProviderPortProbe.isOpen,
         foregroundRestarter: @escaping ForegroundRestarter = ProviderDrainer.defaultForegroundRestarter,
+        launchdRestoreGuardStarter: @escaping LaunchdRestoreGuardStarter = ProviderLaunchdRestoreGuard.start,
         warningWriter: @escaping (String) -> Void = ProviderDrainer.defaultWarningWriter
     ) {
         self.uid = uid
@@ -206,6 +209,7 @@ struct ProviderDrainer {
         self.processIsRunning = processIsRunning
         self.portIsOpen = portIsOpen
         self.foregroundRestarter = foregroundRestarter
+        self.launchdRestoreGuardStarter = launchdRestoreGuardStarter
         self.warningWriter = warningWriter
     }
 
@@ -242,6 +246,13 @@ struct ProviderDrainer {
             try foregroundRestarter(argv)
             return .restored
         }
+    }
+
+    func startLaunchdCrashRestoreGuard(for conflict: ProviderConflict) throws -> ProviderLaunchdRestoreGuard? {
+        guard case .launchdManaged = conflict else {
+            return nil
+        }
+        return try launchdRestoreGuardStarter(launchdDomain, plistURL.path)
     }
 
     private var launchdDomain: String {
@@ -310,5 +321,74 @@ struct ProviderDrainer {
 
     static func defaultWarningWriter(_ warning: String) {
         FileHandle.standardError.write(Data(("\(warning)\n").utf8))
+    }
+}
+
+final class ProviderLaunchdRestoreGuard {
+    static let dismissToken = "__macprovider_launchd_restore_guard_dismiss__"
+    static let restoreScript = """
+        trap '' HUP INT QUIT TERM
+        while IFS= read -r line; do
+          [ "$line" = "$4" ] && exit 0
+        done
+        "$1" bootstrap "$2" "$3" >/dev/null 2>&1 || true
+        """
+
+    private let lock = NSLock()
+    private var dismissed = false
+    private let dismissHandler: () -> Void
+
+    init(dismissHandler: @escaping () -> Void) {
+        self.dismissHandler = dismissHandler
+    }
+
+    func dismiss() {
+        lock.lock()
+        if dismissed {
+            lock.unlock()
+            return
+        }
+        dismissed = true
+        lock.unlock()
+        dismissHandler()
+    }
+
+    static func start(launchdDomain: String, plistPath: String) throws -> ProviderLaunchdRestoreGuard {
+        try start(
+            launchdDomain: launchdDomain,
+            plistPath: plistPath,
+            launchctlPath: "/bin/launchctl"
+        )
+    }
+
+    static func start(
+        launchdDomain: String,
+        plistPath: String,
+        launchctlPath: String
+    ) throws -> ProviderLaunchdRestoreGuard {
+        let process = Process()
+        let stdin = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            restoreScript,
+            "macprovider-launchd-restore-guard",
+            launchctlPath,
+            launchdDomain,
+            plistPath,
+            dismissToken,
+        ]
+        process.standardInput = stdin.fileHandleForReading
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+
+        return ProviderLaunchdRestoreGuard {
+            try? stdin.fileHandleForWriting.write(
+                contentsOf: Data("\(dismissToken)\n".utf8)
+            )
+            try? stdin.fileHandleForWriting.close()
+            process.waitUntilExit()
+        }
     }
 }

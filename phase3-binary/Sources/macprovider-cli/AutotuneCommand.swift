@@ -1103,7 +1103,12 @@ struct AutotuneCommand: AsyncParsableCommand {
             shouldRestore = true
         }
 
-        let drainResult = try ProviderDrainer().drain(
+        let drainer = ProviderDrainer()
+        let restoreGuard = shouldRestore
+            ? try drainer.startLaunchdCrashRestoreGuard(for: conflict)
+            : nil
+
+        let drainResult = try drainer.drain(
             conflict,
             port: port,
             graceSeconds: TimeInterval(drainGrace)
@@ -1131,7 +1136,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         var restoreError: Error?
         if shouldRestore {
             do {
-                _ = try ProviderDrainer().restore(conflict, restartForeground: true)
+                _ = try drainer.restore(conflict, restartForeground: true)
+                restoreGuard?.dismiss()
             } catch {
                 restoreError = error
             }
