@@ -63,6 +63,61 @@ auth:
 	}
 }
 
+// TestLoadResolvesPayoutSecurityEnvFields covers the Step 4 r1 [sec:r1-4]
+// MEDIUM fix: env:NAME indirection must be expanded for payout.security.*
+// string fields so operators can inject RPC URLs + wallet path via env vars.
+func TestLoadResolvesPayoutSecurityEnvFields(t *testing.T) {
+	t.Setenv("S4R1_TEST_OP_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("S4R1_PAYOUT_RPC_PRIMARY", "https://primary.rpc.example/v1")
+	t.Setenv("S4R1_PAYOUT_RPC_SECONDARY", "https://secondary.rpc.example/v1")
+	t.Setenv("S4R1_PAYOUT_HOT_WALLET", "0x8ba1f109551bD432803012645Ac136ddd64DBA72")
+	t.Setenv("S4R1_PAYOUT_WALLET_PATH", "/var/lib/macprovider/wallet.enc")
+
+	cfg := writeMinimalConfig(t, `
+auth:
+  operator_key: env:S4R1_TEST_OP_KEY
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
+payout:
+  enabled: true
+  security:
+    hot_wallet_address: env:S4R1_PAYOUT_HOT_WALLET
+    rpc_url_primary:    env:S4R1_PAYOUT_RPC_PRIMARY
+    rpc_url_secondary:  env:S4R1_PAYOUT_RPC_SECONDARY
+    encrypted_wallet_path: env:S4R1_PAYOUT_WALLET_PATH
+    per_payout_cap_usdc_base_units: 500000000
+    per_day_cap_usdc_base_units:    5000000000
+    cancel_max_tip_multiplier:      5.0
+    cancel_max_gas_native_wei:      10000000000000000
+    cancel_max_gas_native_wei_per_24h: 50000000000000000
+    abandon_rate_per_hour:          3
+    chain_recon_interval:           1h
+    chain_recon_tolerance_usdc_base_units: 100000
+    pause_resume_min_interval:      1s
+  tuning:
+    address_cooling_off_period: 24h
+    run_interval:               6h
+    run_now_min_interval:       60s
+    confirmation_blocks:        5
+    max_rows_per_run:           50
+    reorg_poll_window:          24h
+    low_balance_threshold:      0
+    low_native_threshold:       0
+`)
+	// Assert all four payout.security.* env: fields resolved.
+	if cfg.Payout.Security.RPCURLPrimary != "https://primary.rpc.example/v1" {
+		t.Errorf("RPCURLPrimary=%q, want resolved value", cfg.Payout.Security.RPCURLPrimary)
+	}
+	if cfg.Payout.Security.RPCURLSecondary != "https://secondary.rpc.example/v1" {
+		t.Errorf("RPCURLSecondary=%q, want resolved value", cfg.Payout.Security.RPCURLSecondary)
+	}
+	if cfg.Payout.Security.HotWalletAddress != "0x8ba1f109551bD432803012645Ac136ddd64DBA72" {
+		t.Errorf("HotWalletAddress=%q, want resolved value", cfg.Payout.Security.HotWalletAddress)
+	}
+	if cfg.Payout.Security.EncryptedWalletPath != "/var/lib/macprovider/wallet.enc" {
+		t.Errorf("EncryptedWalletPath=%q, want resolved value", cfg.Payout.Security.EncryptedWalletPath)
+	}
+}
+
 func TestLoadRejectsWhitespaceOnlyEnvGatewayServiceToken(t *testing.T) {
 	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 	t.Setenv("M3_2_TEST_BLANK_GATEWAY_TOKEN", "  \t ")
