@@ -90,6 +90,11 @@ func TestLoadForSIGHUPReloadExcludesPayout(t *testing.T) {
 	// payout.enabled=true with an env: sentinel whose variable is unset
 	// AND a missing hot wallet — full Load must reject this; the
 	// general-reload loader must not even look.
+	// The payout block is hostile in BOTH ways the audits flagged:
+	// a semantically-invalid env: sentinel (unset var, missing wallet)
+	// AND a type-malformed scalar that would fail the typed Config
+	// decode itself (merge-audit r2 convergent HIGH: the strip must
+	// happen before typed unmarshal, not after).
 	cfgPath := writeYAML(t, "coordinator.yaml", `
 auth:
   operator_key: env:PAYOUT_RELOAD_TEST_OP_KEY
@@ -98,6 +103,7 @@ payout:
   enabled: true
   security:
     rpc_url_primary: env:PAYOUT_RELOAD_TEST_UNSET_RPC
+    cancel_max_tip_multiplier: not-a-float
 `)
 
 	if _, err := Load(cfgPath); err == nil {

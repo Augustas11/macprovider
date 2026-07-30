@@ -1558,10 +1558,32 @@ func LoadPayoutTuningOnly(basePath, overlayPath string) (PayoutTuningConfig, err
 // the payout runtime consumes config only via its startup snapshot
 // plus the §6.5 tuning-only SIGHUP listener.
 func LoadForSIGHUPReload(path string) (Config, error) {
-	cfg := Default()
-	if err := unmarshalYAMLFile(path, &cfg); err != nil {
+	b, err := os.ReadFile(path)
+	if err != nil {
 		return Config{}, fmt.Errorf("base config %s: %w", path, err)
 	}
+	// Merge-audit r2 (convergent code+architect HIGH): strip the payout
+	// subtree BEFORE typed decode. Resetting cfg.Payout after a typed
+	// unmarshal is not enough — a type-malformed payout.* scalar (e.g. a
+	// non-numeric cancel_max_tip_multiplier) would fail the Config decode
+	// itself and reject the whole reload before any reset runs. Decode
+	// generically, drop the payout key, then decode the filtered document
+	// into the typed Config.
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(b, &raw); err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+	}
+	delete(raw, "payout")
+	filtered, err := yaml.Marshal(raw)
+	if err != nil {
+		return Config{}, fmt.Errorf("base config %s: re-marshal without payout: %w", path, err)
+	}
+	cfg := Default()
+	if err := yaml.Unmarshal(filtered, &cfg); err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+	}
+	// Belt-and-braces: the payout namespace stays at defaults regardless
+	// of what the document contained.
 	cfg.Payout = Default().Payout
 	if err := finalizeLoadedConfig(&cfg); err != nil {
 		return Config{}, err
