@@ -1312,6 +1312,7 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	if err != nil {
 		return nil, err
 	}
+	s.extendProviderReadDeadlineForActive(provider)
 	payload, err := session.sealInferenceRequest(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx))
 	if err != nil {
 		if errors.Is(err, errTier2C2PCounterExhausted) {
