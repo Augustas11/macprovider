@@ -114,6 +114,11 @@ public struct AppConfig: Equatable, Sendable {
     // process abort). See `KVDiskCacheConfig`.
     public var kvDiskCache: KVDiskCacheConfig
 
+    // SPEC-039 FR-PKV14: provider-local paged KV residency engine. Default-off;
+    // resolved fail-closed (invalid value ⇒ paged mode disabled + `errors`
+    // populated, never a partial enable).
+    public var pagedKV: PagedKVConfig
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -169,7 +174,8 @@ public struct AppConfig: Equatable, Sendable {
             managedBy: nil,
             streamInterval: 1,
             prefillStepSize: 512,
-            kvDiskCache: .defaults()
+            kvDiskCache: .defaults(),
+            pagedKV: .defaults()
         )
     }
 }
@@ -212,6 +218,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var prefillStepSize: Int?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
+    // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
+    public var pagedKV: PagedKVCLIOverrides
 
     public init(
         port: Int? = nil,
@@ -246,7 +254,8 @@ public struct CLIOverrides: Equatable, Sendable {
         idlePrewarmRunOnBattery: Bool? = nil,
         streamInterval: Int? = nil,
         prefillStepSize: Int? = nil,
-        kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides()
+        kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
+        pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
         self.model = model
@@ -281,6 +290,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.streamInterval = streamInterval
         self.prefillStepSize = prefillStepSize
         self.kvDiskCache = kvDiskCache
+        self.pagedKV = pagedKV
     }
 }
 
@@ -334,6 +344,35 @@ public enum ConfigLoader {
         }
         config.kvDiskCache = KVDiskCacheConfigResolver.resolve(
             yaml: kvYAML, environment: environment, cli: cli.kvDiskCache)
+        var pagedYAML: [String: Any]?
+        var pagedYAMLShapeError = false
+        if fileExists(configPath), let text = try? readFile(configPath),
+           let root = try? Yams.load(yaml: text) as? [String: Any] {
+            if let rawPaged = root["paged_kv"], !(rawPaged is NSNull) {
+                if let map = rawPaged as? [String: Any] {
+                    pagedYAML = map
+                } else {
+                    pagedYAMLShapeError = true
+                }
+            }
+        }
+        config.pagedKV = PagedKVConfigResolver.resolve(
+            yaml: pagedYAML, environment: environment, cli: cli.pagedKV)
+        let pagedKVEnvironmentKeys: Set<String> = [
+            "MACPROVIDER_PAGED_KV_ENABLED",
+            "MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS",
+            "MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS",
+            "MACPROVIDER_PAGED_KV_FALLBACK_POLICY",
+        ]
+        let pagedKVEnvironmentPresent = environment.keys.contains { pagedKVEnvironmentKeys.contains($0) }
+        let pagedKVCLIPresent = cli.pagedKV.enabled != nil
+            || cli.pagedKV.blockSizeTokens != nil
+            || cli.pagedKV.maxPhysicalBlocks != nil
+            || cli.pagedKV.fallbackPolicy != nil
+        if pagedYAMLShapeError && !pagedKVEnvironmentPresent && !pagedKVCLIPresent {
+            config.pagedKV.enabled = false
+            config.pagedKV.errors.append("invalid paged_kv=<redacted>; expected map; paged_kv disabled")
+        }
 
         return config
     }

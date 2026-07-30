@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import MacProviderCore
 import XCTest
@@ -23,6 +24,8 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(config.maxContextOverride)
         XCTAssertNil(config.maxConcurrencyOverride)
         XCTAssertFalse(config.enableReceipts)
+        XCTAssertFalse(config.pagedKV.enabled)
+        XCTAssertFalse(config.pagedKV.effectiveEnabled)
     }
 
     func testEnableReceiptsCLIOverridesEnvironmentOverridesYAML() throws {
@@ -85,6 +88,85 @@ final class ServingKnobsConfigTests: XCTestCase {
             readFile: { _ in "kv_bits: 4\n" }
         )
         XCTAssertEqual(config.kvBitsOverride, 4)
+    }
+
+    // MARK: - SPEC-039 paged_kv
+
+    func testPagedKVCLIOverridesEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(pagedKV: PagedKVCLIOverrides(
+                maxPhysicalBlocks: 64,
+                fallbackPolicy: "strict"
+            )),
+            environment: [
+                "MACPROVIDER_PAGED_KV_ENABLED": "true",
+                "MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS": "16",
+                "MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS": "32",
+                "MACPROVIDER_PAGED_KV_FALLBACK_POLICY": "permissive",
+            ],
+            fileExists: { _ in true },
+            readFile: { _ in """
+            paged_kv:
+              enabled: false
+              block_size_tokens: 8
+              max_physical_blocks: 12
+              fallback_policy: permissive
+            """ }
+        )
+        XCTAssertTrue(config.pagedKV.enabled)
+        XCTAssertEqual(config.pagedKV.blockSizeTokens, 16)
+        XCTAssertEqual(config.pagedKV.maxPhysicalBlocks, 64)
+        XCTAssertEqual(config.pagedKV.fallbackPolicy, .strict)
+        XCTAssertTrue(config.pagedKV.errors.isEmpty)
+    }
+
+    func testPagedKVInvalidConfigDisablesInsteadOfThrowing() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_PAGED_KV_ENABLED": "true"],
+            fileExists: { _ in true },
+            readFile: { _ in """
+            paged_kv:
+              block_size_tokens: 0
+            """ }
+        )
+        XCTAssertFalse(config.pagedKV.enabled)
+        XCTAssertFalse(config.pagedKV.effectiveEnabled)
+        XCTAssertEqual(config.pagedKV.errors.count, 1)
+    }
+
+    func testPagedKVInvalidTopLevelShapeDisablesWithoutHigherPrecedenceSource() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "paged_kv: true\n" }
+        )
+        XCTAssertFalse(config.pagedKV.enabled)
+        XCTAssertFalse(config.pagedKV.effectiveEnabled)
+        XCTAssertEqual(config.pagedKV.errors.count, 1)
+    }
+
+    func testPagedKVInvalidTopLevelShapeDoesNotOverrideEnvironmentOrCLI() throws {
+        let envConfig = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_PAGED_KV_ENABLED": "true"],
+            fileExists: { _ in true },
+            readFile: { _ in "paged_kv: true\n" }
+        )
+        XCTAssertTrue(envConfig.pagedKV.enabled)
+        XCTAssertTrue(envConfig.pagedKV.effectiveEnabled)
+        XCTAssertTrue(envConfig.pagedKV.errors.isEmpty)
+
+        let cliConfig = try ConfigLoader.load(
+            cli: CLIOverrides(pagedKV: PagedKVCLIOverrides(enabled: true)),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "paged_kv: true\n" }
+        )
+        XCTAssertTrue(cliConfig.pagedKV.enabled)
+        XCTAssertTrue(cliConfig.pagedKV.effectiveEnabled)
+        XCTAssertTrue(cliConfig.pagedKV.errors.isEmpty)
     }
 
     // MARK: - --max-context
@@ -156,6 +238,84 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
     }
 
+    func testPagedKVStrictModeRejectsAtServeStartupWhileRuntimeProofUnavailable() throws {
+        var config = AppConfig.defaults()
+        config.pagedKV = PagedKVConfig(enabled: true, fallbackPolicy: .strict)
+        XCTAssertTrue(ServeCommand.pagedKVStrictStartupRejectEvent.contains("reason=paged_preflight_reject"))
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config)) { error in
+            XCTAssertEqual(error as? ExitCode, ExitCode(2))
+        }
+    }
+
+    func testPagedKVModelCapabilitiesDetectMoEFromConfigAndExpertIDPattern() {
+        let config = Data("""
+        {"model_type":"qwen3","architectures":["Qwen3ForCausalLM"],"num_experts":128}
+        """.utf8)
+        let metadata = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen-Expert-Test",
+            configJSONData: config
+        )
+        XCTAssertEqual(metadata.modelFamily, "qwen")
+        XCTAssertTrue(metadata.requiresMoEDispatch)
+
+        let patternFallback = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            configJSONData: Data("{}".utf8)
+        )
+        XCTAssertTrue(patternFallback.requiresMoEDispatch)
+
+        let dense = ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3-8B-4bit",
+            configJSONData: Data(#"{"model_type":"qwen3"}"#.utf8)
+        )
+        XCTAssertFalse(dense.requiresMoEDispatch)
+    }
+
+    func testPagedKVAttachedDecisionFailsClosedUntilRuntimeBridgeOwnsRequestReservation() throws {
+        let proof = PagedKVHardwareSizingProof(
+            modelID: "mlx-community/Qwen-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: "qwen",
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "b", count: 64),
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            blockSizeTokens: 32,
+            maxPhysicalBlocks: 64,
+            maxResidentTokens: 2048,
+            parityLabel: "sdpa-parity-v1"
+        )
+        let decision = PagedKVAttachGate.decide(
+            config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
+            runtimeCacheClass: "KVCacheSimple",
+            kvBits: nil,
+            modelID: proof.modelID,
+            modelSHA256: proof.modelSHA256,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            gates: PagedKVGates(
+                identityAvailable: true,
+                observedHardwareClass: proof.hardwareClass,
+                metallibAvailable: true,
+                kernelRegistered: true,
+                parityEstablished: true,
+                hardwareSizingProof: proof,
+                observedMetallibSHA256: proof.metallibSHA256,
+                observedKernelIdentifier: proof.kernelIdentifier,
+                observedParityLabel: proof.parityLabel,
+                engineBridgeAvailable: true
+            )
+        )
+        XCTAssertNotNil(decision.descriptor)
+        XCTAssertThrowsError(try ModelRuntime.enforcePagedKVPreflight(decision)) { error in
+            XCTAssertEqual((error as? APIError)?.status, 503)
+            XCTAssertEqual((error as? APIError)?.code, "internal_error")
+        }
+    }
+
     func testMaxContextPreflightRejectsZero() throws {
         var config = AppConfig.defaults()
         config.maxContextOverride = 0
@@ -189,6 +349,68 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
         let observed = await runtime.kvBitsOverrideForTest()
         XCTAssertNil(observed)
+    }
+
+    func testRuntimeKeepsPagedKVInertWhenGatesAreClosed() async throws {
+        let runtime = ModelRuntime(
+            modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            modelHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            pagedKVConfig: PagedKVConfig(enabled: true),
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let decision = await runtime.pagedKVDecisionForTest()
+        XCTAssertEqual(decision, .fallback(.metallib))
+    }
+
+    func testRuntimeStrictPagedKVRejectsBeforeCompletionRuns() async throws {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            modelHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            pagedKVConfig: PagedKVConfig(enabled: true, fallbackPolicy: .strict),
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected },
+            testCompletion: { _, _ in
+                XCTFail("strict paged KV rejection must happen before inference")
+                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+        let request = try Self.request(model: "fixture-model")
+        do {
+            _ = try await runtime.complete(request)
+            XCTFail("expected paged KV strict preflight rejection")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 503)
+            XCTAssertEqual(error.code, "internal_error")
+            XCTAssertFalse(error.message.localizedCaseInsensitiveContains("paged"))
+            XCTAssertFalse(error.message.localizedCaseInsensitiveContains("kv"))
+        }
+    }
+
+    func testRuntimeStrictPagedKVRejectsDuringStreamingPreflight() async throws {
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            modelHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            pagedKVConfig: PagedKVConfig(enabled: true, fallbackPolicy: .strict),
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected },
+            testCompletion: { _, _ in
+                CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+        let request = try Self.request(model: "fixture-model", stream: true)
+        let handle = try await runtime.acquireRequestHandle(request)
+        do {
+            try await runtime.preflight(request, with: handle)
+            await runtime.unregisterInFlight(handle.registrationID)
+            XCTFail("expected paged KV strict preflight rejection")
+        } catch let error as APIError {
+            await runtime.unregisterInFlight(handle.registrationID)
+            XCTAssertEqual(error.status, 503)
+            XCTAssertEqual(error.code, "internal_error")
+            XCTAssertFalse(error.message.localizedCaseInsensitiveContains("paged"))
+            XCTAssertFalse(error.message.localizedCaseInsensitiveContains("kv"))
+        }
     }
 
     func testRuntimeReceivesMaxBatch() async throws {
@@ -239,6 +461,16 @@ final class ServingKnobsConfigTests: XCTestCase {
 
     func testValidatePromptTokenCountAcceptsAtBoundary() throws {
         XCTAssertNoThrow(try ModelRuntime.validatePromptTokenCount(4096, maxContextTokens: 4096))
+    }
+
+    private static func request(model: String, stream: Bool = false) throws -> ChatCompletionRequest {
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [["role": "user", "content": "Say hi"]],
+            "max_tokens": 1,
+            "stream": stream,
+        ]
+        return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
     }
 }
 

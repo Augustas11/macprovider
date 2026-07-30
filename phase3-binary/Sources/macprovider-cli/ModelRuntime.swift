@@ -19,6 +19,7 @@ protocol ModelRuntimeServing: Actor {
     func completeWithServedSnapshot(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot)
     func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (StreamChunk) -> Void) async throws -> CompletionResult
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
+    func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
@@ -170,6 +171,10 @@ private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
 }
 
 extension ModelRuntimeServing {
+    func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try await preflight(request, with: handle)
+    }
+
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: nil, modelHash: nil)
     }
@@ -245,6 +250,11 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         }
         return draftTargetModelID == modelID
     }
+}
+
+struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
+    let modelFamily: String
+    let requiresMoEDispatch: Bool
 }
 
 public struct RequestHandle: @unchecked Sendable {
@@ -420,6 +430,8 @@ actor ModelRuntime: ModelRuntimeServing {
     // pre-knob behavior; lifting above 1 widens the autotune search.
     private let kvBitsOverride: Int?
     private let prefillStepSize: Int
+    private let pagedKVConfig: PagedKVConfig
+    private var pagedKVAttachDecision: PagedKVAttachDecision
     private let conversationCache: ConversationCache
     /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
@@ -510,6 +522,188 @@ actor ModelRuntime: ModelRuntimeServing {
         model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: eligible))
     }
 
+    nonisolated static func pagedKVAttachDecision(
+        config: PagedKVConfig,
+        modelID: String?,
+        modelHash: String?,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        kvBitsOverride: Int?,
+        runtimeCacheClass: String,
+        gates: PagedKVGates,
+        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil
+    ) -> PagedKVAttachDecision {
+        let capabilities = modelCapabilities ?? Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
+        return PagedKVAttachGate.decide(
+            config: config,
+            runtimeCacheClass: runtimeCacheClass,
+            kvBits: kvBitsOverride,
+            modelID: modelID ?? "",
+            modelSHA256: modelHash ?? "",
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            modelFamily: capabilities.modelFamily,
+            requiresMoEDispatch: capabilities.requiresMoEDispatch,
+            gates: modelHash?.isEmpty == false ? gates : .closed
+        )
+    }
+
+    private nonisolated static func pagedKVRuntimeCapabilityDecision(
+        config: PagedKVConfig,
+        modelID: String?,
+        modelHash: String?,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        kvBitsOverride: Int?,
+        runtimeCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil
+    ) -> PagedKVAttachDecision {
+        let cacheClassForDecision = runtimeCacheClass == Self.pagedKVUnavailableCacheClass
+            ? PagedKVAttachGate.allowedCacheClasses[0]
+            : runtimeCacheClass
+        return pagedKVAttachDecision(
+            config: config,
+            modelID: modelID,
+            modelHash: modelHash,
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: cacheClassForDecision,
+            gates: .runtimeClosed(identityAvailable: modelHash?.isEmpty == false),
+            modelCapabilities: modelCapabilities
+        )
+    }
+
+    private static let pagedKVUnavailableCacheClass = "unavailable"
+
+    private static func pagedKVRuntimeCacheClass(
+        container: ModelContainer?,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?,
+        prefillStepSize: Int
+    ) async -> String {
+        guard let container else { return Self.pagedKVUnavailableCacheClass }
+        do {
+            return try await container.perform { context in
+                let parameters = Self.makeServeGenerateParameters(
+                    maxTokens: 1,
+                    maxContextTokens: maxContextTokens,
+                    kvBitsOverride: kvBitsOverride,
+                    prefillStepSize: prefillStepSize,
+                    temperature: 0.0,
+                    topP: 1.0
+                )
+                return Self.pagedKVRuntimeCacheClass(model: context.model, baseParameters: parameters)
+            }
+        } catch {
+            return Self.pagedKVUnavailableCacheClass
+        }
+    }
+
+    nonisolated static func pagedKVRuntimeCacheClass(model: any LanguageModel, baseParameters: GenerateParameters) -> String {
+        let caches = model.newCache(parameters: baseParameters)
+        guard let first = caches.first else { return "empty" }
+        let firstClass = String(describing: type(of: first))
+        guard caches.allSatisfy({ String(describing: type(of: $0)) == firstClass }) else {
+            return "mixed"
+        }
+        return firstClass
+    }
+
+    nonisolated static func pagedKVModelFamily(_ modelID: String?) -> String {
+        let lower = modelID?.lowercased() ?? ""
+        if lower.contains("qwen") { return "qwen" }
+        if lower.contains("llama") { return "llama" }
+        return "unknown"
+    }
+
+    nonisolated static func pagedKVModelCapabilities(
+        modelID: String?,
+        configJSONData: Data?
+    ) -> PagedKVRuntimeModelCapabilities {
+        PagedKVRuntimeModelCapabilities(
+            modelFamily: Self.pagedKVModelFamily(modelID),
+            requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
+                || Self.pagedKVModelIDLooksLikeExpertModel(modelID)
+        )
+    }
+
+    private static func pagedKVModelCapabilities(
+        modelID: String?,
+        directory: URL
+    ) -> PagedKVRuntimeModelCapabilities {
+        let configData = try? Data(contentsOf: directory.appendingPathComponent("config.json"))
+        return Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: configData)
+    }
+
+    private nonisolated static func pagedKVConfigRequiresMoE(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        var labels: [String] = []
+        if let modelType = object["model_type"] as? String { labels.append(modelType) }
+        if let architectures = object["architectures"] as? [String] { labels.append(contentsOf: architectures) }
+        if labels.contains(where: { $0.localizedCaseInsensitiveContains("moe") }) {
+            return true
+        }
+        let expertKeys = [
+            "num_experts",
+            "n_routed_experts",
+            "num_local_experts",
+            "num_experts_per_tok",
+            "moe_intermediate_size",
+        ]
+        return expertKeys.contains { key in
+            if let value = object[key] as? Int { return value > 1 }
+            if let value = object[key] as? NSNumber { return value.intValue > 1 }
+            return false
+        }
+    }
+
+    private nonisolated static func pagedKVModelIDLooksLikeExpertModel(_ modelID: String?) -> Bool {
+        guard let modelID else { return false }
+        let lower = modelID.lowercased()
+        if lower.contains("mixtral") || lower.contains("moe") { return true }
+        return lower.range(of: #"(^|[-_/])a[0-9]+b($|[-_/])"#, options: .regularExpression) != nil
+    }
+
+    nonisolated static func logPagedKVAttachDecision(_ decision: PagedKVAttachDecision) {
+        switch decision {
+        case .disabled, .attached:
+            return
+        case .fallback(let reason):
+            FileHandle.standardError.write(Data(("event=paged_kv_attach status=fallback reason=\(reason.rawValue)\n").utf8))
+        case .rejected(let reason):
+            FileHandle.standardError.write(Data(("event=paged_kv_attach status=rejected reason=\(reason.rawValue)\n").utf8))
+        }
+    }
+
+    nonisolated static func enforcePagedKVPreflight(_ decision: PagedKVAttachDecision) throws {
+        if case .attached = decision {
+            // This IMPL installs the default-off contract and attach gate only. Serving
+            // still requires a runtime owner that reserves a request lease, injects
+            // PagedKVCache, and releases/retains the handle around TokenIterator.
+            throw APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "internal_error",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        }
+        if case .rejected = decision {
+            throw APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "internal_error",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        }
+    }
+
     private nonisolated static func harmonyTerminalPreservingContext(
         from context: ModelContext,
         modelID: String
@@ -545,6 +739,7 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
+        pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
@@ -567,6 +762,16 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
+        self.pagedKVConfig = pagedKVConfig
+        self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+            config: pagedKVConfig,
+            modelID: modelID,
+            modelHash: verifiedModelArtifactSHA256,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: Self.pagedKVUnavailableCacheClass
+        )
         self.conversationCache = ConversationCache()
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
@@ -615,6 +820,26 @@ actor ModelRuntime: ModelRuntimeServing {
         let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
+        let runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
+            ? await Self.pagedKVRuntimeCacheClass(
+                container: container,
+                maxContextTokens: self.maxContextTokens,
+                kvBitsOverride: self.kvBitsOverride,
+                prefillStepSize: self.prefillStepSize
+            )
+            : Self.pagedKVUnavailableCacheClass
+        let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
+        self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+            config: self.pagedKVConfig,
+            modelID: modelID,
+            modelHash: self.currentModelHash,
+            tokenizerSHA256: tokenizerHashes.config,
+            chatTemplateSHA256: tokenizerHashes.template,
+            kvBitsOverride: self.kvBitsOverride,
+            runtimeCacheClass: runtimeCacheClass,
+            modelCapabilities: modelCapabilities
+        )
+        Self.logPagedKVAttachDecision(self.pagedKVAttachDecision)
 
         if let draftModelID = normalizedDraftModelID {
             let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: normalizedDraftModelLoadPath ?? draftModelID)
@@ -656,6 +881,7 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
+        pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
         warmSwapEnabled: Bool,
@@ -690,6 +916,16 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
+        self.pagedKVConfig = pagedKVConfig
+        self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+            config: pagedKVConfig,
+            modelID: modelID,
+            modelHash: modelHash,
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: Self.pagedKVUnavailableCacheClass
+        )
         self.conversationCache = ConversationCache()
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
@@ -786,6 +1022,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 let weightsManifestSHA256: String?
                 let tokenizerConfigSHA256: String?
                 let chatTemplateSHA256: String?
+                let modelCapabilities: PagedKVRuntimeModelCapabilities
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
                 let draftFailureReason: String?
@@ -798,6 +1035,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256 = nil
                     tokenizerConfigSHA256 = nil
                     chatTemplateSHA256 = nil
+                    modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
                     if let configuredDraftModelID {
                         do {
                             let loadedDraft = try await testLoader(configuredDraftModelID)
@@ -830,6 +1068,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
                     tokenizerConfigSHA256 = swapTokenizerHashes.config
                     chatTemplateSHA256 = swapTokenizerHashes.template
+                    modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
                     if let configuredDraftModelID {
                         do {
                             let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
@@ -885,7 +1124,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     chatTemplateSHA256: chatTemplateSHA256,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
-                    draftFailureReason: draftFailureReason
+                    draftFailureReason: draftFailureReason,
+                    modelCapabilities: modelCapabilities
                 )
             } catch {
                 await self.failSwap(reason: String(describing: error))
@@ -901,6 +1141,10 @@ actor ModelRuntime: ModelRuntimeServing {
     // suites can confirm CLI flag values reached the runtime.
     func kvBitsOverrideForTest() -> Int? {
         kvBitsOverride
+    }
+
+    func pagedKVDecisionForTest() -> PagedKVAttachDecision {
+        pagedKVAttachDecision
     }
 
     func maxBatchForTest() -> Int {
@@ -968,7 +1212,8 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: nil,
             draftModelID: nil,
             draftContainer: nil,
-            draftFailureReason: nil
+            draftFailureReason: nil,
+            modelCapabilities: Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
         )
     }
 
@@ -982,7 +1227,8 @@ actor ModelRuntime: ModelRuntimeServing {
         chatTemplateSHA256: String?,
         draftModelID: String?,
         draftContainer: ModelContainer?,
-        draftFailureReason: String?
+        draftFailureReason: String?,
+        modelCapabilities: PagedKVRuntimeModelCapabilities
     ) async {
         let target = targetModelID ?? modelID
         currentContainer = container
@@ -992,6 +1238,25 @@ actor ModelRuntime: ModelRuntimeServing {
         currentWeightsManifestSHA256 = weightsManifestSHA256
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
+        let runtimeCacheClass = pagedKVConfig.effectiveEnabled
+            ? await Self.pagedKVRuntimeCacheClass(
+                container: container,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize
+            )
+            : Self.pagedKVUnavailableCacheClass
+        pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+            config: pagedKVConfig,
+            modelID: modelID,
+            modelHash: modelHash,
+            tokenizerSHA256: tokenizerConfigSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: runtimeCacheClass,
+            modelCapabilities: modelCapabilities
+        )
+        Self.logPagedKVAttachDecision(pagedKVAttachDecision)
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
         currentDraftContainer = draftContainer
@@ -1135,6 +1400,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
@@ -1154,6 +1420,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
         }
+    }
+
+    func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        try handle.drainCancelled.check()
     }
 
     func complete(
@@ -1296,6 +1567,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let completionStartedAt = Date()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
         if let testSpeculativeCompletion,
            Self.speculativeRoute(
@@ -1676,6 +1948,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         if let testSpeculativeStream,
