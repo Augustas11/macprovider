@@ -1,16 +1,17 @@
 # Handoff — Ship #816 server-side fixes (coordinator + gateway), park the CLI fix, then re-test 30B on Goose
 
-**Created:** 2026-07-30 · **Tracking issue:** https://github.com/Augustas11/macprovider/issues/816
+**Created:** 2026-07-30 · **Umbrella issue:** https://github.com/Augustas11/macprovider/issues/816
+**Sub-issues (sequenced):** #817 coordinator (do 1st) · #818 gateway (do 2nd) · #819 provider-cli (deferred)
 
 ## Mission (in order)
 Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B) gets evicted from buyer routing **while it is actively and successfully decoding**: the provider's heartbeat is starved by inference running on Swift's cooperative concurrency pool, so the coordinator's staleness gate drops a provably-alive provider. Buyers see intermittent `503 no_provider_available`; streaming clients (Goose) also trip the gateway's `decode_idle` deadline.
 
 #816 lists three fixes. **This session ships the two server-side ones** (no fleet CLI release needed), deploys them to Pearl, parks the provider-CLI fix, then re-tests the 30B on Goose.
 
-1. **Fix #2 — coordinator** (`phase4-coordinator`, Go): treat an in-flight request as implicit liveness — do NOT evict a provider on stale heartbeat while it has an active request on a slot.
-2. **Fix #3 — gateway** (`phase5-gateway`, Go): make the `decode_idle` stream deadline adaptive to the model's expected tok/s instead of a flat timeout.
-3. **Release + deploy** both to Pearl (server-side; no CLI version, no fleet auto-update).
-4. **Park #816** for fix #1 (provider CLI) — comment that #2/#3 shipped and #1 is deferred to the next `macprovider-cli` release.
+1. **#817 — coordinator** (`phase4-coordinator`, Go): treat an in-flight request as implicit liveness — do NOT evict a provider on stale heartbeat while it has an active request on a slot.
+2. **#818 — gateway** (`phase5-gateway`, Go): make the `decode_idle` stream deadline adaptive to the model's expected tok/s instead of a flat timeout.
+3. **Release + deploy** both to Pearl (server-side; no CLI version, no fleet auto-update); close #817 and #818.
+4. **Park #819** (provider CLI, fix #1) — the root-cause fix, deferred to the next `macprovider-cli` release. Leave #816 (umbrella) + #819 open.
 5. **Re-test the 30B on Goose** end-to-end.
 
 ## Ground rules (this repo — see CLAUDE.md)
@@ -45,8 +46,8 @@ Issue **#816** documents why a large/slow single-slot provider (Qwen3-Coder-30B)
 - One PR per service (or bundled if deploy is coupled), governance declarations filled, audits clean, `ci-required` green + approval, squash-merge.
 - Deploy new coordinator + gateway to Pearl. **Verify on Pearl:** services active, healthz OK, and the two behaviors above (busy provider not evicted; no false `decode_idle`).
 
-## Park #816
-Comment on #816: fixes **#2 (coordinator)** and **#3 (gateway)** shipped in `<PR links>` and deployed to Pearl on `<date>`; **fix #1 (provider `macprovider-cli`** — move inference off the cooperative pool, `ModelRuntime.swift:779`) is **DEFERRED** to the next CLI release (build → notarize → fleet auto-update). Leave #816 open, labeled for the CLI fix.
+## Park the CLI fix (#819)
+Close **#817** and **#818** when their PRs merge + deploy to Pearl (reference the PR links + deploy date). Comment on the umbrella **#816** that both server-side fixes shipped and **#819 (provider `macprovider-cli`** — move inference off the cooperative pool, `ModelRuntime.swift:779`) is **DEFERRED** to the next CLI release (build → notarize → fleet auto-update). Leave **#816** and **#819** open.
 
 ## Then: re-test 30B on Goose
 Goose is installed (`/opt/homebrew/bin/goose`), config at `~/.config/goose/config.yaml` (provider `openai`, `OPENAI_HOST: https://api.streamvc.live`, `GOOSE_MODEL: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`). Buyer key: `~/.config/macprovider/buyer-api-key` (never print it).
