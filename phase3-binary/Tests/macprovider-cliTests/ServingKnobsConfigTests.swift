@@ -147,16 +147,19 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.pagedKV.errors.count, 1)
     }
 
-    func testPagedKVInvalidTopLevelShapeDoesNotOverrideEnvironmentOrCLI() throws {
+    func testPagedKVInvalidTopLevelShapeAlwaysDisablesEvenWithEnvironmentOrCLI() throws {
+        // A malformed `paged_kv:` block (scalar/list where a map is required) is a config
+        // SHAPE error: it must never be silently dropped. It always surfaces the warning and
+        // fails closed (paged disabled), regardless of any env or CLI enable override.
         let envConfig = try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: ["MACPROVIDER_PAGED_KV_ENABLED": "true"],
             fileExists: { _ in true },
             readFile: { _ in "paged_kv: true\n" }
         )
-        XCTAssertTrue(envConfig.pagedKV.enabled)
-        XCTAssertTrue(envConfig.pagedKV.effectiveEnabled)
-        XCTAssertTrue(envConfig.pagedKV.errors.isEmpty)
+        XCTAssertFalse(envConfig.pagedKV.enabled)
+        XCTAssertFalse(envConfig.pagedKV.effectiveEnabled)
+        XCTAssertEqual(envConfig.pagedKV.errors.count, 1)
 
         let cliConfig = try ConfigLoader.load(
             cli: CLIOverrides(pagedKV: PagedKVCLIOverrides(enabled: true)),
@@ -164,9 +167,9 @@ final class ServingKnobsConfigTests: XCTestCase {
             fileExists: { _ in true },
             readFile: { _ in "paged_kv: true\n" }
         )
-        XCTAssertTrue(cliConfig.pagedKV.enabled)
-        XCTAssertTrue(cliConfig.pagedKV.effectiveEnabled)
-        XCTAssertTrue(cliConfig.pagedKV.errors.isEmpty)
+        XCTAssertFalse(cliConfig.pagedKV.enabled)
+        XCTAssertFalse(cliConfig.pagedKV.effectiveEnabled)
+        XCTAssertEqual(cliConfig.pagedKV.errors.count, 1)
     }
 
     // MARK: - --max-context

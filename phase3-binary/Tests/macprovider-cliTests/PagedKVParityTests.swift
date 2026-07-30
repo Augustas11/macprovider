@@ -110,6 +110,7 @@ final class PagedKVParityTests: XCTestCase {
     private struct ParityOutcome {
         let match: Bool
         let n: Int
+        let nLayers: Int
         let firstDiff: Int?
         let kernelCalls: Int
         let maxBlocks: Int
@@ -147,6 +148,7 @@ final class PagedKVParityTests: XCTestCase {
         return ParityOutcome(
             match: fd == nil && stock.count == paged.count,
             n: Self.nNew,
+            nLayers: nLayers,
             firstDiff: fd,
             kernelCalls: calls,
             maxBlocks: PagedKVCache.maxLogicalBlocksObserved,
@@ -166,8 +168,21 @@ final class PagedKVParityTests: XCTestCase {
             print("    paged: \(r.pagedText)")
         }
         XCTAssertTrue(r.match, "\(label) \(modelName): paged gather output diverged from stock at token \(String(describing: r.firstDiff))")
-        XCTAssertGreaterThan(r.kernelCalls, 0, "\(label): paged Metal gather kernel never executed")
-        XCTAssertGreaterThanOrEqual(r.maxBlocks, 2, "\(label): layout degenerate (< 2 blocks) — no boundary crossed")
+
+        // EXACT call-count identity (FR-PKV4): the real gather must run for EVERY layer at
+        // EVERY forward pass, over BOTH K and V — never bypassed for a single layer/step.
+        //   greedyGenerate performs exactly `nNew` forward passes (the loop runs nNew times:
+        //   one prefill pass over the prompt, then decode passes, nNew total). Each forward
+        //   pass drives `model(y, cache:)`, which calls `update()` once per layer (nLayers),
+        //   and each `update()` invokes `pagedGather` twice — once for keys, once for values.
+        //   Therefore gatherKernelCalls == nLayers * nNew * 2, an exact equality (e.g. the
+        //   28-layer Llama-3.2-3B over 40 passes → 28*40*2 = 2240).
+        let expectedCalls = r.nLayers * r.n * 2
+        XCTAssertEqual(
+            r.kernelCalls, expectedCalls,
+            "\(label): gather ran \(r.kernelCalls) times; expected exactly nLayers(\(r.nLayers)) * nNew(\(r.n)) * 2 = \(expectedCalls) — a per-layer/per-step/per-tensor gather"
+        )
+        XCTAssertGreaterThanOrEqual(r.maxBlocks, 3, "\(label): layout degenerate (< 3 blocks) — not a robust multi-block/boundary-crossing gather")
         XCTAssertTrue(r.nonIdentity, "\(label): physical permutation was identity — gather not meaningfully exercised")
     }
 

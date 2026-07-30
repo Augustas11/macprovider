@@ -489,6 +489,12 @@ public struct PagedKVMaterializedByteLayer: Equatable, Sendable {
     }
 }
 
+/// Neutral BYTE extraction only (FR-PKV10 scope honesty): this type carries logical-order
+/// K/V bytes reassembled from physical blocks. It is NOT the standalone contiguous
+/// `KVCache` handoff that SPEC-024 (cold-tier residency) and SPEC-038 (continuous batching)
+/// consume — reconstructing a live, injectable contiguous `KVCache` from these bytes is
+/// deferred to the runtime bridge. FR-PKV10 is therefore NOT yet complete as a full
+/// extraction contract; only the neutral byte-materialization primitive exists here.
 public struct PagedKVMaterializedByteCache: Equatable, Sendable {
     public let handle: PagedKVBlockTableHandle
     public let blockTable: PagedKVBlockTable
@@ -505,6 +511,9 @@ public struct PagedKVMaterializedByteCache: Equatable, Sendable {
     }
 }
 
+/// Neutral byte-extraction bridge only: yields `PagedKVMaterializedByteCache` bytes. The
+/// standalone contiguous `KVCache` handoff SPEC-024/SPEC-038 consume (FR-PKV10 as a full
+/// extraction contract) is deferred to the runtime bridge and is not provided here.
 public protocol PagedKVContiguousCacheBridge: Sendable {
     func materializeContiguousByteCache(
         handle: PagedKVBlockTableHandle,

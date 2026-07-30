@@ -105,9 +105,17 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        // Controlled handling for this inert seam: never abort the host process on
+        // malformed/out-of-contract input. Guard the invariants and return safely instead
+        // of `precondition`-crashing. The happy path (shape-consistent, within reserved
+        // capacity) is unchanged. NOTE: KERNEL-SIDE (Metal) index/bounds validation is a
+        // SEPARATE, still-REQUIRED before-runtime-enable gate item — these Swift-side guards
+        // do not substitute for in-shader bounds checks (see pagedGather()).
+        guard keys.ndim == 4, values.ndim == 4 else { return (keys, values) }
         let incomingTokens = keys.dim(2)
-        precondition(incomingTokens == values.dim(2), "PagedKVCache key/value sequence mismatch")
-        precondition(offset + incomingTokens <= maxResidentTokens, "PagedKVCache capacity exceeded")
+        guard incomingTokens == values.dim(2) else { return (keys, values) }
+        let (projectedOffset, offsetOverflow) = offset.addingReportingOverflow(incomingTokens)
+        guard !offsetOverflow, projectedOffset <= maxResidentTokens else { return (keys, values) }
 
         let mergedKeys = append(keys, to: keyBlocks)
         let mergedValues = append(values, to: valueBlocks)
@@ -128,15 +136,33 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// `PagedKVGatherKernel` via a block table. Forces genuine physical non-contiguity so
     /// the gather is exercised, not bypassed. Returns a tensor identical to the input.
     private func pagedGather(_ logical: MLXArray) -> MLXArray {
+        // Validate rank/dims and compute all shape/grid math with overflow-checked
+        // arithmetic BEFORE launching the kernel. Any invalid or overflowing configuration
+        // returns the logical tensor unchanged and does NOT launch the kernel.
+        //
+        // IMPORTANT: these are SWIFT-SIDE guards only. KERNEL-SIDE (Metal) bounds validation
+        // — clamping/rejecting out-of-range block_ids and physical_token indices inside the
+        // shader before any `physical[...]` read — remains a REQUIRED before-runtime-enable
+        // gate item and is intentionally NOT added in this inert (non-serving) merge; the
+        // kernel source is frozen here because the seam regression test pins it.
         let blockSize = descriptor.blockSizeTokens
+        guard logical.ndim == 4 else { return logical }
         let H = logical.dim(1)
         let S = logical.dim(2)
         let D = logical.dim(3)
-        guard blockSize > 0, S > 0 else { return logical }
+        guard blockSize > 0, H > 0, S > 0, D > 0 else { return logical }
 
         let nBlocks = (S + blockSize - 1) / blockSize
-        let sPad = nBlocks * blockSize
-        let tokenStride = H * D
+        let (sPad, sPadOverflow) = nBlocks.multipliedReportingOverflow(by: blockSize)
+        guard !sPadOverflow else { return logical }
+        let (tokenStride, strideOverflow) = H.multipliedReportingOverflow(by: D)
+        guard !strideOverflow, tokenStride > 0 else { return logical }
+        // Grid size the kernel will launch (materialize uses logicalTokens * tokenStride);
+        // reject before launch if it overflows Int.
+        let (gridCount, gridOverflow) = S.multipliedReportingOverflow(by: tokenStride)
+        guard !gridOverflow, gridCount > 0 else { return logical }
+        // Physical buffer element count must also be representable.
+        guard case (_, false) = sPad.multipliedReportingOverflow(by: tokenStride) else { return logical }
 
         // [1, H, S, D] -> token-major [S, H*D]
         var tokenMajor = logical.reshaped([H, S, D]).transposed(1, 0, 2).reshaped([S, tokenStride])
@@ -152,8 +178,11 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             .reshaped([nBlocks, blockSize, tokenStride])
             .take(physOrder, axis: 0)
             .reshaped([sPad, tokenStride])
-        // block_ids[logicalBlock] = physical slot holding it = nBlocks-1-logicalBlock.
-        let blockIDs = MLXArray((0 ..< nBlocks).map { Int32(nBlocks - 1 - $0) })
+        // block_ids[logicalBlock] = physical slot holding it = nBlocks-1-logicalBlock. By
+        // construction every id is in [0, nBlocks); assert the invariant before launch.
+        let blockIDValues = (0 ..< nBlocks).map { Int32(nBlocks - 1 - $0) }
+        guard blockIDValues.allSatisfy({ $0 >= 0 && $0 < Int32(nBlocks) }) else { return logical }
+        let blockIDs = MLXArray(blockIDValues)
 
         let kernel: MLXFast.MLXFastKernel
         if let existing = registeredKernel {
@@ -190,14 +219,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             return [keys, values]
         }
         set {
-            guard newValue.count == 2 else {
-                fatalError("PagedKVCache state must have exactly 2 arrays (keys, values)")
-            }
+            // Controlled handling (inert seam): ignore malformed state assignments rather
+            // than aborting the process. A well-formed [keys, values] pair with matching
+            // sequence length is required; anything else is a no-op.
+            guard newValue.count == 2 else { return }
             let keys = newValue[0]
             let values = newValue[1]
-            guard keys.dim(2) == values.dim(2) else {
-                fatalError("PagedKVCache key/value state sequence mismatch")
-            }
+            guard keys.ndim == 4, values.ndim == 4, keys.dim(2) == values.dim(2) else { return }
             offset = keys.dim(2)
             keyBlocks = splitIntoBlocks(keys)
             valueBlocks = splitIntoBlocks(values)
@@ -214,9 +242,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             ]
         }
         set {
-            guard newValue.first == "macprovider_paged_kv_v1" else {
-                fatalError("PagedKVCache meta_state must be macprovider_paged_kv_v1")
-            }
+            // Controlled handling (inert seam): a mismatched meta_state marker is ignored
+            // rather than aborting the process. The stored metadata is derived from the
+            // descriptor/binding, so there is nothing to mutate on a valid marker either.
+            guard newValue.first == "macprovider_paged_kv_v1" else { return }
         }
     }
 

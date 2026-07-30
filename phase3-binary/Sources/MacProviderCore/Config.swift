@@ -358,18 +358,11 @@ public enum ConfigLoader {
         }
         config.pagedKV = PagedKVConfigResolver.resolve(
             yaml: pagedYAML, environment: environment, cli: cli.pagedKV)
-        let pagedKVEnvironmentKeys: Set<String> = [
-            "MACPROVIDER_PAGED_KV_ENABLED",
-            "MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS",
-            "MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS",
-            "MACPROVIDER_PAGED_KV_FALLBACK_POLICY",
-        ]
-        let pagedKVEnvironmentPresent = environment.keys.contains { pagedKVEnvironmentKeys.contains($0) }
-        let pagedKVCLIPresent = cli.pagedKV.enabled != nil
-            || cli.pagedKV.blockSizeTokens != nil
-            || cli.pagedKV.maxPhysicalBlocks != nil
-            || cli.pagedKV.fallbackPolicy != nil
-        if pagedYAMLShapeError && !pagedKVEnvironmentPresent && !pagedKVCLIPresent {
+        // A malformed `paged_kv:` block (scalar/list where a map is required) is a config
+        // shape error that must NEVER be silently dropped: always surface the warning and
+        // fail closed by disabling paged mode, regardless of any env/CLI override presence.
+        // (Env/CLI precedence still governs the well-formed-map case via the resolver above.)
+        if pagedYAMLShapeError {
             config.pagedKV.enabled = false
             config.pagedKV.errors.append("invalid paged_kv=<redacted>; expected map; paged_kv disabled")
         }
