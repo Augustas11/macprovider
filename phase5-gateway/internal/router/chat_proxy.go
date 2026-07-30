@@ -76,6 +76,8 @@ const (
 	legacySettlementPolicyVersion     = "spec022-prereq-v0"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
+	decodeIdleSlowModelProgressTokens = 5
+	decodeIdleSlowModelMax            = 60 * time.Second
 )
 
 var errStreamingIdleTimeout = errors.New("streaming upstream idle timeout")
@@ -563,7 +565,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, model, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, window)
@@ -865,7 +867,7 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	upstreamCtx := deadlines.Context()
 	cancelUpstream := deadlines.Cancel
 	if resp.StatusCode == http.StatusServiceUnavailable {
@@ -958,7 +960,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// keeps the socket warm with role-only or usage-only frames no longer
 	// holds the stream open forever. A zero deadline preserves the legacy
 	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
-	idleTimeout := s.cfg.StreamingIdleTimeout()
+	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
 	progressDeadline := streamingProgressDeadline(idleTimeout)
 	var emitted int64
 	var serializedEmitted int64
@@ -1248,7 +1250,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if errors.Is(err, errStreamingIdleTimeout) {
 			slog.Warn("streaming coordinator idle timeout",
 				"request_id", requestID(r),
-				"timeout_ms", s.cfg.Timeouts.StreamingIdleMS,
+				"timeout_ms", idleTimeout.Milliseconds(),
 				"deadline_phase", deadlineReasonDecodeIdle,
 			)
 			deadlines.noteReason(deadlineReasonDecodeIdle)
@@ -1360,6 +1362,40 @@ func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 		return time.Time{}
 	}
 	return time.Now().Add(idleTimeout)
+}
+
+func adaptiveDecodeIdleTimeout(model string, cfg config.Config) time.Duration {
+	base := cfg.StreamingIdleTimeout()
+	if base <= 0 {
+		return base
+	}
+	expectedTPS, ok := expectedDecodeTokensPerSecond(model)
+	if !ok || expectedTPS <= 0 {
+		return base
+	}
+	perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
+	adaptive := perToken * decodeIdleSlowModelProgressTokens
+	if adaptive > decodeIdleSlowModelMax {
+		adaptive = decodeIdleSlowModelMax
+	}
+	if adaptive > base {
+		return adaptive
+	}
+	return base
+}
+
+func expectedDecodeTokensPerSecond(model string) (float64, bool) {
+	name := strings.ToLower(model)
+	switch {
+	case strings.Contains(name, "70b"), strings.Contains(name, "72b"):
+		return 0.17, true
+	case strings.Contains(name, "30b"), strings.Contains(name, "32b"):
+		return 0.25, true
+	case strings.Contains(name, "20b"), strings.Contains(name, "22b"), strings.Contains(name, "24b"):
+		return 0.5, true
+	default:
+		return 0, false
+	}
 }
 
 // readStreamingLineWithIdleTimeout reads one SSE line, giving up at deadline.
