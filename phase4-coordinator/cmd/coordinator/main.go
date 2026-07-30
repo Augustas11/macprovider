@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
 	"github.com/augstar/macprovider-coordinator/internal/mdm"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
+	"github.com/augstar/macprovider-coordinator/internal/payout"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
 	"github.com/augstar/macprovider-coordinator/internal/providerevents"
@@ -881,8 +883,64 @@ func main() {
 			OperatorKeys: cfg.Auth.OperatorKeys,
 		}))
 	}
+
+	// SPEC-016 §4.1 — wire the payout package. Migrations + asserts
+	// run unconditionally so a future flip of payout.enabled does
+	// not require a schema migration window; the §3.3 handler is
+	// only mounted on the listener when payout.enabled is true.
+	// Adapt billingStore to the payout.PayoutClaimer interface — the
+	// concrete ClaimPayoutReady method satisfies it without modification.
+	payoutAddresses, payoutMuxHandler, payoutS2, err := setupPayout(context.Background(), reqLogStore.DB(), cfg, tokenStore, billingStore, billingHandler, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "payout: %v\n", err)
+		os.Exit(1)
+	}
+	_ = payoutAddresses // satisfies billing.PayoutAddressReader (used by Step 4 reconcile)
 	if cfg.Auth.RequireProviderTokens {
-		providerMux.Handle("/providers/", billingHandler)
+		if payoutMuxHandler != nil {
+			// Mount payout mux at BOTH /providers/ (for §3.3) and
+			// /admin/payout/ (for §4.6 abandon + §4.2 run-now).
+			// Per architect r1 [arch:3.2]: a single /providers/ mount
+			// makes /admin/payout/* unreachable; mounting at both
+			// roots lets chi route to the right handler.
+			providerMux.Handle("/providers/", payoutMuxHandler)
+			providerMux.Handle("/admin/payout/", payoutMuxHandler)
+		} else {
+			providerMux.Handle("/providers/", billingHandler)
+		}
+	}
+	// Start the runner lifecycle if Step 2 is wired.
+	if payoutS2 != nil {
+		payoutS2.runner.Start(shutdownCtx)
+		// Codex Step 3 r1 [arch:3.1] MAJOR closure: the poller
+		// owns its own lifecycle via Start/Stop; shutdownCtx is
+		// threaded into every poll cycle so a graceful shutdown
+		// interrupts mid-RPC instead of using context.Background().
+		payoutS2.reorg.Start(shutdownCtx)
+		// Step 3 §4.8a + §4.8c reaper.
+		if payoutS2.reaper != nil {
+			payoutS2.reaper.Start(shutdownCtx)
+		}
+		// Step 4 §7.4 chain-balance worker.
+		if payoutS2.chainWorker != nil {
+			payoutS2.chainWorker.Start(shutdownCtx)
+		}
+		// #165 R1 architect HIGH closure: drive the chronic-outage
+		// Evaluate on a window-internal cadence independent of the
+		// runner ticker. RunInterval can be up to 24h per §6.5 but
+		// the tracker window defaults to 10min, so per-cycle Evaluate
+		// would prune samples before observing them. Run() ticks at
+		// min(window/2, 1min).
+		if payoutS2.chronic != nil {
+			go payoutS2.chronic.Run(shutdownCtx)
+		}
+		// Step 4 §6.5 SIGHUP-only payout.tuning.* reload. Reading
+		// the YAML on SIGHUP MUST NOT touch payout.security.* (the
+		// loader is read-only on the security namespace); the
+		// TuningProvider.Reload helper applies bound re-enforcement
+		// AND emits payout_config_reloaded / payout_config_reload_rejected
+		// per SPEC §6.5.
+		go startPayoutSIGHUPListener(shutdownCtx, *configPath, *configOverlay, payoutS2.tuning, payoutS2.rpcs, logger)
 	}
 
 	// SPEC-017 v0.1.8 Step 3 — /v1/stats/* mux subtree. Mounts
@@ -1059,6 +1117,7 @@ func main() {
 	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
+	startPayoutNoncePruner(shutdownCtx, payoutAddresses, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -1084,6 +1143,15 @@ func main() {
 			}
 			logger.Info().Str("signal", sig.String()).Dur("timeout", timeout).Msg("coordinator shutdown requested")
 			stopBackground()
+			// Stop the payout runner BEFORE WS drain so any
+			// in-flight §4.3 cycle finishes cleanly and the lease
+			// is released (next process can re-acquire without
+			// waiting the stale window per §4.8b).
+			if payoutS2 != nil {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), timeout)
+				payoutS2.stop(stopCtx)
+				stopCancel()
+			}
 			wsServer.DrainAll("coordinator shutdown")
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
@@ -1500,6 +1568,607 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 	}()
 }
 
+// setupPayout runs SPEC-016 §4.1 / §4.8 / §4.8a startup
+// invariants — apply migrations, assert PRAGMAs and same-DB
+// pin, INSERT OR IGNORE the payout_runner_state row, bootstrap-
+// seed runtime_flags (gated by the three-table empty check),
+// assert trigger presence, and return an AddressesService
+// satisfying billing.PayoutAddressReader plus an http.Handler
+// for the §3.3 endpoint.
+//
+// When payout.enabled = false the migrations + asserts still
+// run (so the schema is ready) but the returned http.Handler
+// is nil and the runner does not start. This matches SPEC-016
+// §0 "design-only" disposition at v0.1.x.
+// payoutStep2 bundles the Step 2 components so main.go can run
+// the runner lifecycle alongside the existing shutdown ordering.
+// Step 3 extends it with the §4.8a + §4.7 reaper. Step 4 adds the
+// §7.4 chain-balance worker + §6.5 tuning provider for SIGHUP.
+type payoutStep2 struct {
+	runner      *payout.Runner
+	reorg       *payout.ReorgPoller
+	state       payout.LeaseState
+	reaper      *payout.Reaper               // Step 3 §4.8a + §4.8c outbox reaper
+	chainWorker *payout.ChainBalanceWorker   // Step 4 §7.4
+	tuning      *payout.TuningProvider       // Step 4 §6.5 SIGHUP-reloadable
+	rpcs        payout.TwoRPCs               // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
+	chronic     *payout.ChronicOutageTracker // #165 A2 — per-RPC sliding-window error tracker; Run() goroutine drives Evaluate
+	stop        func(context.Context)        // calls Stop on every component then Release
+}
+
+func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, claimer payout.PayoutClaimer, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, *payoutStep2, error) {
+	if db == nil {
+		return nil, nil, nil, fmt.Errorf("db is required")
+	}
+	if err := payout.Migrate(ctx, db); err != nil {
+		return nil, nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := payout.AssertPragmas(ctx, db); err != nil {
+		return nil, nil, nil, fmt.Errorf("assert pragmas: %w", err)
+	}
+	if err := payout.AssertSameDB(ctx, db); err != nil {
+		return nil, nil, nil, fmt.Errorf("assert same-db: %w", err)
+	}
+	now := time.Now().UTC()
+	if err := payout.InitRunnerStateRow(ctx, db, now); err != nil {
+		return nil, nil, nil, fmt.Errorf("init runner_state: %w", err)
+	}
+	if err := payout.BootstrapRuntimeFlags(ctx, db, now, logger); err != nil {
+		// payout_invariant_violation already emitted by
+		// BootstrapRuntimeFlags. HALT before listeners come up.
+		return nil, nil, nil, fmt.Errorf("bootstrap runtime_flags: %w", err)
+	}
+	if err := payout.AssertTriggersPresent(ctx, db); err != nil {
+		return nil, nil, nil, fmt.Errorf("assert triggers: %w", err)
+	}
+	if !cfg.Payout.Enabled {
+		logger.Info().Msg("payout pipeline disabled (payout.enabled=false); schema applied, handlers idle")
+		return nil, nil, nil, nil
+	}
+	sec, err := payout.LoadSecurityConfig(cfg.Payout.Security.HotWalletAddress)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load security config: %w", err)
+	}
+	// SPEC §3.3 + §6.3 co-residency / Linux-only invariant — assert
+	// BEFORE building any service so a misconfigured deployment
+	// fails fast at startup, not on the first request.
+	//
+	// FULL-r1 [full-arch:r1-1] MEDIUM closure: SPEC §6.3 requires
+	// "IMPL MUST refuse to start the runner on runtime.GOOS !=
+	// \"linux\"". Step 1 r2 convergence carried LinuxRequired=true
+	// as a Step 2 tightening; this flip lands it. The topology
+	// assertion is now the single startup authority for §6.3
+	// Linux-only refusal, not a downstream comment in signer.go.
+	if err := payout.AssertPayoutRuntimeTopology(payout.PayoutRuntimeTopology{
+		HandlerEnabled:         true,
+		RunnerCoResident:       true,
+		HotWalletAddressPinned: sec.HotWalletAddress,
+		LinuxRequired:          true,
+	}); err != nil {
+		return nil, nil, nil, fmt.Errorf("payout topology: %w", err)
+	}
+
+	// Load signer. Production path = LoadLocalFileSigner against
+	// the systemd-LoadCredential= KEK + the encrypted wallet file.
+	// Dev path requires explicit payout.security.dev_mode=true
+	// AND MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY env var.
+	signer, err := loadPayoutSigner(cfg.Payout, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load signer: %w", err)
+	}
+	if !strings.EqualFold(signer.FromAddress(), sec.HotWalletAddress) {
+		return nil, nil, nil, fmt.Errorf("signer address %s != payout.security.hot_wallet_address %s",
+			signer.FromAddress(), sec.HotWalletAddress)
+	}
+
+	if claimer == nil {
+		return nil, nil, nil, fmt.Errorf("payout: PayoutClaimer is required when payout.enabled=true (SPEC §4.3 step 8)")
+	}
+
+	// Step 4 §6.5 — SIGHUP-reloadable tuning provider. Built
+	// BEFORE the RPC clients so the live pin func() string closures
+	// can reference it. Step 4 r1 [code:r1-1]/[sec:r1-2]/[arch:4.2]
+	// convergent closure — accepting a SIGHUP reload without consumer
+	// plumbing was the original defect. Step 4 r2 [arch:r2-4.2] MAJOR
+	// closure: moved BEFORE NewHTTPRPCClient so the pin func reads the
+	// live snapshot at every TLS handshake rather than the startup value.
+	initialTuning := payout.TuningSnapshot{
+		AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
+		RunInterval:             cfg.Payout.Tuning.RunInterval,
+		RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
+		ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
+		MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
+		ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
+		LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
+		LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
+		RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
+		RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
+	}
+	tuningProvider, err := payout.NewTuningProvider(initialTuning, cfg.Payout.Security.PerDayCapUSDCBaseUnits, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("NewTuningProvider: %w", err)
+	}
+
+	// Two-RPC client + chain id assertion + cold-start nonce sync.
+	// SPKI pinning per SPEC §4.4 (Step 2 [arch:3.3] closure).
+	// Step 4 r2 [arch:r2-4.2] MAJOR closure: pin is now func() string
+	// reading the live TuningProvider snapshot so SIGHUP SPKI rotations
+	// take effect at the next TLS handshake (not just accepted and logged).
+	// #165 A2: chronic-outage tracker wraps both RPC clients so every
+	// JSON-RPC call records success/failure into a sliding-window
+	// detector. Runner evaluates per cycle and emits
+	// payout_rpc_chronic_outage PAGE if either RPC's per-label error
+	// rate crosses the threshold. Tracker uses SPEC defaults (10min
+	// window / 50% threshold / 10 minSamples / 10min PAGE cooldown).
+	chronicTracker := payout.NewChronicOutageTracker(logger, nil)
+	rpcs := payout.TwoRPCs{
+		Primary: payout.NewTrackingRPCClient(payout.NewHTTPRPCClient(
+			cfg.Payout.Security.RPCURLPrimary, "primary",
+			func() string { return tuningProvider.Snapshot().RPCURLPrimaryPinSPKI },
+			20*time.Second,
+		), chronicTracker),
+		Secondary: payout.NewTrackingRPCClient(payout.NewHTTPRPCClient(
+			cfg.Payout.Security.RPCURLSecondary, "secondary",
+			func() string { return tuningProvider.Snapshot().RPCURLSecondaryPinSPKI },
+			20*time.Second,
+		), chronicTracker),
+	}
+	rpcCtx, rpcCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer rpcCancel()
+	if err := rpcs.AssertChainID(rpcCtx, payout.BaseMainnetChainID); err != nil {
+		return nil, nil, nil, fmt.Errorf("RPC chain id: %w", err)
+	}
+	chosen, rpcA, rpcB, within, err := rpcs.ColdStartNonceSync(rpcCtx, sec.HotWalletAddress)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("nonce cold-start: %w", err)
+	}
+	// Capture the cold-start timestamp once so the log event and the
+	// cursor write share the same wall time.
+	coldStartTS := time.Now().UTC().Format(time.RFC3339Nano)
+	if within {
+		// Step 4 r5 [code:r5-3] MEDIUM closure: §7.1 line 3729
+		// requires ts_utc in payout_nonce_cold_start_within_tolerance.
+		logger.Warn().
+			Str("event", "payout_nonce_cold_start_within_tolerance").
+			Str("from_address", sec.HotWalletAddress).
+			Uint64("rpc_a_nonce", rpcA).
+			Uint64("rpc_b_nonce", rpcB).
+			Uint64("chosen_nonce", chosen).
+			Str("ts_utc", coldStartTS).
+			Send()
+	}
+	if err := payout.UpsertNonceCursor(ctx, db, sec.HotWalletAddress, chosen, rpcA, rpcB, coldStartTS); err != nil {
+		return nil, nil, nil, fmt.Errorf("UpsertNonceCursor: %w", err)
+	}
+
+	// Build address service first — needed before NewMuxStep2.
+	denyList, err := payout.NewDenyList(sec.HotWalletAddress)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("deny-list: %w", err)
+	}
+	pauseReader, err := payout.NewPauseReader(db)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("pause reader: %w", err)
+	}
+	svc, err := payout.NewAddressesService(db, sec, denyList, tokenStore, tokenStore, pauseReader, cfg.Payout.Tuning.AddressCoolingOffPeriod, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("addresses service: %w", err)
+	}
+	// Wire live tuning so address cooling-off reads at write time.
+	svc.Tuning = tuningProvider
+
+	// Acquire the lease IMMEDIATELY before runner construction.
+	state, _, err := payout.Acquire(ctx, db, cfg.Payout.Tuning.RunInterval, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Acquire lease: %w", err)
+	}
+
+	// Construct runner. Step 4 r1 closures:
+	//   - Tuning is wired so MaxRowsPerRun/ConfirmationBlocks/
+	//     LowBalance/LowNative reads come from the SIGHUP-reloadable
+	//     snapshot at the top of every cycle ([code:r1-1]/
+	//     [code:r1-2]/[arch:4.2]/[arch:4.3]/[sec:r1-2]/[sec:r1-3]).
+	//   - LowBalanceThreshold/LowNativeThreshold also passed as
+	//     static fields so a missing Tuning (test path) still has
+	//     a sane fallback.
+	//   - RunInterval is still captured here for the cadence ticker;
+	//     SIGHUP changes to run_interval require restart (documented
+	//     limitation per [arch:4.2]).
+	runner, err := payout.NewRunner(payout.RunnerOptions{
+		DB:                    db,
+		Security:              sec,
+		RPCs:                  rpcs,
+		Signer:                signer,
+		Claimer:               claimer,
+		Logger:                logger,
+		RunInterval:           cfg.Payout.Tuning.RunInterval,
+		MaxRowsPerRun:         cfg.Payout.Tuning.MaxRowsPerRun,
+		ConfirmationBlocks:    cfg.Payout.Tuning.ConfirmationBlocks,
+		PerPayoutCapBaseUnits: cfg.Payout.Security.PerPayoutCapUSDCBaseUnits,
+		PerDayCapBaseUnits:    cfg.Payout.Security.PerDayCapUSDCBaseUnits,
+		LowBalanceThreshold:   cfg.Payout.Tuning.LowBalanceThreshold,
+		LowNativeThreshold:    cfg.Payout.Tuning.LowNativeThreshold,
+		Tuning:                tuningProvider,
+		ChronicOutage:         chronicTracker,
+	}, state)
+	if err != nil {
+		// Release the lease on construction failure so the next
+		// process can acquire without waiting the stale window.
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewRunner: %w", err)
+	}
+
+	// Reorg poller is constructed and exposed via step2 for main.go
+	// to ticker. Per SPEC §4.7 it shares the same RPCs and the same
+	// lease — the runner cycle's heartbeat is the canonical liveness
+	// signal.
+	reorgPoller := &payout.ReorgPoller{
+		DB:          db,
+		RPCs:        rpcs,
+		HotWallet:   sec.HotWalletAddress,
+		PollWindow:  cfg.Payout.Tuning.ReorgPollWindow,
+		RunInterval: cfg.Payout.Tuning.RunInterval,
+		Tuning:      tuningProvider,
+		Logger:      logger,
+	}
+
+	// Build the Step 2 mux — replaces NewMux. The abandon service
+	// shares the same RPCs + signer + lease, and uses the runner's
+	// RunInterval as the IsLeaseActive window.
+	abandonSvc, err := payout.NewAbandonService(db, sec, rpcs, signer, cfg.Payout.Tuning.RunInterval, logger)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewAbandonService: %w", err)
+	}
+	// Step 3 services: §4.8a flag-write primitive, §6.4.1 pause/
+	// resume, §4.9 record-funding, §4.7 record-orphan, and the
+	// background reaper for the §4.8a + §4.8c outboxes.
+	flagWriter, err := payout.NewRuntimeFlagWriter(db, logger)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewRuntimeFlagWriter: %w", err)
+	}
+	pauseSvc, err := payout.NewPauseResumeService(payout.PauseResumeOptions{
+		Writer:      flagWriter,
+		MinInterval: cfg.Payout.Security.PauseResumeMinInterval,
+		Logger:      logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewPauseResumeService: %w", err)
+	}
+	fundingSvc, err := payout.NewFundingService(payout.FundingOptions{
+		DB:               db,
+		RPCs:             &rpcs,
+		HotWalletAddress: sec.HotWalletAddress,
+		USDCAddress:      payout.USDCContractAddressBase,
+		Actor:            "operator_key:coordinator",
+		Logger:           logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewFundingService: %w", err)
+	}
+	orphansSvc, err := payout.NewOrphansService(payout.OrphansOptions{
+		DB:     db,
+		Logger: logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewOrphansService: %w", err)
+	}
+	reaper, err := payout.NewReaper(payout.ReaperOptions{
+		DB:        db,
+		PauseSvc:  pauseSvc,
+		TickEvery: cfg.Payout.Tuning.RunInterval,
+		// §4.7 stale cutoff = 3 × run_interval. With Tuning wired,
+		// ReapOnce reads 3 × Tuning.Snapshot().RunInterval per
+		// cycle so SIGHUP changes land at the next tick (the ticker
+		// cadence itself remains captured until restart).
+		StaleAge: 3 * cfg.Payout.Tuning.RunInterval,
+		Tuning:   tuningProvider,
+		Logger:   logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewReaper: %w", err)
+	}
+
+	// Step 4 §7.4 — chain-balance worker. The haltRunner callback
+	// calls runner.RequestHalt to stop the next cycle from running;
+	// the in-flight broadcast (if any) still gets to complete since
+	// the halt flag is read at the TOP of the next RunOnce, not
+	// mid-cycle.
+	//
+	// Step 4 r1 [arch:4.1]/[sec:r1-1] convergent closure: the
+	// previous wiring emitted the PAGE but DID NOT actually halt
+	// the runner, so subsequent cycles continued after fake-funding
+	// detection. SPEC §7.4 says drift beyond tolerance MUST halt.
+	chainCfg := payout.ChainBalanceConfig{
+		Interval:      cfg.Payout.Security.ChainReconInterval,
+		ToleranceUSDC: cfg.Payout.Security.ChainReconToleranceUSDCBaseUnits,
+		HotWalletAddr: sec.HotWalletAddress,
+		USDCContract:  payout.USDCContractAddressBase,
+	}
+	chainWorker, err := payout.NewChainBalanceWorker(db, rpcs, chainCfg, func(reason string) {
+		// RequestHalt is idempotent and emits payout_runner_halted
+		// PAGE on the first invocation. Subsequent calls are no-ops
+		// preserving the first reason.
+		runner.RequestHalt(reason)
+	}, logger)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewChainBalanceWorker: %w", err)
+	}
+
+	// Step 4 §7.3 provider-token payouts read endpoint.
+	payoutsHandler, err := payout.NewPayoutsHandler(payout.PayoutsHandlerOptions{
+		DB:           db,
+		Tokens:       tokenStore,
+		RateLimitMin: 60, // mirror billing/earnings 60/min default
+		Logger:       logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewPayoutsHandler: %w", err)
+	}
+
+	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
+	// closure: shared RunNowController enforces run_now_min_interval
+	// rate-limit and emits payout_run_now_invoked on EVERY outcome.
+	// Uses the live tuningProvider so SIGHUP interval changes land at
+	// the next invocation without restart.
+	runNowCtrl, err := payout.NewRunNowController(
+		runner,
+		tuningProvider,
+		cfg.Payout.Tuning.RunNowMinInterval, // fallback when tuning nil
+		logger,
+	)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewRunNowController: %w", err)
+	}
+
+	mux, err := payout.NewMuxStep4(payout.Step4MuxOptions{
+		Step3MuxOptions: payout.Step3MuxOptions{
+			Step2MuxOptions: payout.Step2MuxOptions{
+				Addresses:   svc,
+				Abandon:     abandonSvc,
+				Runner:      runner,
+				RunNow:      runNowCtrl,
+				OperatorKey: cfg.Auth.OperatorKey,
+				Caps: payout.AbandonCaps{
+					CancelMaxTipMultiplier:      cfg.Payout.Security.CancelMaxTipMultiplier,
+					CancelMaxGasNativeWei:       cfg.Payout.Security.CancelMaxGasNativeWei,
+					CancelMaxGasNativeWeiPer24h: cfg.Payout.Security.CancelMaxGasNativeWeiPer24h,
+					AbandonRatePerHour:          cfg.Payout.Security.AbandonRatePerHour,
+				},
+				Fallback: billingFallback,
+			},
+			Pause:   pauseSvc,
+			Funding: fundingSvc,
+			Orphans: orphansSvc,
+			// SPEC §4.8a actor format: "operator_key:<key_id>". The
+			// raw key is not the id (it's a secret); use the prefix
+			// of its sha-derived label. For Step 3+ we use a stable
+			// non-secret label tied to the deployment.
+			Actor: "operator_key:coordinator",
+		},
+		Payouts: payoutsHandler,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("payout mux: %w", err)
+	}
+
+	logger.Info().
+		Str("hot_wallet_address", sec.HotWalletAddress).
+		Dur("address_cooling_off_period", cfg.Payout.Tuning.AddressCoolingOffPeriod).
+		Uint64("nonce_cursor", chosen).
+		Msg("payout pipeline enabled (Step 3: §3.3 handler + §4.3 runner + §4.6 abandon + §4.7 reorg/record-orphan + §4.9 record-funding + §6.4.1 pause/resume + §4.8a reaper)")
+
+	step2 := &payoutStep2{
+		runner:      runner,
+		reorg:       reorgPoller,
+		state:       state,
+		reaper:      reaper,
+		chainWorker: chainWorker,
+		tuning:      tuningProvider,
+		rpcs:        rpcs,
+		chronic:     chronicTracker,
+		stop: func(stopCtx context.Context) {
+			// Codex Step 3 r1 [arch:3.1] MAJOR closure: shutdown
+			// ordering is runner → poller → reaper → Release.
+			// Each Stop returns bool; we release the lease only
+			// when ALL THREE confirm clean exit. If any returned
+			// false the runner OR the poller may still be holding
+			// the chain-write critical section, and releasing the
+			// lease would let the next process Acquire mid-write.
+			//
+			// Codex round-2 [arch:3.1-r2] MEDIUM closure (Step 2):
+			// lease left to stale takeover (3 × run_interval) on
+			// timeout per SPEC §4.8b.
+			//
+			// Step 4 adds chainWorker.Stop — read-only RPC worker
+			// without lease implications, but we still want it to
+			// drain before the runner so a final balance reconcile
+			// gets a chance to fire on clean shutdown.
+			_ = chainWorker.Stop(stopCtx)
+			runnerClean := runner.Stop(stopCtx)
+			pollerClean := reorgPoller.Stop(stopCtx)
+			// Reaper has no lease to release but Stop must still
+			// complete; we don't gate Release on its bool because
+			// reaper.Stop hitting the timeout cannot corrupt
+			// chain state.
+			_ = reaper.Stop(stopCtx)
+			if runnerClean && pollerClean {
+				_ = payout.Release(stopCtx, db, state, logger)
+			} else {
+				logger.Warn().
+					Str("event", "payout_runner_lease_left_to_stale_out").
+					Str("holder_token_prefix", state.HolderToken[:8]).
+					Bool("runner_clean", runnerClean).
+					Bool("poller_clean", pollerClean).
+					Msg("payout shutdown timed out before runner+poller drained; lease left for stale takeover (SPEC §4.8b)")
+			}
+		},
+	}
+	return svc, mux, step2, nil
+}
+
+// loadPayoutSigner selects the wallet-load path per SPEC §6.3.
+//
+// Production path (cfg.Payout.Security.DevMode = false):
+//   - Resolve KEK from systemd CREDENTIALS_DIRECTORY (preferred)
+//     OR from MACPROVIDER_PAYOUT_WALLET_KEK env var.
+//   - LoadLocalFileSigner against the encrypted wallet file at
+//     cfg.Payout.Security.EncryptedWalletPath.
+//
+// Dev path (cfg.Payout.Security.DevMode = true):
+//   - Loads from MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY.
+//   - Logs a loud warning. Config-validate enforces that
+//     EncryptedWalletPath must be set in production mode; this
+//     function double-checks DevMode == true before honoring the
+//     env path so a misconfigured deploy can't silently downgrade
+//     to dev semantics. Closes codex round-1 [sec:2.3] HIGH.
+func loadPayoutSigner(cfg config.PayoutConfig, logger zerolog.Logger) (payout.Signer, error) {
+	if !cfg.Security.DevMode {
+		// Production path.
+		if cfg.Security.EncryptedWalletPath == "" {
+			return nil, fmt.Errorf("payout: encrypted_wallet_path required in production mode (SPEC §6.3)")
+		}
+		kek, err := resolvePayoutKEK()
+		if err != nil {
+			return nil, fmt.Errorf("payout: resolve KEK: %w", err)
+		}
+		// Codex round-2 [sec:r2-2.1] MEDIUM closure: zeroize KEK
+		// on ALL paths (success + error). The defer wipes the
+		// slice before returning from this function, so an error
+		// during LoadLocalFileSigner doesn't leave KEK material
+		// in heap longer than necessary.
+		defer func() {
+			for i := range kek {
+				kek[i] = 0
+			}
+		}()
+		signer, err := payout.LoadLocalFileSigner(payout.EncryptedWalletFile{
+			Path:      cfg.Security.EncryptedWalletPath,
+			OnDiskHex: cfg.Security.EncryptedWalletOnDiskHex,
+		}, kek)
+		if err != nil {
+			return nil, fmt.Errorf("payout: LoadLocalFileSigner: %w", err)
+		}
+		logger.Info().
+			Str("from_address", signer.FromAddress()).
+			Str("wallet_path", cfg.Security.EncryptedWalletPath).
+			Msg("payout signer loaded from encrypted wallet file (SPEC §6.3 production path)")
+		return signer, nil
+	}
+	// Dev path — explicit opt-in only.
+	rawHex := os.Getenv("MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY")
+	if rawHex == "" {
+		return nil, fmt.Errorf("payout: dev_mode=true but MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY not set")
+	}
+	raw, err := hexDecode(rawHex)
+	if err != nil {
+		return nil, fmt.Errorf("payout signer hex decode: %w", err)
+	}
+	// Codex round-2 [sec:r2-2.1] MEDIUM closure: zeroize the dev
+	// plaintext on all paths.
+	defer func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+	}()
+	signer, err := payout.NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("NewLocalFileSignerFromKey: %w", err)
+	}
+	logger.Warn().
+		Str("from_address", signer.FromAddress()).
+		Msg("PAYOUT SIGNER LOADED FROM DEV ENV VAR — payout.security.dev_mode=true — NOT FOR PRODUCTION (SPEC §6.3)")
+	return signer, nil
+}
+
+// resolvePayoutKEK reads the AES-256 KEK from systemd
+// LoadCredential= (preferred — directory in CREDENTIALS_DIRECTORY)
+// or from the MACPROVIDER_PAYOUT_WALLET_KEK env var (hex-encoded).
+// Returns exactly 32 bytes or an error.
+func resolvePayoutKEK() ([]byte, error) {
+	credDir := os.Getenv("CREDENTIALS_DIRECTORY")
+	if credDir != "" {
+		candidate := filepath.Join(credDir, "payout-wallet-kek")
+		if buf, err := os.ReadFile(candidate); err == nil {
+			// Accept both raw bytes (32 bytes) and hex (64 chars).
+			trimmed := strings.TrimSpace(string(buf))
+			if len(buf) == 32 {
+				return buf, nil
+			}
+			if decoded, decErr := hexDecode(trimmed); decErr == nil && len(decoded) == 32 {
+				return decoded, nil
+			}
+			return nil, fmt.Errorf("payout KEK at %s: unexpected format (want 32 bytes or 64 hex chars)", candidate)
+		}
+	}
+	envHex := os.Getenv("MACPROVIDER_PAYOUT_WALLET_KEK")
+	if envHex == "" {
+		return nil, fmt.Errorf("payout KEK not found: set systemd LoadCredential=payout-wallet-kek OR env MACPROVIDER_PAYOUT_WALLET_KEK (hex)")
+	}
+	decoded, err := hexDecode(strings.TrimSpace(envHex))
+	if err != nil {
+		return nil, fmt.Errorf("MACPROVIDER_PAYOUT_WALLET_KEK hex decode: %w", err)
+	}
+	if len(decoded) != 32 {
+		return nil, fmt.Errorf("MACPROVIDER_PAYOUT_WALLET_KEK must decode to 32 bytes (got %d)", len(decoded))
+	}
+	return decoded, nil
+}
+
+// hexDecode is the local shim for the signer-loading path.
+func hexDecode(s string) ([]byte, error) {
+	return hex.DecodeString(s)
+}
+
+// Codex Step 3 r1 [arch:3.1] MAJOR closure: the standalone
+// startPayoutReorgPoller helper that used to live here is
+// retired; the poller now owns its own Start/Stop lifecycle so
+// the shutdown closure can wait for it to drain alongside the
+// runner before the lease is released. See
+// internal/payout/reorg.go for the Start/Stop primitives.
+
+// startPayoutNoncePruner runs the SPEC §3.2 step 5 background
+// cleanup at a steady cadence. Runs every minute; the actual
+// retention is enforced inside PruneNonces against a fixed
+// 10-minute window. Lifecycle is bound to shutdownCtx.
+func startPayoutNoncePruner(ctx context.Context, svc *payout.AddressesService, logger zerolog.Logger) {
+	if svc == nil {
+		return
+	}
+	prune := func() {
+		n, err := svc.PruneNonces(context.Background())
+		if err != nil {
+			logger.Warn().Err(err).Msg("payout address-nonce prune failed")
+			return
+		}
+		if n > 0 {
+			logger.Debug().Int64("deleted", n).Msg("payout address-nonce pruned")
+		}
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
 func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              addr,
@@ -1654,7 +2323,12 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 }
 
 func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, billingStores ...*billing.Store) {
-	cfg, err := config.Load(configPath)
+	// SPEC-016 v0.1.23 §6.5: the general SIGHUP reload must not parse,
+	// env-resolve, or validate payout.security.*, and a payout.* key
+	// edited on disk must not reject a tier2/billing reload. Payout
+	// tuning has its own dedicated SIGHUP listener
+	// (startPayoutSIGHUPListener); this path never applies payout fields.
+	cfg, err := config.LoadForSIGHUPReload(configPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
@@ -1867,6 +2541,140 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 		return strings.TrimSpace(startup.String()) != strings.TrimSpace(next.String())
 	default:
 		return !reflect.DeepEqual(startup.Interface(), next.Interface())
+	}
+}
+
+// startPayoutSIGHUPListener installs a SIGHUP-only signal handler
+// for the §6.5 `payout.tuning.*` namespace. SPEC §6.5 normative:
+//
+//   - SIGHUP MUST be the ONLY trigger. fsnotify / runtime-debug
+//     endpoint / config-file-mtime-watch are FORBIDDEN.
+//   - Reload re-reads the YAML via config.LoadPayoutTuningOnly,
+//     captures the candidate snapshot, and calls TuningProvider.Reload
+//     — which re-runs the §6.5 bound matrix and either commits +
+//     PAGE-emits OR retains the live value + PAGE-emits-rejected.
+//   - Step 4 r1 [code:r1-3] MEDIUM closure: the security namespace is
+//     genuinely NOT parsed on this path. LoadPayoutTuningOnly only
+//     reads `payout.tuning.*` keys; it does NOT resolve env: sentinels
+//     for payout.security.*, does NOT call Validate on security fields,
+//     and will NOT reject a SIGHUP because a security key changed.
+//   - Step 4 r3 [sec:r3-1]/[arch:r3-4.2] closure: when an SPKI pin
+//     key is in the changed set, CloseIdleConnections is called on
+//     both RPC clients so the next RPC forces a fresh TLS handshake
+//     under the new pin instead of reusing a pooled connection that
+//     was verified under the old pin.
+func startPayoutSIGHUPListener(
+	ctx context.Context,
+	configPath string,
+	configOverlayPath string,
+	tuning *payout.TuningProvider,
+	rpcs payout.TwoRPCs,
+	log zerolog.Logger,
+) {
+	if tuning == nil {
+		return
+	}
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+	defer close(sigCh)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sigCh:
+			// Step 4 r1 [code:r1-3] MEDIUM closure: use tuning-only
+			// loader so payout.security.* is never parsed, resolved, or
+			// validated on the SIGHUP path.
+			t, err := config.LoadPayoutTuningOnly(configPath, configOverlayPath)
+			if err != nil {
+				// Step 4 r4 [code:r4-1]/[sec:r4-1] CONVERGENT MEDIUM closure:
+				// structured §7.1 fields on YAML-load failure path. Use sanitized
+				// literal "config_load_failed" for attempted_value — do NOT log raw
+				// YAML contents because the full coordinator file can contain
+				// secrets outside payout.tuning.
+				tsUTC := time.Now().UTC().Format(time.RFC3339Nano)
+				log.Error().Err(err).
+					Str("event", "payout_config_reload_rejected").
+					Str("key", "yaml_parse").
+					Str("attempted_value", "config_load_failed").
+					Str("bound", "valid payout.tuning YAML").
+					Str("actor", "operator_key:coordinator").
+					Str("ts_utc", tsUTC).
+					Str("severity", "PAGE").
+					Msg("payout tuning SIGHUP reload: LoadPayoutTuningOnly failed; live value retained")
+				continue
+			}
+			candidate := payout.TuningSnapshot{
+				AddressCoolingOffPeriod: t.AddressCoolingOffPeriod,
+				RunInterval:             t.RunInterval,
+				RunNowMinInterval:       t.RunNowMinInterval,
+				ConfirmationBlocks:      t.ConfirmationBlocks,
+				MaxRowsPerRun:           t.MaxRowsPerRun,
+				ReorgPollWindow:         t.ReorgPollWindow,
+				LowBalanceThreshold:     t.LowBalanceThreshold,
+				LowNativeThreshold:      t.LowNativeThreshold,
+				RPCURLPrimaryPinSPKI:    t.RPCURLPrimaryPinSPKI,
+				RPCURLSecondaryPinSPKI:  t.RPCURLSecondaryPinSPKI,
+			}
+			// Reload itself emits payout_config_reloaded /
+			// payout_config_reload_rejected per §7.1; we just
+			// surface the wrapper error for the runner log so
+			// operators see SIGHUP arrived.
+			changedKeys, reloadErr := tuning.Reload(ctx, candidate)
+			if reloadErr != nil {
+				log.Info().Err(reloadErr).
+					Str("event", "payout_tuning_sighup_received").
+					Msg("payout tuning SIGHUP processed (rejected; see payout_config_reload_rejected)")
+			} else {
+				log.Info().
+					Str("event", "payout_tuning_sighup_received").
+					Msg("payout tuning SIGHUP processed (accepted; see payout_config_reloaded)")
+				// Step 4 r3 [sec:r3-1]/[arch:r3-4.2] CONVERGENT HIGH/MEDIUM
+				// closure: drain idle TLS connections so the next RPC call
+				// forces a fresh handshake under the new SPKI pin. Without
+				// this, the 90s IdleConnTimeout can keep the old verified
+				// connection alive after operators believe the new pin is
+				// active. Called only on accepted reloads where the pin key
+				// actually changed; no-op for non-SPKI reload cycles.
+				// #165 R1/R2 code/arch HIGH+MEDIUM (convergent): assert
+				// on a CloseIdleConnections-shaped interface so the
+				// SPKI reload drain still fires through the chronic-
+				// outage TrackingRPCClient wrapper. Both
+				// *payout.HTTPRPCClient and *trackingRPC implement
+				// this method. The miss-branch logs at WARN so a
+				// future RPCClient implementation that lacks the
+				// method is operator-visible at SPKI rotation time
+				// (rather than silently failing to drain).
+				type idleCloser interface{ CloseIdleConnections() }
+				for _, k := range changedKeys {
+					if k == "payout.tuning.rpc_url_primary_pin_spki" ||
+						k == "payout.tuning.rpc_url_secondary_pin_spki" {
+						if rpc, ok := rpcs.Primary.(idleCloser); ok {
+							rpc.CloseIdleConnections()
+						} else {
+							log.Warn().
+								Str("event", "payout_spki_drain_skipped_unsupported_client").
+								Str("rpc_label", "primary").
+								Str("severity", "WARN").
+								Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
+								Msg("SPKI pin rotated but primary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
+						}
+						if rpc, ok := rpcs.Secondary.(idleCloser); ok {
+							rpc.CloseIdleConnections()
+						} else {
+							log.Warn().
+								Str("event", "payout_spki_drain_skipped_unsupported_client").
+								Str("rpc_label", "secondary").
+								Str("severity", "WARN").
+								Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
+								Msg("SPKI pin rotated but secondary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
+						}
+						break
+					}
+				}
+			}
+		}
 	}
 }
 

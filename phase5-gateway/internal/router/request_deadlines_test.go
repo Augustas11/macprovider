@@ -58,6 +58,29 @@ func TestStreamCeilingNeverBelowLegacyWall(t *testing.T) {
 	}
 }
 
+func TestAdaptiveDecodeIdleTimeoutExtendsSlowModelClasses(t *testing.T) {
+	cfg := config.Default()
+	cfg.Timeouts.StreamingIdleMS = 500
+
+	if got, want := adaptiveDecodeIdleTimeout("llama", cfg), 500*time.Millisecond; got != want {
+		t.Fatalf("unknown model idle timeout=%s want configured %s", got, want)
+	}
+
+	unbounded := cfg
+	unbounded.Timeouts.StreamingIdleMS = 0
+	if got := adaptiveDecodeIdleTimeout("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", unbounded); got != 0 {
+		t.Fatalf("unbounded 30B idle timeout=%s want no timeout sentinel", got)
+	}
+
+	got := adaptiveDecodeIdleTimeout("mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit", cfg)
+	if got <= cfg.StreamingIdleTimeout() {
+		t.Fatalf("30B idle timeout=%s want greater than configured %s", got, cfg.StreamingIdleTimeout())
+	}
+	if got > decodeIdleSlowModelMax {
+		t.Fatalf("30B idle timeout=%s exceeds cap %s", got, decodeIdleSlowModelMax)
+	}
+}
+
 // TestEffectiveStreamCeilingClampsStructuredOutput pins the deliberate
 // conservative choice in #760: SPEC-019 v0.2.4 §AC-V2-9 normatively fixes the
 // structured-output streaming budget at 300s, so structured streams keep that
@@ -401,6 +424,46 @@ func TestContentProgressKeepsStreamAliveAcrossIdleBudget(t *testing.T) {
 	body := resp.Body.String()
 	if !strings.Contains(body, "data: [DONE]") || strings.Contains(body, "provider_timeout") {
 		t.Fatalf("a content-progressing stream was cut by the idle budget; body=%.400q", body)
+	}
+}
+
+func TestSlowThirtyBContentProgressUsesAdaptiveDecodeIdleBudget(t *testing.T) {
+	client := seamStreamingUpstreamCtx(func(pw *io.PipeWriter, ctx context.Context) {
+		frames := []string{
+			`data: {"id":"c","choices":[{"delta":{"content":"slow"}}]}` + "\n\n",
+			`data: {"id":"c","choices":[{"delta":{"content":" token"}}]}` + "\n\n",
+			`data: [DONE]` + "\n\n",
+		}
+		for i, frame := range frames {
+			if _, err := pw.Write([]byte(frame)); err != nil {
+				return
+			}
+			if i == len(frames)-1 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				_ = pw.CloseWithError(ctx.Err())
+				return
+			case <-time.After(750 * time.Millisecond):
+			}
+		}
+		_ = pw.Close()
+	})
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 500
+		cfg.Timeouts.FirstTokenSeconds = 30
+		cfg.Timeouts.CoordinatorRequestSeconds = 30
+		cfg.Timeouts.StreamCeilingFloorSeconds = 30
+		cfg.Timeouts.StreamCeilingMaxSeconds = 60
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_slow_30b")
+
+	resp := postChat(t, h, key, `{"model":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	if !strings.Contains(body, "data: [DONE]") || strings.Contains(body, "provider_timeout") {
+		t.Fatalf("slow 30B content-progressing stream was cut by decode idle; body=%.400q", body)
 	}
 }
 

@@ -524,6 +524,19 @@ struct Stage1Prober: Stage1Probing {
         }
 
         let p95 = percentile95(ttfts)
+        let medianTPS = median(throughputs)
+        guard medianTPS.isFinite, medianTPS > 0 else {
+            return .infeasible(
+                reason: "Stage 1 probe produced invalid throughput \(stage1DiagnosticNumber(medianTPS))",
+                nErr: max(1, replicates)
+            )
+        }
+        guard p95.isFinite, p95 >= 0, p95 <= Double(Int32.max) else {
+            return .infeasible(
+                reason: "Stage 1 probe produced invalid TTFT \(stage1DiagnosticNumber(p95))ms",
+                nErr: max(1, replicates)
+            )
+        }
         // gateTTFTMS == 0 means the ceiling is disabled (#742: no 60s default).
         if gateTTFTMS > 0, p95 > Double(gateTTFTMS) {
             return .infeasible(
@@ -533,7 +546,7 @@ struct Stage1Prober: Stage1Probing {
         }
 
         return .feasible(
-            medianTPS: median(throughputs),
+            medianTPS: medianTPS,
             p95TTFTMS: p95
         )
     }
@@ -659,6 +672,20 @@ struct Stage1Prober: Stage1Probing {
             return (sorted[mid - 1] + sorted[mid]) / 2
         }
         return sorted[mid]
+    }
+
+    private func stage1DiagnosticNumber(_ value: Double) -> String {
+        if value.isNaN {
+            return "nan"
+        }
+        if value == .infinity {
+            return "infinity"
+        }
+        if value == -.infinity {
+            return "-infinity"
+        }
+        return String(format: "%.6f", value)
+            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
     }
 }
 

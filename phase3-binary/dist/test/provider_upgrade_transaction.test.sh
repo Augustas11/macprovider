@@ -23,6 +23,7 @@ for function_name in \
   validate_install_dir validate_port_value \
   prepare_staged_config activate_staged_config select_autotune_benchmark_port \
   semantic_merge_config restore_existing_provider_if_start_skipped \
+  prefetch_upgrade_autotune_model own_macprovider_cli_holds_live_port \
   validate_staged_entries; do
   extract_function "$function_name" >> "$TMP/helpers.sh"
 done
@@ -252,5 +253,88 @@ test ! -f "$skip_restore_called"
 test -f "$skip_restore_called"
 
 ( SKIP_PROVIDER_START=1; EXISTING_INSTALL_WAS_PRESENT=0; ! restore_existing_provider_if_start_skipped )
+
+PORT=18080
+INSTALL_DIR="$TMP/install"
+
+# prefetch_upgrade_autotune_model retry dead-end fix: a prior install that
+# carries no signed-catalog model id (donor-mode / never-started / minimally
+# seeded config from an interrupted first run) must NOT die 6 on retry when no
+# provider service is running. It should fall through to a fresh recommendation.
+(
+  lsof() { return 1; }  # nothing holding the port
+  EXISTING_INSTALL_WAS_PRESENT=1
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  INSTALL_TX_SERVICE_WAS_ACTIVE=0
+  prefetch_upgrade_autotune_model
+) || {
+  echo "prefetch dead-ended a retry with no live provider instead of re-tuning" >&2
+  exit 1
+}
+
+# But when a launchd provider service IS active, prefetch must still fail
+# closed rather than stop a live earner for a blind re-tune with no pinned model.
+if (
+  lsof() { return 1; }
+  EXISTING_INSTALL_WAS_PRESENT=1
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  INSTALL_TX_SERVICE_WAS_ACTIVE=1
+  prefetch_upgrade_autotune_model
+); then
+  echo "prefetch stopped a live launchd provider for a blind re-tune with no pinned model" >&2
+  exit 1
+fi
+
+# And when a MANUALLY started macprovider-cli holds the live port (no launchd
+# service, so INSTALL_TX_SERVICE_WAS_ACTIVE=0), prefetch must ALSO fail closed --
+# INSTALL_TX_SERVICE_WAS_ACTIVE alone is not a sufficient live-provider signal.
+if (
+  # Mock lsof: report a listener on $PORT whose txt executable is our own CLI.
+  # The -d txt query resolves the executable; the -iTCP query lists the pid.
+  lsof() {
+    case "$*" in
+      *-d\ txt*) printf 'n%s/macprovider-cli\n' "$INSTALL_DIR" ;;
+      *-iTCP:*) printf '4242\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  EXISTING_INSTALL_WAS_PRESENT=1
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  INSTALL_TX_SERVICE_WAS_ACTIVE=0
+  prefetch_upgrade_autotune_model
+); then
+  echo "prefetch stopped a live MANUAL provider (own CLI on port) for a blind re-tune" >&2
+  exit 1
+fi
+
+# A FOREIGN process on the port (not our CLI) is not our provider; fall through.
+(
+  lsof() {
+    case "$*" in
+      *-d\ txt*) printf 'n/usr/bin/some-other-daemon\n' ;;
+      *-iTCP:*) printf '9999\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  EXISTING_INSTALL_WAS_PRESENT=1
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  INSTALL_TX_SERVICE_WAS_ACTIVE=0
+  prefetch_upgrade_autotune_model
+) || {
+  echo "prefetch fail-closed on a foreign (non-CLI) port holder" >&2
+  exit 1
+}
+
+# No existing install at all: prefetch is a no-op.
+(
+  lsof() { return 1; }
+  EXISTING_INSTALL_WAS_PRESENT=0
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  INSTALL_TX_SERVICE_WAS_ACTIVE=0
+  prefetch_upgrade_autotune_model
+) || {
+  echo "prefetch failed the fresh-install no-op case" >&2
+  exit 1
+}
 
 echo "provider upgrade staging, config preservation, and cutover ordering ok"

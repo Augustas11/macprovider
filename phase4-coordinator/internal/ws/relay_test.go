@@ -182,6 +182,132 @@ func TestRelayDispatchRoutesChunkAndEndByRequestID(t *testing.T) {
 	}
 }
 
+func TestActiveRelayPreventsHeartbeatMonitorCloseBeforeFirstChunk(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	cfg := config.Default()
+	cfg.Routing.FailoverTimeoutS = 1
+	cfg.Routing.RequestTimeoutS = 5
+	cfg.Pool.HeartbeatMissThresholdS = 1
+
+	registry := pool.NewRegistry(nil)
+	stale := time.Now().Add(-2 * time.Second)
+	provider := &pool.Provider{
+		ProviderID:      "p-active",
+		AssignedID:      "s-active",
+		ModelID:         "model-a",
+		Tier:            pool.TierProvisional,
+		InferencePath:   pool.InferencePathWSTunneled,
+		State:           pool.StateReady,
+		SlotsFree:       1,
+		SlotsTotal:      1,
+		MaxConcurrency:  1,
+		LastActivityAt:  stale,
+		LastHeartbeatAt: stale,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p-active", "s-active", serverConn, 1)
+	s.sessions.Store(sessionKey("p-active", "s-active"), session)
+	go session.runWriter()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	relay, err := s.DispatchInference(ctx, *provider, "req-slow", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	defer relay.cancel("test_done")
+	if _, op, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	} else if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+
+	go s.monitorHeartbeat("p-active", "s-active", serverConn)
+	time.Sleep(1500 * time.Millisecond)
+
+	if providerConn.SetReadDeadline(time.Now().Add(100*time.Millisecond)) != nil {
+		t.Fatal("set provider read deadline")
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err == nil {
+		t.Fatal("expected no server frame while active relay is still waiting")
+	} else if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("provider websocket was closed while relay was active: %v", err)
+	}
+	if !session.hasActive() {
+		t.Fatal("relay active state was removed before request context ended")
+	}
+}
+
+func TestActiveRelayLivenessSuppressionEndsWhenRequestContextExpires(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	cfg := config.Default()
+	cfg.Routing.FailoverTimeoutS = 1
+	cfg.Routing.RequestTimeoutS = 1
+	cfg.Pool.HeartbeatMissThresholdS = 1
+
+	registry := pool.NewRegistry(nil)
+	stale := time.Now().Add(-2 * time.Second)
+	provider := &pool.Provider{
+		ProviderID:      "p-expiring",
+		AssignedID:      "s-expiring",
+		ModelID:         "model-a",
+		Tier:            pool.TierProvisional,
+		InferencePath:   pool.InferencePathWSTunneled,
+		State:           pool.StateReady,
+		SlotsFree:       1,
+		SlotsTotal:      1,
+		MaxConcurrency:  1,
+		LastActivityAt:  stale,
+		LastHeartbeatAt: stale,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p-expiring", "s-expiring", serverConn, 1)
+	s.sessions.Store(sessionKey("p-expiring", "s-expiring"), session)
+	go session.runWriter()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	relay, err := s.DispatchInference(ctx, *provider, "req-expiring", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	defer relay.cancel("test_done")
+	if _, op, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	} else if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+
+	go s.monitorHeartbeat("p-expiring", "s-expiring", serverConn)
+	until := time.Now().Add(3 * time.Second)
+	for session.hasActive() && time.Now().Before(until) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if session.hasActive() {
+		t.Fatal("relay active state did not clear after request context expired")
+	}
+	for time.Now().Before(until) {
+		if err := providerConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatalf("set provider read deadline: %v", err)
+		}
+		if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			return
+		}
+	}
+	t.Fatal("provider websocket stayed open after active relay expired and heartbeat remained stale")
+}
+
 func TestRelayDispatchCarriesConversationKeyFromContext(t *testing.T) {
 	serverConn, providerConn := net.Pipe()
 	defer providerConn.Close()

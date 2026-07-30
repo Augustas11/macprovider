@@ -3195,6 +3195,19 @@ struct AutotuneRecommendationBenchmarker {
                 let safety = ProbeSafetyAssessment.assess(before: before, after: after)
                 switch probe {
                 case .feasible(let medianTPS, let p95TTFTMS):
+                    if let invalidDiagnostic = Self.invalidFeasibleDiagnostic(
+                        medianTPS: medianTPS,
+                        p95TTFTMS: p95TTFTMS
+                    ) {
+                        if prefetchedArtifacts != nil {
+                            throw AutotuneRecommendError.candidateProbeFailed(
+                                modelKey: modelKey,
+                                reason: invalidDiagnostic
+                            )
+                        }
+                        diagnostics[modelKey] = invalidDiagnostic
+                        continue
+                    }
                     let generatedAt = clock()
                     results[modelKey] = CandidateBenchmark(
                         modelKey: modelKey,
@@ -3256,6 +3269,32 @@ struct AutotuneRecommendationBenchmarker {
             return "bandwidth tier \(hardware.bandwidthTier.rawValue) below minimum \(row.minBandwidthTier.rawValue)"
         }
         return nil
+    }
+
+    private static func invalidFeasibleDiagnostic(
+        medianTPS: Double,
+        p95TTFTMS: Double
+    ) -> String? {
+        guard medianTPS.isFinite, medianTPS > 0 else {
+            return "Stage 1 probe produced invalid feasible throughput \(diagnosticNumber(medianTPS))"
+        }
+        guard p95TTFTMS.isFinite, p95TTFTMS >= 0, p95TTFTMS <= Double(Int32.max) else {
+            return "Stage 1 probe produced invalid feasible TTFT \(diagnosticNumber(p95TTFTMS))ms"
+        }
+        return nil
+    }
+
+    private static func diagnosticNumber(_ value: Double) -> String {
+        if value.isNaN {
+            return "nan"
+        }
+        if value == .infinity {
+            return "infinity"
+        }
+        if value == -.infinity {
+            return "-infinity"
+        }
+        return value.jsonNumber
     }
 }
 

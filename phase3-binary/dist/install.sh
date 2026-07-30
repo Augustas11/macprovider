@@ -5882,11 +5882,44 @@ run_autotune_recommend_apply() {
   die 6 "autotune recommendation failed before service start"
 }
 
+# Returns 0 when an owned macprovider-cli process is currently LISTENing on
+# $PORT. INSTALL_TX_SERVICE_WAS_ACTIVE only reflects the launchd snapshot, so a
+# manually started provider (macprovider-cli serve) is invisible to it; this
+# mirrors the executable-ownership check in ensure_port_free so the empty
+# signed-catalog-id fall-through stays fail-closed for manual live providers.
+own_macprovider_cli_holds_live_port() {
+  local holding_pids holding_pid holding_executable
+  holding_pids="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
+  [ -n "$holding_pids" ] || return 1
+  for holding_pid in $holding_pids; do
+    holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+    if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 prefetch_upgrade_autotune_model() {
   upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
   [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 0
-  [ -n "$upgrade_candidate_model_id" ] \
-    || die 6 "stale upgrade recommendation lacks an exact signed-catalog model identity; the active provider was not stopped"
+  if [ -z "$upgrade_candidate_model_id" ]; then
+    # The prior install carries no signed-catalog model identity, so it was
+    # never a verified paid provider: donor-mode, never-started, or a
+    # minimally-seeded config left by an interrupted first run (e.g. a Malibu
+    # "Retry" after the first attempt installed files but did not start a
+    # provider). If a provider is actually running -- either a launchd service
+    # (INSTALL_TX_SERVICE_WAS_ACTIVE) or a manually started macprovider-cli
+    # holding the live port -- we still fail closed rather than stop a live
+    # earner for a blind re-tune. Otherwise there is no live provider to
+    # protect, so fall through to a full fresh recommendation instead of
+    # dead-ending the retry loop (die 6).
+    if [ "${INSTALL_TX_SERVICE_WAS_ACTIVE:-0}" -eq 1 ] || own_macprovider_cli_holds_live_port; then
+      die 6 "active provider lacks an exact signed-catalog model identity; the active provider was not stopped"
+    fi
+    log "Existing install has no verified signed-catalog model and no live provider; running a full fresh recommendation."
+    return 0
+  fi
   AUTOTUNE_PREFETCH_RECEIPT_PATH="$staging_dir/autotune-prefetch-receipt.json"
   log "Prefetching and verifying the installed model's exact signed artifact while the current provider remains available."
   run_macprovider_cli_with_amfi_retry autotune --recommend --prefetch \

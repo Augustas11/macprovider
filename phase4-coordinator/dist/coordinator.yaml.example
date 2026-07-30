@@ -373,7 +373,7 @@ malibu_emission:
 # routing. Keys match model_id case-insensitively; values must be bare
 # numeric versions or the coordinator refuses to start.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.66"
+  latest_binary_version: "1.8.67"
   # required_binary_version: "1.7.0"
   # per_model_required_binary_version:
   #   "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "1.8.60"
@@ -390,3 +390,99 @@ providers:
   - provider_id: "m1-anon"
     endpoint_url: "https://m1.streamvc.live"
     display_name: "M1 partner (Llama 3.2 3B)"
+
+# SPEC-016 v0.1.21 §6.5 — payout pipeline (USDC on Base).
+#
+# Two-namespace split. payout.security.* keys are RUNTIME-IMMUTABLE
+# (read at process start; SIGHUP CANNOT change them). payout.tuning.*
+# keys are SIGHUP-reloadable with bound re-enforcement per §6.5.
+# runtime.* is a third namespace (CLOSED in v0.1.x; only
+# runtime.registration_paused is permitted) toggled via §6.4.1
+# admin endpoints and persisted in the runtime_flags table.
+#
+# All caps + thresholds are in USDC base units == credits == USD
+# micro-dollars (SPEC-005 §5.1 unit identity).
+#
+# Cut over with payout.enabled: true ONLY AFTER every §9 prereq
+# is checked + BetterStack synthetic alerts verified per the
+# operator runbook at dist/payout-runbook.md.
+
+payout:
+  # Master switch. Schema + handlers initialise at false; runner +
+  # endpoints do NOT start. Flip to true after every §9 prereq is met.
+  enabled: false
+
+  security:
+    # §3.1 hot wallet address (EIP-55 checksummed). Required when
+    # enabled=true.
+    hot_wallet_address: "<0x... EIP-55 checksummed hot wallet>"
+
+    # §4.4 two-RPC URLs. Both required for nonce sync + receipt
+    # agreement. Use distinct providers (e.g. Infura + Alchemy) so
+    # one RPC outage does not block the runner.
+    rpc_url_primary:   "env:MACPROVIDER_PAYOUT_RPC_URL_PRIMARY"
+    rpc_url_secondary: "env:MACPROVIDER_PAYOUT_RPC_URL_SECONDARY"
+
+    # §5.2 / §5.3 caps in USDC base units (1 USDC = 1_000_000 base units).
+    per_payout_cap_usdc_base_units: 500000000     # $500
+    per_day_cap_usdc_base_units:    5000000000    # $5,000
+
+    # §4.6 cancel-self-transfer caps (gas in native wei). Defaults
+    # per SPEC §4.6 cap-decision worksheet.
+    cancel_max_tip_multiplier:           3
+    cancel_max_gas_native_wei:           5000000000000000     # 0.005 ETH
+    cancel_max_gas_native_wei_per_24h:   20000000000000000    # 0.02 ETH
+    abandon_rate_per_hour:               3
+
+    # §7.4 chain-balance recon cadence + tolerance.
+    chain_recon_interval:                "1h"
+    chain_recon_tolerance_usdc_base_units: 100000  # $0.10
+
+    # §6.4.1 pause/resume rate-limit floor.
+    pause_resume_min_interval: "60s"
+
+    # §6.3 wallet path. Encrypted on disk; KEK supplied via systemd
+    # LoadCredential=payout-wallet-kek (preferred) or
+    # MACPROVIDER_PAYOUT_WALLET_KEK env var.
+    encrypted_wallet_path: "/etc/macprovider/payout-wallet.enc"
+    encrypted_wallet_on_disk_hex: false
+
+    # NEVER enable in production. Dev path requires explicit opt-in
+    # AND MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY env var.
+    dev_mode: false
+
+  tuning:
+    # §3.3 cooling-off window for newly registered / rotated
+    # provider payout addresses. Bound: >= 1h.
+    address_cooling_off_period: "24h"
+
+    # §4.2 runner cadence. Bound: [5m, 24h].
+    run_interval:               "6h"
+
+    # §4.2 admin /admin/payout/run-now rate-limit floor. Bound: [10s, 1h].
+    run_now_min_interval:       "60s"
+
+    # §4.3 step 7 receipt depth threshold for two-RPC confirm.
+    # Bound: [5, 200] (SPEC v0.1.20 round-20 M2 widened from [2, 50]).
+    confirmation_blocks:        5
+
+    # §4.3 step 1 SELECT cap. Bound: [1, 500].
+    max_rows_per_run:           50
+
+    # §4.7 reorg re-poll window for already-confirmed rows.
+    # Bound: [1h, 168h] (SPEC v0.1.20 round-20 M1).
+    reorg_poll_window:          "24h"
+
+    # §6.2 balance alert thresholds (Step 4). 0 disables.
+    # low_balance_threshold MUST be <= 2 × per_day_cap.
+    low_balance_threshold:      0
+    low_native_threshold:       0
+
+    # §4.4 optional SHA-256 SPKI cert pins for the two RPCs. 64-hex
+    # chars OR empty. Generate with:
+    #   openssl s_client -connect HOST:443 -servername HOST < /dev/null \
+    #     | openssl x509 -pubkey -noout \
+    #     | openssl pkey -pubin -outform der \
+    #     | openssl dgst -sha256 -hex
+    rpc_url_primary_pin_spki:   ""
+    rpc_url_secondary_pin_spki: ""

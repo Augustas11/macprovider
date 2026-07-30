@@ -363,6 +363,29 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertEqual(nErr, 1)
     }
 
+    func testStage1ProberInvalidTTFTWithPositiveGateReturnsInfeasibleWithoutTrapping() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try emptyCompletionSSEScript().path,
+            logDirectory: try temporaryDirectory(name: "stage1-invalid-ttft-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 10,
+            replicates: 1
+        )
+
+        guard case .infeasible(let reason, let nErr) = result else {
+            return XCTFail("expected infeasible, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("invalid throughput 0"), reason)
+        XCTAssertEqual(nErr, 1)
+    }
+
     // MARK: - Round-1 audit fix tests
 
     /// Round-1 D.1 closure: HTTP non-2xx responses MUST classify as
@@ -929,6 +952,66 @@ final class Stage1IteratorTests: XCTestCase {
                 time.sleep(delay)
                 chunk = json.dumps({"choices":[{"delta":{"content":response_text}}]})
                 client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private func emptyCompletionSSEScript() throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-empty-sse-provider")
+        let scriptURL = directory.appendingPathComponent("empty-sse-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import socket, sys
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 empty sse provider ready", flush=True)
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
                 client.sendall(b"data: [DONE]\\n\\n")
                 client.close()
                 continue

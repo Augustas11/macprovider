@@ -3120,6 +3120,123 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
+    func testBenchmarksDiagnosesInvalidFeasibleMeasurementsWithoutTrapping() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .feasible(medianTPS: 0, p95TTFTMS: .infinity),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("invalid feasible throughput"), diagnostic)
+    }
+
+    func testBenchmarksDiagnosesInvalidFeasibleTTFTWithoutTrapping() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .feasible(medianTPS: 42, p95TTFTMS: .infinity),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("invalid feasible TTFT infinityms"), diagnostic)
+    }
+
+    func testReceiptBoundBenchmarkFailsClosedOnInvalidFeasibleMeasurement() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
+        request.benchmarks = [:]
+        let prefetched = PrefetchedModelArtifact(
+            modelKey: modelKey,
+            modelID: row.modelID,
+            modelRevision: revision,
+            candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey)),
+            path: snapshot.path,
+            sha256: artifactSHA
+        )
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .feasible(medianTPS: .nan, p95TTFTMS: 900),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        do {
+            _ = try await benchmarker.benchmarks(
+                request: request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                candidateModelIDs: [row.modelID],
+                prefetchedArtifacts: [modelKey: prefetched]
+            )
+            XCTFail("receipt-bound invalid feasible output must fail before state replacement")
+        } catch AutotuneRecommendError.candidateProbeFailed(let failedModelKey, let reason) {
+            XCTAssertEqual(failedModelKey, modelKey)
+            XCTAssertTrue(reason.contains("invalid feasible throughput nan"), reason)
+        }
+    }
+
     func testReceiptBoundBenchmarkFailsClosedWhenCandidateIsNotReady() async throws {
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var request = try makeRequest(modelKey: modelKey)
