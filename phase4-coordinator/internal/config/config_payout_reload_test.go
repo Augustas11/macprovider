@@ -104,6 +104,10 @@ payout:
   security:
     rpc_url_primary: env:PAYOUT_RELOAD_TEST_UNSET_RPC
     cancel_max_tip_multiplier: not-a-float
+payout:
+  enabled: true
+  security:
+    cancel_max_tip_multiplier: also-not-a-float
 `)
 
 	if _, err := Load(cfgPath); err == nil {

@@ -1582,12 +1582,17 @@ func LoadForSIGHUPReload(path string) (Config, error) {
 	}
 	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
 		m := doc.Content[0]
+		// Merge-audit r4 (code HIGH): strip EVERY top-level payout entry —
+		// YAML permits duplicate keys at this layer, and a second payout
+		// block would otherwise reach typed decode.
+		kept := make([]*yaml.Node, 0, len(m.Content))
 		for i := 0; i+1 < len(m.Content); i += 2 {
 			if m.Content[i].Value == "payout" {
-				m.Content = append(m.Content[:i], m.Content[i+2:]...)
-				break
+				continue
 			}
+			kept = append(kept, m.Content[i], m.Content[i+1])
 		}
+		m.Content = kept
 	}
 	cfg := Default()
 	if len(doc.Content) > 0 {
