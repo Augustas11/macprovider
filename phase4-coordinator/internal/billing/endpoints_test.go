@@ -1246,3 +1246,71 @@ func TestWriteErrorEnvelopeShape(t *testing.T) {
 		t.Errorf("type for 500 = %q, want %q", got, "server_error")
 	}
 }
+
+// TestEarningsEndpointEmitsUsdcFields locks the contract the Malibu client
+// (ProviderEarningsClient) actually decodes: usdc_today / usdc_week /
+// usdc_pending / usdc_lifetime. Before this fix the endpoint emitted only
+// *_credits, so every provider card rendered $0.00 despite real accrued
+// credits. usd = provider_credits * usd_per_million_credits / 1_000_000.
+func TestEarningsEndpointEmitsUsdcFields(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	store.SetUsdPerMillionCredits(1.0)
+	// 500,000 payable credits @ $1/M => $0.50, all in the current day/week/life.
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500000)
+
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		TotalCredits float64  `json:"total_credits"`
+		UsdcToday    *float64 `json:"usdc_today"`
+		UsdcWeek     *float64 `json:"usdc_week"`
+		UsdcPending  *float64 `json:"usdc_pending"`
+		UsdcLifetime *float64 `json:"usdc_lifetime"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.TotalCredits != 500000 {
+		t.Fatalf("total_credits=%v want 500000 (unchanged)", resp.TotalCredits)
+	}
+	for name, got := range map[string]*float64{
+		"usdc_today": resp.UsdcToday, "usdc_week": resp.UsdcWeek,
+		"usdc_pending": resp.UsdcPending, "usdc_lifetime": resp.UsdcLifetime,
+	} {
+		if got == nil {
+			t.Fatalf("%s missing from earnings response (client decodes nil -> $0.00)", name)
+		}
+		if *got != 0.5 {
+			t.Fatalf("%s=%v want 0.5", name, *got)
+		}
+	}
+}
+
+// TestEarningsEndpointUsdcZeroWhenRateUnset confirms the safe default: with
+// no published rate (0), usdc_* are 0 rather than NaN/absent — matching
+// pre-fix behaviour and never emitting a bogus USD figure.
+func TestEarningsEndpointUsdcZeroWhenRateUnset(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500000)
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		UsdcLifetime float64 `json:"usdc_lifetime"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.UsdcLifetime != 0 {
+		t.Fatalf("usdc_lifetime=%v want 0 when rate unset", resp.UsdcLifetime)
+	}
+}

@@ -897,20 +897,47 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rangeSQL, rangeArgs := earningsRangeFilter(rangeFrom, rangeTo, hasRange)
-	current := sqliteTimeText(currentMondayUTC(time.Now().UTC()))
+	nowUTC := time.Now().UTC()
+	current := sqliteTimeText(currentMondayUTC(nowUTC))
+	todayUTC := sqliteTimeText(time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC))
 	models := h.modelsServed(r.Context(), providerID, rangeSQL, rangeArgs...)
 	totalArgs := append([]any{providerID}, rangeArgs...)
 	currentArgs := append([]any{providerID, current}, rangeArgs...)
+	todayArgs := append([]any{providerID, todayUTC}, rangeArgs...)
 	faultArgs := append([]any{providerID}, rangeArgs...)
+
+	// Payable provider_credits for the three windows the Malibu card shows
+	// (life / week / today). current_window == "this week" (since Monday UTC).
+	totalCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...)
+	weekCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...)
+	todayCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, todayArgs...)
+	// "Pending" = earned but not yet paid out. Any ledger_payout_ready row that
+	// is neither still-'ready' nor 'voided' represents credits already paid,
+	// so pending = total payable minus those. With payouts default-off (SPEC-016)
+	// this is 0 paid → pending == lifetime, which is the correct current state.
+	paidOutCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE provider_id=? AND status NOT IN ('ready','voided')`, providerID)
+	pendingCredits := totalCredits - paidOutCredits
+	if pendingCredits < 0 {
+		pendingCredits = 0
+	}
+
 	resp := map[string]any{
 		"provider_id":            providerID,
-		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...),
-		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...),
+		"total_credits":          totalCredits,
+		"current_window_credits": weekCredits,
 		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
 		"provider_share_bps":     h.latestShareBps(r.Context()),
 		"models_served":          models,
 		"rate_card_excerpt":      h.rateCardExcerpt(r.Context(), models),
 		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
+		// usdc_* are the USD figures the Malibu client (ProviderEarningsClient)
+		// decodes for the "today / wk / pending / life" card. Before this the
+		// endpoint emitted only *_credits, so every card read $0.00 regardless
+		// of real accrued earnings. Converted via the published rate.
+		"usdc_today":    h.store.creditsToUSD(todayCredits),
+		"usdc_week":     h.store.creditsToUSD(weekCredits),
+		"usdc_pending":  h.store.creditsToUSD(pendingCredits),
+		"usdc_lifetime": h.store.creditsToUSD(totalCredits),
 	}
 	idlePrewarm := statsprewarm.Summary{
 		EventsLast1h:        map[string]int64{},

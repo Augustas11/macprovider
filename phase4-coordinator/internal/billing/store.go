@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,13 @@ type Store struct {
 	forceVoidEnabled       atomic.Bool
 	forceCreditEnabled     atomic.Bool
 	forceCreditHoldSeconds atomic.Int64
+	// usdPerMillionCreditsBits holds stats.rollup.usd_per_million_credits
+	// as math.Float64bits so the provider /earnings handler can convert
+	// ledger provider_credits into the usdc_* USD fields the Malibu client
+	// decodes. Written by SetUsdPerMillionCredits at startup and on SIGHUP
+	// reload; read lock-free per request. Zero (never set / rate 0) yields
+	// $0.00, matching pre-fix behaviour rather than emitting a bogus number.
+	usdPerMillionCreditsBits atomic.Uint64
 }
 
 const defaultForceCreditSettlementHoldSeconds int64 = 24 * 60 * 60
@@ -1078,6 +1086,32 @@ func (s *Store) SetSettlementConfig(cfg SettlementConfig) {
 	s.settlementMu.Lock()
 	defer s.settlementMu.Unlock()
 	s.settlement = cfg
+}
+
+// SetUsdPerMillionCredits publishes the credits→USD conversion rate
+// (stats.rollup.usd_per_million_credits) used by the provider /earnings
+// endpoint to fill the usdc_* fields. A negative or non-finite rate is
+// coerced to 0 (no conversion) so the handler never emits NaN/Inf USD.
+func (s *Store) SetUsdPerMillionCredits(rate float64) {
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
+		rate = 0
+	}
+	s.usdPerMillionCreditsBits.Store(math.Float64bits(rate))
+}
+
+// UsdPerMillionCredits returns the published credits→USD rate, or 0 when
+// it has never been set.
+func (s *Store) UsdPerMillionCredits() float64 {
+	return math.Float64frombits(s.usdPerMillionCreditsBits.Load())
+}
+
+// creditsToUSD converts integer provider_credits to a USD amount using the
+// published rate: usd = credits * usd_per_million_credits / 1_000_000.
+func (s *Store) creditsToUSD(credits int64) float64 {
+	if credits <= 0 {
+		return 0
+	}
+	return float64(credits) * s.UsdPerMillionCredits() / 1_000_000
 }
 
 func (s *Store) SettlementConfig(defaultCfg SettlementConfig) SettlementConfig {
