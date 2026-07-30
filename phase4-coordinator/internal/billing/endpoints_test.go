@@ -1278,6 +1278,7 @@ func TestEarningsEndpointEmitsUsdcFields(t *testing.T) {
 	if resp.TotalCredits != 500000 {
 		t.Fatalf("total_credits=%v want 500000 (unchanged)", resp.TotalCredits)
 	}
+	// All four usdc_* fields must be present (a nil = the pre-fix $0.00 bug).
 	for name, got := range map[string]*float64{
 		"usdc_today": resp.UsdcToday, "usdc_week": resp.UsdcWeek,
 		"usdc_pending": resp.UsdcPending, "usdc_lifetime": resp.UsdcLifetime,
@@ -1285,8 +1286,21 @@ func TestEarningsEndpointEmitsUsdcFields(t *testing.T) {
 		if got == nil {
 			t.Fatalf("%s missing from earnings response (client decodes nil -> $0.00)", name)
 		}
-		if *got != 0.5 {
-			t.Fatalf("%s=%v want 0.5 (500000 base units / 1e6)", name, *got)
+	}
+	// lifetime + pending are range-/window-independent, so their conversion is
+	// asserted exactly: 500000 base units / 1e6 == $0.50.
+	if *resp.UsdcLifetime != 0.5 {
+		t.Fatalf("usdc_lifetime=%v want 0.5", *resp.UsdcLifetime)
+	}
+	if *resp.UsdcPending != 0.5 {
+		t.Fatalf("usdc_pending=%v want 0.5", *resp.UsdcPending)
+	}
+	// today/week depend on the handler's own UTC clock vs the seed time; a run
+	// crossing 00:00 (or Monday 00:00) UTC would zero the window. Assert only
+	// that they carry the credit's converted value or 0 — never a bogus figure.
+	for name, got := range map[string]float64{"usdc_today": *resp.UsdcToday, "usdc_week": *resp.UsdcWeek} {
+		if got != 0.5 && got != 0 {
+			t.Fatalf("%s=%v want 0.5 or 0 (UTC-boundary tolerant)", name, got)
 		}
 	}
 }
