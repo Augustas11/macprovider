@@ -18,7 +18,7 @@ filed as a separate follow-up).
 ## Change log
 
 Audit-narrative-by-round detail lives in the per-round audit files
-under `specs/SPEC-016-rN-audit.md` (one file per codex round, plus
+under `docs/spec-history/spec-016/SPEC-016-rN-audit.md` (one file per codex round, plus
 the v0.1 internal-critic and rounds 2-7 Claude rounds preserved as
 git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
@@ -160,7 +160,7 @@ the race. LOW-1 (M1 fix-out) — §4.7 re-poll budget paragraph
 clarified to distinguish row re-polls vs RPC calls
 (`N_rows × 2` RPC calls because two-RPC discipline; 200 rows
 = 400 RPC calls per cycle). Full r21 closure narrative:
-`specs/SPEC-016-r21-audit.md`.
+`docs/spec-history/spec-016/SPEC-016-r21-audit.md`.
 
 **v0.1.20 (2026-06-25, draft — Claude-side cross-check absorbed):**
 Round-20 Claude cross-check (critic + analyst lenses, parallel)
@@ -179,11 +179,11 @@ uniqueness load-bearing explanatory paragraph + IMPL stall test
 (§4.8b); M5 §7.4 query (F) money-conservation aggregate invariant
 + weekly operational binding. M3 (EIP-712 `verifyingContract` UX)
 deferred — Step 1 verifier already committed; documented as known
-limitation in §3.2. Full audit narrative: `specs/SPEC-016-r20-audit.md`.
+limitation in §3.2. Full audit narrative: `docs/spec-history/spec-016/SPEC-016-r20-audit.md`.
 
 **v0.1.19 (2026-06-25, draft — audit-narrative split):** Splits the
 inlined codex round-9..19 audit findings out of this SPEC body into
-per-round `specs/SPEC-016-rN-audit.md` files. NO normative changes.
+per-round `docs/spec-history/spec-016/SPEC-016-rN-audit.md` files. NO normative changes.
 Body shrinks from ~5,860 lines to its normative core.
 
 **v0.1.18 (2026-06-25, draft — post-convergence LOW sweep, no
@@ -196,7 +196,7 @@ site; §4.8a reaper CAS SQL aligned with sync emitter's
 
 **v0.1.17 (2026-06-25, draft — round-18 codex audit fix pass):**
 Codex round 18 returned 0 CRIT + 0 MAJOR + 2 MED + 0 LOW; both MEDs
-absorbed. Full findings + closure verification: `specs/SPEC-016-r18-audit.md`.
+absorbed. Full findings + closure verification: `docs/spec-history/spec-016/SPEC-016-r18-audit.md`.
 Fixes: §4.8c `cancel_reconfirm_stale_outbox` table + reaper added
 for the §7.1 `payout_cancel_self_transfer_reconfirm_stale` PAGE
 (closes crash-between-COMMIT-and-emit silent-suppression class);
@@ -206,7 +206,7 @@ SQL didn't). Commit `7be223d`.
 
 **v0.1.16 (2026-06-25, draft — round-17 codex audit fix pass):**
 Codex round 17 returned 0 CRIT + 0 MAJOR + 1 MED + 0 LOW; absorbed.
-Full findings: `specs/SPEC-016-r17-audit.md`. Fix: added
+Full findings: `docs/spec-history/spec-016/SPEC-016-r17-audit.md`. Fix: added
 `cancel_reconfirm_stale_paged_at_utc` column to `payout_attempts`
 + CAS-based once-per-transition emission so the reconfirm-stale
 PAGE doesn't re-fire on every coordinator restart. Commit
@@ -214,7 +214,7 @@ PAGE doesn't re-fire on every coordinator restart. Commit
 
 **v0.1.15 (2026-06-25, draft — round-16 codex audit fix pass):**
 Codex round 16 returned 0 CRIT + 0 MAJOR + 3 MED + 0 LOW; all
-absorbed. Full findings: `specs/SPEC-016-r16-audit.md`. Fixes:
+absorbed. Full findings: `docs/spec-history/spec-016/SPEC-016-r16-audit.md`. Fixes:
 cancel-confirmed event scoped to transition-only (no re-emit per
 cycle); §7.1 `payout_reorg_revert` gains `is_cancel_self_transfer`
 discriminator field; new `payout_cancel_self_transfer_reconfirm_stale`
@@ -222,7 +222,7 @@ PAGE event after 3 × `run_interval`. Commit `f6d4918`.
 
 **v0.1.14 (2026-06-25, draft — round-15 codex audit fix pass):**
 Codex round 15 returned 0 CRIT + 2 MAJOR + 1 MED + 0 LOW; all
-absorbed. Full findings: `specs/SPEC-016-r15-audit.md`. Fixes
+absorbed. Full findings: `docs/spec-history/spec-016/SPEC-016-r15-audit.md`. Fixes
 extend provider-payout discipline (pre-broadcast verify + CAS,
 reorg recovery, observability) to the new cancel-handling machinery
 from v0.1.13: §4.6 cancel preflight + CAS broadcast stamping;
@@ -232,7 +232,7 @@ query (D) cancel observability roll-up. Commit `7f7a4b4`.
 
 **v0.1.13 (2026-06-25, draft — round-14 codex audit fix pass):**
 Codex round 14 returned 0 CRIT + 1 MAJOR + 0 MED + 4 deferred
-LOW; absorbed. Full findings: `specs/SPEC-016-r14-audit.md`. Fix:
+LOW; absorbed. Full findings: `docs/spec-history/spec-016/SPEC-016-r14-audit.md`. Fix:
 §4.3 step 5 lookup did not filter `is_cancel_self_transfer = 0`;
 a confirmed cancel could be passed to `ClaimPayoutReady`,
 consuming the provider's `ledger_payout_ready` row without
@@ -247,7 +247,7 @@ class that 13 prior rounds missed.** Commit `3cf8658`.
 
 **v0.1.12 (2026-06-25, draft — round-13 codex audit fix pass):**
 Codex round 13 returned 0 CRIT + 0 MAJOR + 1 MED + 4 deferred
-LOW; absorbed. Full findings: `specs/SPEC-016-r13-audit.md`. Fix:
+LOW; absorbed. Full findings: `docs/spec-history/spec-016/SPEC-016-r13-audit.md`. Fix:
 §4.6 `/admin/payout/abandon-attempt` `UPDATE` extended with
 state-check predicates (`AND confirmed_at_utc IS NULL AND
 abandoned_at_utc IS NULL`) + row-count disambiguation
@@ -256,7 +256,7 @@ Commit `4ad3e1a`.
 
 **v0.1.11 (2026-06-25, draft — round-12 codex audit fix pass):**
 Codex round 12 returned 0 CRIT + 1 MAJOR + 0 MED + 4 deferred
-LOW; absorbed. Full findings: `specs/SPEC-016-r12-audit.md`. Fix:
+LOW; absorbed. Full findings: `docs/spec-history/spec-016/SPEC-016-r12-audit.md`. Fix:
 §4.3 step 6 CAS persist extended with
 `AND confirmed_at_utc IS NULL AND abandoned_at_utc IS NULL` +
 state-changed-during-sign halt; §4.6 abandon-attempt gains 409
@@ -266,7 +266,7 @@ the concurrent-abandon-vs-runner-CAS race. Commit `0fba334`.
 **v0.1.10 (2026-06-25, draft — round-11 codex audit fix pass):**
 Codex round 11 returned 0 CRIT + 2 MAJOR + 2 MED + 4 LOW;
 MAJORs+MEDs absorbed, 4 LOWs deferred per user scope decision.
-Full findings: `specs/SPEC-016-r11-audit.md`. Fixes: §5.3
+Full findings: `docs/spec-history/spec-016/SPEC-016-r11-audit.md`. Fixes: §5.3
 stale-reservation halt + cap-counts-all-regardless-of-age; §4.3
 step 6 CAS persist via `BEGIN IMMEDIATE` with lease holder_token
 re-check; §7.1 enum gains `prebroadcast_signed_tx`; §9 BetterStack
@@ -275,7 +275,7 @@ Commit `6749491`.
 
 **v0.1.9 (2026-06-25, draft — round-10 codex audit fix pass):**
 Codex round 10 returned 0 CRIT + 3 MAJOR + 5 MED + 7 LOW; all
-absorbed. Full findings: `specs/SPEC-016-r10-audit.md`. Fixes:
+absorbed. Full findings: `docs/spec-history/spec-016/SPEC-016-r10-audit.md`. Fixes:
 §4.3 step 6 pre-broadcast Signer-output verification (ecrecover,
 not just Signer.FromAddress); §4.8b `payout_runner_lease` table
 + acquire/heartbeat/takeover/self-fencing/release algorithm
@@ -289,7 +289,7 @@ equality; misc LOWs cleaned. Commit `72d2c14`.
 **v0.1.8 (2026-06-25, draft — round-9 codex audit fix pass):**
 First codex-lens audit (rounds 1-8 were Claude internal). Codex
 round 9 returned 2 CRIT + 5 MAJOR + 2 MED; all absorbed. Full
-findings: `specs/SPEC-016-r9-audit.md`. CRITs: (a) §9.5b.1
+findings: `docs/spec-history/spec-016/SPEC-016-r9-audit.md`. CRITs: (a) §9.5b.1
 compensation insert not bound to original orphan's provider/amount
 — compromised operator key could use a $10 orphan to authorize
 unbounded compensation to a different provider; (b) §4.3 fresh-
