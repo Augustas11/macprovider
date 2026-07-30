@@ -940,7 +940,7 @@ func main() {
 		// TuningProvider.Reload helper applies bound re-enforcement
 		// AND emits payout_config_reloaded / payout_config_reload_rejected
 		// per SPEC §6.5.
-		go startPayoutSIGHUPListener(shutdownCtx, *configPath, payoutS2.tuning, payoutS2.rpcs, logger)
+		go startPayoutSIGHUPListener(shutdownCtx, *configPath, *configOverlay, payoutS2.tuning, payoutS2.rpcs, logger)
 	}
 
 	// SPEC-017 v0.1.8 Step 3 — /v1/stats/* mux subtree. Mounts
@@ -2323,7 +2323,12 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 }
 
 func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, billingStores ...*billing.Store) {
-	cfg, err := config.Load(configPath)
+	// SPEC-016 v0.1.23 §6.5: the general SIGHUP reload must not parse,
+	// env-resolve, or validate payout.security.*, and a payout.* key
+	// edited on disk must not reject a tier2/billing reload. Payout
+	// tuning has its own dedicated SIGHUP listener
+	// (startPayoutSIGHUPListener); this path never applies payout fields.
+	cfg, err := config.LoadForSIGHUPReload(configPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
@@ -2561,6 +2566,7 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 func startPayoutSIGHUPListener(
 	ctx context.Context,
 	configPath string,
+	configOverlayPath string,
 	tuning *payout.TuningProvider,
 	rpcs payout.TwoRPCs,
 	log zerolog.Logger,
@@ -2580,7 +2586,7 @@ func startPayoutSIGHUPListener(
 			// Step 4 r1 [code:r1-3] MEDIUM closure: use tuning-only
 			// loader so payout.security.* is never parsed, resolved, or
 			// validated on the SIGHUP path.
-			t, err := config.LoadPayoutTuningOnly(configPath)
+			t, err := config.LoadPayoutTuningOnly(configPath, configOverlayPath)
 			if err != nil {
 				// Step 4 r4 [code:r4-1]/[sec:r4-1] CONVERGENT MEDIUM closure:
 				// structured §7.1 fields on YAML-load failure path. Use sanitized

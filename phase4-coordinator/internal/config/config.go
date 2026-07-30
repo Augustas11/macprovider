@@ -1459,9 +1459,19 @@ type payoutTuningOnlyWrapper struct {
 }
 
 // LoadPayoutTuningOnly parses ONLY the `payout.tuning.*` keys from
-// the YAML at path and returns the validated snapshot. It intentionally
-// does NOT read `payout.security.*`, does NOT call resolveEnv on any
-// other field, and does NOT run full Config.Validate.
+// the YAML at basePath — merged with overlayPath when non-empty, with
+// the same overlay-keys-override semantics as LoadWithOverlay — and
+// returns the validated snapshot. It intentionally does NOT read
+// `payout.security.*`, does NOT call resolveEnv on any other field,
+// and does NOT run full Config.Validate.
+//
+// Merge-audit 2026-07-30 (convergent code+security HIGH): the SIGHUP
+// path MUST read the same effective base+overlay source as startup's
+// LoadWithOverlay. The shipped systemd unit passes --config-overlay;
+// reading only the base file here would let a SIGHUP silently revert
+// overlay-sourced tuning — including clearing non-empty SPKI pins,
+// which validate as empty and would drop RPC certificate pinning on
+// the payout money path.
 //
 // Step 4 r1 [code:r1-3] MEDIUM closure: the SIGHUP loader MUST NOT
 // couple tuning-reload success to immutable security fields. Callers
@@ -1473,8 +1483,8 @@ type payoutTuningOnlyWrapper struct {
 // deliberately not loaded here; the bound is enforced by Validate at
 // startup. On SIGHUP, TuningProvider.Reload applies its own in-memory
 // cap check using the startup PerDayCapUSDCBaseUnits.
-func LoadPayoutTuningOnly(path string) (PayoutTuningConfig, error) {
-	b, err := os.ReadFile(path)
+func LoadPayoutTuningOnly(basePath, overlayPath string) (PayoutTuningConfig, error) {
+	b, err := os.ReadFile(basePath)
 	if err != nil {
 		return PayoutTuningConfig{}, err
 	}
@@ -1484,6 +1494,17 @@ func LoadPayoutTuningOnly(path string) (PayoutTuningConfig, error) {
 	wrapper.Payout.Tuning = defaults.Payout.Tuning
 	if err := yaml.Unmarshal(b, &wrapper); err != nil {
 		return PayoutTuningConfig{}, err
+	}
+	if strings.TrimSpace(overlayPath) != "" {
+		ob, err := os.ReadFile(overlayPath)
+		if err != nil {
+			return PayoutTuningConfig{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		}
+		// Unmarshal into the SAME wrapper: keys present in the overlay
+		// override; keys absent inherit base (mirrors LoadWithOverlay).
+		if err := yaml.Unmarshal(ob, &wrapper); err != nil {
+			return PayoutTuningConfig{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		}
 	}
 	t := wrapper.Payout.Tuning
 	// §6.5 tuning-namespace bound matrix — same as Validate's payout.tuning.* block.
@@ -1518,6 +1539,34 @@ func LoadPayoutTuningOnly(path string) (PayoutTuningConfig, error) {
 		return PayoutTuningConfig{}, err
 	}
 	return t, nil
+}
+
+// LoadForSIGHUPReload reads the config for the GENERAL coordinator
+// SIGHUP reload path (tier2 / billing / proof-of-weights consumers in
+// reloadCoordinatorConfig). Identical to Load EXCEPT the payout.*
+// namespace is reset to defaults (enabled=false) after unmarshal and
+// before env resolution + validation, so on SIGHUP:
+//   - payout.security.* env: sentinels are never resolved (SPEC-016
+//     v0.1.23 §6.5: the security namespace is startup-immutable and
+//     MUST NOT be parsed on any SIGHUP path; the dedicated payout
+//     listener uses LoadPayoutTuningOnly), and
+//   - a payout.* key edited invalidly on disk cannot reject an
+//     otherwise-valid tier2/billing reload (no cross-namespace
+//     reload-success coupling — merge-audit 2026-07-30 architect HIGH).
+//
+// Safe because the general reload path never applies payout fields:
+// the payout runtime consumes config only via its startup snapshot
+// plus the §6.5 tuning-only SIGHUP listener.
+func LoadForSIGHUPReload(path string) (Config, error) {
+	cfg := Default()
+	if err := unmarshalYAMLFile(path, &cfg); err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+	}
+	cfg.Payout = Default().Payout
+	if err := finalizeLoadedConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 func unmarshalYAMLFile(path string, cfg *Config) error {
