@@ -221,6 +221,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+		translatedBody, translateErr := adapter.translateRequest(body)
+		if translateErr != nil {
+			writeResponsesTranslationError(w, http.StatusBadRequest, translateErr)
+			return
+		}
+		body = translatedBody
+	}
 	chat, err := parseChatRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
@@ -830,10 +838,19 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	} else {
 		tokenSource = "provider_reported"
 	}
+	body = usageBodyWithTokenUsage(body, usage)
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
+		if err := adapter.prepareNonStreamingResponse(body); err != nil {
+			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_response", resp.Header) {
+				return
+			}
+			writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+			return
+		}
+	}
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
-	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))

@@ -166,6 +166,13 @@ routing:
   sticky_enabled: false
   sticky_ttl_s: 1800
 
+features:
+  # Stateless OpenAI Responses API compatibility facade. When enabled,
+  # POST /v1/responses translates full-context Responses requests into the
+  # existing billed chat-completions pipeline. Server-side response state,
+  # hosted tools, and multimodal input remain unsupported.
+  responses_api_enabled: false
+
 cors:
   allowed_origins:
     - https://console.streamvc.live

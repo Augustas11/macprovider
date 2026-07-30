@@ -84,6 +84,7 @@ Primary buyer endpoints:
 | Method | Path | Auth |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | Bearer API key or browser demo token |
+| `POST` | `/v1/responses` | Bearer API key or browser demo token; available when the Responses compatibility flag is enabled |
 | `GET` | `/v1/models` | Bearer API key or demo token |
 | `GET` | `/v1/status` | Public |
 | `GET` | `/v1/usage` | Bearer API key |
@@ -99,6 +100,12 @@ Multimodal parts such as `image_url` are not supported in v1 and return
 `unsupported_content_shape`.
 
 Covered paid settlement claims are limited to `POST /v1/chat/completions`. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.
+
+### Responses API
+
+`POST /v1/responses` is a stateless OpenAI Responses compatibility facade over the same billed chat-completions pipeline. Send the full `input` on every request with `store:false`. Function tools and `text.format` structured output are translated into the chat pipeline. `previous_response_id`, `store:true`, `conversation`, `include`, `background:true`, non-disabled `truncation`, `reasoning` controls, non-default `parallel_tool_calls`, hosted tools, and multimodal input are not supported.
+
+When the Responses compatibility flag is enabled, covered paid settlement claims include `POST /v1/responses` and `POST /v1/chat/completions`.
 
 Excluded legacy/direct paths are outside this SPEC-022 gateway settlement claim unless separately disabled or migrated behind the gateway paid ledger: `coordinator.streamvc.live`, `m4.streamvc.live`, and `m1.streamvc.live`.
 
