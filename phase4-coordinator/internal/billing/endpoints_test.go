@@ -1251,11 +1251,11 @@ func TestWriteErrorEnvelopeShape(t *testing.T) {
 // (ProviderEarningsClient) actually decodes: usdc_today / usdc_week /
 // usdc_pending / usdc_lifetime. Before this fix the endpoint emitted only
 // *_credits, so every provider card rendered $0.00 despite real accrued
-// credits. usd = provider_credits * usd_per_million_credits / 1_000_000.
+// credits. usd = provider_credits / 1_000_000 (SPEC-016 §4.3 payout invariant:
+// provider_credits == USDC base units, 6 decimals).
 func TestEarningsEndpointEmitsUsdcFields(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
-	store.SetUsdPerMillionCredits(1.0)
-	// 500,000 payable credits @ $1/M => $0.50, all in the current day/week/life.
+	// 500,000 payable credits == $0.50 USDC, all in the current day/week/life.
 	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500000)
 
 	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
@@ -1286,18 +1286,22 @@ func TestEarningsEndpointEmitsUsdcFields(t *testing.T) {
 			t.Fatalf("%s missing from earnings response (client decodes nil -> $0.00)", name)
 		}
 		if *got != 0.5 {
-			t.Fatalf("%s=%v want 0.5", name, *got)
+			t.Fatalf("%s=%v want 0.5 (500000 base units / 1e6)", name, *got)
 		}
 	}
 }
 
-// TestEarningsEndpointUsdcZeroWhenRateUnset confirms the safe default: with
-// no published rate (0), usdc_* are 0 rather than NaN/absent — matching
-// pre-fix behaviour and never emitting a bogus USD figure.
-func TestEarningsEndpointUsdcZeroWhenRateUnset(t *testing.T) {
+// TestEarningsEndpointUsdcPendingIsRangeIndependent locks the security-audit
+// MEDIUM fixes: usdc_pending is all owed money and must not shrink when a
+// from/to range is supplied, whereas usdc_lifetime is range-scoped. An older
+// credit outside the range still counts as owed/pending.
+func TestEarningsEndpointUsdcPendingIsRangeIndependent(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
-	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500000)
-	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	// One old credit (outside the range) + one recent (inside the range).
+	insertCredit(t, store.db, "provider-a", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), 300000)
+	insertCredit(t, store.db, "provider-a", time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), 200000)
+
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings?from=2026-06-01&to=2026-06-30", nil)
 	req.Header.Set("Authorization", "Bearer good")
 	w := httptest.NewRecorder()
 	store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
@@ -1306,11 +1310,15 @@ func TestEarningsEndpointUsdcZeroWhenRateUnset(t *testing.T) {
 	}
 	var resp struct {
 		UsdcLifetime float64 `json:"usdc_lifetime"`
+		UsdcPending  float64 `json:"usdc_pending"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp.UsdcLifetime != 0 {
-		t.Fatalf("usdc_lifetime=%v want 0 when rate unset", resp.UsdcLifetime)
+	if resp.UsdcLifetime != 0.2 { // range-scoped: only the 200000 recent credit
+		t.Fatalf("usdc_lifetime=%v want 0.2 (range-scoped)", resp.UsdcLifetime)
+	}
+	if resp.UsdcPending != 0.5 { // all owed: (300000+200000)/1e6, ignores range
+		t.Fatalf("usdc_pending=%v want 0.5 (range-independent owed total)", resp.UsdcPending)
 	}
 }

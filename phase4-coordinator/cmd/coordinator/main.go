@@ -259,9 +259,6 @@ func main() {
 		os.Exit(1)
 	}
 	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
-	// Publish the credits→USD rate so the provider /earnings endpoint can fill
-	// the usdc_* fields the Malibu client displays (else every card shows $0.00).
-	billingStore.SetUsdPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits)
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
@@ -2397,8 +2394,6 @@ func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config,
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID, cfg.Stats.Rollup.UsdPerMillionCredits)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
-		// Keep the provider /earnings usdc_* conversion rate in sync on SIGHUP.
-		billingStores[0].SetUsdPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
