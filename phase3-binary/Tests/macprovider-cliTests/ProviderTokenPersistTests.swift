@@ -1,4 +1,5 @@
 import MacProviderCore
+import Dispatch
 import XCTest
 
 /// SPEC-003 v0.8 FR-C9.3 — atomic persist of a self-minted provisional
@@ -8,6 +9,72 @@ import XCTest
 /// resulting file is mode 0600, and the write is atomic — so a crash or
 /// concurrent reader never sees a half-written secret.
 final class ProviderTokenPersistTests: XCTestCase {
+
+    func testRemoveDeletesOnlyExactExpectedTopLevelToken() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        let token = String(repeating: "a", count: 64)
+        try "provider_id: provider-a\nprovider_token: \(token)\nmodel: m\n".write(
+            toFile: configPath,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(try ProviderTokenPersist.remove(expectedToken: token, configPath: configPath))
+        let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
+        XCTAssertFalse(onDisk.contains("provider_token:"))
+        XCTAssertTrue(onDisk.contains("provider_id: provider-a"))
+        XCTAssertTrue(onDisk.contains("model: m"))
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: configPath)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testRemoveRedactsLegacyAutotuneBackupsButNotOperatorArchives() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        let token = String(repeating: "a", count: 64)
+        let secretConfig = "provider_id: provider-a\nprovider_token: \(token)\nmodel: m\n"
+        try secretConfig.write(toFile: configPath, atomically: true, encoding: .utf8)
+        let automaticBackup = tempDir + "/config.yaml.bak-1718712345-0"
+        let operatorArchive = tempDir + "/config.yaml.cli-backup-20260714T120000Z"
+        try secretConfig.write(toFile: automaticBackup, atomically: true, encoding: .utf8)
+        try secretConfig.write(toFile: operatorArchive, atomically: true, encoding: .utf8)
+
+        XCTAssertTrue(try ProviderTokenPersist.remove(expectedToken: token, configPath: configPath))
+
+        XCTAssertFalse(try String(contentsOfFile: automaticBackup).contains("provider_token:"))
+        XCTAssertTrue(try String(contentsOfFile: automaticBackup).contains("model: m"))
+        XCTAssertTrue(try String(contentsOfFile: operatorArchive).contains("provider_token: \(token)"))
+    }
+
+    func testRemovePreservesConfigWhenExpectedTokenDoesNotMatch() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        let original = "provider_id: provider-a\nprovider_token: current-token\n"
+        try original.write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(try ProviderTokenPersist.remove(expectedToken: "stale-token", configPath: configPath))
+        XCTAssertEqual(try String(contentsOfFile: configPath, encoding: .utf8), original)
+    }
+
+    func testRemovePreservesNestedProviderToken() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        try "provider_token: current-token\nauth:\n  provider_token: nested-token\n".write(
+            toFile: configPath,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(try ProviderTokenPersist.remove(expectedToken: "current-token", configPath: configPath))
+        XCTAssertEqual(
+            try String(contentsOfFile: configPath, encoding: .utf8),
+            "auth:\n  provider_token: nested-token\n"
+        )
+    }
 
     func testApplyProviderTokenLineAppendsWhenAbsent() {
         let existing = """
@@ -127,6 +194,31 @@ final class ProviderTokenPersistTests: XCTestCase {
 
         let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
         XCTAssertTrue(onDisk.contains("provider_token: \(token)"))
+    }
+
+    func testConcurrentWritesSerializeToSingleValidTokenLine() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        try "port: 8080\nmodel: m\n".write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let queue = DispatchQueue(label: "token-persist-test", attributes: .concurrent)
+        let group = DispatchGroup()
+        for index in 0..<12 {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                let token = String(repeating: String(format: "%x", index % 16), count: 64)
+                try? ProviderTokenPersist.write(token: token, configPath: configPath)
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+
+        let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
+        let tokenLines = onDisk.split(separator: "\n").filter { $0.hasPrefix("provider_token:") }
+        XCTAssertEqual(tokenLines.count, 1, "serialized writers must leave one canonical provider_token line: \(onDisk)")
+        XCTAssertTrue(onDisk.contains("port: 8080"))
+        XCTAssertTrue(onDisk.contains("model: m"))
     }
 
     // SPEC-003 v0.8 FR-C9.3 — codex code-reviewer MAJOR-1 fix:

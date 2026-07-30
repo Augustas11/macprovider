@@ -1,0 +1,12 @@
+# Rebuild the matrix + calibration every 15 min from the store. See coldwarm-matrix.service.
+[Unit]
+Description=Rebuild macprovider cold/warm TTFT matrix every 15 min
+
+[Timer]
+OnBootSec=8min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

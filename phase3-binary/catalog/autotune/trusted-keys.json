@@ -1,0 +1,13 @@
+{
+  "keys": {
+    "streamvc-autotune-static-v4": {
+      "public_key_base64": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
+      "status": "active"
+    },
+    "streamvc-autotune-static-v5": {
+      "public_key_base64": "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA=",
+      "status": "bridge"
+    }
+  },
+  "schema_version": "macprovider.autotune-keys.v1"
+}

@@ -1,0 +1,15 @@
+# This definition can schedule only the low-impact liveness mode. #584 leaves it
+# disabled; a separate signed production change must own any future activation.
+[Unit]
+Description=Run low-impact macprovider liveness probe every 30 min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+# Jitter so the probe never lands on the same instant as other periodic jobs.
+RandomizedDelaySec=60
+# Catch up one missed run after downtime instead of waiting a full interval.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

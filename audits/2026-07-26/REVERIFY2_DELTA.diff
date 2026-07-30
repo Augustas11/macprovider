@@ -1,0 +1,442 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+index 2bc35722..3e03ba0d 100644
+--- a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
++++ b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+@@ -1278,29 +1278,30 @@ actor ControlSocketServer {
+ 
+     /// SPEC-037 stage 5 (FR-KVP8) — execute a kv-cache purge in the lock-holding
+     /// serve process. When the disk tier is DISABLED here (`tier == nil`), the serve
+-    /// process still owns its RAM `ConversationCache`, so purge must remain functional
+-    /// (FR-KVP8): clear the matching hot-tier residency — so we never keep serving a
+-    /// purged prefix from RAM until TTL — and report what was removed. The disk
+-    /// component is absent in this process (a standalone CLI handles disk purge when
+-    /// no serve holds the namespace lock); this path never reports a hot purge it did
+-    /// not perform.
++    /// process holds NO KV namespace flock (the disk store is never constructed), so
++    /// the on-disk crypto-shred must be delegated to the standalone CLI path, which
++    /// acquires the now-free namespace lock and deletes the namespace dir + Keychain
++    /// DEKs. We STILL clear the serve-owned RAM (hot) residency here first — so we
++    /// never keep serving a purged prefix from RAM until TTL — but then reply
++    /// `unavailable` (detail `disk_tier_disabled`) so the CLI's `status != "unavailable"`
++    /// guard falls THROUGH to `makeTier` + the standalone `purgeAllAndForget`/`purgeAll`/
++    /// `purge` that actually shreds disk. Replying `purge_ok` here would make the CLI
++    /// return early and skip the only code that deletes on-disk ciphertext + DEKs left
++    /// behind by a prior enabled run.
+     private nonisolated static func handleKVCachePurge(
+         mode: String, key: String?, tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
+     ) async {
+         guard let tier else {
+-            let entriesRemoved: Int
++            // Clear RAM hot residency (correct half — do not keep serving a purged
++            // prefix from RAM), then delegate the disk shred to the standalone CLI.
+             switch mode {
+             case "all", "all_forget":
+-                // Report the hot residency actually cleared.
+-                let before = await modelRuntime.hotConversationStats().entries
+                 await modelRuntime.purgeAllHotConversations()
+-                entriesRemoved = before
+             default:
+-                let hadHot = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
+-                entriesRemoved = hadHot ? 1 : 0
++                _ = await modelRuntime.purgeHotConversation(conversationKey: key ?? "")
+             }
+             try? await connection.send(.kvCachePurgeResponse(
+-                status: "purge_ok", entriesRemoved: entriesRemoved, bytesFreed: 0, detail: "disk_tier_disabled"))
++                status: "unavailable", entriesRemoved: 0, bytesFreed: 0, detail: "disk_tier_disabled"))
+             return
+         }
+         // Enabled: the tier's purge path already clears the wired hot-tier residency
+@@ -1323,19 +1324,20 @@ actor ControlSocketServer {
+ 
+     /// SPEC-037 stage 5 (FR-KVP12) — report the inspection surface from the
+     /// lock-holding serve process (JSON payload identical to the CLI shape). When the
+-    /// disk tier is DISABLED here (`tier == nil`), still report the serve-owned RAM
+-    /// (hot) residency with `enabled=false` so status remains functional while
+-    /// disabled (FR-KVP8).
++    /// disk tier is DISABLED here (`tier == nil`), the serve holds NO KV namespace
++    /// flock, so it cannot report on-disk residue at all. Reply `unavailable`
++    /// (detail `disk_tier_disabled`) so the CLI falls THROUGH to the standalone
++    /// `tier.status()`, which acquires the now-free lock and reports the operator-
++    /// critical disk residency (bytes_used / entry_count / keychain_item_count) left by
++    /// a prior enabled run. A hot-only reply here would lack "unavailable", short-circuit
++    /// the CLI, and hide surviving disk residue.
+     private nonisolated static func handleKVCacheStatus(
+         tier: KVDiskTier?, modelRuntime: ModelRuntime, connection: ControlSocketConnection
+     ) async {
+         guard let tier else {
+-            let stats = await modelRuntime.hotConversationStats()
+             let object: [String: Any] = [
+-                "status": "ok",
+-                "enabled": false,
+-                "hot_entries": stats.entries,
+-                "hot_tokens": stats.tokens,
++                "status": "unavailable",
++                "detail": "disk_tier_disabled",
+             ]
+             let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+             try? await connection.send(.kvCacheStatusResponse(payloadJSON: String(decoding: data, as: UTF8.self)))
+diff --git a/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift b/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift
+index 38c91bf3..be6da4ce 100644
+--- a/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift
++++ b/phase3-binary/Sources/macprovider-cli/KVConversationColdTierAdapter.swift
+@@ -157,15 +157,19 @@ final class KVConversationColdTierAdapter: ConversationColdTier {
+     /// Build the live-model geometry template that `captureSnapshot` learns from a
+     /// committed entry's layer payloads. Factored out so `ModelRuntime`'s load-time
+     /// seed (below) and the commit-time learn produce byte-identical geometry. The
+-    /// sequence axis is the payload dim equal to `tokenCount` (the committed
+-    /// sequence length), falling back to the structural rank-4 layout axis
+-    /// (`ndim - 2`) when the token count is ambiguous.
++    /// sequence axis is derived STRUCTURALLY as the rank-4 `KVCacheSimple` layout axis
++    /// (`ndim - 2` — the `seq` axis of `[batch, kvHeads, seq, headDim]`), identical to
++    /// `seedGeometryTemplate`. This must not key off a payload dim that equals
++    /// `tokenCount`: for a shape like `[1,32,32,128]` with tokenCount=32 that would pick
++    /// axis 1 (kvHeads) instead of the real seq axis 2, and a commit would overwrite the
++    /// correct load-seed with a wrong-axis template. The v1 allowlist is
++    /// KVCacheSimple-only, whose seq axis is always `ndim - 2`.
+     static func liveGeometryTemplate(fromPayloads payloads: [KVLayerPayload], tokenCount: Int) -> [KVLayerGeometry] {
+         payloads.map { payload in
+-            let seqAxis = payload.dims.firstIndex(of: tokenCount) ?? max(0, payload.ndim - 2)
+-            return KVLayerGeometry(
++            KVLayerGeometry(
+                 layerIndex: payload.layerIndex, classID: payload.classID, layoutVersion: 1,
+-                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype, sequenceAxis: seqAxis)
++                ndim: payload.ndim, dims: payload.dims, dtype: payload.dtype,
++                sequenceAxis: max(0, payload.ndim - 2))
+         }
+     }
+ 
+diff --git a/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift b/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift
+index 9b2295e8..c9cecb06 100644
+--- a/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift
++++ b/phase3-binary/Sources/macprovider-cli/UninstallCommand.swift
+@@ -97,11 +97,20 @@ struct UninstallCommand: AsyncParsableCommand {
+     }
+ 
+     /// FR-KVP8 — resolve the installed KV disk tier and purge --all --forget it,
+-    /// best-effort. Skips silently when there is no resolvable config or provider
+-    /// identity (nothing to clean). Never throws — uninstall must not hard-fail on a
+-    /// KV-cleanup hiccup.
++    /// best-effort. When the tier cannot be resolved (config unreadable or empty
++    /// provider_id), we cannot locate the namespace to shred, so surface an explicit
++    /// warning rather than skipping silently — any encrypted KV survival data + Keychain
++    /// DEKs from a prior enabled run may remain. Never throws — uninstall must not
++    /// hard-fail on a KV-cleanup hiccup (it is reversible and preserves identity).
+     static func purgeKVDiskCacheBestEffort(warnings: inout [String]) async {
+-        guard let tier = makeKVDiskTierForUninstall() else { return }
++        guard let tier = makeKVDiskTierForUninstall() else {
++            warnings.append(
++                "kv-cache cleanup skipped: could not resolve config/provider_id; encrypted KV "
++                + "survival data and Keychain DEKs may remain under the configured cache directory "
++                + "— run `macprovider-cli kv-cache purge --all --forget` after restoring config, or "
++                + "remove the cache dir manually.")
++            return
++        }
+         await purgeKVDiskCache(tier, warnings: &warnings)
+     }
+ 
+diff --git a/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift b/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift
+index 16e87f11..37d1eebe 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/ControlSocketTests.swift
+@@ -1,5 +1,6 @@
+ import Darwin
+ import Foundation
++import MacProviderCore
+ import XCTest
+ @testable import macprovider_cli
+ 
+@@ -721,10 +722,14 @@ final class ControlSocketTests: XCTestCase {
+ 
+     // MARK: - SPEC-037 FR-KVP8 — disabled-disk-tier RAM purge/status (Finding 2)
+ 
+-    /// With the disk tier DISABLED (kvDiskTier == nil), a socket-routed single-key
+-    /// purge must clear the serve-owned RAM (hot) entry and report purge_ok for what
+-    /// it removed — NOT reply `unavailable` (which would fall back to a standalone
+-    /// store that cannot touch this process's RAM, leaving a purged prefix live).
++    /// With the disk tier DISABLED (kvDiskTier == nil), the serve holds NO KV
++    /// namespace flock, so the on-disk crypto-shred is delegated to the standalone
++    /// CLI path. A socket-routed single-key purge must (1) still clear the serve-owned
++    /// RAM (hot) entry — so we never keep serving a purged prefix from RAM — and
++    /// (2) reply `unavailable`/`disk_tier_disabled` so the CLI's `status != "unavailable"`
++    /// guard falls THROUGH to the standalone `purge` that actually shreds disk +
++    /// Keychain. Replying `purge_ok` here would make the CLI return early and skip the
++    /// only disk-shred code.
+     func testKVCachePurgeSingleClearsHotRAMWhenDiskTierDisabled() async throws {
+         let socketPath = try makeSocketPath()
+         let runtime = makeRuntime(modelID: "ready-model")
+@@ -743,12 +748,13 @@ final class ControlSocketTests: XCTestCase {
+         await connection.close()
+         await server.stop()
+ 
+-        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
++        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
+             return XCTFail("expected kvCachePurgeResponse, got \(response)")
+         }
+-        XCTAssertEqual(status, "purge_ok")
+-        XCTAssertEqual(entriesRemoved, 1, "the resident hot entry must be reported removed")
++        // (2) CLI must fall through to the standalone disk shred.
++        XCTAssertEqual(status, "unavailable")
+         XCTAssertEqual(detail, "disk_tier_disabled")
++        // (1) RAM hot residency was cleared by the handler.
+         let residentAfter = await runtime.hotConversationStats().entries
+         XCTAssertEqual(residentAfter, 0, "hot entry evicted from RAM")
+         // A subsequent begin() with a proper superset prompt (which WOULD warm-hit the
+@@ -758,7 +764,8 @@ final class ControlSocketTests: XCTestCase {
+         XCTAssertEqual(cachedAfter, 0)
+     }
+ 
+-    /// With the disk tier disabled, `--all` clears every RAM entry over the socket.
++    /// With the disk tier disabled, `--all` clears every RAM entry over the socket and
++    /// replies `unavailable` so the CLI falls through to the standalone disk shred.
+     func testKVCachePurgeAllClearsHotRAMWhenDiskTierDisabled() async throws {
+         let socketPath = try makeSocketPath()
+         let runtime = makeRuntime(modelID: "ready-model")
+@@ -775,19 +782,18 @@ final class ControlSocketTests: XCTestCase {
+         await connection.close()
+         await server.stop()
+ 
+-        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, detail) = response else {
++        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
+             return XCTFail("expected kvCachePurgeResponse, got \(response)")
+         }
+-        XCTAssertEqual(status, "purge_ok")
+-        XCTAssertEqual(entriesRemoved, 2, "purge --all reports every hot entry removed")
++        XCTAssertEqual(status, "unavailable")
+         XCTAssertEqual(detail, "disk_tier_disabled")
+         let residentAfter = await runtime.hotConversationStats().entries
+         XCTAssertEqual(residentAfter, 0)
+     }
+ 
+-    /// With the disk tier disabled and NO resident hot entry, a single-key purge must
+-    /// not claim to have removed anything it did not (entriesRemoved == 0), yet still
+-    /// report purge_ok (nothing in RAM to miss — honest).
++    /// With the disk tier disabled and NO resident hot entry, the handler still replies
++    /// `unavailable`/`disk_tier_disabled` (the CLI must delegate the disk shred to the
++    /// standalone path regardless of whether RAM held anything to clear).
+     func testKVCachePurgeDisabledReportsZeroForAbsentHotEntry() async throws {
+         let socketPath = try makeSocketPath()
+         let runtime = makeRuntime(modelID: "ready-model")
+@@ -799,16 +805,131 @@ final class ControlSocketTests: XCTestCase {
+         await connection.close()
+         await server.stop()
+ 
+-        guard case let .kvCachePurgeResponse(status, entriesRemoved, _, _) = response else {
++        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
+             return XCTFail("expected kvCachePurgeResponse, got \(response)")
+         }
+-        XCTAssertEqual(status, "purge_ok")
+-        XCTAssertEqual(entriesRemoved, 0, "must not report a removal it did not perform")
++        XCTAssertEqual(status, "unavailable")
++        XCTAssertEqual(detail, "disk_tier_disabled")
+     }
+ 
+-    /// With the disk tier disabled, `kv-cache status` reports the RAM/hot residency
+-    /// with enabled=false — not `unavailable`.
+-    func testKVCacheStatusReportsHotStateWhenDiskTierDisabled() async throws {
++    /// FINDING A — the disabled-tier disk crypto-shred must be IDENTICAL whether or
++    /// not a serve is running: both flows converge on the standalone
++    /// `purgeAllAndForget` (the CLI fall-through), which deletes on-disk ciphertext +
++    /// Keychain DEKs left by a prior enabled run. The socket arm reaches it because the
++    /// disabled handler replies `unavailable` (not `purge_ok`) so the CLI does not
++    /// short-circuit; the no-serve arm reaches it because `trySocket` finds nothing.
++    func testDisabledForgetShredsDiskIdenticallyWithAndWithoutServe() async throws {
++        // Arm A — a running serve with the disk tier DISABLED (tier == nil).
++        let armA = try await seedPriorEnabledRunResidue()
++        let (diskA, kcA) = await residencyCounts(armA)
++        XCTAssertEqual(diskA, 1, "precondition: prior enabled run left a disk entry")
++        XCTAssertGreaterThan(kcA, 0, "precondition: prior enabled run left Keychain DEK material")
++
++        let socketPath = try makeSocketPath()
++        let runtime = makeRuntime(modelID: "ready-model")
++        await runtime.seedHotConversationForTest(key: "conv:kvs-synth:armA", tokens: (0 ..< 40).map(Int32.init), modelID: "ready-model")
++        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)   // kvDiskTier == nil
++        try await server.start()
++        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
++        try await connection.send(.kvCachePurgeRequest(mode: "all_forget", key: nil))
++        let response = try await connection.receive(timeout: 2)
++        await connection.close()
++        await server.stop()
++        guard case let .kvCachePurgeResponse(status, _, _, detail) = response else {
++            return XCTFail("expected kvCachePurgeResponse, got \(response)")
++        }
++        XCTAssertEqual(status, "unavailable", "disabled serve must delegate disk shred to the standalone CLI")
++        XCTAssertEqual(detail, "disk_tier_disabled")
++        let hotAfterA = await runtime.hotConversationStats().entries
++        XCTAssertEqual(hotAfterA, 0, "serve cleared RAM before delegating")
++        // The CLI now falls through to the standalone shred.
++        _ = await armA.tier.purgeAllAndForget()
++        let (diskAfterA, kcAfterA) = await residencyCounts(armA)
++        await armA.tier.shutdown()
++
++        // Arm B — no serve at all: the CLI goes straight to the standalone shred.
++        let armB = try await seedPriorEnabledRunResidue()
++        let (diskB, kcB) = await residencyCounts(armB)
++        XCTAssertEqual(diskB, 1)
++        XCTAssertGreaterThan(kcB, 0)
++        _ = await armB.tier.purgeAllAndForget()
++        let (diskAfterB, kcAfterB) = await residencyCounts(armB)
++        await armB.tier.shutdown()
++
++        // Identical end state: both arms shredded disk ciphertext + Keychain DEKs.
++        XCTAssertEqual(diskAfterA, 0)
++        XCTAssertEqual(kcAfterA, 0)
++        XCTAssertEqual(diskAfterB, 0)
++        XCTAssertEqual(kcAfterB, 0)
++        XCTAssertEqual(diskAfterA, diskAfterB, "disk end state identical with/without a running serve")
++        XCTAssertEqual(kcAfterA, kcAfterB, "Keychain end state identical with/without a running serve")
++    }
++
++    /// A disabled disk tier over a namespace that a prior ENABLED run populated with one
++    /// committed entry (ciphertext on disk + a DEK in the shared Keychain). Returns the
++    /// disabled tier plus the shared root/keychain for residency assertions.
++    private struct DiskResidue {
++        let tier: KVDiskTier
++        let root: URL
++        let keychain: KVInMemoryKeychain
++    }
++
++    private func seedPriorEnabledRunResidue() async throws -> DiskResidue {
++        let root = URL(fileURLWithPath: NSTemporaryDirectory())
++            .appendingPathComponent("kvres-\(getpid())-\(UUID().uuidString)")
++        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
++        let keychain = KVInMemoryKeychain()
++        // Prior ENABLED run: write one committed entry, then shut down (releasing the lock).
++        let enabled = KVDiskTier(
++            config: KVDiskCacheConfig(enabled: true, directory: root.path, minFreeBytes: 1024 * 1024),
++            namespaceID: "ns-res", eligibilityTTLSeconds: 900, keychain: keychain, sink: KVRecordingEventSink())
++        let activated = await enabled.activateForControlPlane()
++        XCTAssertTrue(activated)
++        let key = "conv:kvs-synth:residue"
++        let seq = 5
++        let index = try await enabled.store.currentIndex(rawKey: key)
++        let sampled = try await enabled.store.highWatermark(rawKey: key)
++        let byteCount = 1 * 2 * seq * 4 * KVCodecDType.f32.byteSize
++        let snapshot = KVWriteSnapshot(
++            rawKey: key, indexHMAC: try XCTUnwrap(index), tokens: Array(0 ..< Int32(seq)),
++            layers: [KVLayerPayload(
++                layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 2, seq, 4], dtype: .f32,
++                cacheOffset: seq, keyBytes: Data(count: byteCount), valueBytes: Data(count: byteCount))],
++            identity: KVWriteIdentity(
++                requestModel: "qwen-test", servedModelID: "qwen-test-served",
++                modelSHA256: String(repeating: "b", count: 64), catalogRevision: "r1",
++                tokenizerID: "tok-1", tokenizerConfigSHA256: String(repeating: "c", count: 64),
++                chatTemplateSHA256: String(repeating: "d", count: 64), abiEpoch: 1,
++                mlxSwiftLMRevision: "3.31.4", mlxVersion: "0.0.0", cacheClass: "KVCacheSimple",
++                layerCount: 1, kvBits: nil, kvGroupSize: nil, kvQuantMode: nil, kvQuantPolicy: nil,
++                decodePath: "ordinary", keyEpoch: 1),
++            sampledPurgeGeneration: sampled, commitSequence: 1,
++            createdAtMillis: 1_000_000, eligibleUntilMillis: 1_900_000,
++            incarnation: "inc-\(UUID().uuidString)")
++        guard case .committed = try await enabled.store.write(snapshot, nowMillis: 1_000_000) else {
++            XCTFail("prior enabled write should commit"); throw ControlSocketTestError.unexpectedContainerLoader
++        }
++        await enabled.shutdown()
++        // Current run has the tier DISABLED, sharing the same on-disk namespace + Keychain.
++        let disabled = KVDiskTier(
++            config: KVDiskCacheConfig(enabled: false, directory: root.path, minFreeBytes: 1024 * 1024),
++            namespaceID: "ns-res", eligibilityTTLSeconds: 900, keychain: keychain, sink: KVRecordingEventSink())
++        return DiskResidue(tier: disabled, root: root, keychain: keychain)
++    }
++
++    private func residencyCounts(_ residue: DiskResidue) async -> (disk: Int, keychain: Int) {
++        let disk = await residue.tier.status()?.entryCount ?? 0
++        let keychain = (try? residue.keychain.enumerate(servicePrefix: "").count) ?? -1
++        return (disk, keychain)
++    }
++
++    /// FINDING B — with the disk tier disabled, the serve holds no KV namespace flock
++    /// and cannot see on-disk residue, so `kv-cache status` over the socket must reply
++    /// `unavailable`/`disk_tier_disabled` (NOT a hot-only view). The CLI's
++    /// `!payloadJSON.contains("\"unavailable\"")` guard then falls THROUGH to the
++    /// standalone `tier.status()`, which reports the operator-critical disk residency
++    /// (bytes_used / entry_count / keychain_item_count).
++    func testKVCacheStatusFallsThroughToStandaloneWhenDiskTierDisabled() async throws {
+         let socketPath = try makeSocketPath()
+         let runtime = makeRuntime(modelID: "ready-model")
+         await runtime.seedHotConversationForTest(key: "conv:kvs-synth:s", tokens: (0 ..< 12).map(Int32.init), modelID: "ready-model")
+@@ -824,11 +945,10 @@ final class ControlSocketTests: XCTestCase {
+         guard case let .kvCacheStatusResponse(payloadJSON) = response else {
+             return XCTFail("expected kvCacheStatusResponse, got \(response)")
+         }
+-        XCTAssertFalse(payloadJSON.contains("\"unavailable\""), "disabled tier must not report unavailable")
++        XCTAssertTrue(payloadJSON.contains("\"unavailable\""), "disabled tier must reply unavailable so the CLI falls through")
+         let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payloadJSON.utf8)) as? [String: Any])
+-        XCTAssertEqual(object["status"] as? String, "ok")
+-        XCTAssertEqual(object["enabled"] as? Bool, false)
+-        XCTAssertEqual(object["hot_entries"] as? Int, 1)
++        XCTAssertEqual(object["status"] as? String, "unavailable")
++        XCTAssertEqual(object["detail"] as? String, "disk_tier_disabled")
+     }
+ 
+     private func makeSocketPath() throws -> URL {
+diff --git a/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift b/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift
+index aeaa845e..bc161ce5 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/KVConversationColdTierTests.swift
+@@ -596,6 +596,30 @@ final class KVConversationColdTierTests: XCTestCase {
+         }
+     }
+ 
++    /// FINDING D — a commit whose sequence length COLLIDES with another dim (e.g.
++    /// `[1,32,32,128]`, tokenCount=32) must still learn the structural seq axis
++    /// `ndim - 2` (axis 2), NOT the first dim equal to tokenCount (axis 1, kvHeads).
++    /// A wrong axis here would overwrite the correct load-time seed and later miss /
++    /// corrupt normal-length promotions.
++    func testLiveGeometryTemplateUsesStructuralAxisOnTokenCountCollision() {
++        let collided = [
++            KVLayerPayload(layerIndex: 0, classID: "KVCacheSimple", ndim: 4, dims: [1, 32, 32, 128],
++                           dtype: .f16, cacheOffset: 32, keyBytes: Data(), valueBytes: Data()),
++        ]
++        let learned = KVConversationColdTierAdapter.liveGeometryTemplate(fromPayloads: collided, tokenCount: 32)
++        XCTAssertEqual(learned.count, 1)
++        XCTAssertEqual(learned[0].sequenceAxis, 2, "seq axis must be ndim-2, not the kvHeads dim that also equals tokenCount")
++
++        // And it is byte-identical to the load-time seed for the same shape.
++        let seeded = KVConversationColdTierAdapter.seedGeometryTemplate(fromPayloads: collided)
++        XCTAssertEqual(seeded[0].sequenceAxis, learned[0].sequenceAxis, "seed and commit agree even under collision")
++        XCTAssertEqual(seeded[0].dims, learned[0].dims)
++        XCTAssertEqual(seeded[0].ndim, learned[0].ndim)
++        XCTAssertEqual(seeded[0].dtype, learned[0].dtype)
++        XCTAssertEqual(seeded[0].classID, learned[0].classID)
++        XCTAssertEqual(seeded[0].layoutVersion, learned[0].layoutVersion)
++    }
++
+     /// HIGH-1 (MLX-gated) — seed from a REAL `KVCacheSimple` populated via MLX and
+     /// promote on the first request. Gated on KV_ENABLE_MLX_TESTS (MLX aborts the
+     /// process without a Metal library).
+diff --git a/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift b/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift
+index 913e4ace..58e5db50 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/UninstallCommandTests.swift
+@@ -65,6 +65,31 @@ final class UninstallCommandTests: XCTestCase {
+         XCTAssertTrue(warnings.isEmpty, "a clean KV cleanup adds no warning: \(warnings)")
+     }
+ 
++    /// FINDING C — when the KV disk tier cannot be resolved (config unreadable /
++    /// empty provider_id) uninstall must not skip cleanup silently: it surfaces an
++    /// explicit warning that encrypted KV survival data + Keychain DEKs may remain,
++    /// while still staying best-effort (never hard-failing uninstall).
++    func testUninstallWarnsWhenKVCleanupCannotResolveConfig() async throws {
++        // Point config resolution at a path that does not exist so ConfigLoader.load
++        // throws (explicit path + missing file) and makeKVDiskTierForUninstall() → nil.
++        let missing = FileManager.default.temporaryDirectory
++            .appendingPathComponent("kvuninstall-missing-\(UUID().uuidString).yaml").path
++        let previous = getenv("MACPROVIDER_CONFIG").map { String(cString: $0) }
++        setenv("MACPROVIDER_CONFIG", missing, 1)
++        defer {
++            if let previous { setenv("MACPROVIDER_CONFIG", previous, 1) } else { unsetenv("MACPROVIDER_CONFIG") }
++        }
++        XCTAssertNil(UninstallCommand.makeKVDiskTierForUninstall(), "precondition: tier unresolvable")
++
++        var warnings: [String] = []
++        await UninstallCommand.purgeKVDiskCacheBestEffort(warnings: &warnings)
++
++        XCTAssertEqual(warnings.count, 1, "the skip path must surface exactly one warning: \(warnings)")
++        let warning = try XCTUnwrap(warnings.first)
++        XCTAssertTrue(warning.contains("kv-cache cleanup skipped"), "warning names the skip: \(warning)")
++        XCTAssertTrue(warning.contains("may remain"), "warning states residue may remain: \(warning)")
++    }
++
+     func testStopLaunchdServicesAcceptsVerifiedAbsentJob() throws {
+         var calls: [[String]] = []
+ 

@@ -11,6 +11,9 @@ PROVIDER_VERSION="${PROVIDER_VERSION:-1.2.6}"
 PROVIDER_SHA256="${PROVIDER_SHA256-d096ecb82863275478e919a4c0741750c272beb4a0ba5e5c3e778cba159184e2}"
 REQUIRE_TIER2_STRINGS="${REQUIRE_TIER2_STRINGS:-1}"
 FORBID_TIER2_STRINGS="${FORBID_TIER2_STRINGS-DeviceCheck devicecheck}"
+PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
+PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
+PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
 
 log() { printf '[tier2-provider-artifact] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-artifact] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -22,6 +25,42 @@ require_file() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+case "$PROVIDER_RUNTIME_MODE" in
+  execute) ;;
+  structural)
+    [ -n "$PROVIDER_EXPECTED_ARCHES" ] || {
+      die "structural mode requires PROVIDER_EXPECTED_ARCHES"
+    }
+    ;;
+  *) die "PROVIDER_RUNTIME_MODE must be execute or structural" ;;
+esac
+
+if [ -n "$PROVIDER_EXPECTED_ARCHES" ]; then
+  case "$PROVIDER_LIPO_BIN" in
+    /*) ;;
+    *) die "PROVIDER_LIPO_BIN must be an absolute path when architecture validation is required" ;;
+  esac
+  [ -f "$PROVIDER_LIPO_BIN" ] && [ -x "$PROVIDER_LIPO_BIN" ] && [ ! -L "$PROVIDER_LIPO_BIN" ] || {
+    die "PROVIDER_LIPO_BIN must be a regular executable and not a symlink"
+  }
+fi
+
+provider_version_at_least() {
+  local required_major="$1"
+  local required_minor="$2"
+  local required_patch="$3"
+  local major minor patch
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  [ "$major" -gt "$required_major" ] || \
+    { [ "$major" -eq "$required_major" ] && [ "$minor" -gt "$required_minor" ]; } || \
+    { [ "$major" -eq "$required_major" ] && [ "$minor" -eq "$required_minor" ] && [ "$patch" -ge "$required_patch" ]; }
 }
 
 sha256_file() {
@@ -52,6 +91,145 @@ check_sha256() {
   log "provider artifact sha256 ok: $actual"
 }
 
+validate_artifact_entries() {
+  local entries="$1"
+  local has_binary=0
+  local has_metal=0
+  local has_catalog_manifest=0
+  local has_catalog_keyring=0
+  local has_catalog_tier2=0
+  local has_catalog_candidates=0
+  local has_catalog_candidates_signature=0
+  local has_catalog_demand=0
+  local has_catalog_demand_signature=0
+  local has_catalog_rate_card=0
+  local has_catalog_rate_card_signature=0
+  local has_compatibility_set=0
+  local has_local_install_contract=0 has_local_provider_plist=0 has_local_updater_metadata=0
+  local has_local_watchdog_plist=0 has_local_watchdog_script=0
+  local version_major version_minor version_patch
+  local entry normalized_entry
+  while IFS= read -r entry; do
+    normalized_entry="$entry"
+    while :; do
+      case "$normalized_entry" in
+        ./*) normalized_entry="${normalized_entry#./}" ;;
+        *) break ;;
+      esac
+    done
+    case "$normalized_entry" in
+      ""|.) continue ;;
+    esac
+    case "$normalized_entry" in
+      /*|*"/../"*|../*|*/..|..)
+        die "unsafe provider artifact path: $entry"
+        ;;
+      macprovider-cli)
+        has_binary=1
+        ;;
+      mlx.metallib|mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)
+        has_metal=1
+        ;;
+      THIRD-PARTY-NOTICES.txt)
+        ;;
+      compatibility-set.json)
+        has_compatibility_set=$((has_compatibility_set + 1))
+        ;;
+      compatibility-set-local|compatibility-set-local/)
+        ;;
+      compatibility-set-local/install.sh)
+        has_local_install_contract=$((has_local_install_contract + 1))
+        ;;
+      compatibility-set-local/provider-launch-agent.plist.template)
+        has_local_provider_plist=$((has_local_provider_plist + 1))
+        ;;
+      compatibility-set-local/updater-rollback.json)
+        has_local_updater_metadata=$((has_local_updater_metadata + 1))
+        ;;
+      compatibility-set-local/watchdog-launch-agent.plist.template)
+        has_local_watchdog_plist=$((has_local_watchdog_plist + 1))
+        ;;
+      compatibility-set-local/watchdog.sh)
+        has_local_watchdog_script=$((has_local_watchdog_script + 1))
+        ;;
+      catalog-release|catalog-release/)
+        ;;
+      catalog-release/release.json)
+        has_catalog_manifest=$((has_catalog_manifest + 1))
+        ;;
+      catalog-release/trusted-keys.json)
+        has_catalog_keyring=$((has_catalog_keyring + 1))
+        ;;
+      catalog-release/tier2-catalog.json)
+        has_catalog_tier2=$((has_catalog_tier2 + 1))
+        ;;
+      catalog-release/autotune-candidates.json)
+        has_catalog_candidates=$((has_catalog_candidates + 1))
+        ;;
+      catalog-release/autotune-candidates.json.sig)
+        has_catalog_candidates_signature=$((has_catalog_candidates_signature + 1))
+        ;;
+      catalog-release/demand-rank.json)
+        has_catalog_demand=$((has_catalog_demand + 1))
+        ;;
+      catalog-release/demand-rank.json.sig)
+        has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
+        ;;
+      catalog-release/rate-card.json)
+        has_catalog_rate_card=$((has_catalog_rate_card + 1))
+        ;;
+      catalog-release/rate-card.json.sig)
+        has_catalog_rate_card_signature=$((has_catalog_rate_card_signature + 1))
+        ;;
+      *.bundle|*.bundle/*)
+        ;;
+      *)
+        die "unexpected provider artifact member: $entry"
+        ;;
+    esac
+  done <<EOF
+$entries
+EOF
+
+  [ "$has_binary" -eq 1 ] || die "provider artifact does not contain macprovider-cli"
+  [ "$has_metal" -eq 1 ] || die "provider artifact lacks MLX Metal kernels (mlx.metallib or mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)"
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  version_major="${BASH_REMATCH[1]}"
+  version_minor="${BASH_REMATCH[2]}"
+  version_patch="${BASH_REMATCH[3]}"
+  if [ "$version_major" -gt 1 ] || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -gt 8 ]; } || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -eq 8 ] && [ "$version_patch" -ge 31 ]; }; then
+    [ "$has_catalog_manifest" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/release.json"
+    [ "$has_catalog_keyring" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/trusted-keys.json"
+    [ "$has_catalog_tier2" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/tier2-catalog.json"
+    [ "$has_catalog_candidates" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json"
+    [ "$has_catalog_candidates_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json.sig"
+    [ "$has_catalog_demand" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json"
+    [ "$has_catalog_demand_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json.sig"
+    [ "$has_catalog_rate_card" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/rate-card.json"
+    [ "$has_catalog_rate_card_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/rate-card.json.sig"
+  fi
+  if [ "$version_major" -gt 1 ] || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -gt 8 ]; } || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -eq 8 ] && [ "$version_patch" -ge 33 ]; }; then
+    [ "$has_compatibility_set" -eq 1 ] || die "provider artifact must contain exactly one compatibility-set.json"
+    [ "$has_local_install_contract" -eq 1 ] || die "provider artifact must contain exactly one local install contract"
+    [ "$has_local_provider_plist" -eq 1 ] || die "provider artifact must contain exactly one provider launchd template"
+    [ "$has_local_updater_metadata" -eq 1 ] || die "provider artifact must contain exactly one updater rollback metadata file"
+    [ "$has_local_watchdog_plist" -eq 1 ] || die "provider artifact must contain exactly one watchdog launchd template"
+    [ "$has_local_watchdog_script" -eq 1 ] || die "provider artifact must contain exactly one watchdog script"
+  fi
+}
+
+validate_artifact_member_types() {
+  if tar tvzf "$PROVIDER_ARTIFACT" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
+    die "provider artifact contains unsafe link or device members"
+  fi
+}
+
 tmpdir=""
 temp_parent=""
 cleanup() {
@@ -69,21 +247,54 @@ require_command grep
 require_file "$PROVIDER_ARTIFACT"
 
 check_sha256 "$PROVIDER_ARTIFACT" "$PROVIDER_SHA256"
+artifact_entries="$(tar tzf "$PROVIDER_ARTIFACT")" || die "failed to list provider artifact"
+[ -n "$artifact_entries" ] || die "provider artifact is empty"
+validate_artifact_member_types
+validate_artifact_entries "$artifact_entries"
 
 temp_parent="${TMPDIR:-/tmp}"
 [ -d "$temp_parent" ] || die "temporary directory parent does not exist: $temp_parent"
 temp_parent="$(cd "$temp_parent" && pwd -P)"
 tmpdir="$(mktemp -d "$temp_parent/tier2-provider-artifact.XXXXXX")"
 
-tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir" macprovider-cli
+tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir"
 provider_binary="$tmpdir/macprovider-cli"
 [ -x "$provider_binary" ] || die "extracted provider binary is not executable: $provider_binary"
 
-provider_version="$("$provider_binary" --version)"
-if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
-  die "provider version mismatch: got $provider_version want $PROVIDER_VERSION"
+log "provider artifact includes MLX Metal kernels"
+
+if [ -n "$PROVIDER_EXPECTED_ARCHES" ]; then
+  provider_arches="$("$PROVIDER_LIPO_BIN" -archs "$provider_binary")"
+  [ "$provider_arches" = "$PROVIDER_EXPECTED_ARCHES" ] || {
+    die "provider architecture mismatch: got $provider_arches want $PROVIDER_EXPECTED_ARCHES"
+  }
+  log "provider architecture ok: $provider_arches"
 fi
-log "provider version ok: $provider_version"
+
+if [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
+  provider_version="$("$provider_binary" --version)"
+  if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
+    die "provider version mismatch: got $provider_version want $PROVIDER_VERSION"
+  fi
+  log "provider version ok: $provider_version"
+else
+  log "provider runtime execution deferred to an architecture-compatible verifier"
+fi
+
+if [ -f "$tmpdir/compatibility-set.json" ]; then
+  require_file "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem"
+  python3 "$REPO_ROOT/scripts/compatibility-set-manifest.py" validate \
+    --input "$tmpdir/compatibility-set.json" \
+    --payload-directory "$tmpdir" \
+    --require-signature \
+    --public-key "$REPO_ROOT/ops/pearl-updater/release-signing-public.pem" \
+    --expected-tag "v$PROVIDER_VERSION"
+  log "compatibility-set manifest signature and provider version verified"
+  if provider_version_at_least 1 8 39 && [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
+    "$provider_binary" release-payload-preflight >/dev/null
+    log "staged provider validated its signed compatibility release payload"
+  fi
+fi
 
 if [ "$REQUIRE_TIER2_STRINGS" = "1" ]; then
   for literal in \

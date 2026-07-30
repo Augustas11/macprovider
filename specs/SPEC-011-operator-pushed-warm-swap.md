@@ -1,7 +1,11 @@
 # SPEC-011 — Operator-Pushed Warm Swap
 
 **Version:** 0.5 (post round-3 polish pass — LOCK candidate)
-**Status:** Draft (pre round-4 LOCK-confirmation audit)
+**Status:** **LOCKED** at v0.5 (2026-06-06, Decision-log Entry 55 —
+codex round-4 returned 0/0/0). Implemented end-to-end (operator-pushed
+warm swap, NDJSON control socket, opt-in `model_hash`/`loading` heartbeat,
+`operator_model_swap` audit event). The former "pre round-4" status was
+never flipped.
 **Date drafted:** 2026-06-06
 **Depends on (REQUIRED):** SPEC-010 v1.5 (LOCKED 2026-06-06,
 Decision-log Entry 54) — SPEC-010 provides `supported_models[]`
@@ -10,6 +14,9 @@ frame which R-3.1.6 binary-side validation depends on.
 **Companion to (LOCKED):** SPEC-001 v1.2.4 (becomes v1.3
 candidate per §6.1), SPEC-002 v1.3.4 (becomes v1.3.5
 candidate per §6.2), SPEC-004 v0.3.1, SPEC-008 v0.3.
+
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §7 OQ-1 (control-socket transport), OQ-2 (CLI block-vs-detach), and OQ-3 (audit-backfill for WS-drop-mid-load swaps) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-011.
 
 **Change log v0.5 (round-3 polish pass — LOCK candidate):**
 Round-3 verdict was LOCK-READY pending narrow polish with
@@ -173,7 +180,7 @@ The 5 MAJORs + 3 MINORs:
 
 **Outline history (preserved in git):** SPEC-011 v0.1 + v0.1.1
 were OUTLINE versions reviewed in two pre-draft outline-audit
-rounds at `specs/SPEC-011-outline-audit.md`. v0.2 was the first
+rounds at `audits/spec-011/SPEC-011-outline-audit.md`. v0.2 was the first
 full normative draft. v0.2 incorporated:
 - **C2.1 fix** (outline round 2 MAJOR): §3.8 WS drop mid-load
   reconnect uses **`hello`** (locked SPEC-001 §6.5 / SPEC-002
@@ -1704,16 +1711,16 @@ Resolved in v0.2 (outline-audit round-2 decisions):
 
 Open for v0.5 (if pursued):
 
-- **OQ-1** Control-socket signaling: v0.4 picks Unix domain
+- **OQ-1** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed for v0.4 — UDS is correct for the macOS-only provider fleet that exists today; re-open only if Linux/Windows providers ship._ Control-socket signaling: v0.4 picks Unix domain
   socket at `$TMPDIR/macprovider-cli/ctl.sock` (macOS-native
   per R-3.1.5). If a future cross-platform target (Linux
   servers, containers) needs a different transport, v0.5
   may add a localhost HTTP alternative or a platform-
   conditional default.
-- **OQ-2** CLI block-vs-detach: v0.4 picks block-with-stderr-
+- **OQ-2** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed for v0.4 — no CI fire-and-forget consumer exists today; re-open when a real consumer asks._ CLI block-vs-detach: v0.4 picks block-with-stderr-
   progress. v0.5 may add `--detach` for CI fire-and-forget
   if demand surfaces.
-- **OQ-3** Audit-backfill for WS-drop-mid-load completed
+- **OQ-3** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — the "observation-only" decision stands; no operator pain reported in practice._ Audit-backfill for WS-drop-mid-load completed
   swaps: v0.4 explicitly decides "no backfill, observation-
   only." If operators report this gap as painful in
   practice, v0.5 may add a binary-side "swap-completed-while-
@@ -1745,11 +1752,12 @@ Open for v0.5 (if pursued):
   foundation; R-3.6.3, R-3.1.4 are SPEC-011 dependencies)
 - [SPEC-011 v0.1 / v0.1.1 outline](../docs/) (preserved in
   git history; archived)
-- [SPEC-011 outline audit history](SPEC-011-outline-audit.md)
+- [SPEC-011 outline audit history](../audits/spec-011/SPEC-011-outline-audit.md)
   rounds 1-2 — drove the v0.2 normative shape
-- [SPEC-012 source draft](SPEC-012-source.md) — wide-scope
-  predecessor; SPEC-011 + SPEC-012 split is documented in
-  SPEC-010 v1.x history
+- [SPEC-012 coordinator demand-pull draft](SPEC-012-coordinator-demand-pull.md)
+  — retained coordinator-driven contract
+- [SPEC-012 split history](../docs/spec-history/SPEC-012-v0.3-history.md)
+  — wide-scope predecessor and split rationale
 - [SPEC-001 v1.2.4](SPEC-001-phase3-binary.md) — provider
   binary (SPEC-011 drives v1.2.5 candidate per §6.1)
 - [SPEC-002 v1.3.4](SPEC-002-coordinator.md) — coordinator

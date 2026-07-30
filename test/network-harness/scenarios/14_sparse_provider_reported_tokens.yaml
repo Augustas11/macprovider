@@ -1,0 +1,60 @@
+# 14_sparse_provider_reported_tokens.yaml — issue #303 Path C regression.
+#
+# PR #288 closed a trust-byte-estimate path that over-settled sparse
+# English-heavy streams by overriding provider tokenizer counts. This
+# scenario exercises that sparse natural-language shape against the Llama
+# row documented in #303.
+#
+# What gets asserted by hard invariants:
+#   - I1/I3 fail if gateway byte estimation overcharges relative to the
+#     buyer-delivered stream or drifts from coordinator settlement.
+#   - I2/I4 retain the standard orphan-5xx and silent-hang protections.
+#
+# Expected live shape:
+#   - Successful streams use provider-reported token counts. If triaging,
+#     confirm ledger_reconcile.matched_successes has
+#     gateway_token_source=provider_reported for each matched success.
+name: sparse_provider_reported_tokens
+description: |
+  Issue #303 Path C regression coverage. Two sparse, English-heavy
+  streaming prompts against Llama-3.1-8B verify that provider-reported
+  tokenizer counts remain authoritative over gateway byte estimation.
+
+expected_shape: |
+  Issue #303 Path C:
+   - 2 total streaming requests against the Llama sparse-English row.
+   - Successful requests should reconcile with gateway_outcome=ok and
+     no positive gateway-vs-buyer overbill.
+   - ledger_reconcile.json should show gateway_token_source=provider_reported
+     for successful streams; gateway_estimated on a clean success is a
+     regression signal even if raw token drift is small.
+   - If this exact Llama row is absent, use the issue-approved fallback
+     English-heavy Llama variant and record that substitution in the
+     baseline artifact notes.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 240s
+request_timeout: 120s
+silent_hang_threshold: 45s
+required_gateway_token_source: provider_reported
+
+prompts:
+  - model: mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+    user: "Write four concise paragraphs describing how fog changes the soundscape of a harbor at dawn."
+    max_tokens: 192
+  - model: mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+    user: "Explain, in plain English, why careful accounting matters in a shared compute marketplace. Use no bullet points."
+    max_tokens: 192

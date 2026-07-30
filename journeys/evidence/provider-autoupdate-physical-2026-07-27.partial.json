@@ -1,0 +1,509 @@
+{
+  "schema_version": "macprovider.journey-evidence.partial.v1",
+  "journey_id": "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL",
+  "spec_requirement_ids": [
+    "SPEC-020-R001",
+    "SPEC-020-R002",
+    "SPEC-020-R003",
+    "SPEC-020-R004"
+  ],
+  "capture": {
+    "captured_at": "2026-07-27T03:46:34Z",
+    "captured_by": "augstar",
+    "repository_commit": "15f95d9f2a59caa40201b1db7af114e60ce4742a",
+    "artifact_scope": "partial-physical-evidence",
+    "status": "blocked-before-conformance-promotion",
+    "blocking_verdict": "Air5/Qwen physical rollback and buyer-serving recovery were proved, but Air5 did not converge from v1.8.56 to v1.8.61. The current production-base success path remains unproved.",
+    "conformance_promotion": "not-promoted; SPEC-020 remains pending until a current-production-base signed physical update succeeds and the signed journey-result contract exists.",
+    "redaction": {
+      "tokens": "omitted",
+      "lan_ips": "omitted",
+      "hostnames": {
+        "Pearl coordinator": "coordinator-pearl",
+        "Augustass-MacBook-Air.local": "provider-a-8gb-llama",
+        "MacBook-Air-5.local": "provider-b-16gb-qwen",
+        "Augustas Air": "provider-c-32gb-qwen-coder"
+      },
+      "stable_provider_ids_retained": true,
+      "request_ids_retained": true
+    }
+  },
+  "release_assets": {
+    "target_release": {
+      "tag": "v1.8.61",
+      "target_commitish": "6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+      "published_at": "2026-07-24T10:11:25Z",
+      "is_draft": false,
+      "is_prerelease": false,
+      "assets": {
+        "macprovider-cli-v1.8.61-darwin-arm64.tar.gz": {
+          "sha256": "23cbcc46bb5674bbcb805216a5d6aeaaf567586545339789c578743f0e5d4458"
+        },
+        "macprovider-cli-v1.8.61-darwin-arm64.pkg": {
+          "sha256": "eb375f6601ea2d51654f0abb72fd48f090750da789c6f2715af46a3ca11939f7"
+        },
+        "checksums.txt": {
+          "sha256": "d7f77cf6904da9ed053b264860044621d7379db65a3f676430f71020e46b095e"
+        },
+        "checksums.txt.sig": {
+          "sha256": "8e1bb40e5898f9331fb3f50d75e6f142998fef1d9b853e10d198f3a3dc9cd636"
+        },
+        "compatibility-set.json": {
+          "sha256": "6e77237be204d189079b997737332e34fc8c10f58952079e62073f9df248267d"
+        },
+        "compatibility-artifact-index.json": {
+          "sha256": "672ce6fbe5796037b63a0e7eb5de89654175bc5f62f3a010cba67fb4dbd8c257"
+        },
+        "macprovider-release-discovery.json": {
+          "sha256": "42f5d5937e657e849cc1796b3ba464adf5e014dcdaa77e7b2c159f2b7d50c64a"
+        },
+        "macprovider-release-discovery.json.sig": {
+          "sha256": "7e5aec3ea0ee1bb297d21597126bfa6e6f099a6a13f5a0f062f55ecc4368928b"
+        },
+        "release.json": {
+          "sha256": "386803eac2069a3721fe1ce41081b1083964cb96cec0868a17c9fe25a2a22276"
+        },
+        "tier2-catalog.json": {
+          "sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92"
+        },
+        "autotune-candidates.json": {
+          "sha256": "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
+        }
+      }
+    },
+    "pearl_current_advertisement": {
+      "captured_at": "2026-07-27T03:41:46Z",
+      "latest_binary_version": "1.8.60",
+      "observation": "Pearl still advertises v1.8.60 while the target release inspected here is v1.8.61. The current production coordinator recommendation is therefore not a v1.8.61 convergence driver."
+    },
+    "air5_installer_release_verification": {
+      "captured_at": "2026-07-27T03:40:40Z",
+      "method": "GUI Terminal install-v1.8.61.command",
+      "result": "package downloaded and verified before admission failure",
+      "verified_steps": [
+        "checksums signature verified",
+        "Developer ID Gatekeeper assessment accepted",
+        "stapler validation passed",
+        "signed catalog and stored recommendation verified",
+        "Qwen3-8B artifact was already present and verified"
+      ]
+    },
+    "signed_autotune_release": {
+      "release_id": "published-2026-07-10-catalog-recovery-v1",
+      "generated_at": "2026-07-10T19:00:00Z",
+      "policy_version": "autotune-policy-v1",
+      "feeds": {
+        "autotune-candidates.json": {
+          "version": "published-2026-07-10-catalog-recovery-v1",
+          "sha256": "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda",
+          "signer_key_id": "streamvc-autotune-static-v4"
+        },
+        "tier2-catalog.json": {
+          "version": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b",
+          "sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92",
+          "signer_key_id": "tier2-coordinator-key:707a860299e6a37f"
+        }
+      }
+    }
+  },
+  "coordinator": {
+    "role": "coordinator-pearl",
+    "host": "ubuntu-s-2vcpu-4gb-120gb-intel-nyc1",
+    "captured_at": "2026-07-27T03:41:46Z",
+    "services": {
+      "macprovider-coordinator.service": {
+        "active_state": "active",
+        "sub_state": "running",
+        "exec_main_pid": 4045041,
+        "exec_main_start_timestamp": "2026-07-23T18:31:24Z"
+      },
+      "macprovider-gateway.service": {
+        "active_state": "active",
+        "sub_state": "running",
+        "exec_main_pid": 4045080,
+        "exec_main_start_timestamp": "2026-07-23T18:31:26Z"
+      }
+    },
+    "poolz_after_air5_rollback": {
+      "captured_at": "2026-07-27T03:46:13Z",
+      "summary": {
+        "total_providers": 3,
+        "ready": 3,
+        "models": [
+          "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+          "mlx-community/Qwen3-8B-4bit",
+          "mlx-community/Llama-3.2-3B-Instruct-4bit"
+        ]
+      },
+      "air5_ready_row": {
+        "provider_id": "mp-90542c0bcf7c4d303795cd10bda3830d",
+        "assigned_id": "bdeae50f-d5f0-4721-aa03-864c55d9023f",
+        "model_id": "mlx-community/Qwen3-8B-4bit",
+        "state": "ready",
+        "routing_eligible": true,
+        "auth_state": "bearer_validated",
+        "encrypted_leg": true,
+        "catalog_admission_mode": "current",
+        "ram_gb": 16,
+        "binary_version": "1.8.56",
+        "last_autoupdate_event": {
+          "attempt": 17,
+          "timestamp": "2026-07-27T03:41:00Z",
+          "update_id": "bb5e005a-632a-40ed-921f-87adedfd1a59",
+          "current_version": "1.8.56",
+          "target_version": "1.8.60",
+          "phase": "cooldown",
+          "outcome": "skipped",
+          "reason": "cooldown_release_payload_incomplete_until_2026-07-27T04:38:00Z"
+        }
+      }
+    }
+  },
+  "providers": [
+    {
+      "role": "provider-a-8gb-llama",
+      "provider_id": "mp-c6ce46b97a755f1db6ddfa7d59bbdf6a",
+      "assigned_id": "69d9337e-5154-44e1-929a-3e1e09d07492",
+      "local_shell_access": "ssh augstar@Augustass-MacBook-Air.local with ~/.ssh/macprovider_prebeta_newmac_ed25519",
+      "whoami": "augstar",
+      "hardware": {
+        "macos": "26.3.1",
+        "hw_model": "MacBookAir10,1",
+        "arch": "arm64",
+        "memory_bytes": 8589934592,
+        "poolz_ram_gb": 8,
+        "hardware_tier": "8GB"
+      },
+      "model": {
+        "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "model_hash": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+        "weights_manifest_sha256": "0baf13715db1eeb56e6d0806b0d764aa1c44497aaaaf8d2ba90c21128d9fe2fe",
+        "model_loaded": true
+      },
+      "binary": {
+        "shell_path": "$HOME/.local/bin/macprovider-cli",
+        "launchd_path": "$HOME/macprovider/macprovider-cli",
+        "version_before": "1.8.61",
+        "version_after": "1.8.61",
+        "sha256": "822590b704f5363f092a142b0a442d8b3b8b47b19f65b324883ddd400208da88",
+        "update_check_output": "Recommendation stale: recommendation inputs changed since 2026-07-26T09:55:44Z. Run: macprovider-cli autotune --recommend. Already up to date (v1.8.61)."
+      },
+      "launchd": {
+        "service_label": "live.streamvc.macprovider",
+        "state": "running",
+        "pid": 13834,
+        "runs": 4,
+        "last_exit_code": 0,
+        "watchdog_service": "absent"
+      },
+      "local_autoupdate_state": {
+        "pending_marker_present": false,
+        "update_lock_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "release_discovery_state": {
+          "release_sequence": 1977479873101825,
+          "head_sha256": "fbd23e5c7510d9cecfd17a8f6386e163746750f5b99800850b7226bfdc97d5c9",
+          "file_sha256": "da842757908807d584fa24eba5d4ad4d983e74ba2d16139592e6d62150f90e2e"
+        },
+        "signed_policy_sha256": "8d3e3d2b956a8dbb24f6464e6e146e68a64bce59d627b020797b43c4f0411e8d",
+        "cooldowns_sha256": "54bb047263361eb5237e55148d748c38df2a98085f198401ba5d1d2b4164c2a2"
+      },
+      "coordinator_admission": {
+        "state": "ready",
+        "routing_eligible": true,
+        "auth_state": "bearer_validated",
+        "encrypted_leg": true,
+        "catalog_admission_mode": "current",
+        "binary_version": "1.8.61",
+        "last_autoupdate_event": {
+          "current_version": "1.8.61",
+          "target_version": "1.8.60",
+          "phase": "eligibility",
+          "outcome": "noop",
+          "reason": "target_not_newer"
+        }
+      }
+    },
+    {
+      "role": "provider-b-16gb-qwen",
+      "provider_id": "mp-90542c0bcf7c4d303795cd10bda3830d",
+      "assigned_id_before_attempts": "4cf354a7-bada-49c3-a711-2772542c092d",
+      "assigned_id_after_rollback": "bdeae50f-d5f0-4721-aa03-864c55d9023f",
+      "local_shell_access": "ssh admin@MacBook-Air-5.local with ~/.ssh/macprovider_prebeta_newmac_ed25519",
+      "whoami": "admin",
+      "ssh_session_source": "/Users/augstar/.codex/sessions/2026/07/21/rollout-2026-07-21T14-38-16-019f84af-1e41-7641-846e-9376e62737ce.jsonl",
+      "hardware": {
+        "macos": "26.5.2",
+        "hw_model": "Mac15,12",
+        "arch": "arm64",
+        "memory_bytes": 17179869184,
+        "poolz_ram_gb": 16,
+        "hardware_tier": "16GB"
+      },
+      "model": {
+        "model_id": "mlx-community/Qwen3-8B-4bit",
+        "model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+        "weights_manifest_sha256": "269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81",
+        "model_loaded": true
+      },
+      "binary_before": {
+        "shell_path": "$HOME/.local/bin/macprovider-cli",
+        "launchd_path": "$HOME/macprovider/macprovider-cli",
+        "version": "1.8.56",
+        "sha256": "2dbfa8526526dbfea2ee5f24fe3804a0a2de72458693b43f54d383d85ffa9e60"
+      },
+      "ordinary_update_attempt": {
+        "started_at": "2026-07-27T03:34:42Z",
+        "ended_at": "2026-07-27T03:34:49Z",
+        "command": "macprovider-cli update",
+        "exit_code": 1,
+        "failure": "Signed compatibility-set manifest is invalid: catalog_files_fields",
+        "interpretation": "The v1.8.56 updater rejects the current v1.8.61 compatibility-set manifest shape. This is pre-v1.8.61 updater archaeology, not the current production-base update path."
+      },
+      "ssh_installer_attempt": {
+        "target": "v1.8.61",
+        "model": "mlx-community/Qwen3-8B-4bit",
+        "exit_class": "rollback",
+        "failure": "candidate probe failed before Stage 1 probe: keychainReadFailed(status -25308)",
+        "interpretation": "The SSH non-interactive session cannot read the provider credential from the macOS Keychain. Installer rollback restored the prior provider files and service state."
+      },
+      "gui_installer_attempt": {
+        "started_at": "2026-07-27T03:38:00Z",
+        "finished_at": "2026-07-27T03:40:40Z",
+        "target": "v1.8.61",
+        "model": "mlx-community/Qwen3-8B-4bit",
+        "exit_code": 6,
+        "preflight": {
+          "package_verified": true,
+          "gatekeeper_accepted": true,
+          "stapler_validated": true,
+          "signed_catalog_verified": true,
+          "existing_model_artifact_verified": true
+        },
+        "candidate_autotune_result": {
+          "candidate_started": true,
+          "candidate_model": "qwen3-8b",
+          "warnings": [
+            "swap_observed_under_load",
+            "tps_below_gate",
+            "ttft_above_gate",
+            "candidate_catalog_stale",
+            "demand_rank_stale"
+          ],
+          "applied_candidate_profile": {
+            "model": "qwen3-8b",
+            "max_concurrency_override": 1,
+            "max_context_override": 4000
+          }
+        },
+        "failure": "authenticated hardware evidence admission failed before service start: HTTP 429",
+        "rollback_verification": "Previous provider, recommendation, watchdog, manifest, service, and manual-process states were restored and verified."
+      },
+      "state_after_rollback": {
+        "captured_at": "2026-07-27T03:41:46Z",
+        "binary_version": "1.8.56",
+        "launchd_service_label": "live.streamvc.macprovider",
+        "launchd_pid": 79832,
+        "launchd_runs": 2,
+        "watchdog_service": "live.streamvc.macprovider-watchdog",
+        "coordinator_state": "ready",
+        "routing_eligible": true,
+        "auth_state": "bearer_validated",
+        "encrypted_leg": true,
+        "catalog_admission_mode": "current"
+      },
+      "local_autoupdate_state": {
+        "release_discovery_state": {
+          "release_sequence": 1977479873101825,
+          "head_sha256": "fbd23e5c7510d9cecfd17a8f6386e163746750f5b99800850b7226bfdc97d5c9",
+          "file_sha256": "da842757908807d584fa24eba5d4ad4d983e74ba2d16139592e6d62150f90e2e"
+        },
+        "signed_policy_sha256_after_attempts": "8d3e3d2b956a8dbb24f6464e6e146e68a64bce59d627b020797b43c4f0411e8d",
+        "cooldowns_sha256_before_attempts": "3fba810cf5d0f15fa2d335411eb911553dca1e9e64382dbc9273abb038b9bd08",
+        "update_lock_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "role": "provider-c-32gb-qwen-coder",
+      "provider_id": "mp-26592d710fc97aa7c07b260665c67cf6",
+      "assigned_id": "b0c16d66-6801-40dd-bef4-8914270932e3",
+      "hardware": {
+        "poolz_ram_gb": 32,
+        "hardware_tier": "32GB"
+      },
+      "model": {
+        "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+        "model_hash": "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
+        "model_loaded": true
+      },
+      "coordinator_admission": {
+        "state": "ready",
+        "routing_eligible": true,
+        "binary_version": "1.8.60",
+        "last_autoupdate_event": {
+          "current_version": "1.8.60",
+          "target_version": "1.8.60",
+          "phase": "eligibility",
+          "outcome": "noop",
+          "reason": "target_not_newer"
+        }
+      }
+    }
+  ],
+  "buyer_probes": [
+    {
+      "scope": "before_air5_update_attempts",
+      "source_artifact_on_pearl": "/var/lib/macprovider-canary-buyer/artifacts/canary-2026-07-27T03-22-50-000Z.json",
+      "source_artifact_sha256": "f6badd3ddb07c986c021a27cd9c9d624f4cb1b65e374e8f0fefaa528e83ac40c",
+      "base": "https://api.streamvc.live",
+      "mode": "liveness",
+      "result": {
+        "outcome": "healthy",
+        "phase": "complete"
+      },
+      "budget": {
+        "requests": 2,
+        "completion_tokens_reserved": 16,
+        "elapsed_ms": 49023
+      },
+      "requests": [
+        {
+          "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+          "provider_id": "mp-c6ce46b97a755f1db6ddfa7d59bbdf6a",
+          "request_id": "06387e74-1713-43b7-bbee-f353381869f7",
+          "status": 200,
+          "outcome": "2xx",
+          "ttft_ms": 572,
+          "total_ms": 711,
+          "completion_tokens": 2
+        },
+        {
+          "model": "mlx-community/Qwen3-8B-4bit",
+          "provider_id": "mp-90542c0bcf7c4d303795cd10bda3830d",
+          "request_id": "d924e548-0fb4-48a8-b9d6-17d9f3ad88fc",
+          "status": 200,
+          "outcome": "2xx",
+          "ttft_ms": 1425,
+          "total_ms": 1811,
+          "completion_tokens": 8
+        }
+      ]
+    },
+    {
+      "scope": "after_air5_rollback_pool_guard",
+      "source_artifact_on_pearl": "/var/lib/macprovider-canary-buyer/artifacts/canary-2026-07-27T03-46-13-000Z.json",
+      "result": {
+        "outcome": "aborted",
+        "failure_class": "precondition_failed",
+        "phase": "precondition",
+        "reasons": [
+          "mp-c6ce46b97a755f1db6ddfa7d59bbdf6a:unexpected_provider",
+          "provider_signal_count_3_ne_2",
+          "mp-26592d710fc97aa7c07b260665c67cf6:memory_pressure_warning"
+        ]
+      },
+      "pool_observation": "The precondition sample did not issue buyer requests, but it recorded all three providers ready, including Air5/Qwen on v1.8.56 after rollback."
+    },
+    {
+      "scope": "after_air5_rollback_single_qwen_request",
+      "source_artifact_on_pearl": "/var/lib/macprovider-canary-buyer/artifacts/spec020-qwen-postrollback-2026-07-27T03-46-34-000Z.json",
+      "source_artifact_sha256": "2eb2c9d271f2a77f24e99d6d4d5fee5d745004cce01b6301c2a955e69da71670",
+      "base": "https://api.streamvc.live",
+      "request": {
+        "model": "mlx-community/Qwen3-8B-4bit",
+        "max_tokens": 8
+      },
+      "response": {
+        "http_status": 200,
+        "request_id": "chatcmpl-0d23679eb2e24b1fa9a48cf13079b1e4",
+        "response_model": "mlx-community/Qwen3-8B-4bit",
+        "completion_tokens": 8,
+        "macprovider_model_hash_observed": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+        "provider_inference": "Air5/Qwen is the only Pearl-ready provider for mlx-community/Qwen3-8B-4bit in this pool snapshot."
+      }
+    }
+  ],
+  "requirement_assertions": {
+    "SPEC-020-R001": {
+      "state": "partial",
+      "proved": [
+        "v1.8.61 release, checksum, signature, compatibility, discovery, and catalog assets have captured SHA-256 digests.",
+        "8GB Llama provider is v1.8.61, locally hashable, model-loaded, admitted, and buyer-serviceable.",
+        "Air5/Qwen installer verified the signed v1.8.61 package and catalog before failing at coordinator hardware-evidence admission.",
+        "Air5/Qwen rollback restored ready/routing-eligible Pearl admission and buyer-visible Qwen model service."
+      ],
+      "not_proved": [
+        "successful current production-base signed physical update apply on Air5/Qwen",
+        "launchd restart after a successful update on both provider roles",
+        "coordinator recommendation to v1.8.61 from Pearl"
+      ]
+    },
+    "SPEC-020-R002": {
+      "state": "partial",
+      "proved": [
+        "8GB Llama manual update check reaches signed update path and no-ops at v1.8.61.",
+        "Air5/Qwen v1.8.56 manual update fails closed on signed compatibility-set validation rather than applying an unaccepted manifest.",
+        "Air5/Qwen SSH installer fails before service start when Keychain access is unavailable and restores prior provider state."
+      ],
+      "not_proved": [
+        "manual recovery from disconnected or coordinator-rejected state on the current production-base provider",
+        "successful manual v1.8.61 recovery on Air5/Qwen"
+      ]
+    },
+    "SPEC-020-R003": {
+      "state": "partial",
+      "proved": [
+        "8GB Llama local binary SHA-256, launchd path, update lock, discovery state, and ready admission are captured.",
+        "Air5/Qwen GUI installer performed a candidate/autotune preflight, failed required hardware-evidence admission before provider service start, and restored previous provider files/service state.",
+        "Air5/Qwen after-rollback state is ready on Pearl and buyer-visible for Qwen."
+      ],
+      "not_proved": [
+        "local success decision after a mutating current-base physical update",
+        "controlled activation/local-health failure rollback after current-base update bytes are committed"
+      ]
+    },
+    "SPEC-020-R004": {
+      "state": "partial",
+      "proved": [
+        "Air5/Qwen launchd PID changed across the installer rollback attempt, and the prior launchd service was restored.",
+        "Air5/Qwen rollback restored watchdog, manifest, service, and manual-process state.",
+        "8GB Llama and Air5/Qwen update lock files are hashable and empty after the run."
+      ],
+      "not_proved": [
+        "shared mutation-lock ownership during a successful update",
+        "one-shot launchd helper fencing during successful restart",
+        "listener-bound first-hop commit authorization",
+        "rollback-entry fencing and payload cleanup after a current-base rollback fault"
+      ]
+    }
+  },
+  "open_gaps": [
+    {
+      "gap": "coordinator-hardware-evidence-rate-limit",
+      "details": "Air5/Qwen v1.8.61 GUI install reached required authenticated hardware-evidence submission, but Pearl returned HTTP 429 before service start. The installer rollback path restored the previous provider."
+    },
+    {
+      "gap": "pearl-advertised-version",
+      "details": "Pearl advertises latest_binary_version 1.8.60. It cannot prove a v1.8.61 production-base coordinator-driven convergence path while configured that way."
+    },
+    {
+      "gap": "old-updater-archaeology",
+      "details": "The v1.8.56 updater rejects the current compatibility-set manifest with catalog_files_fields. That validates fail-closed behavior but is not a production-base update success path."
+    },
+    {
+      "gap": "signed-journey-result-contract",
+      "details": "SPEC governance still requires a structured signed journey-result contract before this physical evidence can promote SPEC-020 R001-R004 to conformant."
+    }
+  ],
+  "source_commands": [
+    "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 -o BatchMode=yes -o IdentitiesOnly=yes admin@MacBook-Air-5.local 'hostname; whoami; sw_vers -productVersion; sysctl -n hw.memsize; sysctl -n hw.model; macprovider-cli --version; macprovider-cli status --config ~/.config/macprovider/config.yaml'",
+    "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 admin@MacBook-Air-5.local 'macprovider-cli update'",
+    "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 admin@MacBook-Air-5.local 'MACPROVIDER_VERSION=v1.8.61 MACPROVIDER_NO_PROMPT=1 MACPROVIDER_MODEL=mlx-community/Qwen3-8B-4bit bash install-v1.8.61.sh'",
+    "ssh -i ~/.ssh/macprovider_prebeta_newmac_ed25519 admin@MacBook-Air-5.local 'open /Users/admin/Desktop/spec020-air5-v1861-install.command'",
+    "ssh pearl 'systemctl show macprovider-coordinator.service macprovider-gateway.service'",
+    "ssh pearl 'curl -H Authorization:Bearer-REDACTED http://127.0.0.1:8444/poolz'",
+    "ssh pearl '/opt/macprovider-canary-buyer/run-canary.sh --mode liveness with temporary expected-fleet override'",
+    "ssh pearl 'curl https://api.streamvc.live/v1/chat/completions for mlx-community/Qwen3-8B-4bit with buyer token redacted'",
+    "ssh augstar@Augustass-MacBook-Air.local 'macprovider-cli update --check'",
+    "gh release view v1.8.61 --repo Augustas11/macprovider --json tagName,isPrerelease,isDraft,publishedAt,targetCommitish,assets"
+  ]
+}

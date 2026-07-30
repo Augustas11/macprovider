@@ -1,0 +1,63 @@
+# 03_sticky_multi_turn.yaml — 3 buyers each fire 5 sequential prompts,
+# each sending a per-buyer X-MacProvider-Conversation tag to exercise
+# SPEC-004 Pillar A sticky affinity.
+#
+# Requires both sides ON:
+#   - gateway: routing.sticky_enabled=true + auth.key_hash_secret set
+#   - coordinator: routing.sticky_enabled=true
+#
+# What we assert descriptively (phase A, no verdict):
+#  - Each buyer's 5 requests should land on ONE provider consistently.
+#    Group per_request.jsonl by buyer_index and check that
+#    route_provider_id is single-valued per buyer (modulo drain/failover
+#    edge cases).
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+#
+# Cost estimate (15 requests x 24 max_tokens): order of cents.
+name: sticky_multi_turn
+description: |
+  3 buyers, each sends 5 sequential non-streaming requests with a per-
+  buyer X-MacProvider-Conversation tag. Confirms sticky affinity fires
+  when both gateway and coord have routing.sticky_enabled=true.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - 15 total requests (3 buyers x 5 each).
+   - With sticky ON on both sides: each buyer's 5 requests land on the
+     same provider (per_request.route_provider_id column, grouped by
+     buyer_index).
+   - With sticky OFF (or header unset): each buyer's requests scatter.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 3
+  stream: false
+  pattern: interval
+  interval_ms: 1500
+  requests_per_buyer: 5
+  # SPEC-004 Pillar A: per-buyer conversation tag. Gateway HMACs it with
+  # account_id to produce X-MacProvider-Internal-Conv for coord routing.
+  sticky_conversation_key: "harness-scenario-03-buyer-%d"
+
+duration: 300s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Turn 1: pick a fruit and remember it."
+    max_tokens: 24
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Turn 2: what was the fruit?"
+    max_tokens: 24
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Turn 3: count to three."
+    max_tokens: 24

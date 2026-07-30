@@ -1,0 +1,28 @@
+[
+  {
+    "role": "system",
+    "content": "Respond with JSON matching schema person_tool_result before any other text."
+  },
+  {
+    "role": "user",
+    "content": "Return Ada and call lookup_age if needed."
+  },
+  {
+    "role": "assistant",
+    "tool_calls": [
+      {
+        "id": "call_lookup_age_ada",
+        "type": "function",
+        "function": {
+          "name": "lookup_age",
+          "arguments": "{\"name\":\"Ada\"}"
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "tool_call_id": "call_lookup_age_ada",
+    "content": "{\"age\":37}"
+  }
+]

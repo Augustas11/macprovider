@@ -1,0 +1,4 @@
+{
+  "mutation": {"operation": "malformed_owner_spec"},
+  "expected": "owner_spec: must be a non-empty string"
+}

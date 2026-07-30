@@ -35,11 +35,31 @@ var tier1DisclosureText = []disclosureItem{
 	},
 	{
 		Key:  "model_identity",
-		Text: "Model identity is provider-reported. When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.",
+		Text: "Model identity is provider-reported. `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.",
+	},
+	{
+		Key:  "model_verification_limit",
+		Text: modelVerificationLimitDisclosure,
+	},
+	{
+		Key:  "settlement_mode",
+		Text: settlementObserveModeDisclosure + " " + settlementEnforceModeDisclosure,
+	},
+	{
+		Key:  "settlement_outcomes",
+		Text: settlementPendingReservationDisclosure + " " + settlementPendingOutcomeDisclosure + " " + settlementVerifiedOutcomeDisclosure + " " + settlementQuarantinedOutcomeDisclosure + " " + settlementZeroSettledOutcomeDisclosure,
+	},
+	{
+		Key:  "streaming_partial_settlement",
+		Text: settlementPartialChargeDisclosure + " " + settlementStreamingFailoverDisclosure,
+	},
+	{
+		Key:  "buyer_receipt_status",
+		Text: settlementBuyerReceiptStatusDisclosure,
 	},
 	{
 		Key:  "tier2_milestone",
-		Text: "The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.",
+		Text: "The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.",
 	},
 }
 

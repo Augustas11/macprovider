@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,8 +23,20 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 		if r.URL.Path != "/v1/chat/completions" {
 			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 		}
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Fatalf("forwarded buyer auth header=%q", got)
+		// SPEC-006 v0.9.1 / issue #211: the upstream Authorization
+		// header is now hoisted out of the sticky-routing conditional
+		// and set on every forward (alongside X-MacProvider-Account)
+		// because the coordinator gates X-MacProvider-Account behind
+		// internalBearerAuthorized. The value MUST be the gateway's
+		// configured upstream coordinator bearer — NOT the buyer's
+		// mp_-prefixed API key. This assertion guards that the
+		// buyer's bearer is not silently exfiltrated upstream.
+		got := r.Header.Get("Authorization")
+		if strings.Contains(got, "mp_") {
+			t.Fatalf("forwarded buyer auth header (mp_ key leaked)=%q", got)
+		}
+		if got != "Bearer service-token" {
+			t.Fatalf("forwarded Authorization=%q, want %q", got, "Bearer service-token")
 		}
 		forwardedRequestID = r.Header.Get("X-Request-ID")
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
@@ -152,7 +165,7 @@ func TestQuotaExhaustionReturns429(t *testing.T) {
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
-		cfg.Quotas.AccountDailyTokens = 50
+		cfg.Quotas.AccountDailyTokens = 130
 		cfg.Limits.MaxTokensPerRequest = 50
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, "acct_quota_exhaust")
@@ -182,16 +195,17 @@ func TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota(t *testing.T) {
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
-		cfg.Quotas.DemoDailyTokensPerIP = 10
+		cfg.Quotas.DemoDailyTokensPerIP = 95
 		cfg.Limits.DemoMaxTokensPerRequest = 10
 	}, WithHTTPClient(client))
 	demo := issueDemoToken(t, h, "1.2.3.4")
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
-	first := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"})
+	demoHeaders := map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"}
+	first := postChat(t, h, "", body, distinctRequestID(demoHeaders))
 	if first.Code != http.StatusOK {
 		t.Fatalf("first demo status=%d body=%s", first.Code, first.Body.String())
 	}
-	second := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"})
+	second := postChat(t, h, "", body, distinctRequestID(demoHeaders))
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second demo status=%d body=%s", second.Code, second.Body.String())
 	}
@@ -225,7 +239,7 @@ func TestAccountConcurrencyCap(t *testing.T) {
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
 	done := make(chan *httptest.ResponseRecorder, 2)
 	for i := 0; i < 2; i++ {
-		go func() { done <- postChat(t, h, key, body, nil) }()
+		go func() { done <- postChat(t, h, key, body, distinctRequestID(nil)) }()
 	}
 	for i := 0; i < 2; i++ {
 		select {
@@ -234,18 +248,181 @@ func TestAccountConcurrencyCap(t *testing.T) {
 			t.Fatal("timed out waiting for upstream request")
 		}
 	}
-	third := postChat(t, h, key, body, nil)
+	third := postChat(t, h, key, body, distinctRequestID(nil))
 	if third.Code != http.StatusTooManyRequests {
 		t.Fatalf("third status=%d body=%s", third.Code, third.Body.String())
 	}
 	assertErrorCode(t, third.Body.String(), "account_concurrency_exceeded")
+	// Issue #190: 429 must carry OpenAI-compatible concurrency
+	// rate-limit headers so SDKs can self-pace.
+	assertConcurrencyRejectHeaders(t, third, 2)
+	// Issue #190 R1 security HIGH: per-tenant headers must not
+	// be cacheable.
+	assertNoStoreCacheHeaders(t, third)
 	close(release)
 	for i := 0; i < 2; i++ {
 		resp := <-done
 		if resp.Code != http.StatusOK {
 			t.Fatalf("in-flight response status=%d body=%s", resp.Code, resp.Body.String())
 		}
+		// Issue #190: admitted 2xx responses must also carry
+		// X-RateLimit-Limit-Requests so SDKs know the cap before
+		// they hit it.
+		if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got != "2" {
+			t.Errorf("admitted response X-RateLimit-Limit-Requests=%q want 2", got)
+		}
+		if got := resp.Header().Get("Retry-After"); got != "" {
+			t.Errorf("admitted response carries Retry-After=%q (must be unset)", got)
+		}
 	}
+}
+
+func TestAccountRequestRateLimitRejectsBurstBeforeUpstream(t *testing.T) {
+	now := fixedNow()
+	upstreamHits := make(chan struct{}, 4)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits <- struct{}{}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_request_rate",
+			"object":"chat.completion",
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Quotas.AccountConcurrency = 10
+		cfg.Quotas.AccountRequestRatePerSecond = 2
+	}, WithNow(func() time.Time { return now }), WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_request_rate_burst")
+	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+
+	for i := 0; i < 2; i++ {
+		resp := postChat(t, h, key, body, distinctRequestID(nil))
+		if resp.Code != http.StatusOK {
+			t.Fatalf("admitted request %d status=%d body=%s", i, resp.Code, resp.Body.String())
+		}
+	}
+	beforeReject := gatewaySettlementSnapshot(t, dbPath, "acct_request_rate_burst")
+	third := postChat(t, h, key, body, distinctRequestID(nil))
+	if third.Code != http.StatusTooManyRequests {
+		t.Fatalf("third request status=%d body=%s, want 429", third.Code, third.Body.String())
+	}
+	assertErrorCode(t, third.Body.String(), "account_request_rate_exceeded")
+	assertConcurrencyRejectHeaders(t, third, 2)
+	if got := len(upstreamHits); got != 2 {
+		t.Fatalf("upstream hits after rate rejection=%d want 2", got)
+	}
+	afterReject := gatewaySettlementSnapshot(t, dbPath, "acct_request_rate_burst")
+	if afterReject != beforeReject {
+		t.Fatalf("rate rejection changed settlement state: before=%+v after=%+v", beforeReject, afterReject)
+	}
+
+	now = now.Add(time.Second)
+	fourth := postChat(t, h, key, body, distinctRequestID(nil))
+	if fourth.Code != http.StatusOK {
+		t.Fatalf("request after refill status=%d body=%s", fourth.Code, fourth.Body.String())
+	}
+	if got := len(upstreamHits); got != 3 {
+		t.Fatalf("upstream hits after refill=%d want 3", got)
+	}
+}
+
+func TestRunawayBuyerBurstGetsQuick429sAtGateway(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		entered <- struct{}{}
+		<-release
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_runaway",
+			"object":"chat.completion",
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Quotas.AccountConcurrency = 1
+		cfg.Quotas.AccountRequestRatePerSecond = 100
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_runaway_burst")
+	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- postChat(t, h, key, body, distinctRequestID(nil)) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first upstream request")
+	}
+
+	for i := 0; i < 19; i++ {
+		resp := postChat(t, h, key, body, distinctRequestID(nil))
+		if resp.Code != http.StatusTooManyRequests {
+			t.Fatalf("burst request %d status=%d body=%s, want 429", i+2, resp.Code, resp.Body.String())
+		}
+		assertErrorCode(t, resp.Body.String(), "account_concurrency_exceeded")
+		assertConcurrencyRejectHeaders(t, resp, 1)
+	}
+
+	close(release)
+	first := <-done
+	if first.Code != http.StatusOK {
+		t.Fatalf("first in-flight response status=%d body=%s", first.Code, first.Body.String())
+	}
+}
+
+// Issue #190 R1 security HIGH helper: confirm chat responses are
+// non-cacheable so per-tenant headers cannot leak via a shared
+// CDN/proxy cache.
+func assertNoStoreCacheHeaders(t *testing.T, resp *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := resp.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Errorf("Cache-Control=%q must contain no-store", got)
+	}
+	// Vary may be a single comma-joined value or multiple Add-ed
+	// values; check both representations.
+	varyJoined := strings.Join(resp.Header().Values("Vary"), ", ")
+	if !strings.Contains(varyJoined, "Authorization") {
+		t.Errorf("Vary=%q must contain Authorization", varyJoined)
+	}
+	if !strings.Contains(varyJoined, "X-Demo-Token") {
+		t.Errorf("Vary=%q must contain X-Demo-Token", varyJoined)
+	}
+}
+
+// Issue #190 helper: verify the 429 concurrency-reject path emits
+// every header an OpenAI-compatible SDK looks for.
+func assertConcurrencyRejectHeaders(t *testing.T, resp *httptest.ResponseRecorder, wantLimit int) {
+	t.Helper()
+	wantLimitStr := strconv.Itoa(wantLimit)
+	if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got != wantLimitStr {
+		t.Errorf("X-RateLimit-Limit-Requests=%q want %s", got, wantLimitStr)
+	}
+	if got := resp.Header().Get("X-RateLimit-Remaining-Requests"); got != "0" {
+		t.Errorf("X-RateLimit-Remaining-Requests=%q want 0", got)
+	}
+	resetStr := resp.Header().Get("X-RateLimit-Reset-Requests")
+	if resetStr == "" {
+		t.Errorf("X-RateLimit-Reset-Requests missing on 429")
+	} else if reset, err := strconv.ParseInt(resetStr, 10, 64); err != nil {
+		t.Errorf("X-RateLimit-Reset-Requests=%q not parsable: %v", resetStr, err)
+	} else if reset <= 0 {
+		t.Errorf("X-RateLimit-Reset-Requests=%d must be positive unix seconds", reset)
+	}
+	retryAfterStr := resp.Header().Get("Retry-After")
+	if retryAfterStr == "" {
+		t.Errorf("Retry-After missing on 429")
+	} else if retryAfter, err := strconv.Atoi(retryAfterStr); err != nil {
+		t.Errorf("Retry-After=%q not parsable: %v", retryAfterStr, err)
+	} else if retryAfter < 1 || retryAfter > 60 {
+		t.Errorf("Retry-After=%d outside [1, 60]", retryAfter)
+	}
+	// Round-2 sweep rule: a path that sets a positive Retry-After MUST
+	// stamp retryable=true in the body — otherwise a buyer honoring one
+	// signal and a buyer honoring the other reach opposite conclusions.
+	assertBodyRetryable(t, resp.Body.String(), true)
 }
 
 // Regression: M1-8 / PERF-6. Demo requests must respect a concurrency cap.
@@ -281,7 +458,7 @@ func TestDemoConcurrencyCap(t *testing.T) {
 
 	done := make(chan *httptest.ResponseRecorder, 2)
 	for i := 0; i < 2; i++ {
-		go func() { done <- postChat(t, h, "", body, headers) }()
+		go func() { done <- postChat(t, h, "", body, distinctRequestID(headers)) }()
 	}
 	for i := 0; i < 2; i++ {
 		select {
@@ -290,11 +467,14 @@ func TestDemoConcurrencyCap(t *testing.T) {
 			t.Fatal("timed out waiting for upstream demo request to enter")
 		}
 	}
-	third := postChat(t, h, "", body, headers)
+	third := postChat(t, h, "", body, distinctRequestID(headers))
 	if third.Code != http.StatusTooManyRequests {
 		t.Fatalf("third demo request status=%d body=%s, want 429", third.Code, third.Body.String())
 	}
 	assertErrorCode(t, third.Body.String(), "demo_concurrency_exceeded")
+	// Issue #190: demo path must carry the same headers as the
+	// authenticated path.
+	assertConcurrencyRejectHeaders(t, third, 2)
 	close(release)
 	for i := 0; i < 2; i++ {
 		resp := <-done
@@ -302,6 +482,22 @@ func TestDemoConcurrencyCap(t *testing.T) {
 			t.Fatalf("in-flight demo response status=%d body=%s", resp.Code, resp.Body.String())
 		}
 	}
+}
+
+func TestCoordinator503PassthroughPreservesPreflightRejected(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"error":{"code":"preflight_rejected","message":"Provider rejected preflight","param":null,"type":"service_unavailable"}}`
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_preflight_passthrough")
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":80,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "preflight_rejected")
 }
 
 func TestProviderUnavailableReturns503AndRefunds(t *testing.T) {
@@ -316,7 +512,7 @@ func TestProviderUnavailableReturns503AndRefunds(t *testing.T) {
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	assertErrorCode(t, resp.Body.String(), "provider_unavailable")
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	if quota["daily_tokens_used"].(float64) != 0 || quota["daily_tokens_reserved"].(float64) != 0 {
@@ -439,7 +635,7 @@ func TestDemoOnlyKillSwitchPausesPlaygroundFeedback(t *testing.T) {
 	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, nil)
 	demoToken := issueDemoToken(t, h, "1.2.3.4")
 
-	postAdminJSON(t, h, "/admin/kill-switch", `{"demo_only":true}`)
+	postAdminJSON(t, h, "/admin/kill-switch", `{"demo_only":true,"version":0}`)
 	resp := postFeedback(t, h, "", demoToken, `{"rating":4,"scope":"playground"}`)
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("feedback status=%d body=%s", resp.Code, resp.Body.String())

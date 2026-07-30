@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/spec-pr-governance-v1.schema.json",
+  "title": "Macprovider SPEC pull-request governance declaration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "behavior_change",
+    "contract_change",
+    "specs",
+    "requirements",
+    "authority_domains",
+    "arbitration",
+    "tests",
+    "journeys"
+  ],
+  "properties": {
+    "schema_version": {"const": "spec-pr-governance-v1"},
+    "behavior_change": {"enum": ["none", "yes"]},
+    "contract_change": {"enum": ["none", "yes"]},
+    "issue": {"type": "string", "pattern": "^https://github\\.com/Augustas11/macprovider/issues/[0-9]+$"},
+    "specs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"}},
+    "requirements": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}-R[0-9]{3}$"}},
+    "authority_domains": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}},
+    "arbitration": {"type": "array", "uniqueItems": true, "items": {"enum": ["CODE_BUG", "SPEC_BUG", "DECISION_REQUIRED", "DUPLICATE_AUTHORITY", "UNKNOWN"]}},
+    "tests": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "journeys": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  }
+}

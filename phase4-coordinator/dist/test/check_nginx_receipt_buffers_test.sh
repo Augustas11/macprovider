@@ -11,7 +11,12 @@ FAIL=0
 require_directive() {
   local file="$1"
   local directive="$2"
-  if ! sed 's/[[:space:]]*#.*$//' "$file" | grep -qF "$directive"; then
+  # `grep -q` exits on first match, which closes a producer pipe and causes
+  # either `sed` or `printf` to exit 141 under `pipefail`. Feed the stripped
+  # config through a here-string so no producer process can SIGPIPE.
+  local stripped
+  stripped=$(sed 's/[[:space:]]*#.*$//' "$file")
+  if ! grep -qF "$directive" <<<"$stripped"; then
     echo "FAIL: $file missing active directive: $directive" >&2
     FAIL=1
   fi

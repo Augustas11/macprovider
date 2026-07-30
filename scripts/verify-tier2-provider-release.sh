@@ -12,10 +12,14 @@ INSTALL_SH="${INSTALL_SH:-$REPO_ROOT/phase3-binary/dist/install.sh}"
 CHECKER="${CHECKER:-$REPO_ROOT/scripts/check-tier2-provider-artifact.sh}"
 CURL_BIN="${CURL_BIN:-curl}"
 OPENSSL_BIN="${OPENSSL_BIN:-openssl}"
+HDIUTIL_BIN="${HDIUTIL_BIN:-hdiutil}"
 PROVIDER_VERSION_OVERRIDE="${PROVIDER_VERSION:-}"
 KEEP_DOWNLOADS="${KEEP_DOWNLOADS:-0}"
 DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:-1}"
 DOWNLOAD_RETRY_SLEEP="${DOWNLOAD_RETRY_SLEEP:-5}"
+PROVIDER_RUNTIME_MODE="${PROVIDER_RUNTIME_MODE:-execute}"
+PROVIDER_EXPECTED_ARCHES="${PROVIDER_EXPECTED_ARCHES:-}"
+PROVIDER_LIPO_BIN="${PROVIDER_LIPO_BIN:-}"
 
 log() { printf '[tier2-provider-release] %s\n' "$*" >&2; }
 die() { printf '[tier2-provider-release] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -27,19 +31,26 @@ usage: scripts/verify-tier2-provider-release.sh [--tag v1.2.6]
 Downloads a macprovider-cli GitHub Release asset set, verifies the signed
 checksum manifest using the installer public key, verifies the release tarball
 checksum, then runs scripts/check-tier2-provider-artifact.sh against the
-downloaded tarball. This script is read-only against GitHub and does not mutate
-local release state unless KEEP_DOWNLOADS=1 is set.
+downloaded tarball. When the release also contains Malibu.app, this verifies
+the app DMG checksum, code signature, stapled ticket, Gatekeeper, and bundled
+CLI byte identity against the standalone provider tarball.
+assessment. This script is read-only against GitHub and does not mutate local
+release state unless KEEP_DOWNLOADS=1 is set.
 
 Environment:
   GITHUB_REPO                         default: Augustas11/macprovider
   RELEASE_TAG                         default: v1.2.6
   INSTALL_SH                          default: phase3-binary/dist/install.sh
   CHECKER                             default: scripts/check-tier2-provider-artifact.sh
+  HDIUTIL_BIN                         default: hdiutil
   MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM optional public key override
   PROVIDER_VERSION                    default: RELEASE_TAG without leading v
   KEEP_DOWNLOADS=1                    keep downloaded artifacts and print path
   DOWNLOAD_ATTEMPTS                    default: 1
   DOWNLOAD_RETRY_SLEEP                 seconds between attempts; default: 5
+  PROVIDER_RUNTIME_MODE                execute (default) or structural
+  PROVIDER_EXPECTED_ARCHES             required in structural mode
+  PROVIDER_LIPO_BIN                    absolute lipo path when validating arches
 USAGE
 }
 
@@ -61,10 +72,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-case "$RELEASE_TAG" in
-  v[0-9]*.[0-9]*.[0-9]*) ;;
-  *) die "RELEASE_TAG must look like v1.2.6: $RELEASE_TAG" ;;
-esac
+if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  die "RELEASE_TAG must look like v1.2.6: $RELEASE_TAG"
+fi
 
 if [ -n "$PROVIDER_VERSION_OVERRIDE" ]; then
   PROVIDER_VERSION="$PROVIDER_VERSION_OVERRIDE"
@@ -79,6 +89,19 @@ require_command() {
 require_file() {
   local path="$1"
   [ -f "$path" ] || die "missing file: $path"
+}
+
+provider_version_requires_catalog() {
+  local major minor patch
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  [ "$major" -gt 1 ] || \
+    { [ "$major" -eq 1 ] && [ "$minor" -gt 8 ]; } || \
+    { [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -ge 31 ]; }
 }
 
 sha256_file() {
@@ -117,6 +140,18 @@ validate_payload_entries() {
   local label="$2"
   local entries
   local entry normalized_entry has_binary=0
+  local has_catalog_manifest=0
+  local has_catalog_keyring=0
+  local has_catalog_tier2=0
+  local has_catalog_candidates=0
+  local has_catalog_candidates_signature=0
+  local has_catalog_demand=0
+  local has_catalog_demand_signature=0
+  local has_catalog_rate_card=0
+  local has_catalog_rate_card_signature=0
+  local has_compatibility_set=0
+  local has_local_install_contract=0 has_local_provider_plist=0 has_local_updater_metadata=0
+  local has_local_watchdog_plist=0 has_local_watchdog_script=0
 
   entries="$(cd "$payload_dir" && find . -mindepth 1 -print)" || die "failed to list $label"
   [ -n "$entries" ] || die "$label is empty"
@@ -138,7 +173,58 @@ validate_payload_entries() {
       macprovider-cli)
         has_binary=1
         ;;
+      mlx.metallib)
+        ;;
       THIRD-PARTY-NOTICES.txt)
+        ;;
+      compatibility-set.json)
+        has_compatibility_set=$((has_compatibility_set + 1))
+        ;;
+      compatibility-set-local)
+        ;;
+      compatibility-set-local/install.sh)
+        has_local_install_contract=$((has_local_install_contract + 1))
+        ;;
+      compatibility-set-local/provider-launch-agent.plist.template)
+        has_local_provider_plist=$((has_local_provider_plist + 1))
+        ;;
+      compatibility-set-local/updater-rollback.json)
+        has_local_updater_metadata=$((has_local_updater_metadata + 1))
+        ;;
+      compatibility-set-local/watchdog-launch-agent.plist.template)
+        has_local_watchdog_plist=$((has_local_watchdog_plist + 1))
+        ;;
+      compatibility-set-local/watchdog.sh)
+        has_local_watchdog_script=$((has_local_watchdog_script + 1))
+        ;;
+      catalog-release)
+        ;;
+      catalog-release/release.json)
+        has_catalog_manifest=$((has_catalog_manifest + 1))
+        ;;
+      catalog-release/trusted-keys.json)
+        has_catalog_keyring=$((has_catalog_keyring + 1))
+        ;;
+      catalog-release/tier2-catalog.json)
+        has_catalog_tier2=$((has_catalog_tier2 + 1))
+        ;;
+      catalog-release/autotune-candidates.json)
+        has_catalog_candidates=$((has_catalog_candidates + 1))
+        ;;
+      catalog-release/autotune-candidates.json.sig)
+        has_catalog_candidates_signature=$((has_catalog_candidates_signature + 1))
+        ;;
+      catalog-release/demand-rank.json)
+        has_catalog_demand=$((has_catalog_demand + 1))
+        ;;
+      catalog-release/demand-rank.json.sig)
+        has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
+        ;;
+      catalog-release/rate-card.json)
+        has_catalog_rate_card=$((has_catalog_rate_card + 1))
+        ;;
+      catalog-release/rate-card.json.sig)
+        has_catalog_rate_card_signature=$((has_catalog_rate_card_signature + 1))
         ;;
       *.bundle|*.bundle/*)
         ;;
@@ -151,14 +237,85 @@ $entries
 EOF
 
   [ "$has_binary" -eq 1 ] || die "$label does not contain macprovider-cli"
+  if provider_version_requires_catalog; then
+    [ "$has_catalog_manifest" -eq 1 ] || die "$label must contain exactly one catalog-release/release.json"
+    [ "$has_catalog_keyring" -eq 1 ] || die "$label must contain exactly one catalog-release/trusted-keys.json"
+    [ "$has_catalog_tier2" -eq 1 ] || die "$label must contain exactly one catalog-release/tier2-catalog.json"
+    [ "$has_catalog_candidates" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json"
+    [ "$has_catalog_candidates_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json.sig"
+    [ "$has_catalog_demand" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json"
+    [ "$has_catalog_demand_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json.sig"
+    [ "$has_catalog_rate_card" -eq 1 ] || die "$label must contain exactly one catalog-release/rate-card.json"
+    [ "$has_catalog_rate_card_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/rate-card.json.sig"
+  fi
+  if [[ "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] && \
+     { [ "${BASH_REMATCH[1]}" -gt 1 ] || \
+       { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -gt 8 ]; } || \
+       { [ "${BASH_REMATCH[1]}" -eq 1 ] && [ "${BASH_REMATCH[2]}" -eq 8 ] && [ "${BASH_REMATCH[3]}" -ge 33 ]; }; }; then
+    [ "$has_compatibility_set" -eq 1 ] || die "$label must contain exactly one compatibility-set.json"
+    [ "$has_local_install_contract" -eq 1 ] || die "$label must contain exactly one local install contract"
+    [ "$has_local_provider_plist" -eq 1 ] || die "$label must contain exactly one provider launchd template"
+    [ "$has_local_updater_metadata" -eq 1 ] || die "$label must contain exactly one updater rollback metadata file"
+    [ "$has_local_watchdog_plist" -eq 1 ] || die "$label must contain exactly one watchdog launchd template"
+    [ "$has_local_watchdog_script" -eq 1 ] || die "$label must contain exactly one watchdog script"
+  fi
   if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
     die "$label contains unsafe link or device members"
   fi
 }
 
+validate_malibu_app_zip() {
+  local zip_path="$1"
+  python3 - "$zip_path" <<'PY'
+import stat
+import sys
+import zipfile
+
+zip_path = sys.argv[1]
+required = {
+    "Malibu.app/Contents/MacOS/Malibu",
+    "Malibu.app/Contents/MacOS/macprovider-cli",
+}
+has_metal = False
+seen = set()
+
+try:
+    with zipfile.ZipFile(zip_path) as archive:
+        infos = archive.infolist()
+        if not infos:
+            raise SystemExit("Malibu.app zip is empty")
+        for info in infos:
+            name = info.filename
+            if name.startswith("/") or "/../" in name or name.startswith("../") or name.endswith("/..") or name == "..":
+                raise SystemExit(f"unsafe Malibu.app zip path: {name}")
+            if name != "Malibu.app/" and not name.startswith("Malibu.app/"):
+                raise SystemExit(f"unexpected Malibu.app zip member: {name}")
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode in (stat.S_IFLNK, stat.S_IFBLK, stat.S_IFCHR, stat.S_IFIFO):
+                raise SystemExit(f"unsafe Malibu.app zip member type: {name}")
+            seen.add(name.rstrip("/"))
+            if name.rstrip("/") == "Malibu.app/Contents/MacOS/mlx.metallib":
+                has_metal = True
+            if name.rstrip("/") == "Malibu.app/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib":
+                has_metal = True
+except zipfile.BadZipFile:
+    raise SystemExit("Malibu.app asset is not a valid zip archive")
+
+missing = sorted(required - seen)
+if missing:
+    raise SystemExit("Malibu.app zip missing required member: " + ", ".join(missing))
+if not has_metal:
+    raise SystemExit("Malibu.app zip lacks adjacent MLX Metal resources")
+PY
+}
+
 tmpdir=""
 temp_parent=""
+app_mount_dir=""
 cleanup() {
+  if [ -n "$app_mount_dir" ] && [ -d "$app_mount_dir" ]; then
+    "$HDIUTIL_BIN" detach "$app_mount_dir" -quiet >/dev/null 2>&1 || true
+  fi
   if [ -n "$tmpdir" ] && [ "$KEEP_DOWNLOADS" != "1" ]; then
     case "$tmpdir" in
       "$temp_parent"/tier2-provider-release.*) rm -rf "$tmpdir" ;;
@@ -183,6 +340,24 @@ esac
 case "$DOWNLOAD_RETRY_SLEEP" in
   ''|*[!0-9]*) die "DOWNLOAD_RETRY_SLEEP must be a non-negative integer" ;;
 esac
+case "$PROVIDER_RUNTIME_MODE" in
+  execute) ;;
+  structural)
+    [ -n "$PROVIDER_EXPECTED_ARCHES" ] || {
+      die "structural mode requires PROVIDER_EXPECTED_ARCHES"
+    }
+    ;;
+  *) die "PROVIDER_RUNTIME_MODE must be execute or structural" ;;
+esac
+if [ -n "$PROVIDER_EXPECTED_ARCHES" ]; then
+  case "$PROVIDER_LIPO_BIN" in
+    /*) ;;
+    *) die "PROVIDER_LIPO_BIN must be an absolute path when architecture validation is required" ;;
+  esac
+  [ -f "$PROVIDER_LIPO_BIN" ] && [ -x "$PROVIDER_LIPO_BIN" ] && [ ! -L "$PROVIDER_LIPO_BIN" ] || {
+    die "PROVIDER_LIPO_BIN must be a regular executable and not a symlink"
+  }
+fi
 
 download_file() {
   local url="$1"
@@ -204,6 +379,7 @@ download_file() {
 
 asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.tar.gz"
 pkg_asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.pkg"
+app_asset="Malibu-${RELEASE_TAG}.dmg"
 base="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}"
 
 temp_parent="${TMPDIR:-/tmp}"
@@ -213,6 +389,7 @@ tmpdir="$(mktemp -d "$temp_parent/tier2-provider-release.XXXXXX")"
 
 tarball_path="$tmpdir/$asset"
 pkg_path="$tmpdir/$pkg_asset"
+app_dmg_path="$tmpdir/$app_asset"
 checksums_path="$tmpdir/checksums.txt"
 checksums_sig_path="$tmpdir/checksums.txt.sig"
 public_key_path="$tmpdir/release-signing-public.pem"
@@ -272,22 +449,79 @@ if [ -n "$pkg_expected_sha" ]; then
   [ "$pkg_binary_sha" = "$tar_binary_sha" ] || die "package binary sha256 differs from tarball binary"
   log "provider package binary matches tarball binary: $pkg_binary_sha"
 
-  pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
-  [ "$pkg_version" = "$PROVIDER_VERSION" ] || die "provider package version mismatch: got $pkg_version want $PROVIDER_VERSION"
-  log "provider package version ok: $pkg_version"
+  if [ "$PROVIDER_RUNTIME_MODE" = execute ]; then
+    pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
+    [ "$pkg_version" = "$PROVIDER_VERSION" ] || die "provider package version mismatch: got $pkg_version want $PROVIDER_VERSION"
+    log "provider package version ok: $pkg_version"
+  else
+    pkg_arches="$("$PROVIDER_LIPO_BIN" -archs "$pkg_expand_dir/Payload/macprovider-cli")"
+    [ "$pkg_arches" = "$PROVIDER_EXPECTED_ARCHES" ] || {
+      die "provider package architecture mismatch: got $pkg_arches want $PROVIDER_EXPECTED_ARCHES"
+    }
+    log "provider package architecture ok: $pkg_arches"
+    log "provider package runtime execution deferred to an architecture-compatible verifier"
+  fi
 
   tar czf "$pkg_payload_tar" -C "$pkg_expand_dir/Payload" .
   PROVIDER_ARTIFACT="$pkg_payload_tar" \
     PROVIDER_VERSION="$PROVIDER_VERSION" \
     PROVIDER_SHA256="" \
+    PROVIDER_RUNTIME_MODE="$PROVIDER_RUNTIME_MODE" \
+    PROVIDER_EXPECTED_ARCHES="$PROVIDER_EXPECTED_ARCHES" \
+    PROVIDER_LIPO_BIN="$PROVIDER_LIPO_BIN" \
     "$CHECKER"
 else
   log "no package entry in checksums.txt; tarball-only compatibility release"
 fi
 
+app_expected_sha="$(checksum_for_asset "$checksums_path" "$app_asset")"
+if [ -n "$app_expected_sha" ]; then
+  download_file "$base/$app_asset" "$app_dmg_path" "$app_asset"
+  app_actual_sha="$(sha256_file "$app_dmg_path")"
+  [ "$app_actual_sha" = "$app_expected_sha" ] || die "Malibu.app DMG sha256 mismatch: got $app_actual_sha want $app_expected_sha"
+  log "Malibu.app DMG sha256 verified: $app_actual_sha"
+
+  require_command "$HDIUTIL_BIN"
+  require_command codesign
+  require_command spctl
+  require_command xcrun
+  app_mount_dir="$tmpdir/malibu-dmg"
+  mkdir -p "$app_mount_dir"
+  "$HDIUTIL_BIN" attach -nobrowse -mountpoint "$app_mount_dir" "$app_dmg_path" >/dev/null ||
+    die "failed to mount $app_asset"
+  app_path="$app_mount_dir/Malibu.app"
+  [ -d "$app_path" ] || die "$app_asset does not contain Malibu.app"
+  [ -x "$app_path/Contents/MacOS/macprovider-cli" ] || die "Malibu.app lacks executable bundled macprovider-cli"
+  app_tar_payload_dir="$tmpdir/app-tar-payload"
+  mkdir -p "$app_tar_payload_dir"
+  tar -xzf "$tarball_path" -C "$app_tar_payload_dir" macprovider-cli || die "provider tarball lacks macprovider-cli"
+  app_tar_binary_sha="$(sha256_file "$app_tar_payload_dir/macprovider-cli")"
+  app_binary_sha="$(sha256_file "$app_path/Contents/MacOS/macprovider-cli")"
+  [ "$app_binary_sha" = "$app_tar_binary_sha" ] ||
+    die "Malibu.app bundled binary sha256 differs from tarball binary"
+  log "Malibu.app bundled binary matches tarball binary: $app_binary_sha"
+  if [ ! -f "$app_path/Contents/MacOS/mlx.metallib" ] && \
+     [ ! -f "$app_path/Contents/MacOS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
+    die "Malibu.app lacks adjacent MLX Metal resources for bundled macprovider-cli"
+  fi
+  codesign --verify --strict --deep --verbose=2 "$app_path" || die "Malibu.app code signature verification failed"
+  log "Malibu.app code signature verified"
+  xcrun stapler validate "$app_dmg_path" || die "Malibu.app DMG stapler validation failed"
+  log "Malibu.app DMG stapler validation passed"
+  spctl -a -vvv -t open "$app_dmg_path" || spctl -a -vvv -t exec "$app_path" || die "Malibu.app failed Gatekeeper assessment"
+  log "Malibu.app Gatekeeper assessment passed"
+  "$HDIUTIL_BIN" detach "$app_mount_dir" -quiet >/dev/null 2>&1 || true
+  app_mount_dir=""
+else
+  log "no Malibu.app DMG entry in checksums.txt; app-track release absent"
+fi
+
 PROVIDER_ARTIFACT="$tarball_path" \
   PROVIDER_VERSION="$PROVIDER_VERSION" \
   PROVIDER_SHA256="$expected_sha" \
+  PROVIDER_RUNTIME_MODE="$PROVIDER_RUNTIME_MODE" \
+  PROVIDER_EXPECTED_ARCHES="$PROVIDER_EXPECTED_ARCHES" \
+  PROVIDER_LIPO_BIN="$PROVIDER_LIPO_BIN" \
   "$CHECKER"
 
 if [ "$KEEP_DOWNLOADS" = "1" ]; then

@@ -1,0 +1,2819 @@
+/// KVDiskCacheStore — SPEC-037 disk-tier core: one actor per provider namespace.
+///
+/// Owns activation (flock single-writer with bounded-backoff retry + recovery),
+/// the write path (immutable snapshot → budget/geometry/quota/floor checks → the
+/// exact FR-KVP3 fsync commit protocol with a mutation-lane pre-publication
+/// recheck), the read path (manifest load with fstat bounds → four-category
+/// validation → chunk decrypt/verify under the staging budget → decoded payload),
+/// the FR-KVP8 purge primitive (single-key tombstone-first 5-step ordering with
+/// purge-generation fencing + DEK destruction; purge-all via epoch rotation),
+/// LRU/retention eviction with DEK lifecycle, telemetry via the FR-KVP12 closed
+/// reason-code enum + injectable event sink, and the inspection snapshot.
+///
+/// This is the stage 1-2 store core. ModelRuntime/ConversationCache integration,
+/// config plumbing, CLI wiring, and the ingest-provenance synthetic gate land in a
+/// later stage; the write path here accepts an already-built immutable snapshot and
+/// the read path returns restored layer state for the caller to promote.
+///
+/// Reference: specs/SPEC-037-kv-survival-restart.md FR-KVP3/5/6/7/8/9/10/12, §5, §5a.
+
+import CryptoKit
+import Darwin
+import Foundation
+import MLX
+import MLXLMCommon
+
+// MARK: - Event sink (FR-KVP12)
+
+/// One telemetry event. Keyed by the truncated index hash — never raw keys, raw
+/// index values, or token content.
+struct KVEvent: Sendable, Equatable {
+    let code: KVReasonCode
+    let detail: KVReasonDetail?
+    let indexHashPrefix: String?
+    let fields: [String: String]
+
+    init(_ code: KVReasonCode, detail: KVReasonDetail? = nil,
+         indexHashPrefix: String? = nil, fields: [String: String] = [:]) {
+        self.code = code
+        self.detail = detail
+        self.indexHashPrefix = indexHashPrefix
+        self.fields = fields
+    }
+}
+
+protocol KVEventSink: Sendable {
+    func emit(_ event: KVEvent)
+}
+
+/// Default sink: `conv_cache`-style structured stderr, matching the hot tier.
+struct KVStderrEventSink: KVEventSink {
+    func emit(_ event: KVEvent) {
+        var line = "event=kv_disk_cache code=\(event.code.rawValue)"
+        if let detail = event.detail { line += " detail=\(detail.rawValue)" }
+        if let prefix = event.indexHashPrefix { line += " index_hash=\(prefix)" }
+        for key in event.fields.keys.sorted() {
+            line += " \(key)=\(event.fields[key] ?? "")"
+        }
+        FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
+/// Test sink collecting events in order.
+final class KVRecordingEventSink: KVEventSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _events: [KVEvent] = []
+    var events: [KVEvent] { lock.lock(); defer { lock.unlock() }; return _events }
+    func emit(_ event: KVEvent) { lock.lock(); _events.append(event); lock.unlock() }
+    func codes(_ code: KVReasonCode) -> Int { events.filter { $0.code == code }.count }
+    func reset() { lock.lock(); _events.removeAll(); lock.unlock() }
+}
+
+// MARK: - Failpoints (crash-consistency testing, AC-3/AC-4)
+
+/// Ordering boundaries at which a test may inject a simulated crash (the injected
+/// error aborts after the side effects performed up to that boundary, modeling a
+/// power loss there). Default: no injection.
+enum KVFailpoint: String, Sendable, CaseIterable {
+    // write path (FR-KVP3 commit protocol)
+    case afterDEKCreate
+    case afterMkdirBeforeParentFsync
+    case afterBlobFsync
+    case afterEntryDirFsync
+    case afterManifestTempFsync
+    case insideMutationLaneBeforeRename
+    case afterRenameBeforeDirFsync
+    // single-key purge (FR-KVP8)
+    case purgeAfterIncompleteTombstone
+    case purgeAfterHighWatermark
+    /// Fires immediately before the first suspending hot-tier callback, AFTER the
+    /// durable incomplete tombstone + high-watermark are written (Item 1/2). A crash
+    /// here models a power loss inside the hot callback: recovery MUST complete the
+    /// purge and the entry MUST never be restorable.
+    case purgeBeforeHotCallback
+    case purgeAfterDEKDestroy
+    case purgeAfterUnlink
+    // epoch rotation (FR-KVP6)
+    case rotationAfterJournal
+    case rotationAfterMasterCreate
+    case rotationAfterEpochCommit
+    case rotationAfterOldDelete
+}
+
+struct KVInjectedCrash: Error, Equatable {
+    let point: KVFailpoint
+}
+
+#if DEBUG
+/// Test-only pause gate for the off-actor promotion decode (CRITICAL-1 regression). Holds
+/// an optional async hook under a lock so the nonisolated detached decode can await it
+/// without hopping onto the store actor (which would risk reentrancy against the very
+/// purge the test is racing). Compiled only in DEBUG.
+final class KVPromoteDecodeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hook: (@Sendable () async -> Void)?
+    func set(_ hook: (@Sendable () async -> Void)?) { lock.lock(); self.hook = hook; lock.unlock() }
+    func pauseIfSet() async {
+        lock.lock(); let hook = self.hook; lock.unlock()
+        if let hook { await hook() }
+    }
+}
+#endif
+
+// MARK: - Value types
+
+/// Envelope identity a snapshot carries immutably from hot-tier commit (FR-KVP3).
+struct KVWriteIdentity: Sendable, Equatable {
+    let requestModel: String
+    let servedModelID: String
+    let modelSHA256: String
+    let catalogRevision: String
+    let tokenizerID: String
+    let tokenizerConfigSHA256: String
+    let chatTemplateSHA256: String
+    let abiEpoch: Int
+    let mlxSwiftLMRevision: String
+    let mlxVersion: String
+    let cacheClass: String
+    let layerCount: Int
+    let kvBits: Int?
+    let kvGroupSize: Int?
+    let kvQuantMode: String?
+    let kvQuantPolicy: String?
+    let decodePath: String
+    /// Key epoch sampled at commit; the write is skipped if it is no longer current.
+    let keyEpoch: Int
+}
+
+/// Immutable write snapshot captured synchronously at hot-tier `commit()` while the
+/// per-key lease is held (FR-KVP3). Nothing observed after this instant may alter it.
+struct KVWriteSnapshot: Sendable {
+    /// Raw conversation key (used only in-process to compute/verify the index; never
+    /// logged or persisted).
+    let rawKey: String
+    /// Precomputed HMAC index under `identity.keyEpoch`.
+    let indexHMAC: String
+    let tokens: [Int32]
+    let layers: [KVLayerPayload]
+    let identity: KVWriteIdentity
+    /// High-watermark sampled at hot-lease acquisition (FR-KVP8 stamping rule).
+    let sampledPurgeGeneration: Int
+    /// Monotonic per-index commit sequence allocated under the hot lease.
+    let commitSequence: Int
+    let createdAtMillis: Int
+    let eligibleUntilMillis: Int
+    /// Creating write's incarnation identifier (ownership-checked DEK cleanup).
+    let incarnation: String
+}
+
+/// A successful read: decoded tokens + restored per-layer state, plus telemetry.
+struct KVReadHit: Sendable {
+    let tokens: [Int32]
+    let layers: [KVLayerPayload]
+    let bytesRead: Int
+    let decryptMillis: Int
+    let peakStagingBytes: Int
+}
+
+enum KVReadResult: Sendable {
+    case hit(KVReadHit)
+    case miss(KVReasonCode, KVReasonDetail?)
+    static func miss(_ code: KVReasonCode) -> KVReadResult { .miss(code, nil) }
+}
+
+enum KVWriteResult: Sendable, Equatable {
+    case committed(generation: Int, commitSequence: Int)
+    case skipped(KVReasonDetail)
+}
+
+enum KVPurgeResult: Sendable, Equatable {
+    case ok(entriesRemoved: Int, bytesFreed: Int)
+    case failed(KVReasonDetail)
+}
+
+/// FR-KVP12 inspection snapshot.
+struct KVInspection: Sendable, Equatable {
+    let namespaceID: String
+    /// Live entry bytes only (blobs + manifests). See `totalBytesUsed` for the full
+    /// namespace footprint across every artifact class.
+    let bytesUsed: Int
+    let entryCount: Int
+    let maxBytes: Int
+    let maxEntries: Int
+    let freeSpaceHeadroom: Int
+    let keyEpoch: Int
+    let tombstoneCount: Int
+    let keychainItemCount: Int
+    let eligibilityTTLSeconds: Int
+    let purgeHighWatermarkEntries: Int
+    let counters: [String: Int]
+    /// FR-KVP7 all-class accounting: non-entry artifacts (control doc + tombstones +
+    /// usage journal) and the grand total including entries.
+    let controlBytesUsed: Int
+    let usageJournalBytes: Int
+    let totalBytesUsed: Int
+}
+
+// MARK: - Configuration
+
+struct KVDiskCacheStoreConfig: Sendable {
+    var root: URL
+    var namespaceID: String
+    var maxBytes: Int
+    var maxEntries: Int
+    var maxEntryBytes: Int
+    var retentionSeconds: Int
+    var stagingMaxBytes: Int            // read/promotion ceiling (≤ 256 MiB)
+    var writeStagingMaxBytes: Int       // write/snapshot ceiling (≤ 1 GiB)
+    var minFreeBytes: Int
+    var promotionMaxSeconds: Int
+    var eligibilityTTLSeconds: Int      // hot-tier TTL, for the inspection surface
+    /// Non-evictable metadata reserve (FR-KVP7): default 4 MiB.
+    var metadataReserveBytes: Int = 4 * 1024 * 1024
+    /// Background retention sweep interval, seconds (M-12). 0 ⇒ no timer (opportunistic
+    /// on-write sweep still runs); the serve tier sets a real interval.
+    var retentionSweepSeconds: Int = 0
+    /// Test hook: override host free-space (bytes). Nil ⇒ real statvfs.
+    var freeSpaceOverride: Int? = nil
+    /// Test hook (M-19): simulate a statvfs failure so the free-space floor fails
+    /// closed (skip write) rather than assuming headroom.
+    var simulateStatvfsFailure: Bool = false
+
+    static let promotionCeilingHardMax = 256 * 1024 * 1024   // FR-KVP9
+    static let writeStagingHardMax = 1024 * 1024 * 1024      // FR-KVP3
+}
+
+// MARK: - Namespace metadata (control document, FR-KVP7)
+
+/// The fsync-protected control document. Serialized as JSON, atomically replaced.
+struct KVNamespaceMetadata: Sendable, Equatable {
+    var providerNamespaceID: String
+    var keyEpoch: Int
+    var schemaID: String
+    var codecID: String
+    /// Purge-generation high-watermark map: index → generation. Capped at 4096.
+    var purgeHighWatermarks: [String: Int]
+    /// Monotonically non-decreasing wall-clock high-water, Unix ms.
+    var clockHighWaterMillis: Int
+    /// Open rotation-intent journal entry (nil when none).
+    var rotationJournal: KVRotationJournal?
+    /// Immutable per-index retention basis (creation ms), persisted so the
+    /// creation-based retention deadline survives restart independently of the current
+    /// generation's manifest timestamp (M-C). Bounded by maxEntries; cleared on
+    /// purge/eviction/rotation.
+    var retentionBasisMillis: [String: Int] = [:]
+
+    static let maxBytes = 256 * 1024   // FR-KVP7 control-plane bound
+    static let highWatermarkCap = 4096 // FR-KVP7
+
+    func highWatermark(for index: String) -> Int { purgeHighWatermarks[index] ?? 0 }
+}
+
+struct KVRotationJournal: Sendable, Equatable {
+    var from: Int
+    var to: Int
+    var phase: String   // "created" | "committed" | "old_deleted"
+}
+
+// MARK: - Tombstone (FR-KVP8)
+
+/// Durable per-(epoch, index) purge record. Phase-aware: an incomplete tombstone
+/// drives recovery to finish steps 2–4; a complete tombstone gates re-admission.
+struct KVTombstone: Sendable, Equatable {
+    var epoch: Int
+    var index: String
+    var purgeGeneration: Int
+    var complete: Bool
+}
+
+// MARK: - Errors
+
+/// Why an activation attempt did not fully activate (Item 6). Distinct from a
+/// permanent quarantine (which throws): both `.lock` and `.keychain` are RETRYABLE
+/// dormancy — the serve retry loop re-activates when the condition clears. `.none`
+/// means the last attempt fully activated.
+enum KVActivationDormancy: Sendable, Equatable {
+    case none
+    case lock       // the namespace lock is held by another writer (FR-KVP7)
+    case keychain   // Keychain material is unavailable pre-unlock (FR-KVP6)
+}
+
+enum KVStoreError: Error, Equatable {
+    case lockUnavailable
+    case quarantined(KVReasonDetail)
+    case io(String)
+    /// A read whose fstat size exceeds the declared/allocation bound (M-14). A
+    /// bounds violation is an integrity failure (disk_miss_corrupt), NOT an I/O
+    /// error — the file is structurally wrong, not merely unreadable.
+    case boundsExceeded(String)
+}
+
+// MARK: - Store actor
+
+actor KVDiskCacheStore {
+    private let config: KVDiskCacheStoreConfig
+    private let keys: KVKeyManager
+    private let sink: any KVEventSink
+    private let naming: KVKeychainNaming
+
+    #if DEBUG
+    /// Test-only failpoint injector: throws `KVInjectedCrash` at the named boundary.
+    /// Compiled only in DEBUG so crash-injection never ships in the release binary.
+    private var failpoint: (@Sendable (KVFailpoint) throws -> Void)?
+    #endif
+
+    /// Test-only directory-fsync failure injection (HIGH-7): throw at the k-th
+    /// (1-based) `fsyncDirectory` call to model a filesystem that fails to durably
+    /// commit a directory entry. Nil ⇒ no injection.
+    private var dirFsyncFailAt: Int?
+    private var dirFsyncCount = 0
+    /// Test-only unlink-failure injection (M-D).
+    private var unlinkFailInjected = false
+    /// Test-only retention-tick wall-clock override (M-F).
+    private var sweepClockOverride: (@Sendable () -> Int)?
+    /// Test-only tombstone-directory listing-failure injection (HIGH-3).
+    private var tombstoneListFailInjected = false
+
+    // Activation state
+    private var lockFD: Int32 = -1
+    private var activated = false
+    private var quarantined: KVReasonDetail?
+    private var dormantForClock = false
+    /// Item 6: why the last activation attempt did not fully activate (retryable
+    /// dormancy vs fully active). Read by the serve coordinator to choose the retry
+    /// path. Distinct from quarantine, which throws.
+    private(set) var activationDormancy: KVActivationDormancy = .none
+
+    // In-memory control-plane mirror (authoritative on disk)
+    private var metadata: KVNamespaceMetadata
+    /// Per-index last committed generation and commit sequence.
+    private var lastGeneration: [String: Int] = [:]
+    private var lastCommitSequence: [String: Int] = [:]
+    /// Running committed byte accounting (blobs + manifests of live entries).
+    private var committedBytes = 0
+    /// FR-KVP7 non-entry artifact byte accounting, recounted at activation and
+    /// maintained incrementally: the control document (`meta.json`), every tombstone,
+    /// and the usage journal. `controlBytes` is the sum; it is reserved out of the data
+    /// budget before any entry admission and reported on the inspection surface so
+    /// status bytes include EVERY namespace artifact class, not just entry blobs.
+    private var metadataBytes = 0
+    private var tombstoneBytes = 0
+    private var usageJournalBytes = 0
+    private var controlBytes: Int { metadataBytes + tombstoneBytes + usageJournalBytes }
+    /// In-flight reservation bytes, distinct from committedBytes (M-11). Transitions
+    /// to committedBytes only at publication; released by the writer's defer on every
+    /// exit path. Writes are actor-serialized, so at most one reservation is live.
+    private var reservedBytes = 0
+    /// Item 7: bytes of superseded-generation blobs whose deletion at publication FAILED
+    /// — retained against quota (they still occupy disk) until a later activation sweep
+    /// reclaims them, so a failed compaction-delete can never bypass the namespace cap.
+    /// Reset by `sweepOrphansAndAccount` (which deletes non-current-gen blobs).
+    private var supersededLeakBytes = 0
+    /// Live entry indices with their committed byte size and last-eligible-use ms.
+    private var liveEntries: [String: KVLiveEntry] = [:]
+    /// At most one promotion in flight namespace-wide (FR-KVP9 back-pressure).
+    private var promotionInFlight = false
+    /// CRITICAL-1: in-flight off-actor promotion decodes, keyed by index. `read()`
+    /// registers its detached decode here (under actor isolation) BEFORE awaiting it and
+    /// deregisters on return; a single-key purge cancel-or-joins the matching index's
+    /// decodes BEFORE destroying the DEK, and a purge-all / cap-rotation joins ALL before
+    /// crypto-shredding the epoch. Combined with the post-decode re-fence in `read()`,
+    /// this guarantees purge_ok is reported only after any decode holding a copied
+    /// (now-revoked) DEK has finished and its decoded plaintext has been discarded.
+    private struct KVPromotionHandle { let id: Int; let task: Task<KVPromoteDecode, Never> }
+    private var promotionHandleSeq = 0
+    private var inFlightPromotions: [String: [KVPromotionHandle]] = [:]
+    #if DEBUG
+    /// Test-only (CRITICAL-1 regression): a pause gate invoked INSIDE the off-actor
+    /// promotion decode so a test can complete a single-key purge AND a purge-all while a
+    /// decode is genuinely in flight, then assert the read returns a miss (not `.hit`) in
+    /// both cases. A plain reference `let` of a `Sendable` type is cross-actor accessible,
+    /// so the detached, nonisolated decode awaits it without an actor hop or reentrancy.
+    private let promoteDecodeGate = KVPromoteDecodeGate()
+    #endif
+    /// Cumulative counters per reason code (inspection surface).
+    private var counters: [String: Int] = [:]
+
+    /// SPEC-037 FR-KVP8 hot-tier purge callbacks (CRITICAL-1). Set by the serve
+    /// wiring once the hot `ConversationCache` is attached, so the purge path can
+    /// drop the matching hot entry / invalidate outstanding leases BEFORE it
+    /// unlinks the on-disk generation (single-key) or completes epoch rotation
+    /// (purge-all). Nil while no hot tier is attached (control-plane-only process).
+    /// The single-key hook returns whether the hot tier held live state (a resident
+    /// entry OR a pending/in-flight persist) for the key, so a purge that had hot or
+    /// pending state advances the durable high-watermark even with no disk artifacts
+    /// (FR-KVP8 (a): never no-op a purge that had hot/pending state).
+    private var hotPurgeSingle: (@Sendable (String) async -> Bool)?
+    private var hotPurgeAll: (@Sendable () async -> Void)?
+
+    /// FR-KVP8 admission fences (CRITICAL). Set SYNCHRONOUSLY before any suspension
+    /// point inside a purge so writes/reads/promotions that interleave during the
+    /// `await hotPurge*` callback are denied for the affected index (per-index) or
+    /// the whole namespace (purge-all / high-watermark-cap rotation). `write` and
+    /// `read` are synchronous actor methods, so once they observe a clear fence they
+    /// complete atomically; a purge sets the fence before it can suspend.
+    private var purgingIndexes: Set<String> = []
+    private var namespacePurging = false
+
+    /// FR-KVP8 durable per-index block (Item 1, CRITICAL). An index is blocked iff an
+    /// INCOMPLETE tombstone exists for it (a purge started but not completion-marked).
+    /// Unlike the transient `purgingIndexes` fence (cleared by the purge's `defer`),
+    /// this is derived from DURABLE state: it is established when an incomplete
+    /// tombstone becomes durable (in `writeTombstone`) and at activation recovery, and
+    /// cleared ONLY when the completion mark is durable. So a purge that FAILS after
+    /// the tombstone (DEK/unlink/fsync error) leaves the index blocked — a subsequent
+    /// read fails closed (`disk_miss_tombstoned`) and a write is refused
+    /// (`fence_lost`) until an in-process retry or a post-restart recovery completes
+    /// the purge. This closes the fail-open where the transient flag was cleared while
+    /// an incomplete tombstone still admitted the old generation.
+    private var blockedIndexes: Set<String> = []
+
+    /// A namespace is blocked (reads/writes/promotions refused) while a purge-all /
+    /// cap-rotation is in flight (`namespacePurging`) OR an open rotation-intent
+    /// journal is durably present in namespace metadata — including one left open by a
+    /// FAILED rotation. Recovery drives an open journal forward at the next
+    /// activation; until then the namespace fails closed rather than serving reads
+    /// against a half-rotated (or not-yet-rotated) epoch. Derived from durable state,
+    /// never only the transient flag.
+    private var namespaceBlocked: Bool { namespacePurging || metadata.rotationJournal != nil }
+
+    /// FR-KVP8 purge/rotation serialization gate (Item 2, CRITICAL). At most one
+    /// purge OR rotation runs at a time namespace-wide, so a running purge OWNS its
+    /// fence (`purgingIndexes` / `namespacePurging`) for its full duration — including
+    /// the suspension on the hot-tier callback. Without this, two concurrent control
+    /// connections could overlap: one purge clears a fence a second purge is still
+    /// relying on, and a hot commit admitted in that gap survives the remaining purge.
+    private var purgeGateHeld = false
+    private var purgeGateWaiters: [CheckedContinuation<Void, Never>] = []
+
+    struct KVLiveEntry: Sendable, Equatable {
+        var bytes: Int
+        var lastUsedMillis: Int
+        /// Immutable creation timestamp of the entry (index), preserved across
+        /// generations (M-12). Retention is measured from this, never from
+        /// lastUsedMillis, so reads cannot extend physical retention.
+        var creationMillis: Int
+        var generation: Int
+    }
+
+    /// Background retention sweep (M-12 "timer while active"). Cancelled on deactivate.
+    private var retentionTask: Task<Void, Never>?
+
+    // MARK: Init
+
+    init(config: KVDiskCacheStoreConfig, keychain: any KVKeychain, sink: any KVEventSink = KVStderrEventSink()) {
+        self.config = config
+        self.keys = KVKeyManager(keychain: keychain, namespaceID: config.namespaceID)
+        self.naming = KVKeychainNaming(namespaceID: config.namespaceID)
+        self.sink = sink
+        self.metadata = KVNamespaceMetadata(
+            providerNamespaceID: config.namespaceID,
+            keyEpoch: 1,
+            schemaID: KVDiskCacheFormat.manifestSchemaID,
+            codecID: KVDiskCacheFormat.codecID,
+            purgeHighWatermarks: [:],
+            clockHighWaterMillis: 0,
+            rotationJournal: nil)
+    }
+
+    #if DEBUG
+    func setFailpoint(_ hook: (@Sendable (KVFailpoint) throws -> Void)?) {
+        failpoint = hook
+    }
+
+    /// Test-only (CRITICAL-1): install the off-actor promotion-decode pause hook so a
+    /// test can land a purge / purge-all while a decode is in flight.
+    func setPromoteDecodePause(_ hook: (@Sendable () async -> Void)?) {
+        promoteDecodeGate.set(hook)
+    }
+
+    /// Test-only (HIGH-7): fail the k-th subsequent `fsyncDirectory` call. Resets the
+    /// call counter. Pass nil to disable.
+    func injectDirFsyncFailure(atCall k: Int?) {
+        dirFsyncFailAt = k
+        dirFsyncCount = 0
+    }
+
+    /// Test-only (M-D): force the next entry-directory unlink to fail, modeling a
+    /// filesystem that cannot remove the ciphertext. Pass false to clear.
+    func injectUnlinkFailure(_ enabled: Bool) { unlinkFailInjected = enabled }
+    #endif
+
+    /// Remove an entry directory, propagating any failure as `KVStoreError.io` (M-D):
+    /// callers MUST treat a failed unlink as purge_failed / eviction failure and retain
+    /// the incomplete tombstone + byte accounting for recovery retry.
+    private func removeEntryDirectory(_ url: URL) throws {
+        if unlinkFailInjected { throw KVStoreError.io("injected unlink failure") }
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            throw KVStoreError.io("entry unlink failed: \(error.localizedDescription)")
+        }
+    }
+
+    #if DEBUG
+    /// Test-only (FR-KVP8 CRITICAL (d)): fill the purge high-watermark map with
+    /// `count` dummy indices so the next single-key purge of a NEW index crosses the
+    /// 4096 cap and routes through the namespace-fence rotation — without creating
+    /// thousands of real entries.
+    func seedPurgeWatermarksForTest(count: Int) {
+        for i in 0 ..< count { metadata.purgeHighWatermarks["seed-\(i)"] = 1 }
+    }
+    #endif
+
+    /// Wire the hot-tier purge callbacks (CRITICAL-1). `single` receives the raw
+    /// conversation key (the hot tier keys on the trimmed raw key, not the HMAC
+    /// index); `all` clears every hot entry and fences outstanding leases.
+    func setHotPurgeHooks(
+        single: (@Sendable (String) async -> Bool)?,
+        all: (@Sendable () async -> Void)?
+    ) {
+        hotPurgeSingle = single
+        hotPurgeAll = all
+    }
+
+    #if DEBUG
+    private func crashIf(_ point: KVFailpoint) throws {
+        try failpoint?(point)
+    }
+    #else
+    /// Release: crash-injection is a no-op (the injector never compiles in), so the
+    /// FR-KVP3/6/8 ordering boundaries carry zero cost in the shipping binary.
+    @inline(__always) private func crashIf(_ point: KVFailpoint) throws {}
+    #endif
+
+    // MARK: Paths
+
+    private var namespaceDir: URL { config.root.appendingPathComponent(namespaceDigest, isDirectory: true) }
+    private var entriesDir: URL { namespaceDir.appendingPathComponent("entries", isDirectory: true) }
+    private var tombstonesDir: URL { namespaceDir.appendingPathComponent("tombstones", isDirectory: true) }
+    private var metadataURL: URL { namespaceDir.appendingPathComponent("meta.json") }
+    /// Append-only usage journal (FR-KVP7): durable per-index last-eligible-use ordering.
+    private var usageJournalURL: URL { namespaceDir.appendingPathComponent("usage.jsonl") }
+    private var lockURL: URL {
+        config.root.appendingPathComponent(".locks", isDirectory: true)
+            .appendingPathComponent("\(namespaceDigest).lock")
+    }
+    private func entryDir(_ index: String) -> URL { entriesDir.appendingPathComponent(index, isDirectory: true) }
+
+    /// Stable digest of the namespace ID for on-disk naming (hides the raw provider ID).
+    private var namespaceDigest: String {
+        let d = SHA256.hash(data: Data(config.namespaceID.utf8))
+        return d.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Activation (FR-KVP7)
+
+    /// Acquire the single-writer lock (bounded-backoff retry) and run all recovery.
+    /// Returns true on activation; false when the lock stays unavailable (transient
+    /// dormancy — the caller retries opportunistically). Throws on quarantine.
+    @discardableResult
+    func activate(retryDeadline: Date = Date().addingTimeInterval(2)) throws -> Bool {
+        if activated { return true }
+        if let detail = quarantined { throw KVStoreError.quarantined(detail) }
+
+        try ensureDirectories()
+        // M-16: never trust pre-existing cache-directory components. Verify each is a
+        // real directory we own, is not a symlink (O_NOFOLLOW), and is not writable by
+        // group/other — the data dirs strictly 0700. A violation quarantines.
+        try verifyDirectorySecurity()
+        guard try acquireLock(deadline: retryDeadline) else {
+            activationDormancy = .lock
+            return false
+        }
+
+        do {
+            try loadMetadata()
+            // Item 6 (FR-KVP6): the epoch master + all keychain-dependent MANDATORY
+            // recovery must SUCCEED before the store is marked active. A Keychain that is
+            // unavailable (pre-unlock, missing entitlement) is RETRYABLE dormancy — never
+            // a spuriously-active store with un-created master / un-run recovery (which
+            // would block later retries), and never a permanent quarantine. The keychain
+            // catch below turns any such failure into `.keychain` dormancy + retry.
+            try ensureEpochMaster()
+            try recoverRotationJournal()
+            try recoverTombstones()
+            try sweepOrphansAndAccount()
+            // FR-KVP7: seed durable LRU last-eligible-use ordering from the usage journal
+            // (a corrupt journal quarantines; a missing one falls back to the manifest
+            // creation times already seeded above). Then recount every artifact class so
+            // admission reserves — and status reports — the full namespace footprint.
+            try loadUsageJournal()
+            // M-E (FR-KVP6): destroy current-epoch entry DEKs with no matching live
+            // entry — orphans from a crash between DEK create and manifest commit.
+            try reconcileOrphanEntryDEKs()
+            recountArtifactAccounting()
+            activated = true
+            activationDormancy = .none
+            notifyEpoch()
+            startRetentionTimer()
+            return true
+        } catch let crash as KVInjectedCrash {
+            throw crash
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            // Item 6: retryable Keychain dormancy — release the lock so the next attempt
+            // re-acquires cleanly, do NOT set `activated`, do NOT quarantine. The serve
+            // retry loop re-activates once the Keychain becomes available. Dormancy
+            // telemetry is single-line (not per-request) so no log storm.
+            _ = e
+            releaseLock()
+            activationDormancy = .keychain
+            emit(.diskMissIO, detail: .keychainUnavailable, fields: ["phase": "activation_dormant"])
+            return false
+        } catch {
+            releaseLock()
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+    }
+
+    /// Release the lock and mark inactive (graceful shutdown / test teardown).
+    func deactivate() {
+        retentionTask?.cancel()
+        retentionTask = nil
+        releaseLock()
+        activated = false
+    }
+
+    private func ensureEpochMaster() throws {
+        if try keys.epochMaster(epoch: metadata.keyEpoch) == nil {
+            try keys.createEpochMaster(epoch: metadata.keyEpoch, incarnation: "bootstrap-\(UUID().uuidString)")
+        }
+    }
+
+    /// Compute the current-epoch HMAC index for a raw conversation key. Returns nil
+    /// when the epoch master is unavailable (dormancy). Callers building a write
+    /// snapshot use this to stamp `indexHMAC`; never logs the raw key.
+    func currentIndex(rawKey: String) throws -> String? {
+        try keys.computeIndex(rawKey: rawKey, epoch: metadata.keyEpoch)
+    }
+
+    /// Current key epoch (for snapshot identity + tests).
+    var currentEpoch: Int { metadata.keyEpoch }
+
+    /// Last published commit sequence for a raw key's current-epoch index (0 when
+    /// none / keychain unavailable). Seeds the adapter's synchronous per-index
+    /// commit-sequence counter so post-restart writes are not rejected as stale
+    /// (CRITICAL-2). Never logs the raw key.
+    func lastPublishedCommitSequence(rawKey: String) -> Int {
+        guard let index = try? currentIndex(rawKey: rawKey) else { return 0 }
+        return lastCommitSequence[index] ?? 0
+    }
+
+    /// Observer invoked (synchronously, on the actor) whenever the current key epoch
+    /// is established or changes, so the cold-tier adapter can cache it for the
+    /// synchronous `captureSnapshot` epoch stamp (CRITICAL-2). Called at activation
+    /// and after every rotation phase that commits a new epoch.
+    private var epochObserver: (@Sendable (Int) -> Void)?
+    func setEpochObserver(_ observer: (@Sendable (Int) -> Void)?) {
+        epochObserver = observer
+        observer?(metadata.keyEpoch)
+    }
+    private func notifyEpoch() { epochObserver?(metadata.keyEpoch) }
+
+    /// Current live purge-generation high-watermark for a raw key's index.
+    func highWatermark(rawKey: String) throws -> Int {
+        guard let index = try currentIndex(rawKey: rawKey) else { return 0 }
+        return metadata.highWatermark(for: index)
+    }
+
+    private func ensureDirectories() throws {
+        try createDir(config.root)
+        try createDir(config.root.appendingPathComponent(".locks", isDirectory: true))
+        try createDir(namespaceDir)
+        // M-6 / FR-KVP10: exclude the namespace root from Time Machine backups so the
+        // encrypted cache is not copied into a backup set (where a data-volume rollback
+        // could otherwise reintroduce ciphertext — the DEK revocation anchor still fences
+        // it, but this is defense in depth). Best-effort: not all volumes support the
+        // flag, and it never blocks activation.
+        markExcludedFromBackup(namespaceDir)
+        try createDir(entriesDir)
+        try createDir(tombstonesDir)
+    }
+
+    /// M-6 / FR-KVP10: mark `url` excluded from Time Machine backup
+    /// (`URLResourceValues.isExcludedFromBackup`). Best-effort — logged, never fatal.
+    private func markExcludedFromBackup(_ url: URL) {
+        var target = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        do {
+            try target.setResourceValues(values)
+        } catch {
+            FileHandle.standardError.write(Data(
+                "event=kv_disk_cache action=warn reason=backup_exclusion_failed detail=\"\(error.localizedDescription)\"\n".utf8))
+        }
+    }
+
+    /// M-16: verify a directory is owned by us, a real directory, not a symlink
+    /// (O_NOFOLLOW), and no wider than `maxMode` (permission bits outside `maxMode`
+    /// forbidden). Throws on any violation ⇒ quarantine.
+    private func verifyDir(_ url: URL, maxMode: mode_t) throws {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { throw KVStoreError.io("dir security open failed \(url.lastPathComponent) errno=\(errno)") }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == geteuid(),
+              (info.st_mode & ~maxMode & 0o777) == 0 else {
+            throw KVStoreError.io("dir security check failed for \(url.lastPathComponent)")
+        }
+    }
+
+    /// Verify the store root + lock dir (no group/other WRITE — a shared cache root
+    /// may be group/other-readable) and the private data dirs (strict 0700).
+    private func verifyDirectorySecurity() throws {
+        try verifyDir(config.root, maxMode: 0o755)
+        try verifyDir(config.root.appendingPathComponent(".locks", isDirectory: true), maxMode: 0o755)
+        try verifyDir(namespaceDir, maxMode: 0o700)
+        try verifyDir(entriesDir, maxMode: 0o700)
+        try verifyDir(tombstonesDir, maxMode: 0o700)
+    }
+
+    private func acquireLock(deadline: Date) throws -> Bool {
+        let fd = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw KVStoreError.io("lock open failed errno=\(errno)") }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == geteuid(),
+              (info.st_mode & 0o077) == 0 else {
+            close(fd)
+            throw KVStoreError.io("lock inode unsafe")
+        }
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if errno == EINTR { continue }
+            guard errno == EWOULDBLOCK || errno == EAGAIN else {
+                close(fd)
+                throw KVStoreError.io("flock failed errno=\(errno)")
+            }
+            if Date() >= deadline {
+                close(fd)
+                return false   // transient dormancy
+            }
+            usleep(20_000)
+        }
+        lockFD = fd
+        return true
+    }
+
+    private func releaseLock() {
+        if lockFD >= 0 {
+            flock(lockFD, LOCK_UN)
+            close(lockFD)
+            lockFD = -1
+        }
+    }
+
+    // MARK: - Metadata persistence (fsync + atomic rename)
+
+    private func loadMetadata() throws {
+        guard fileExists(metadataURL) else {
+            try persistMetadata()   // first activation writes the initial doc
+            return
+        }
+        let data = try readBounded(metadataURL, maxBytes: KVNamespaceMetadata.maxBytes)
+        guard let parsed = KVMetadataCodec.decode(data) else {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        metadata = parsed
+    }
+
+    private func persistMetadata() throws {
+        let data = try KVMetadataCodec.encode(metadata)
+        guard data.count <= KVNamespaceMetadata.maxBytes else {
+            throw KVStoreError.io("namespace metadata exceeds 256 KiB")
+        }
+        try writeFileAtomic(data, to: metadataURL)
+        metadataBytes = data.count   // FR-KVP7 control-plane accounting
+    }
+
+    // MARK: - Clock high-water (FR-KVP10)
+
+    /// Advance the persisted wall-clock high-water to `nowMillis` (durable, fsync)
+    /// before any eligibility decision is acted on. Returns false ⇒ clock-rollback
+    /// dormancy (current wall-clock is below the mark).
+    private func advanceClock(nowMillis: Int) throws -> Bool {
+        if nowMillis < metadata.clockHighWaterMillis {
+            dormantForClock = true
+            return false
+        }
+        dormantForClock = false
+        if nowMillis > metadata.clockHighWaterMillis {
+            metadata.clockHighWaterMillis = nowMillis
+            try persistMetadata()
+        }
+        return true
+    }
+
+    // MARK: - Write path (FR-KVP3)
+
+    /// Persist an immutable snapshot. Never blocks or fails the hot commit; returns a
+    /// typed skip reason or the committed generation. Requires activation.
+    @discardableResult
+    func write(_ snapshot: KVWriteSnapshot, nowMillis: Int) throws -> KVWriteResult {
+        guard activated else { return skip(.ioError, snapshot) }
+        if let detail = quarantined { return skip(detail, snapshot) }
+
+        // FR-KVP8 admission fence (CRITICAL, Item 1): a write sampled before/during an
+        // in-progress OR incomplete purge must not publish. Derived from durable state:
+        //  - namespaceBlocked: in-flight purge-all/cap-rotation OR a durably open
+        //    rotation journal;
+        //  - purgingIndexes: the transient per-index fence covering the hot-callback
+        //    window;
+        //  - blockedIndexes: a durable incomplete tombstone (a purge that started but
+        //    has not completion-marked) — new state MUST NOT be admitted before the
+        //    completion mark, even after a purge failure or restart.
+        // The durable high-watermark additionally fences a write that arrives AFTER the
+        // purge completes (re-checked in the mutation lane).
+        if namespaceBlocked || purgingIndexes.contains(snapshot.indexHMAC)
+            || blockedIndexes.contains(snapshot.indexHMAC) {
+            return skip(.fenceLost, snapshot)
+        }
+
+        // Clock integrity: a rollback below the high-water skips writes.
+        guard try advanceClock(nowMillis: nowMillis) else { return skip(.clockRollback, snapshot) }
+
+        // Opportunistic retention sweep on writes (M-12): evict entries past their
+        // creation-based retention deadline before admitting new state.
+        try? runRetention(nowMillis: nowMillis)
+
+        // Key epoch must still be current (a warm-swap/rotation after commit skips).
+        guard snapshot.identity.keyEpoch == metadata.keyEpoch else { return skip(.fenceLost, snapshot) }
+
+        // Allowlist check.
+        guard KVDiskCacheFormat.allowlistedCacheClasses.contains(snapshot.identity.cacheClass) else {
+            return skip(.allowlistRemoved, snapshot)
+        }
+
+        // Geometry pre-check: the §5a decoded_length equation (same as read-side).
+        let geometry = snapshot.layers.map {
+            KVDiskCacheFormat.LayerGeometryInput(classID: $0.classID, ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+        }
+        guard let decodedLength = KVDiskCacheFormat.decodedLength(tokenCount: snapshot.tokens.count, layers: geometry) else {
+            return skip(.geometryUnvalidated, snapshot)
+        }
+        // An entry that could never be promoted MUST NOT be written.
+        guard decodedLength <= config.stagingMaxBytes, decodedLength <= KVDiskCacheStoreConfig.promotionCeilingHardMax else {
+            return skip(.exceedsPromotionCeiling, snapshot)
+        }
+        // Write-live budget (RAM-DoS bound).
+        guard decodedLength <= config.writeStagingMaxBytes else { return skip(.exceedsPromotionCeiling, snapshot) }
+        guard decodedLength <= config.maxEntryBytes else { return skip(.perEntryCap, snapshot) }
+
+        // Estimate on-disk size (ciphertext ≈ plaintext + per-chunk framing/tag).
+        let estimatedDiskBytes = estimateDiskBytes(decodedLength: decodedLength)
+        guard estimatedDiskBytes <= config.maxEntryBytes else { return skip(.perEntryCap, snapshot) }
+
+        // Free-space floor. Fail closed when free space is unreadable (M-19): a
+        // statvfs failure skips the write rather than assuming headroom.
+        guard let freeBytes = hostFreeBytes(), freeBytes - estimatedDiskBytes >= config.minFreeBytes else {
+            return skip(.freeSpaceFloor, snapshot)
+        }
+
+        // Quota reservation (M-11 + HIGH-4): reserve the FULL new generation's bytes,
+        // NOT just the net growth. During construction the old generation's blob still
+        // exists on disk alongside the new blob + manifest temp, so reserving only
+        // `new - old` would let physical usage exceed the namespace cap by ~an entry
+        // near quota. `committedBytes` already includes the old generation (excluded
+        // from eviction), so `committedBytes(old) + reservedBytes(full new)` accounts
+        // old + new co-resident. The reservation is released on EVERY exit via defer;
+        // publication converts it to the committed NET delta (old blob deleted).
+        let index = snapshot.indexHMAC
+        let previousBytes = liveEntries[index]?.bytes ?? 0
+        let isReplacement = liveEntries[index] != nil
+        let reservation = estimatedDiskBytes
+        guard try reserveQuota(reservation, isReplacement: isReplacement, excluding: index, nowMillis: nowMillis) else {
+            return skip(.quotaExhausted, snapshot)
+        }
+        defer { reservedBytes -= reservation }
+
+        // Write ordering: drop a stale snapshot (commit sequence ≤ last published).
+        if let last = lastCommitSequence[index], snapshot.commitSequence <= last {
+            return skip(.snapshotDisplaced, snapshot)
+        }
+
+        do {
+            let result = try commitEntry(snapshot, decodedLength: decodedLength, nowMillis: nowMillis)
+            return result
+        } catch let crash as KVInjectedCrash {
+            throw crash
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            return skip(.dekCreateFailed, snapshot)
+        } catch {
+            return skip(.ioError, snapshot)
+        }
+    }
+
+    private func commitEntry(_ snapshot: KVWriteSnapshot, decodedLength: Int, nowMillis: Int) throws -> KVWriteResult {
+        let writeStarted = Date()
+        let index = snapshot.indexHMAC
+        let dir = entryDir(index)
+        let newEntry = !fileExists(dir)
+
+        // DEK: ONE shared entry DEK across generations (HIGH-4). A replacement write
+        // REUSES the committed generation's DEK — creating a fresh DEK would
+        // delete-then-add, destroying the previous generation's key, so a crash
+        // before the new manifest rename would leave the still-committed generation
+        // undecryptable. A fresh DEK is created only when none exists (first write,
+        // or after a purge/eviction crypto-shredded it).
+        let dek: Data
+        let createdFreshDEK: Bool
+        if let existing = try keys.entryDEK(epoch: metadata.keyEpoch, index: index) {
+            dek = existing
+            createdFreshDEK = false
+        } else {
+            dek = try keys.createEntryDEK(epoch: metadata.keyEpoch, index: index, incarnation: snapshot.incarnation)
+            createdFreshDEK = true
+        }
+        try crashIf(.afterDEKCreate)
+
+        // Allocate the generation (max committed + 1).
+        let generation = (lastGeneration[index] ?? 0) + 1
+        // Item 7: track the manifest temp so a NON-crash failure can delete it (the blob
+        // path is deterministic from `generation`). Cleanup runs in the real-error catch.
+        var manifestTempURL: URL?
+
+        do {
+            if newEntry {
+                try createDir(dir)
+                try crashIf(.afterMkdirBeforeParentFsync)
+                try fsyncDirectory(entriesDir)
+            }
+
+            // Chunk boundaries are byte ranges over the codec plaintext; derive them
+            // from decoded_length alone (HIGH-1) so the whole plaintext need never exist
+            // to plan the framing. GCM ciphertext length == plaintext length, so every
+            // ct_length — and thus blob_length — is known before a single byte is sealed.
+            let chunkSize = max(1, min(decodedLength, KVDiskCacheFormat.maxChunkCiphertextBytes))
+            var chunkLengths: [Int] = []
+            var remainingLen = decodedLength
+            while remainingLen > 0 {
+                let take = min(chunkSize, remainingLen)
+                chunkLengths.append(take)
+                remainingLen -= take
+            }
+            if chunkLengths.isEmpty { chunkLengths.append(0) }
+
+            var chunkRecords: [KVChunkRecord] = []
+            var nonces: [Data] = []
+            for (ordinal, len) in chunkLengths.enumerated() {
+                let nonce = try KVKeyManager.randomBytes(KVDiskCacheFormat.chunkNonceBytes)
+                nonces.append(nonce)
+                chunkRecords.append(KVChunkRecord(ordinal: ordinal, ctLength: len, nonce: nonce))
+            }
+            // blob_length is AAD-bound (only blob_sha256 is omitted from the AAD) and
+            // fully known before encryption: each frame is (ct_length + 40) bytes. The
+            // AAD projection is therefore stable between seal and read.
+            let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
+            let blobLength = chunkLengths.reduce(0) { $0 + $1 + frameOverhead }
+            let manifestForAAD = buildManifest(
+                snapshot: snapshot, generation: generation, decodedLength: decodedLength,
+                chunks: chunkRecords, blobLength: blobLength, blobSHA256: String(repeating: "0", count: 64))
+
+            // HIGH-1 streaming seal: pull each chunk's plaintext from the codec segments
+            // (never the whole plaintext as one buffer), AES-256-GCM seal it with its
+            // fresh nonce + the FR-KVP4 AAD projection, write the frame straight to the
+            // O_EXCL blob fd, fold the frame into a rolling SHA-256, and release both
+            // buffers before the next chunk. Peak live memory beyond the snapshot is one
+            // chunk plaintext + one frame — not the whole plaintext AND the whole blob.
+            let blobURL = dir.appendingPathComponent("gen-\(generation).blob")
+            var cursor = KVSegmentCursor(try KVPayloadCodec.encodeSegments(
+                tokens: snapshot.tokens, layers: snapshot.layers))
+            var blobHasher = SHA256()
+            var writtenBlobBytes = 0
+            let blobFD = try openExclusiveForWrite(blobURL)
+            do {
+                for (ordinal, len) in chunkLengths.enumerated() {
+                    let chunk = cursor.next(len)
+                    guard chunk.count == len else {
+                        throw KVStoreError.io("codec stream shorter than decoded_length")
+                    }
+                    let aad = try manifestForAAD.aad(ordinal: ordinal)
+                    let sealed = try KVChunkCryptoSealFixedNonce(
+                        plaintext: chunk, dek: dek, aad: aad, nonce: nonces[ordinal])
+                    let frame = try KVChunkFrame.encode(ordinal: ordinal, nonce: nonces[ordinal],
+                                                        ciphertext: sealed.ciphertext, tag: sealed.tag)
+                    try writeAll(fd: blobFD, frame)
+                    blobHasher.update(data: frame)
+                    writtenBlobBytes += frame.count
+                }
+                guard cursor.totalRemaining == 0 else {
+                    throw KVStoreError.io("codec stream longer than decoded_length")
+                }
+                guard fsync(blobFD) == 0 else { throw KVStoreError.io("blob fsync failed errno=\(errno)") }
+            } catch {
+                close(blobFD)
+                throw error
+            }
+            close(blobFD)
+            precondition(writtenBlobBytes == blobLength, "blob length must match the pre-encryption estimate")
+            let blobSHA = blobHasher.finalize().map { String(format: "%02x", $0) }.joined()
+            // Only blob_sha256 changes (out of the AAD), so the sealed AAD stays valid.
+            let manifest = buildManifest(
+                snapshot: snapshot, generation: generation, decodedLength: decodedLength,
+                chunks: chunkRecords, blobLength: blobLength, blobSHA256: blobSHA)
+
+            try crashIf(.afterBlobFsync)
+            try fsyncDirectory(dir)
+            try crashIf(.afterEntryDirFsync)
+
+            // Manifest → unique temp → fsync.
+            let manifestData = try KVManifestCodec.encode(manifest)
+            guard manifestData.count <= KVDiskCacheFormat.manifestMaxBytes else {
+                throw KVStoreError.io("manifest exceeds cap")
+            }
+            let tempURL = dir.appendingPathComponent("manifest.json.tmp.\(UUID().uuidString)")
+            manifestTempURL = tempURL
+            try writeFileExclusive(manifestData, to: tempURL)
+            try crashIf(.afterManifestTempFsync)
+
+            // Mutation lane: re-verify epoch/fence/newest, then atomic rename.
+            try crashIf(.insideMutationLaneBeforeRename)
+            guard metadata.keyEpoch == snapshot.identity.keyEpoch else {
+                try? FileManager.default.removeItem(at: tempURL)
+                try? FileManager.default.removeItem(at: blobURL)
+                return skip(.fenceLost, snapshot)
+            }
+            guard snapshot.sampledPurgeGeneration >= metadata.highWatermark(for: index) else {
+                try? FileManager.default.removeItem(at: tempURL)
+                try? FileManager.default.removeItem(at: blobURL)
+                return skip(.fenceLost, snapshot)
+            }
+            if let last = lastCommitSequence[index], snapshot.commitSequence <= last {
+                try? FileManager.default.removeItem(at: tempURL)
+                try? FileManager.default.removeItem(at: blobURL)
+                return skip(.snapshotDisplaced, snapshot)
+            }
+            let manifestURL = dir.appendingPathComponent("manifest.json")
+            // Reclaim the superseded generation's bytes (compaction retains the DEK).
+            let previousBytes = liveEntries[index]?.bytes ?? 0
+            let previousGen = lastGeneration[index]
+            guard rename(tempURL.path, manifestURL.path) == 0 else {
+                throw KVStoreError.io("manifest rename failed errno=\(errno)")
+            }
+            try crashIf(.afterRenameBeforeDirFsync)
+            try fsyncDirectory(dir)
+
+            // Delete the superseded blob (compaction), keep the shared DEK. Item 7: if
+            // the deletion FAILS, keep its bytes counted against quota
+            // (`supersededLeakBytes`) rather than silently subtracting them below — a
+            // later activation sweep reclaims it. Never bypass quota with an undeleted
+            // old generation.
+            if let previousGen, previousGen != generation {
+                let supersededURL = dir.appendingPathComponent("gen-\(previousGen).blob")
+                if fileExists(supersededURL) {
+                    let supersededSize = (try? fileSize(supersededURL)) ?? 0
+                    do { try removeEntryDirectory(supersededURL) }
+                    catch { supersededLeakBytes += supersededSize }
+                }
+            }
+
+            // Publish in-memory state.
+            let entryBytes = writtenBlobBytes + manifestData.count
+            committedBytes += entryBytes - previousBytes
+            // Preserve the entry's original creation time across generations (M-12).
+            // M-C: the retention basis is the persisted value if present, else the
+            // in-memory creation time, else this first commit's created_at — so the
+            // creation-based retention deadline never shifts forward on a replacement.
+            let creationMillis = metadata.retentionBasisMillis[index]
+                ?? liveEntries[index]?.creationMillis
+                ?? snapshot.createdAtMillis
+            liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: nowMillis,
+                                             creationMillis: creationMillis, generation: generation)
+            lastGeneration[index] = generation
+            lastCommitSequence[index] = snapshot.commitSequence
+            // M-C: persist the immutable retention basis on first observation so it
+            // survives restart independently of the newest manifest's timestamp.
+            if metadata.retentionBasisMillis[index] != creationMillis {
+                metadata.retentionBasisMillis[index] = creationMillis
+                try persistMetadata()
+            }
+
+            // §6 (Item 9): the disk_write_committed event carries the identity/build/
+            // format record correlated by commit sequence + index hash, so the KVS-01a
+            // harness can merge the persist event's identity + commit-latency delta into
+            // the restored measurement (the buyer stream cannot see these fields).
+            var writeFields: [String: String] = [
+                "generation": "\(generation)",
+                "commit_sequence": "\(snapshot.commitSequence)",
+                "serialized_bytes": "\(writtenBlobBytes)",
+                "write_ms": "\(Int(Date().timeIntervalSince(writeStarted) * 1000))",
+            ]
+            for (k, v) in identityFields(
+                modelSHA256: snapshot.identity.modelSHA256, catalogRevision: snapshot.identity.catalogRevision,
+                kvBits: snapshot.identity.kvBits) { writeFields[k] = v }
+            emit(.diskWriteCommitted, indexHashPrefix: indexPrefix(index), fields: writeFields)
+            return .committed(generation: generation, commitSequence: snapshot.commitSequence)
+        } catch let crash as KVInjectedCrash {
+            // Simulated crash: leave on-disk side effects; abort-path DEK cleanup is
+            // ownership-checked so a delayed abort cannot delete a re-created DEK.
+            throw crash
+        } catch {
+            // Item 7: on a NON-crash failure, delete the NEW generation's partial
+            // artifacts so their bytes never bypass quota (the reservation is released by
+            // write()'s defer). Only the new blob + manifest temp — and, for a brand-new
+            // entry, the whole orphan dir — are removed; a still-committed PRIOR
+            // generation (replacement case) is never touched. A crash path
+            // (KVInjectedCrash, handled above) deliberately leaves artifacts for
+            // activation recovery to sweep + account.
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("gen-\(generation).blob"))
+            if let manifestTempURL { try? FileManager.default.removeItem(at: manifestTempURL) }
+            if newEntry { try? FileManager.default.removeItem(at: dir) }
+            try? fsyncDirectory(newEntry ? entriesDir : dir)
+            // Ownership-checked abort deletion — ONLY when THIS write created the DEK
+            // fresh (HIGH-4). A reused DEK backs a still-committed prior generation and
+            // must survive this write's failure.
+            if createdFreshDEK {
+                try? keys.destroyEntryDEKIfOwnedBy(epoch: metadata.keyEpoch, index: index, incarnation: snapshot.incarnation)
+            }
+            throw error
+        }
+    }
+
+    private func buildManifest(snapshot: KVWriteSnapshot, generation: Int, decodedLength: Int,
+                               chunks: [KVChunkRecord], blobLength: Int, blobSHA256: String) -> KVDiskManifest {
+        let id = snapshot.identity
+        let layerRecords = snapshot.layers.map {
+            KVLayerRecord(layerIndex: $0.layerIndex, classID: $0.classID, layoutVersion: layoutVersion(for: $0),
+                          ndim: $0.ndim, dims: $0.dims, dtype: $0.dtype)
+        }
+        return KVDiskManifest(
+            schemaID: KVDiskCacheFormat.manifestSchemaID,
+            codecID: KVDiskCacheFormat.codecID,
+            namespaceID: config.namespaceID,
+            keyEpoch: metadata.keyEpoch,
+            indexHMAC: snapshot.indexHMAC,
+            generation: generation,
+            commitSequence: snapshot.commitSequence,
+            purgeGeneration: snapshot.sampledPurgeGeneration,
+            requestModel: id.requestModel,
+            servedModelID: id.servedModelID,
+            modelSHA256: id.modelSHA256,
+            catalogRevision: id.catalogRevision,
+            tokenizerID: id.tokenizerID,
+            tokenizerConfigSHA256: id.tokenizerConfigSHA256,
+            chatTemplateSHA256: id.chatTemplateSHA256,
+            abiEpoch: id.abiEpoch,
+            mlxSwiftLMRevision: id.mlxSwiftLMRevision,
+            mlxVersion: id.mlxVersion,
+            cacheClass: id.cacheClass,
+            layerCount: id.layerCount,
+            layers: layerRecords,
+            kvBits: id.kvBits,
+            kvGroupSize: id.kvGroupSize,
+            kvQuantMode: id.kvQuantMode,
+            kvQuantPolicy: id.kvQuantPolicy,
+            decodePath: id.decodePath,
+            tokenCount: snapshot.tokens.count,
+            createdAtMillis: snapshot.createdAtMillis,
+            eligibleUntilMillis: snapshot.eligibleUntilMillis,
+            decodedLength: decodedLength,
+            chunks: chunks,
+            blobLength: blobLength,
+            blobSHA256: blobSHA256)
+    }
+
+    /// Per-layer layout version. v1 fixes it to 1 for the allowlisted class; the
+    /// caller may thread a distinct value once layouts diverge (ABI-epoch bump).
+    private func layoutVersion(for layer: KVLayerPayload) -> Int { 1 }
+
+    private func estimateDiskBytes(decodedLength: Int) -> Int {
+        // ciphertext == plaintext length; framing per chunk = 4+4+4+12+16 = 40.
+        let chunks = max(1, (decodedLength + KVDiskCacheFormat.maxChunkCiphertextBytes - 1) / KVDiskCacheFormat.maxChunkCiphertextBytes)
+        return decodedLength + chunks * 40 + KVDiskCacheFormat.manifestMaxBytes
+    }
+
+    // MARK: - Read path (FR-KVP4/5/9)
+
+    /// Outcome of the off-actor bounded blob decode (Item 5). Sendable so it can cross
+    /// back from a detached decode task to the actor.
+    private enum KVPromoteDecode: Sendable {
+        case ok(tokens: [Int32], layers: [KVLayerPayload], blobSize: Int, peakStaging: Int)
+        case corrupt
+        case ioError
+        case deadline
+        case budget
+    }
+
+    /// Item 5 (FR-KVP9): the bounded streaming blob read + decrypt + decode, run OUTSIDE
+    /// the store's actor isolation (via a detached task) so it never blocks other
+    /// promotion admissions — a second promotion arriving during this work observes the
+    /// claimed `promotionInFlight` slot and returns `disk_miss_busy` immediately rather
+    /// than queueing behind the decode. Touches no actor-mutable state: it takes the
+    /// manifest, DEK, blob URL, deadline, and ceiling by value and returns a decoded
+    /// payload or a typed miss. `nonisolated` + immutable inputs make it Sendable-safe.
+    nonisolated private func promoteDecodeBlob(
+        blobURL: URL, manifest: KVDiskManifest, dek: Data, deadline: Date, stagingMaxBytes: Int
+    ) -> KVPromoteDecode {
+        // Pass 1: SHA-256 the blob by streaming the FILE through the hash in bounded
+        // windows, retaining NONE of the ciphertext.
+        let blobSize: Int
+        do {
+            let (shaFD, size) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
+            defer { close(shaFD) }
+            blobSize = size
+            guard size == manifest.blobLength else { return .corrupt }
+            var hasher = SHA256()
+            var remaining = size
+            let window = 1 << 20   // 1 MiB streaming window; never the whole blob
+            while remaining > 0 {
+                // CRITICAL-1(c): a purge/rotation cancel-or-join cancels this decode; bail
+                // promptly so the joiner is not blocked for the full deadline. The read's
+                // post-decode re-fence turns this into the correct revocation miss.
+                if Task.isCancelled { return .ioError }
+                let take = min(window, remaining)
+                let piece = try readExactly(fd: shaFD, count: take)
+                hasher.update(data: piece)
+                remaining -= take
+            }
+            let actualSHA = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+            guard actualSHA == manifest.blobSHA256 else { return .corrupt }
+        } catch let e as KVStoreError {
+            if case .boundsExceeded = e { return .corrupt }   // over-bound blob is corrupt
+            return .ioError
+        } catch { return .ioError }
+
+        // Pass 2: stream one frame at a time — read exact bytes, AEAD-open, feed the
+        // incremental decoder that materializes each layer and releases consumed bytes.
+        let frameOverhead = 4 + 4 + 4 + KVDiskCacheFormat.chunkNonceBytes + KVDiskCacheFormat.gcmTagBytes
+        let decoder = KVStreamingPayloadDecoder(
+            expectedDecodedLength: manifest.decodedLength, layerCount: manifest.layerCount)
+        var peakStaging = 0
+        enum StreamMiss: Error { case corrupt, deadline, budget }
+        do {
+            let (readFD, _) = try openBoundedForRead(blobURL, maxBytes: manifest.blobLength)
+            defer { close(readFD) }
+            for record in manifest.chunks {
+                if Task.isCancelled { throw StreamMiss.deadline }   // CRITICAL-1(c): bail on cancel
+                if Date() > deadline { throw StreamMiss.deadline }
+                let frameData: Data
+                do { frameData = try readExactly(fd: readFD, count: frameOverhead + record.ctLength) }
+                catch { throw StreamMiss.corrupt }
+                let frame: KVParsedFrame
+                do { frame = try KVChunkFrame.decodeBlob(frameData, chunkTable: [record])[0] }
+                catch { throw StreamMiss.corrupt }
+                let aad: Data
+                do { aad = try manifest.aad(ordinal: frame.ordinal) } catch { throw StreamMiss.corrupt }
+                let opened: Data
+                do {
+                    opened = try KVChunkCrypto.open(nonce: frame.nonce, ciphertext: frame.ciphertext,
+                                                    tag: frame.tag, dek: dek, aad: aad)
+                } catch { throw StreamMiss.corrupt }
+                let liveBeforeDecode = frameData.count + opened.count + decoder.residualBytes + decoder.decodedBytes
+                peakStaging = max(peakStaging, liveBeforeDecode)
+                guard peakStaging <= stagingMaxBytes else { throw StreamMiss.budget }
+                do { try decoder.feed(opened) } catch { throw StreamMiss.corrupt }
+                // Item 4: enforce AFTER materialization of each layer on the true peak.
+                let liveAfterDecode = frameData.count + decoder.peakBytes
+                peakStaging = max(peakStaging, liveAfterDecode)
+                guard peakStaging <= stagingMaxBytes else { throw StreamMiss.budget }
+            }
+        } catch StreamMiss.deadline {
+            return .deadline
+        } catch StreamMiss.budget {
+            return .budget
+        } catch let e as KVStoreError {
+            if case .boundsExceeded = e { return .corrupt }
+            return .ioError
+        } catch { return .corrupt }
+
+        let decoded: KVDecodedPayload
+        do { decoded = try decoder.finish() } catch { return .corrupt }
+        guard decoded.tokens.count == manifest.tokenCount else { return .corrupt }
+        // Item 4: report the true internal high-water (source ⋂ tensor co-residency).
+        peakStaging = max(peakStaging, decoder.peakBytes)
+        return .ok(tokens: decoded.tokens, layers: decoded.layers, blobSize: blobSize, peakStaging: peakStaging)
+    }
+
+    /// Attempt a cold hit for `rawKey` against the live runtime identity. Returns the
+    /// decoded tokens + restored layer state, or a typed miss reason. `runtime`
+    /// carries every live-identity input (a nil `modelSHA256` ⇒ identity unavailable).
+    /// - Parameter emitHitEvent: when false, a successful restore returns the hit
+    ///   WITHOUT emitting `disk_hit`; the caller (the runtime promotion adapter)
+    ///   emits exactly one terminal code after the hot predicate accepts/rejects
+    ///   the restored layers (§5 row 25). Miss codes are always emitted here.
+    func read(rawKey: String, runtime: KVRuntimeIdentity, nowMillis: Int, emitHitEvent: Bool = true) async throws -> KVReadResult {
+        guard activated else { return .miss(.diskMissIO, .ioError) }
+        if let detail = quarantined { return .miss(.diskMissIO, detail) }
+
+        // Clock-rollback dormancy (FR-KVP10).
+        guard try advanceClock(nowMillis: nowMillis) else {
+            emitMiss(.diskMissIO, detail: .clockRollback)
+            return .miss(.diskMissIO, .clockRollback)
+        }
+
+        // Keychain / index availability. A missing epoch master ⇒ dormancy.
+        let index: String
+        do {
+            guard let computed = try keys.computeIndex(rawKey: rawKey, epoch: metadata.keyEpoch) else {
+                return .miss(.diskMissIO, .keychainUnavailable)
+            }
+            index = computed
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            return .miss(.diskMissIO, .keychainUnavailable)
+        }
+
+        // FR-KVP8 admission fence (CRITICAL, Item 1): deny reads/promotions derived from
+        // DURABLE state, not only the transient flags.
+        //  - Namespace-wide fence (in-flight purge-all/cap-rotation OR a durably open
+        //    rotation journal, including one left open by a failed rotation) → busy.
+        //  - A durably-blocked index (incomplete tombstone: purge started, not
+        //    completion-marked) → tombstoned. This holds across a purge FAILURE and a
+        //    restart until recovery finishes the purge, so an old generation can never
+        //    be read again before the completion mark.
+        //  - A transient per-index purge fence (the hot-callback window before the
+        //    tombstone is durable) → busy.
+        if namespaceBlocked { return .miss(.diskMissBusy) }
+        if blockedIndexes.contains(index) { return .miss(.diskMissTombstoned, .purgePending) }
+        if purgingIndexes.contains(index) { return .miss(.diskMissBusy) }
+
+        // Back-pressure: at most one promotion in flight namespace-wide.
+        guard !promotionInFlight else { return .miss(.diskMissBusy) }
+
+        let prefix = indexPrefix(index)
+        let dir = entryDir(index)
+        let manifestURL = dir.appendingPathComponent("manifest.json")
+        guard fileExists(manifestURL) else { return .miss(.diskMissAbsent) }
+
+        // Manifest load bounded by fstat (§5a) → structural parse (corrupt).
+        let manifestData: Data
+        do {
+            manifestData = try readBounded(manifestURL, maxBytes: KVDiskCacheFormat.manifestMaxBytes)
+        } catch let e as KVStoreError {
+            // M-14: an over-bound manifest is corrupt (integrity), not an I/O error.
+            if case .boundsExceeded = e {
+                emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+            }
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
+        } catch {
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix); return .miss(.diskMissIO, .ioError)
+        }
+        let manifest: KVDiskManifest
+        do {
+            manifest = try KVManifestCodec.decode(manifestData, maxBlobBytes: config.maxEntryBytes)
+        } catch {
+            emitMiss(.diskMissCorrupt, prefix: prefix); return .miss(.diskMissCorrupt)
+        }
+
+        // Four-category envelope validation completes before any payload byte.
+        let runtimeForFence = KVRuntimeIdentity(
+            namespaceID: runtime.namespaceID, keyEpoch: runtime.keyEpoch, indexHMAC: index,
+            requestModel: runtime.requestModel, servedModelID: runtime.servedModelID, modelSHA256: runtime.modelSHA256,
+            catalogRevision: runtime.catalogRevision, tokenizerID: runtime.tokenizerID,
+            tokenizerConfigSHA256: runtime.tokenizerConfigSHA256, chatTemplateSHA256: runtime.chatTemplateSHA256,
+            abiEpoch: runtime.abiEpoch, mlxSwiftLMRevision: runtime.mlxSwiftLMRevision, mlxVersion: runtime.mlxVersion,
+            cacheClass: runtime.cacheClass, layerCount: runtime.layerCount, layers: runtime.layers,
+            kvBits: runtime.kvBits, kvGroupSize: runtime.kvGroupSize, kvQuantMode: runtime.kvQuantMode,
+            kvQuantPolicy: runtime.kvQuantPolicy, decodePath: runtime.decodePath,
+            liveHighWatermark: metadata.highWatermark(for: index))
+        switch KVEnvelopeValidator.validate(manifest, runtime: runtimeForFence, nowMillis: nowMillis) {
+        case .miss(let code, let detail):
+            emitMiss(code, detail: detail, prefix: prefix)
+            return .miss(code, detail)
+        case .ok:
+            break
+        }
+
+        // Entry DEK: absent/destroyed ⇒ tombstoned (revocation authority, FR-KVP8).
+        let dek: Data
+        do {
+            guard let loaded = try keys.entryDEK(epoch: metadata.keyEpoch, index: index) else {
+                emitMiss(.diskMissTombstoned, detail: .dekDestroyed, prefix: prefix)
+                return .miss(.diskMissTombstoned, .dekDestroyed)
+            }
+            dek = loaded
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            emitMiss(.diskMissIO, detail: .keychainUnavailable, prefix: prefix)
+            return .miss(.diskMissIO, .keychainUnavailable)
+        }
+
+        // Promotion staging ceiling (declared decoded size).
+        guard manifest.decodedLength <= config.stagingMaxBytes else {
+            emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
+            return .miss(.diskMissBudget, .exceedsPromotionCeiling)
+        }
+
+        // Item 5 (FR-KVP9): CLAIM the single promotion slot here (actor-isolated). The
+        // busy check above already returned `disk_miss_busy` immediately if the slot was
+        // taken. The bounded blob decode below runs OFF the actor (detached task) so a
+        // second promotion arriving during it observes the claimed slot and returns
+        // `disk_miss_busy` immediately rather than queueing behind this decode. The
+        // deadline starts at the claim, not after any queue wait.
+        promotionInFlight = true
+        defer { promotionInFlight = false }
+        let deadline = Date().addingTimeInterval(TimeInterval(config.promotionMaxSeconds))
+        let started = Date()
+        let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
+        let stagingCeiling = config.stagingMaxBytes
+
+        // CRITICAL-1(b): snapshot the admission epoch + purge high-watermark under actor
+        // isolation so the post-decode re-fence can detect a purge/rotation that revoked
+        // this index during the off-actor decode suspension.
+        let epochAtEntry = metadata.keyEpoch
+        let hwmAtEntry = metadata.highWatermark(for: index)
+
+        // Await the off-actor decode. During this suspension the actor is free, so a
+        // contending promotion's admission runs and gets busy (FR-KVP9 "rather than
+        // queueing"). Running the blocking disk I/O + crypto off-actor also keeps the
+        // actor responsive. The decode is registered so a concurrent purge/rotation can
+        // cancel-or-join it BEFORE it destroys the DEK / crypto-shreds the epoch (Item c).
+        let decodeTask = Task.detached { [self] in
+            #if DEBUG
+            await promoteDecodeGate.pauseIfSet()
+            #endif
+            return promoteDecodeBlob(blobURL: blobURL, manifest: manifest, dek: dek,
+                                     deadline: deadline, stagingMaxBytes: stagingCeiling)
+        }
+        let handleID = registerPromotion(index: index, task: decodeTask)
+        let outcome = await decodeTask.value
+        deregisterPromotion(index: index, id: handleID)
+
+        // CRITICAL-1(b) RE-FENCE: the detached decode suspended this read. A single-key
+        // purge, purge-all, or cap-rotation may have DURABLY revoked this index during the
+        // window — advancing the purge high-watermark, rotating (crypto-shredding) the
+        // epoch, dropping the live entry, or setting a tombstone. A COMPLETED single-key
+        // purge already CLEARS `blockedIndexes`, so keying on that alone is insufficient;
+        // the epoch + high-watermark comparison (both advanced ON the actor before this
+        // read can resume) closes the window deterministically. On ANY mismatch DISCARD the
+        // decoded state — built from the copied DEK/blob, released as this returns — and
+        // return disk_miss_tombstoned rather than serving revoked KV.
+        if quarantined != nil {
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix)
+            return .miss(.diskMissIO, .ioError)
+        }
+        if metadata.keyEpoch != epochAtEntry
+            || metadata.highWatermark(for: index) != hwmAtEntry
+            || namespaceBlocked
+            || purgingIndexes.contains(index)
+            || blockedIndexes.contains(index)
+            || liveEntries[index] == nil {
+            emitMiss(.diskMissTombstoned, detail: .purgePending, prefix: prefix)
+            return .miss(.diskMissTombstoned, .purgePending)
+        }
+
+        switch outcome {
+        case .deadline:
+            emitMiss(.diskMissIO, detail: .promotionDeadline, prefix: prefix)
+            return .miss(.diskMissIO, .promotionDeadline)
+        case .budget:
+            emitMiss(.diskMissBudget, detail: .exceedsPromotionCeiling, prefix: prefix)
+            return .miss(.diskMissBudget, .exceedsPromotionCeiling)
+        case .ioError:
+            emitMiss(.diskMissIO, detail: .ioError, prefix: prefix)
+            return .miss(.diskMissIO, .ioError)
+        case .corrupt:
+            emitMiss(.diskMissCorrupt, prefix: prefix)
+            return .miss(.diskMissCorrupt)
+        case let .ok(tokens, layers, blobSize, peakStaging):
+            // Update LRU last-eligible-use, durably (FR-KVP7 usage journal). Best-effort:
+            // a failure degrades LRU durability but never fails the hit.
+            if var entry = liveEntries[index] {
+                entry.lastUsedMillis = nowMillis
+                liveEntries[index] = entry
+                appendUsageRecord(index: index, millis: nowMillis)
+            }
+            let elapsedMillis = Int(Date().timeIntervalSince(started) * 1000)
+            if emitHitEvent {
+                var hitFields: [String: String] = [
+                    "restore_bytes": "\(blobSize)",
+                    "decrypt_ms": "\(elapsedMillis)",
+                    "peak_staging_bytes": "\(peakStaging)",
+                ]
+                for (k, v) in identityFields(
+                    modelSHA256: manifest.modelSHA256, catalogRevision: manifest.catalogRevision,
+                    kvBits: manifest.kvBits) { hitFields[k] = v }
+                emit(.diskHit, indexHashPrefix: prefix, fields: hitFields)
+            }
+            return .hit(KVReadHit(tokens: tokens, layers: layers,
+                                  bytesRead: blobSize, decryptMillis: elapsedMillis,
+                                  peakStagingBytes: peakStaging))
+        }
+    }
+
+    /// Runtime cold-tier adapter entry point (FR-KVP3): compute the HMAC index and
+    /// allocate a restart-safe monotonic commit sequence (recovered at activation
+    /// as max-committed+1), then write — all inside the actor so concurrent commits
+    /// for one key cannot collide on a sequence. The synchronous deep copy of
+    /// tensor bytes already happened at hot-tier commit (`captureSnapshot`).
+    func writeColdSnapshot(
+        rawKey: String, tokens: [Int32], layers: [KVLayerPayload], identity: KVWriteIdentity,
+        sampledPurgeGeneration: Int, commitSequence: Int, createdAtMillis: Int, eligibleUntilMillis: Int,
+        incarnation: String, nowMillis: Int
+    ) throws -> KVWriteResult {
+        guard activated else { return .skipped(.ioError) }
+        if let detail = quarantined { return .skipped(detail) }
+        // CRITICAL-2: `identity.keyEpoch` is the epoch captured synchronously at
+        // hot-tier commit (NOT the current epoch). A queued pre-purge-all snapshot
+        // whose captured epoch no longer matches is rejected here, so it can never
+        // be restamped into the new epoch and survive crypto-shredding.
+        guard identity.keyEpoch == metadata.keyEpoch else { return .skipped(.fenceLost) }
+        guard let index = try currentIndex(rawKey: rawKey) else {
+            emit(.diskWriteSkipped, detail: .keychainUnavailable)
+            return .skipped(.keychainUnavailable)
+        }
+        // The commit sequence is allocated under the hot lease (adapter-held per-index
+        // counter). A sequence not newer than the last published one is dropped by
+        // `write()` as `snapshot_displaced`, so two commits publish in commit order
+        // regardless of persist-Task scheduling.
+        let snapshot = KVWriteSnapshot(
+            rawKey: rawKey, indexHMAC: index, tokens: tokens, layers: layers, identity: identity,
+            sampledPurgeGeneration: sampledPurgeGeneration, commitSequence: commitSequence,
+            createdAtMillis: createdAtMillis, eligibleUntilMillis: eligibleUntilMillis, incarnation: incarnation)
+        return try write(snapshot, nowMillis: nowMillis)
+    }
+
+    /// §6 (Item 9): the identity/build/format fields appended to both disk_hit and
+    /// disk_write_committed structured events, correlated by the index-hash prefix, so
+    /// the KVS-01a harness records every §6 evidence field. `kv_bits=null` denotes the
+    /// v1 unquantized `KVCacheSimple` class (a legitimate value, not a missing field).
+    private func identityFields(modelSHA256: String, catalogRevision: String, kvBits: Int?) -> [String: String] {
+        [
+            "model_sha256": modelSHA256,
+            "catalog_revision": catalogRevision,
+            "schema_id": KVDiskCacheFormat.manifestSchemaID,
+            "codec_id": KVDiskCacheFormat.codecID,
+            "kv_bits": kvBits.map(String.init) ?? "null",
+        ]
+    }
+
+    /// Emit `disk_hit` for a promotion the hot predicate accepted (§5 row 25). Kept
+    /// separate from `read` so the terminal code is emitted once, after the hot
+    /// tier confirms reuse. Carries the §6 identity/build/format fields (Item 9).
+    func notePromotedHit(prefixHash: String, bytesRead: Int, decryptMillis: Int, peakStagingBytes: Int,
+                         modelSHA256: String, catalogRevision: String, kvBits: Int?) {
+        var fields: [String: String] = [
+            "restore_bytes": "\(bytesRead)",
+            "decrypt_ms": "\(decryptMillis)",
+            "peak_staging_bytes": "\(peakStagingBytes)",
+        ]
+        for (k, v) in identityFields(modelSHA256: modelSHA256, catalogRevision: catalogRevision, kvBits: kvBits) {
+            fields[k] = v
+        }
+        emit(.diskHit, indexHashPrefix: prefixHash, fields: fields)
+    }
+
+    /// Emit `disk_promote_rejected` when the hot predicate rejected restored layers.
+    func notePromoteRejected(prefixHash: String, reason: String) {
+        emit(.diskPromoteRejected, indexHashPrefix: prefixHash, fields: ["hot_reason": reason])
+    }
+
+    /// FR-KVP12: emit `disk_miss_identity_unavailable` for a gated read attempt whose
+    /// live identity is unavailable, so the closed-enum code fires instead of the store
+    /// never being reached. Index prefix is best-effort (keychain may be dormant).
+    func noteIdentityUnavailableRead(rawKey: String) {
+        emitMiss(.diskMissIdentityUnavailable, detail: .identityUnavailable, prefix: identityPrefix(rawKey))
+    }
+
+    /// FR-KVP12: emit `disk_write_skipped(detail=identity_unavailable)` for a gated
+    /// commit whose live identity is unavailable.
+    func noteIdentityUnavailableWrite(rawKey: String) {
+        emit(.diskWriteSkipped, detail: .identityUnavailable, indexHashPrefix: identityPrefix(rawKey))
+    }
+
+    /// Item 3 (FR-KVP3): emit `disk_write_skipped(detail=write_budget)` for a commit
+    /// refused BEFORE the deep copy because the aggregate write-live staging budget is
+    /// exhausted. Index prefix is best-effort (keychain may be dormant).
+    func noteWriteBudgetSkipped(rawKey: String) {
+        emit(.diskWriteSkipped, detail: .writeBudget, indexHashPrefix: identityPrefix(rawKey))
+    }
+
+    /// MEDIUM-A/LOW/INFO (SPEC-037): emit `disk_write_skipped(detail=unsupported_cache_class)`
+    /// for a tier-eligible commit whose live cache is not the v1-allowlisted
+    /// `KVCacheSimple`. Carries the actual runtime cache class in `cache_class` so an
+    /// operator sees a skip reason instead of a silent no-op. The v1 allowlist limitation
+    /// is unchanged; only the SILENCE is removed. Index prefix is best-effort.
+    func noteUnsupportedCacheClassSkipped(rawKey: String, cacheClass: String) {
+        emit(.diskWriteSkipped, detail: .unsupportedCacheClass,
+             indexHashPrefix: identityPrefix(rawKey), fields: ["cache_class": cacheClass])
+    }
+
+    private func identityPrefix(_ rawKey: String) -> String? {
+        // `try?` flattens the throwing Optional; a nil epoch master ⇒ no prefix.
+        guard let index = try? currentIndex(rawKey: rawKey) else { return nil }
+        return indexPrefix(index)
+    }
+
+    // MARK: - Purge/rotation serialization gate (Item 2, FR-KVP8)
+
+    /// Acquire the exclusive purge/rotation gate. A second purge awaits the first, so
+    /// at most one purge/rotation runs at a time and each owns its fence for its full
+    /// duration (including the hot-callback suspension). FIFO: the gate is handed
+    /// directly to the next waiter on release, so `purgeGateHeld` never drops between
+    /// a release and the resumed waiter running.
+    private func acquirePurgeGate() async {
+        if !purgeGateHeld { purgeGateHeld = true; return }
+        await withCheckedContinuation { purgeGateWaiters.append($0) }
+    }
+
+    private func releasePurgeGate() {
+        if purgeGateWaiters.isEmpty { purgeGateHeld = false }
+        else { purgeGateWaiters.removeFirst().resume() }
+    }
+
+    // MARK: - In-flight promotion tracking (CRITICAL-1)
+
+    /// Register a detached promotion decode under actor isolation, returning a handle id
+    /// the read path deregisters with on return.
+    private func registerPromotion(index: String, task: Task<KVPromoteDecode, Never>) -> Int {
+        promotionHandleSeq += 1
+        let id = promotionHandleSeq
+        inFlightPromotions[index, default: []].append(KVPromotionHandle(id: id, task: task))
+        return id
+    }
+
+    private func deregisterPromotion(index: String, id: Int) {
+        inFlightPromotions[index]?.removeAll { $0.id == id }
+        if inFlightPromotions[index]?.isEmpty == true { inFlightPromotions[index] = nil }
+    }
+
+    /// CRITICAL-1(c): cancel and JOIN every in-flight promotion decode for `index`, so a
+    /// single-key purge cannot destroy the DEK / report purge_ok while a decode still
+    /// holds a copied DEK for that index. Awaiting the off-actor tasks releases the actor,
+    /// but the per-index fence (`purgingIndexes`, and the durable `blockedIndexes`) is
+    /// already raised, so no NEW promotion for the index is admitted meanwhile.
+    private func cancelOrJoinPromotions(index: String) async {
+        let handles = inFlightPromotions[index] ?? []
+        for h in handles { h.task.cancel() }
+        for h in handles { _ = await h.task.value }
+    }
+
+    /// CRITICAL-1(c): cancel and JOIN ALL in-flight promotion decodes (purge-all /
+    /// cap-rotation), so no decode holding a copied old-epoch DEK survives the epoch
+    /// crypto-shred. The namespace fence (`namespacePurging`) is already raised.
+    private func cancelOrJoinAllPromotions() async {
+        let handles = inFlightPromotions.values.flatMap { $0 }
+        for h in handles { h.task.cancel() }
+        for h in handles { _ = await h.task.value }
+    }
+
+    // MARK: - Purge (FR-KVP8)
+
+    /// Single-key purge with the exact tombstone-first ordering. Idempotent and
+    /// fail-closed: any partial failure leaves the incomplete tombstone (and the
+    /// derived durable block, `blockedIndexes`) in place.
+    ///
+    /// Item 1/2 durable-first ordering (CRITICAL): the incomplete tombstone AND the
+    /// high-watermark are made durable (fsync) BEFORE the first suspending hot-tier
+    /// callback whenever there is durable state to revoke (disk artifacts or a prior
+    /// watermark), so a crash inside that callback still leaves a durable fence for
+    /// recovery to resume from. Only when there is NO durable state (no artifacts, no
+    /// prior watermark) is the hot callback consulted first — a crash there is safe
+    /// because nothing durable could be admitted (writes are fenced by
+    /// `purgingIndexes`, raised synchronously below, and no manifest could have been
+    /// published without disk artifacts existing).
+    @discardableResult
+    func purge(rawKey: String) async throws -> KVPurgeResult {
+        guard activated else { return .failed(.ioError) }
+        if let detail = quarantined { return .failed(detail) }
+
+        // Item 2 (CRITICAL): serialize purges/rotations so fences cannot race.
+        await acquirePurgeGate()
+        defer { releasePurgeGate() }
+
+        let index: String
+        do {
+            guard let computed = try keys.computeIndex(rawKey: rawKey, epoch: metadata.keyEpoch) else {
+                return .failed(.keychainUnavailable)
+            }
+            index = computed
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            return .failed(.keychainUnavailable)
+        }
+
+        // FR-KVP8 (CRITICAL): raise the per-index admission fence SYNCHRONOUSLY before
+        // any suspension so a write/read/promotion that interleaves during the
+        // hot-tier callback below is denied for this index.
+        purgingIndexes.insert(index)
+        defer { purgingIndexes.remove(index) }
+
+        let dir = entryDir(index)
+        let hadArtifacts = fileExists(dir)
+        let hadPriorHWM = metadata.purgeHighWatermarks[index] != nil
+
+        // When there is no durable state to revoke (no disk artifacts, no prior
+        // watermark) the ONLY thing that can make this purge non-trivial is hot/pending
+        // state, which requires the suspending hot callback to learn. A crash during
+        // that callback is safe here: nothing durable exists to leave unfenced. In the
+        // durable-state path below the tombstone+HWM are written BEFORE the callback.
+        var hotCallbackDone = false
+        if !hadArtifacts && !hadPriorHWM {
+            let hotHadState = await hotPurgeSingle?(rawKey) ?? false
+            hotCallbackDone = true
+            if !hotHadState {
+                emit(.purgeOK, indexHashPrefix: indexPrefix(index), fields: ["entries_removed": "0", "bytes_freed": "0"])
+                return .ok(entriesRemoved: 0, bytesFreed: 0)
+            }
+        }
+
+        // High-watermark-cap rotation (FR-KVP7 4096 path): admitting a NEW index into
+        // a full map forces an epoch rotation. Route it through the SAME namespace
+        // fence as purge-all so the hot tier is fully invalidated (CRITICAL (d)) rather
+        // than bypassing hot-tier invalidation.
+        if metadata.purgeHighWatermarks[index] == nil,
+           metadata.purgeHighWatermarks.count >= KVNamespaceMetadata.highWatermarkCap {
+            do {
+                let rotated = try await performNamespacePurgeRotation()
+                emit(.purgeOK, indexHashPrefix: indexPrefix(index),
+                     fields: ["entries_removed": "\(rotated.entries)", "bytes_freed": "\(rotated.bytes)", "mode": "cap_rotation"])
+                return .ok(entriesRemoved: rotated.entries, bytesFreed: rotated.bytes)
+            } catch let crash as KVInjectedCrash {
+                throw crash
+            } catch {
+                emit(.purgeFailed, indexHashPrefix: indexPrefix(index), fields: ["detail": KVReasonDetail.ioError.rawValue, "mode": "cap_rotation"])
+                return .failed(.ioError)
+            }
+        }
+
+        let newGeneration = metadata.highWatermark(for: index) + 1
+        do {
+            // (1) DURABLE-FIRST: create + fsync the incomplete tombstone (which also
+            //     establishes the durable in-memory block via `blockedIndexes`), THEN
+            //     advance + fsync the high-watermark — both BEFORE the suspending hot
+            //     callback, so a crash inside the callback still fences the index.
+            try writeTombstone(KVTombstone(epoch: metadata.keyEpoch, index: index,
+                                           purgeGeneration: newGeneration, complete: false))
+            try crashIf(.purgeAfterIncompleteTombstone)
+            metadata.purgeHighWatermarks[index] = newGeneration
+            try persistMetadata()
+            try crashIf(.purgeAfterHighWatermark)
+
+            // CRITICAL-1(c): cancel-or-join any in-flight promotion decode for this index
+            // BEFORE destroying the DEK below, so no detached decode holding a copied DEK
+            // for this index is still producing plaintext when purge_ok is reported. The
+            // durable tombstone + high-watermark above already fence any NEW promotion.
+            await cancelOrJoinPromotions(index: index)
+
+            // (2) Drop the matching hot entry, cancel its pending/in-flight persist, and
+            //     fence any outstanding lease's commit. Suspends on the hot actor — but
+            //     the durable fence above already holds, so a crash here is recoverable.
+            if !hotCallbackDone {
+                try crashIf(.purgeBeforeHotCallback)
+                _ = await hotPurgeSingle?(rawKey)
+            }
+
+            let bytesFreed = try completePurgeSteps(index: index, generation: newGeneration)
+            emit(.purgeOK, indexHashPrefix: indexPrefix(index),
+                 fields: ["entries_removed": hadArtifacts ? "1" : "0", "bytes_freed": "\(bytesFreed)"])
+            return .ok(entriesRemoved: hadArtifacts ? 1 : 0, bytesFreed: bytesFreed)
+        } catch let crash as KVInjectedCrash {
+            throw crash
+        } catch let e as KVKeychainError where isUnavailable(e) {
+            emit(.purgeFailed, indexHashPrefix: indexPrefix(index), fields: ["detail": KVReasonDetail.keychainUnavailable.rawValue])
+            return .failed(.keychainUnavailable)
+        } catch {
+            emit(.purgeFailed, indexHashPrefix: indexPrefix(index), fields: ["detail": KVReasonDetail.ioError.rawValue])
+            return .failed(.ioError)
+        }
+    }
+
+    /// Steps 2–4 + completion mark. Recovery re-runs exactly these for an incomplete
+    /// tombstone.
+    private func completePurgeSteps(index: String, generation: Int) throws -> Int {
+        // (2) destroy the entry DEK and verify absence — the revocation instant.
+        try keys.destroyEntryDEK(epoch: metadata.keyEpoch, index: index)
+        try crashIf(.purgeAfterDEKDestroy)
+
+        let freed = liveEntries[index]?.bytes ?? 0
+
+        // (4) delete generations + manifest, fsync entry dir — BEFORE any accounting or
+        // tombstone-completion mutation (M-D). A failed unlink must PROPAGATE
+        // (purge_failed): the incomplete tombstone and the byte accounting are retained
+        // so recovery retries this deletion. Reporting success here would decrement
+        // accounting and admit new writes while the old ciphertext still exists on disk.
+        let dir = entryDir(index)
+        if fileExists(dir) {
+            try removeEntryDirectory(dir)
+        }
+        try fsyncDirectory(entriesDir)
+        try crashIf(.purgeAfterUnlink)
+
+        // Only now that the files are durably gone: drop in-memory publication state +
+        // accounting for the index.
+        liveEntries.removeValue(forKey: index)
+        lastGeneration.removeValue(forKey: index)
+        lastCommitSequence.removeValue(forKey: index)
+        metadata.retentionBasisMillis.removeValue(forKey: index)   // M-C
+        committedBytes = max(0, committedBytes - freed)
+
+        // Mark the tombstone complete (fsync + dir fsync). New writes admitted only now.
+        try writeTombstone(KVTombstone(epoch: metadata.keyEpoch, index: index,
+                                       purgeGeneration: generation, complete: true))
+        return freed
+    }
+
+    /// Purge-all via epoch rotation (FR-KVP6/8). Fences the namespace, invalidates
+    /// in-memory state, and rotates the key epoch through the intent journal, then
+    /// verifies old-epoch Keychain material is absent before reporting success.
+    @discardableResult
+    func purgeAll() async throws -> KVPurgeResult {
+        guard activated else { return .failed(.ioError) }
+        if let detail = quarantined { return .failed(detail) }
+        // Item 2 (CRITICAL): the namespace-exclusive section — serialized against every
+        // single-key purge and cap-rotation through the same gate.
+        await acquirePurgeGate()
+        defer { releasePurgeGate() }
+        do {
+            let rotated = try await performNamespacePurgeRotation()
+            emit(.purgeOK, fields: ["entries_removed": "\(rotated.entries)", "bytes_freed": "\(rotated.bytes)", "mode": "all"])
+            return .ok(entriesRemoved: rotated.entries, bytesFreed: rotated.bytes)
+        } catch let crash as KVInjectedCrash {
+            throw crash
+        } catch {
+            emit(.purgeFailed, fields: ["detail": KVReasonDetail.ioError.rawValue, "mode": "all"])
+            return .failed(.ioError)
+        }
+    }
+
+    /// Shared namespace-fence rotation used by purge-all AND the high-watermark-cap
+    /// path (CRITICAL (c)/(d)). Raises the whole-namespace admission fence BEFORE the
+    /// suspending `hotPurgeAll` callback so no read/write/promotion is admitted across
+    /// it; `hotPurgeAll` clears every hot entry, invalidates all outstanding leases,
+    /// and cancels+joins every queued/in-flight persist so nothing publishes into the
+    /// pre-rotation epoch; THEN the epoch is rotated (crypto-shred) and in-memory
+    /// publication state is dropped; the fence lifts on return.
+    private func performNamespacePurgeRotation() async throws -> (entries: Int, bytes: Int) {
+        namespacePurging = true
+        defer { namespacePurging = false }
+        let bytesFreed = committedBytes
+        let entries = liveEntries.count
+
+        // CRITICAL-2 (durable-before-suspension): make the rotation-intent journal
+        // durable (fsync via persistMetadata) BEFORE the suspending `hotPurgeAll`
+        // callback. A crash anywhere from here on leaves `metadata.rotationJournal != nil`
+        // ⇒ `namespaceBlocked`, so activation recovery drives the rotation forward and no
+        // old-epoch disk artifact can be served again. Previously the callback ran first,
+        // so a crash inside it lost the transient `namespacePurging` fence with NO durable
+        // journal — a restart could re-serve old-epoch ciphertext. This mirrors the
+        // single-key path's tombstone-first discipline.
+        let from = metadata.keyEpoch
+        let to = from + 1
+        metadata.rotationJournal = KVRotationJournal(from: from, to: to, phase: "created")
+        try persistMetadata()
+        try crashIf(.rotationAfterJournal)
+
+        // CRITICAL-1(c): cancel-or-join EVERY in-flight promotion decode before the epoch
+        // crypto-shred below, so no detached decode holding a copied old-epoch DEK can
+        // still be producing plaintext when this rotation reports purge_ok. The namespace
+        // fence above (`namespacePurging`) already refuses any NEW promotion admission.
+        await cancelOrJoinAllPromotions()
+
+        // Hot cleanup (suspends): clears every hot entry, invalidates outstanding leases,
+        // and cancels queued/in-flight persists so nothing publishes into the new epoch.
+        // The durable journal above already fences the namespace across this suspension.
+        await hotPurgeAll?()
+
+        // Drive the already-journaled rotation forward: create epoch-(to) master, durably
+        // commit the new epoch (crypto-shred), delete old-epoch keys + files, clear journal.
+        try driveRotationForward()
+        liveEntries.removeAll()
+        lastGeneration.removeAll()
+        lastCommitSequence.removeAll()
+        committedBytes = 0
+        // FR-KVP7: every entry is crypto-shredded, so its usage journal is stale — clear
+        // it and recount the surviving artifact classes (control doc, any tombstones).
+        clearUsageJournal()
+        recountArtifactAccounting()
+        return (entries, bytesFreed)
+    }
+
+    // MARK: - Epoch rotation (FR-KVP6 crash-safe ordering)
+
+    /// Drive an open rotation journal forward through its remaining phases. Called at
+    /// activation for an open journal (recovery) and inline by
+    /// `performNamespacePurgeRotation` after the journal is durable (CRITICAL-2).
+    private func driveRotationForward() throws {
+        guard let journal = metadata.rotationJournal else { return }
+        let incarnation = "rotate-\(journal.to)-\(UUID().uuidString)"
+
+        if journal.phase == "created" {
+            // (1) create + verify epoch-(to) master.
+            try keys.createEpochMaster(epoch: journal.to, incarnation: incarnation)
+            try crashIf(.rotationAfterMasterCreate)
+            // (2) durably commit the new epoch + reset the high-watermark map.
+            metadata.keyEpoch = journal.to
+            metadata.purgeHighWatermarks = [:]
+            metadata.retentionBasisMillis = [:]   // M-C: all entries are crypto-shredded
+            metadata.rotationJournal = KVRotationJournal(from: journal.from, to: journal.to, phase: "committed")
+            try persistMetadata()
+            notifyEpoch()   // CRITICAL-2: adapter caches the new epoch for capture-time stamping.
+            try crashIf(.rotationAfterEpochCommit)
+        }
+
+        if metadata.rotationJournal?.phase == "committed" || journal.phase == "committed" {
+            // (3) delete epoch-(from) Keychain items and verify absence.
+            try keys.deleteEpochItems(epoch: journal.from)
+            metadata.rotationJournal = KVRotationJournal(from: journal.from, to: journal.to, phase: "old_deleted")
+            try persistMetadata()
+            try crashIf(.rotationAfterOldDelete)
+        }
+
+        // (4) delete old-epoch files best-effort; (5) clear the journal.
+        removeOldEpochFiles(epoch: journal.from)
+        metadata.rotationJournal = nil
+        try persistMetadata()
+    }
+
+    private func removeOldEpochFiles(epoch: Int) {
+        // v1 keeps files under one entries/ tree; a full purge-all clears entries.
+        if fileExists(entriesDir) {
+            try? FileManager.default.removeItem(at: entriesDir)
+            try? createDir(entriesDir)
+            try? fsyncDirectory(namespaceDir)   // best-effort cleanup after rotation
+        }
+    }
+
+    // MARK: - Uninstall (FR-KVP8 --forget)
+
+    /// Rotate the epoch, delete the namespace directory, and delete all namespace
+    /// Keychain items (enumerated by service prefix). The lock (held from outside the
+    /// deleted tree) is retained until deletions verify.
+    func purgeAllAndForget() async throws -> KVPurgeResult {
+        let result = try await purgeAll()
+        if case .failed = result { return result }
+        do {
+            try keys.deleteAllNamespaceItems()
+            if fileExists(namespaceDir) {
+                try FileManager.default.removeItem(at: namespaceDir)
+            }
+            return result
+        } catch {
+            return .failed(.ioError)
+        }
+    }
+
+    // MARK: - Quota / eviction (FR-KVP7)
+
+    /// Reserve `bytes` (the NET growth over any existing generation) against the data
+    /// budget (total minus the metadata reserve), evicting LRU entries to fund the
+    /// write (M-11). The reservation is tracked in `reservedBytes`, distinct from
+    /// `committedBytes`, and released by the caller's `defer`. A replacement of an
+    /// existing index does NOT trigger entry-count eviction (the count is unchanged).
+    /// Returns false when it cannot be funded.
+    private func reserveQuota(_ bytes: Int, isReplacement: Bool, excluding index: String, nowMillis: Int) throws -> Bool {
+        // FR-KVP7: reserve the ACTUAL non-entry artifact footprint (control doc +
+        // tombstones + usage journal) when it exceeds the fixed metadata floor, so entry
+        // admission never overruns the quota by ignoring control-plane bytes. Item 7:
+        // also subtract any superseded-blob bytes whose deletion failed — they still
+        // occupy disk, so admission must account for them until a sweep reclaims them.
+        let reserve = max(config.metadataReserveBytes, controlBytes) + supersededLeakBytes
+        let dataBudget = max(0, config.maxBytes - reserve)
+        // Entry-count eviction applies only when admitting a NEW index.
+        if !isReplacement {
+            while liveEntries.count >= config.maxEntries {
+                guard try evictOneLRU(excluding: index, nowMillis: nowMillis) else { return false }
+            }
+        }
+        while committedBytes + reservedBytes + bytes > dataBudget {
+            guard try evictOneLRU(excluding: index, nowMillis: nowMillis) else { return false }
+        }
+        guard committedBytes + reservedBytes + bytes <= dataBudget else { return false }
+        reservedBytes += bytes
+        return true
+    }
+
+    /// Evict the least-recently-eligible-used entry (never the index being written);
+    /// destroys its DEK (crypto-shred).
+    @discardableResult
+    private func evictOneLRU(excluding: String? = nil, nowMillis: Int) throws -> Bool {
+        guard let victim = liveEntries
+            .filter({ $0.key != excluding })
+            .min(by: { $0.value.lastUsedMillis < $1.value.lastUsedMillis })?.key else {
+            return false
+        }
+        try destroyWholeEntry(index: victim, reason: .diskEvictQuota)
+        return true
+    }
+
+    /// Whole-entry eviction: destroy the DEK (verify), then reclaim files + bytes.
+    private func destroyWholeEntry(index: String, reason: KVReasonCode) throws {
+        try keys.destroyEntryDEK(epoch: metadata.keyEpoch, index: index)
+        let freed = liveEntries[index]?.bytes ?? 0
+        let dir = entryDir(index)
+        // M-D: a failed unlink must PROPAGATE so eviction/retention does not decrement
+        // accounting (nor emit success) while the ciphertext is still on disk.
+        if fileExists(dir) {
+            try removeEntryDirectory(dir)
+        }
+        try fsyncDirectory(entriesDir)
+        liveEntries.removeValue(forKey: index)
+        lastGeneration.removeValue(forKey: index)
+        lastCommitSequence.removeValue(forKey: index)
+        metadata.retentionBasisMillis.removeValue(forKey: index)   // M-C
+        committedBytes = max(0, committedBytes - freed)
+        emit(reason, indexHashPrefix: indexPrefix(index), fields: ["bytes_freed": "\(freed)"])
+    }
+
+    /// Retention compaction (FR-KVP10 / M-12): evict entries whose IMMUTABLE creation
+    /// time predates the retention deadline. Retention is a physical cleanup deadline
+    /// measured from creation — never from lastUsed — so reads cannot extend it.
+    func runRetention(nowMillis: Int) throws {
+        guard config.retentionSeconds > 0 else { return }
+        let cutoff = nowMillis - config.retentionSeconds * 1000
+        for (index, entry) in liveEntries where entry.creationMillis < cutoff {
+            try destroyWholeEntry(index: index, reason: .diskEvictRetention)
+        }
+    }
+
+    /// Periodic retention tick (M-12 "timer while active"). M-F: sample the CURRENT
+    /// wall time each tick — not the persisted clock high-water, which only advances on
+    /// request activity, so an idle process would never clean up. Run the rollback /
+    /// high-water guard (which persists the advance) with the sampled time, then sweep.
+    private func retentionSweepTick() {
+        guard activated, quarantined == nil else { return }
+        let now = sweepClockMillis()
+        // Rollback guard: a sampled time below the high-water leaves the store dormant
+        // for this tick (never sweeps on a backwards clock).
+        guard (try? advanceClock(nowMillis: now)) == true else { return }
+        try? runRetention(nowMillis: now)
+    }
+
+    #if DEBUG
+    /// Test-only (M-F): the wall-clock source for the retention tick. Defaults to real
+    /// time; a fake-clock idle test overrides it.
+    func setSweepClockForTest(_ provider: @escaping @Sendable () -> Int) { sweepClockOverride = provider }
+
+    /// Test-only (M-F): run one retention tick synchronously.
+    func runRetentionTickForTest() { retentionSweepTick() }
+
+    /// Test-only (HIGH-3): force the tombstone-directory listing to fail.
+    func injectTombstoneListFailure(_ enabled: Bool) { tombstoneListFailInjected = enabled }
+
+    /// Test-only (HIGH-3): run tombstone recovery synchronously (as activation does).
+    func runTombstoneRecoveryForTest() throws { try recoverTombstones() }
+
+    /// Test-only: whether the store has quarantined itself.
+    var isQuarantinedForTest: Bool { quarantined != nil }
+
+    /// Test-only (Item 7): bytes of superseded blobs whose deletion failed and are
+    /// retained against quota until a sweep reclaims them.
+    var supersededLeakBytesForTest: Int { supersededLeakBytes }
+    #endif
+
+    private func sweepClockMillis() -> Int {
+        if let sweepClockOverride { return sweepClockOverride() }
+        return Int(Date().timeIntervalSince1970 * 1000)
+    }
+
+    private func startRetentionTimer() {
+        guard retentionTask == nil, config.retentionSweepSeconds > 0 else { return }
+        let interval = UInt64(config.retentionSweepSeconds) * 1_000_000_000
+        retentionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                await self?.retentionSweepTick()
+            }
+        }
+    }
+
+    // MARK: - Recovery (FR-KVP7)
+
+    private func recoverRotationJournal() throws {
+        guard metadata.rotationJournal != nil else { return }
+        try driveRotationForward()
+    }
+
+    /// M-E: destroy current-epoch entry DEKs that have no matching live entry. Runs at
+    /// activation after `sweepOrphansAndAccount` populates `liveEntries`.
+    private func reconcileOrphanEntryDEKs() throws {
+        _ = try keys.reconcileOrphanEntryDEKs(
+            epoch: metadata.keyEpoch, liveIndices: Set(liveEntries.keys))
+    }
+
+    private func recoverTombstones() throws {
+        guard fileExists(tombstonesDir) else { return }
+        // HIGH-3: an unreadable/corrupt tombstone directory must NEVER be treated as
+        // "no tombstones" (fail-open) — that silently drops the purge fence, letting a
+        // revoked entry re-admit. A directory-listing failure quarantines the namespace
+        // (dormancy) instead.
+        let files: [URL]
+        do {
+            if tombstoneListFailInjected { throw KVStoreError.io("injected tombstone list failure") }
+            files = try FileManager.default.contentsOfDirectory(at: tombstonesDir, includingPropertiesForKeys: nil)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? readBounded(file, maxBytes: 64 * 1024),
+                  let tomb = KVTombstoneCodec.decode(data) else {
+                quarantine(.ioError)
+                throw KVStoreError.quarantined(.ioError)
+            }
+            // Architect LOW: a tombstone from a PRIOR key epoch is stale — that epoch's
+            // material is crypto-shredded and the new epoch's high-watermark map was
+            // reset at rotation. It MUST NOT repopulate the current epoch's HWM map (a
+            // fresh entry under the new epoch would then be wrongly fenced). Delete the
+            // stale tombstone and skip it.
+            guard tomb.epoch == metadata.keyEpoch else {
+                try? FileManager.default.removeItem(at: file)
+                continue
+            }
+            // Recovery FIRST re-advances + persists the high-watermark if metadata is
+            // behind, THEN re-runs the destructive steps for an incomplete tombstone.
+            if metadata.highWatermark(for: tomb.index) < tomb.purgeGeneration {
+                metadata.purgeHighWatermarks[tomb.index] = tomb.purgeGeneration
+                try persistMetadata()
+            }
+            if !tomb.complete {
+                // Item 1: block the index durably BEFORE attempting completion, so if
+                // completion cannot finish (transient I/O, or keychain dormancy) the
+                // index stays fenced (reads → tombstoned, writes → fence_lost) instead
+                // of admitting. `completePurgeSteps` clears the block via the durable
+                // completion mark on success.
+                blockedIndexes.insert(tomb.index)
+                do {
+                    _ = try completePurgeSteps(index: tomb.index, generation: tomb.purgeGeneration)
+                } catch let crash as KVInjectedCrash {
+                    throw crash
+                } catch let e as KVKeychainError where isUnavailable(e) {
+                    // Item 6 / coordinator LOW (FR-KVP6): a keychain-unavailable DEK-destroy
+                    // during interrupted-purge recovery is RETRYABLE dormancy, NOT a
+                    // quarantine. Propagate so `activate()` releases the lock and returns
+                    // `.keychain` dormancy; the index stays durably blocked
+                    // (`blockedIndexes`, persisted via the incomplete tombstone) and the
+                    // purge is re-completed on a later activation once the keychain returns.
+                    throw e
+                } catch {
+                    // Transient completion failure (e.g. unlink error): keep the index
+                    // blocked (fail-closed) and let a later activation retry, rather than
+                    // quarantining the whole namespace for one stuck index.
+                }
+            }
+        }
+    }
+
+    /// HIGH-4: remove an orphan/superseded artifact at activation recovery, CHARGING its
+    /// bytes to `supersededLeakBytes` if the removal fails (honoring the unlink-failure
+    /// injection). Undeletable ciphertext must keep counting against the namespace quota
+    /// until a later sweep reclaims it, rather than dropping off the books (which would
+    /// reopen the quota bypass; AC-3 "orphan bytes swept and accounted").
+    private func reclaimOrChargeOrphan(_ url: URL, isDirectory: Bool) {
+        let bytes = orphanArtifactBytes(url, isDirectory: isDirectory)
+        do {
+            if unlinkFailInjected { throw KVStoreError.io("injected unlink failure") }
+            try FileManager.default.removeItem(at: url)
+        } catch {
+            supersededLeakBytes += bytes
+        }
+    }
+
+    /// Total on-disk bytes of an orphan artifact (a file, or the shallow sum of a dir's
+    /// immediate files) used to charge the leak ledger when removal fails (HIGH-4).
+    private func orphanArtifactBytes(_ url: URL, isDirectory: Bool) -> Int {
+        if !isDirectory { return (try? fileSize(url)) ?? 0 }
+        let contents = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+        return contents.reduce(0) { $0 + ((try? fileSize($1)) ?? 0) }
+    }
+
+    /// Sweep orphan temp/blob files and rebuild committed-byte accounting from
+    /// surviving manifests (recovers generation/commit-sequence high-water).
+    private func sweepOrphansAndAccount() throws {
+        committedBytes = 0
+        liveEntries.removeAll()
+        // Item 7 / HIGH-4: this sweep deletes every non-current-generation blob (and orphan
+        // dirs), reclaiming any superseded-blob bytes whose in-process deletion had failed.
+        // Reset to 0, then RE-CHARGE any orphan/superseded artifact this sweep still cannot
+        // remove — its ciphertext stays on disk, so its bytes must keep counting against the
+        // namespace quota (AC-3), never silently dropping off the books.
+        supersededLeakBytes = 0
+        // Item 7 (coordinator refinement 2): reclaim namespace-root atomic temp files
+        // (meta/usage/tombstone `.tmp.*`) left by a crash mid atomic-rename, so their
+        // bytes are neither leaked nor unaccounted. A temp that cannot be removed
+        // quarantines the namespace rather than being silently ignored.
+        try sweepAtomicTemps(in: namespaceDir)
+        guard fileExists(entriesDir) else { return }
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: entriesDir, includingPropertiesForKeys: nil)) ?? []
+        for dir in dirs {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            // M-16: an entry dir we recover from must be ours, a real 0700 directory,
+            // and not a symlink — a tampered entry dir quarantines the store.
+            try verifyDir(dir, maxMode: 0o700)
+            let index = dir.lastPathComponent
+            let manifestURL = dir.appendingPathComponent("manifest.json")
+            // Sweep temp files always.
+            let contents = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            for file in contents where file.lastPathComponent.hasPrefix("manifest.json.tmp.") {
+                reclaimOrChargeOrphan(file, isDirectory: false)
+            }
+            guard fileExists(manifestURL),
+                  let data = try? readBounded(manifestURL, maxBytes: KVDiskCacheFormat.manifestMaxBytes),
+                  let manifest = try? KVManifestCodec.decode(data, maxBlobBytes: config.maxEntryBytes) else {
+                // No committed manifest ⇒ orphan generation; sweep the whole dir (HIGH-4:
+                // charge its bytes to the leak ledger if it cannot be removed).
+                reclaimOrChargeOrphan(dir, isDirectory: true)
+                continue
+            }
+            // Sweep non-current generation blobs (orphans from an interrupted compaction).
+            for file in contents where file.pathExtension == "blob" && file.lastPathComponent != "gen-\(manifest.generation).blob" {
+                reclaimOrChargeOrphan(file, isDirectory: false)
+            }
+            let blobURL = dir.appendingPathComponent("gen-\(manifest.generation).blob")
+            let blobBytes = (try? fileSize(blobURL)) ?? 0
+            let entryBytes = blobBytes + data.count
+            committedBytes += entryBytes
+            // M-C: restore the retention basis from the persisted control state — NOT
+            // the newest manifest's created_at, which shifts the deadline forward on a
+            // post-replacement restart. Fall back to the manifest only for pre-M-C
+            // metadata that lacks a persisted basis.
+            let creationMillis = metadata.retentionBasisMillis[index] ?? manifest.createdAtMillis
+            liveEntries[index] = KVLiveEntry(bytes: entryBytes, lastUsedMillis: manifest.createdAtMillis,
+                                             creationMillis: creationMillis, generation: manifest.generation)
+            lastGeneration[index] = manifest.generation
+            lastCommitSequence[index] = manifest.commitSequence
+        }
+        // M-C: drop retention-basis entries for indices that no longer have a live
+        // manifest (swept orphans), keeping the persisted map bounded to live entries.
+        let pruned = metadata.retentionBasisMillis.filter { liveEntries[$0.key] != nil }
+        if pruned.count != metadata.retentionBasisMillis.count {
+            metadata.retentionBasisMillis = pruned
+            try persistMetadata()
+        }
+        try fsyncDirectory(entriesDir)
+    }
+
+    /// Item 7 (coordinator refinement 2): reclaim atomic-write temp files
+    /// (`.<name>.tmp.<uuid>`) left in `dir` (and, for the namespace root, in the
+    /// tombstones subtree) by a crash mid-rename. A temp that cannot be inspected or
+    /// removed QUARANTINES the namespace (fail-closed) rather than being silently
+    /// ignored — an un-inspectable orphan could mask a tampered artifact and its bytes
+    /// would otherwise bypass quota. Entry-directory manifest temps are swept per-entry
+    /// in `sweepOrphansAndAccount`.
+    private func sweepAtomicTemps(in dir: URL) throws {
+        guard fileExists(dir) else { return }
+        let contents: [URL]
+        do {
+            contents = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        for url in contents where url.lastPathComponent.contains(".tmp.") {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                quarantine(.ioError)
+                throw KVStoreError.quarantined(.ioError)
+            }
+        }
+        if dir == namespaceDir { try sweepAtomicTemps(in: tombstonesDir) }
+    }
+
+    // MARK: - Inspection (FR-KVP12)
+
+    func inspect() -> KVInspection {
+        let tombstoneCount = (try? FileManager.default.contentsOfDirectory(atPath: tombstonesDir.path))?.filter { $0.hasSuffix(".json") }.count ?? 0
+        let kcCount = (try? keys.keychainItemCount()) ?? 0
+        return KVInspection(
+            namespaceID: config.namespaceID,
+            bytesUsed: committedBytes,
+            entryCount: liveEntries.count,
+            maxBytes: config.maxBytes,
+            maxEntries: config.maxEntries,
+            freeSpaceHeadroom: hostFreeBytes() ?? 0,
+            keyEpoch: metadata.keyEpoch,
+            tombstoneCount: tombstoneCount,
+            keychainItemCount: kcCount,
+            eligibilityTTLSeconds: config.eligibilityTTLSeconds,
+            purgeHighWatermarkEntries: metadata.purgeHighWatermarks.count,
+            counters: counters,
+            controlBytesUsed: controlBytes,
+            usageJournalBytes: usageJournalBytes,
+            totalBytesUsed: committedBytes + controlBytes)
+    }
+
+    // MARK: - Telemetry helpers
+
+    private func emit(_ code: KVReasonCode, detail: KVReasonDetail? = nil,
+                      indexHashPrefix: String? = nil, fields: [String: String] = [:]) {
+        counters[code.rawValue, default: 0] += 1
+        sink.emit(KVEvent(code, detail: detail, indexHashPrefix: indexHashPrefix, fields: fields))
+    }
+
+    private func emitMiss(_ code: KVReasonCode, detail: KVReasonDetail? = nil, prefix: String? = nil) {
+        emit(code, detail: detail, indexHashPrefix: prefix)
+    }
+
+    private func skip(_ detail: KVReasonDetail, _ snapshot: KVWriteSnapshot) -> KVWriteResult {
+        emit(.diskWriteSkipped, detail: detail, indexHashPrefix: indexPrefix(snapshot.indexHMAC))
+        return .skipped(detail)
+    }
+
+    private func quarantine(_ detail: KVReasonDetail) {
+        quarantined = detail
+        emit(.diskStoreQuarantined, detail: detail)
+    }
+
+    /// Truncated index hash for logging (never the raw index value).
+    private func indexPrefix(_ index: String) -> String { String(index.prefix(8)) }
+
+    private func isUnavailable(_ e: KVKeychainError) -> Bool {
+        if case .unavailable = e { return true }
+        return false
+    }
+
+    // MARK: - Tombstone persistence
+
+    private func writeTombstone(_ tomb: KVTombstone) throws {
+        let url = tombstonesDir.appendingPathComponent("\(tomb.epoch)-\(tomb.index).json")
+        let data = try KVTombstoneCodec.encode(tomb)
+        try writeFileAtomic(data, to: url)
+        try fsyncDirectory(tombstonesDir)
+        tombstoneBytes = sumDirBytes(tombstonesDir)   // FR-KVP7 accounting
+        // Item 1: the durable in-memory block is established once the incomplete
+        // tombstone is durable, and lifted once the completion mark is durable — so
+        // admission derives "is this index blocked?" from durable purge state.
+        if tomb.complete { blockedIndexes.remove(tomb.index) }
+        else { blockedIndexes.insert(tomb.index) }
+    }
+
+    // MARK: - Usage journal + artifact accounting (FR-KVP7)
+
+    /// Recount every non-entry artifact class from disk. Called at activation (after the
+    /// orphan sweep) and after rotation, so `controlBytes` — reserved out of the data
+    /// budget and reported on the inspection surface — reflects the true footprint.
+    private func recountArtifactAccounting() {
+        metadataBytes = fileExists(metadataURL) ? ((try? fileSize(metadataURL)) ?? 0) : 0
+        tombstoneBytes = sumDirBytes(tombstonesDir)
+        usageJournalBytes = fileExists(usageJournalURL) ? ((try? fileSize(usageJournalURL)) ?? 0) : 0
+    }
+
+    private func sumDirBytes(_ dir: URL) -> Int {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil) else { return 0 }
+        var total = 0
+        for file in files { total += (try? fileSize(file)) ?? 0 }
+        return total
+    }
+
+    /// Durably record a last-eligible-use for `index` (best-effort LRU durability).
+    /// Item 7 (FR-KVP7): compact BEFORE the append would cross the 1 MiB bound, and STOP
+    /// growth if compaction fails (refuse the append) rather than appending first and
+    /// ignoring a failed compaction — which let the journal grow unbounded past 1 MiB.
+    /// Refusing an append only degrades LRU ordering durability, never correctness.
+    private func appendUsageRecord(index: String, millis: Int) {
+        guard let line = try? KVUsageJournalCodec.encodeLine(index: index, millis: millis) else { return }
+        if usageJournalBytes + line.count > KVUsageJournal.maxBytes {
+            // Compaction rewrites one record per live entry from the CURRENT
+            // lastUsedMillis (the caller updated it before this call), so it already
+            // captures this update — no separate append is needed. If compaction FAILS
+            // we return WITHOUT appending, so the journal never grows past 1 MiB
+            // (growth stopped) instead of appending past the bound and ignoring the
+            // failed compaction.
+            try? compactUsageJournal()
+            return
+        }
+        let fd = open(usageJournalURL.path, O_CREAT | O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        do { try writeAll(fd: fd, line) } catch { return }
+        _ = fsync(fd)
+        usageJournalBytes += line.count
+    }
+
+    /// Rewrite the journal with exactly one record per live entry (drops stale/evicted
+    /// index records), atomically. Keeps the file ≤ 1 MiB in steady state.
+    private func compactUsageJournal() throws {
+        var data = Data()
+        for (index, entry) in liveEntries {
+            data.append(try KVUsageJournalCodec.encodeLine(index: index, millis: entry.lastUsedMillis))
+        }
+        try writeFileAtomic(data, to: usageJournalURL)
+        usageJournalBytes = data.count
+    }
+
+    private func clearUsageJournal() {
+        try? FileManager.default.removeItem(at: usageJournalURL)
+        usageJournalBytes = 0
+    }
+
+    /// Seed durable LRU ordering from the journal. Missing ⇒ fall back to the manifest
+    /// creation times already seeded by the orphan sweep. A malformed COMPLETE record
+    /// quarantines (FR-KVP5) rather than silently resetting the ordering; a torn trailing
+    /// partial line (crash mid-append) is tolerated and ignored.
+    private func loadUsageJournal() throws {
+        guard fileExists(usageJournalURL) else { return }
+        let data: Data
+        do {
+            data = try readBounded(usageJournalURL, maxBytes: KVUsageJournal.readCapBytes)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        let records: [(index: String, millis: Int)]
+        do {
+            records = try KVUsageJournalCodec.decode(data)
+        } catch {
+            quarantine(.ioError)
+            throw KVStoreError.quarantined(.ioError)
+        }
+        for record in records where liveEntries[record.index] != nil {
+            liveEntries[record.index]?.lastUsedMillis = record.millis
+        }
+    }
+
+    // MARK: - Free space
+
+    /// Host free bytes, or nil when `statvfs` fails (M-19). Callers MUST treat nil as
+    /// fail-closed (skip the write) — returning a large number would let a write
+    /// proceed past the free-space floor on an unreadable filesystem.
+    private func hostFreeBytes() -> Int? {
+        if config.simulateStatvfsFailure { return nil }
+        if let override = config.freeSpaceOverride { return override }
+        var st = statvfs()
+        guard statvfs(namespaceDir.path, &st) == 0 else { return nil }
+        return Int(st.f_bavail) * Int(st.f_frsize)
+    }
+
+    // MARK: - Low-level fs helpers (0700/0600, O_NOFOLLOW, fsync + atomic rename)
+
+    @discardableResult
+    private func createDir(_ url: URL) throws -> URL {
+        if !fileExists(url) {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
+        return url
+    }
+
+    private func fileExists(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.path)
+    }
+
+    private func fileSize(_ url: URL) throws -> Int {
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs[.size] as? Int) ?? 0
+    }
+
+    /// Bounded read: fstat before read, reject oversize (§5a). O_NOFOLLOW, owner check.
+    private func readBounded(_ url: URL, maxBytes: Int) throws -> Data {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw KVStoreError.io("open failed errno=\(errno)") }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid() else {
+            throw KVStoreError.io("fstat/owner check failed")
+        }
+        guard info.st_size <= maxBytes else { throw KVStoreError.boundsExceeded("file size \(info.st_size) exceeds bound \(maxBytes)") }
+        let size = Int(info.st_size)
+        var buffer = Data(count: size)
+        let readCount = buffer.withUnsafeMutableBytes { ptr -> Int in
+            guard let base = ptr.baseAddress, size > 0 else { return 0 }
+            return Darwin.read(fd, base, size)
+        }
+        guard readCount == size else { throw KVStoreError.io("short read") }
+        return buffer
+    }
+
+    /// Open a file for a bounded streaming read (HIGH-1): O_NOFOLLOW, owner + regular-file
+    /// checks, and the §5a size bound, WITHOUT reading the bytes. Returns the fd (caller
+    /// closes) and the fstat size. A size over the bound throws `boundsExceeded`
+    /// (integrity → corrupt), matching `readBounded`.
+    nonisolated private func openBoundedForRead(_ url: URL, maxBytes: Int) throws -> (fd: Int32, size: Int) {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw KVStoreError.io("open failed errno=\(errno)") }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid() else {
+            close(fd)
+            throw KVStoreError.io("fstat/owner check failed")
+        }
+        guard info.st_size <= maxBytes else {
+            close(fd)
+            throw KVStoreError.boundsExceeded("file size \(info.st_size) exceeds bound \(maxBytes)")
+        }
+        return (fd, Int(info.st_size))
+    }
+
+    /// Read exactly `count` bytes from `fd`, retrying short reads / EINTR. Throws on a
+    /// short file (fewer bytes than requested) or an I/O error.
+    nonisolated private func readExactly(fd: Int32, count: Int) throws -> Data {
+        guard count >= 0 else { throw KVStoreError.io("negative read count") }
+        var buffer = Data(count: count)
+        guard count > 0 else { return buffer }
+        var read = 0
+        try buffer.withUnsafeMutableBytes { ptr in
+            guard let base = ptr.baseAddress else { throw KVStoreError.io("read buffer unavailable") }
+            while read < count {
+                let n = Darwin.read(fd, base + read, count - read)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw KVStoreError.io("read failed errno=\(errno)")
+                }
+                if n == 0 { throw KVStoreError.io("short read: file ended early") }
+                read += n
+            }
+        }
+        return buffer
+    }
+
+    /// Atomic write: unique O_EXCL temp in the destination directory, fsync, rename,
+    /// fsync dir. Files are 0600.
+    private func writeFileAtomic(_ data: Data, to dest: URL) throws {
+        let dir = dest.deletingLastPathComponent()
+        let temp = dir.appendingPathComponent(".\(dest.lastPathComponent).tmp.\(UUID().uuidString)")
+        try writeFileExclusive(data, to: temp)
+        guard rename(temp.path, dest.path) == 0 else {
+            try? FileManager.default.removeItem(at: temp)
+            throw KVStoreError.io("rename failed errno=\(errno)")
+        }
+        try fsyncDirectory(dir)
+    }
+
+    /// Open a fresh file with O_CREAT | O_EXCL | O_NOFOLLOW at 0600. The caller owns the
+    /// returned fd (must `close`); used both for one-shot writes and the HIGH-1 streaming
+    /// blob seal that writes frame-by-frame before fsync.
+    private func openExclusiveForWrite(_ url: URL) throws -> Int32 {
+        let fd = open(url.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw KVStoreError.io("exclusive create failed errno=\(errno) path=\(url.lastPathComponent)") }
+        return fd
+    }
+
+    /// Write all of `data` to `fd`, retrying short writes and EINTR.
+    private func writeAll(fd: Int32, _ data: Data) throws {
+        var written = 0
+        try data.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return }
+            while written < data.count {
+                let n = Darwin.write(fd, base + written, data.count - written)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw KVStoreError.io("write failed errno=\(errno)")
+                }
+                written += n
+            }
+        }
+    }
+
+    /// Create a file with O_EXCL | O_NOFOLLOW at 0600, write all bytes, fsync fd.
+    private func writeFileExclusive(_ data: Data, to url: URL) throws {
+        let fd = try openExclusiveForWrite(url)
+        defer { close(fd) }
+        try writeAll(fd: fd, data)
+        guard fsync(fd) == 0 else { throw KVStoreError.io("fsync failed errno=\(errno)") }
+    }
+
+    /// Fsync a directory, throwing on open OR fsync failure (HIGH-7). A swallowed
+    /// directory fsync failure would let `disk_write_committed` claim durability the
+    /// filesystem never provided; propagating it turns the commit into a
+    /// `disk_write_skipped` instead. Best-effort cleanup call sites use `try?`.
+    private func fsyncDirectory(_ url: URL) throws {
+        dirFsyncCount += 1
+        if let k = dirFsyncFailAt, dirFsyncCount == k {
+            throw KVStoreError.io("injected dir fsync failure at call \(k)")
+        }
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw KVStoreError.io("dir open for fsync failed errno=\(errno)") }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else { throw KVStoreError.io("dir fsync failed errno=\(errno)") }
+    }
+}
+
+// MARK: - Fixed-nonce seal (internal: nonce chosen before manifest finalization)
+
+/// Seal with a caller-chosen nonce so the chunk table (nonces + ct_lengths) can be
+/// built before the manifest/AAD is finalized (GCM ciphertext length == plaintext
+/// length, so ct_length is known pre-encryption).
+func KVChunkCryptoSealFixedNonce(plaintext: Data, dek: Data, aad: Data, nonce: Data) throws -> KVChunkCrypto.Sealed {
+    let gcmNonce = try AES.GCM.Nonce(data: nonce)
+    let box = try AES.GCM.seal(plaintext, using: SymmetricKey(data: dek), nonce: gcmNonce, authenticating: aad)
+    return KVChunkCrypto.Sealed(nonce: nonce, ciphertext: box.ciphertext, tag: box.tag)
+}
+
+// MARK: - Control-plane JSON codecs (bounded, fsync-protected docs)
+
+enum KVMetadataCodec {
+    static func encode(_ m: KVNamespaceMetadata) throws -> Data {
+        var object: [String: Any] = [
+            "provider_namespace_id": m.providerNamespaceID,
+            "key_epoch": m.keyEpoch,
+            "schema_id": m.schemaID,
+            "codec_id": m.codecID,
+            "purge_high_watermarks": m.purgeHighWatermarks,
+            "clock_high_water_ms": m.clockHighWaterMillis,
+            "retention_basis_ms": m.retentionBasisMillis,
+        ]
+        if let journal = m.rotationJournal {
+            object["rotation_journal"] = ["from": journal.from, "to": journal.to, "phase": journal.phase]
+        }
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    /// Allowed rotation-journal phases (M-9 closed schema).
+    static let rotationPhases: Set<String> = ["created", "committed", "old_deleted"]
+
+    /// CLOSED-schema decode (M-9): reject unknown top-level fields, validate epoch /
+    /// map size / rotation phase, and REQUIRE purge_high_watermarks to be present
+    /// (its absence while other state exists is corruption, not an empty map). Any
+    /// mismatch returns nil, which the store escalates to quarantine + dormancy.
+    static func decode(_ data: Data) -> KVNamespaceMetadata? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        // Reject unknown fields (closed schema); rotation_journal is optional.
+        let allowed: Set<String> = [
+            "provider_namespace_id", "key_epoch", "schema_id", "codec_id",
+            "purge_high_watermarks", "clock_high_water_ms", "rotation_journal",
+            "retention_basis_ms",
+        ]
+        // retention_basis_ms is optional (back-compat: metadata written before M-C
+        // lacks it) — recovery falls back to the manifest timestamp for a missing basis.
+        let required: Set<String> = allowed.subtracting(["rotation_journal", "retention_basis_ms"])
+        let present = Set(object.keys)
+        guard present.isSubset(of: allowed), required.isSubset(of: present) else { return nil }
+
+        guard let namespaceID = object["provider_namespace_id"] as? String,
+              let epoch = object["key_epoch"] as? Int, epoch >= 1,
+              let schemaID = object["schema_id"] as? String,
+              let codecID = object["codec_id"] as? String,
+              let clockHW = object["clock_high_water_ms"] as? Int, clockHW >= 0 else { return nil }
+
+        // purge_high_watermarks is REQUIRED and every value must be a non-negative
+        // integer; the map may not exceed the FR-KVP7 cap.
+        guard let hwRaw = object["purge_high_watermarks"] as? [String: Any],
+              hwRaw.count <= KVNamespaceMetadata.highWatermarkCap else { return nil }
+        var hw: [String: Int] = [:]
+        for (k, v) in hwRaw {
+            guard let n = v as? Int, n >= 0 else { return nil }
+            hw[k] = n
+        }
+
+        // retention_basis_ms (optional): every value a non-negative integer, bounded.
+        var basis: [String: Int] = [:]
+        if let raw = object["retention_basis_ms"] {
+            guard let map = raw as? [String: Any],
+                  map.count <= KVNamespaceMetadata.highWatermarkCap else { return nil }
+            for (k, v) in map {
+                guard let n = v as? Int, n >= 0 else { return nil }
+                basis[k] = n
+            }
+        }
+
+        var journal: KVRotationJournal?
+        if let raw = object["rotation_journal"] {
+            guard let j = raw as? [String: Any],
+                  Set(j.keys) == ["from", "to", "phase"],
+                  let from = j["from"] as? Int, from >= 1,
+                  let to = j["to"] as? Int, to == from + 1,
+                  let phase = j["phase"] as? String, rotationPhases.contains(phase) else { return nil }
+            journal = KVRotationJournal(from: from, to: to, phase: phase)
+        }
+        return KVNamespaceMetadata(
+            providerNamespaceID: namespaceID, keyEpoch: epoch, schemaID: schemaID, codecID: codecID,
+            purgeHighWatermarks: hw, clockHighWaterMillis: clockHW, rotationJournal: journal,
+            retentionBasisMillis: basis)
+    }
+}
+
+// MARK: - Usage journal codec (FR-KVP7 append-only LRU ordering)
+
+enum KVUsageJournal {
+    /// Compaction threshold: the journal is rewritten (one record per live entry) once
+    /// it grows past this, so it stays bounded (FR-KVP7 "compacted ≤ 1 MiB").
+    static let maxBytes = 1024 * 1024
+    /// Load-time cap. A journal larger than this (never produced in steady state) is
+    /// treated as corrupt → quarantine, not silently truncated.
+    static let readCapBytes = 4 * 1024 * 1024
+}
+
+enum KVUsageJournalCodec {
+    /// One newline-terminated record: `{"i":"<index-hex>","u":<millis>}\n`.
+    static func encodeLine(index: String, millis: Int) throws -> Data {
+        var data = try JSONSerialization.data(
+            withJSONObject: ["i": index, "u": millis], options: [.sortedKeys])
+        data.append(0x0A)
+        return data
+    }
+
+    /// Parse complete newline-terminated records in file (chronological) order. A torn
+    /// trailing partial line (no terminating newline — a crash mid-append) is ignored;
+    /// a malformed COMPLETE record throws corrupt (→ quarantine, never a silent reset).
+    static func decode(_ data: Data) throws -> [(index: String, millis: Int)] {
+        let bytes = [UInt8](data)
+        var out: [(index: String, millis: Int)] = []
+        var lineStart = 0
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x0A {
+                if i > lineStart {
+                    try appendRecord(Data(bytes[lineStart ..< i]), into: &out)
+                }
+                lineStart = i + 1
+            }
+            i += 1
+        }
+        // bytes[lineStart ..< end] is an unterminated tail → torn append, ignored.
+        return out
+    }
+
+    private static func appendRecord(_ line: Data, into out: inout [(index: String, millis: Int)]) throws {
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              Set(obj.keys) == ["i", "u"],
+              let index = obj["i"] as? String, KVHex.decode(index) != nil,
+              let millis = obj["u"] as? Int, millis >= 0 else {
+            throw KVManifestParseError.corrupt("usage journal record malformed")
+        }
+        out.append((index, millis))
+    }
+}
+
+enum KVTombstoneCodec {
+    static func encode(_ t: KVTombstone) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "epoch": t.epoch, "index": t.index,
+            "purge_generation": t.purgeGeneration, "complete": t.complete,
+        ], options: [.sortedKeys])
+    }
+
+    /// CLOSED-schema decode (M-9): reject unknown fields + validate ranges; nil
+    /// escalates to quarantine during recovery.
+    static func decode(_ data: Data) -> KVTombstone? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["epoch", "index", "purge_generation", "complete"],
+              let epoch = object["epoch"] as? Int, epoch >= 1,
+              let index = object["index"] as? String, KVHex.decode(index) != nil,
+              let gen = object["purge_generation"] as? Int, gen >= 0,
+              let complete = object["complete"] as? Bool else { return nil }
+        return KVTombstone(epoch: epoch, index: index, purgeGeneration: gen, complete: complete)
+    }
+}
+
+// MARK: - KVCacheSimple (de)serialization bridge
+
+/// Bridge between the allowlisted `KVCacheSimple` and the codec layer payload.
+/// Snapshotting reads `state = [keys, values]` (already sliced to offset); restore
+/// rebuilds arrays and sets `state` (the setter re-derives `offset`).
+enum KVCacheSerialization {
+    static func codecDType(_ dtype: DType) -> KVCodecDType? {
+        switch dtype {
+        case .float16: return .f16
+        case .bfloat16: return .bf16
+        case .float32: return .f32
+        case .int32: return .i32
+        case .uint32: return .u32
+        default: return nil
+        }
+    }
+
+    static func mlxDType(_ dtype: KVCodecDType) -> DType {
+        switch dtype {
+        case .f16: return .float16
+        case .bf16: return .bfloat16
+        case .f32: return .float32
+        case .i32: return .int32
+        case .u32: return .uint32
+        }
+    }
+
+    /// Estimate the decoded payload length from cache GEOMETRY only — reading shapes
+    /// and dtypes, never copying tensor bytes (HIGH-5). Used to reject an oversized
+    /// snapshot BEFORE the expensive `.asData(access: .copy)` deep copy. Returns nil
+    /// on an unsupported dtype or a geometry that overflows the §5a equation.
+    static func estimatedDecodedLength(_ caches: [KVCacheSimple], tokenCount: Int) -> Int? {
+        var geometry: [KVDiskCacheFormat.LayerGeometryInput] = []
+        geometry.reserveCapacity(caches.count)
+        for cache in caches {
+            let state = cache.state
+            guard state.count == 2 else { return nil }
+            let k = state[0]
+            guard let dtype = codecDType(k.dtype) else { return nil }
+            geometry.append(KVDiskCacheFormat.LayerGeometryInput(
+                classID: "KVCacheSimple", ndim: k.shape.count, dims: k.shape, dtype: dtype))
+        }
+        return KVDiskCacheFormat.decodedLength(tokenCount: tokenCount, layers: geometry)
+    }
+
+    /// Snapshot per-layer state from KVCacheSimple caches. Returns nil if any layer is
+    /// empty, uses an unsupported dtype, or has mismatched K/V geometry (→ skip write).
+    static func snapshotLayers(_ caches: [KVCacheSimple]) -> [KVLayerPayload]? {
+        var out: [KVLayerPayload] = []
+        for (i, cache) in caches.enumerated() {
+            let state = cache.state
+            guard state.count == 2 else { return nil }
+            let k = state[0].asData(access: .copy)
+            let v = state[1].asData(access: .copy)
+            guard let dtype = codecDType(k.dType), codecDType(v.dType) == dtype else { return nil }
+            guard k.shape == v.shape else { return nil }
+            out.append(KVLayerPayload(
+                layerIndex: i, classID: "KVCacheSimple", ndim: k.shape.count, dims: k.shape,
+                dtype: dtype, cacheOffset: cache.offset, keyBytes: k.data, valueBytes: v.data))
+        }
+        return out
+    }
+
+    /// Rebuild KVCacheSimple caches from decoded layer payloads.
+    static func restore(_ layers: [KVLayerPayload]) -> [KVCacheSimple] {
+        var caches: [KVCacheSimple] = []
+        for layer in layers.sorted(by: { $0.layerIndex < $1.layerIndex }) {
+            let dtype = mlxDType(layer.dtype)
+            let k = MLXArray(layer.keyBytes, layer.dims, dtype: dtype)
+            let v = MLXArray(layer.valueBytes, layer.dims, dtype: dtype)
+            let cache = KVCacheSimple()
+            cache.state = [k, v]
+            caches.append(cache)
+        }
+        return caches
+    }
+}

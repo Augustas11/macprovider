@@ -1,9 +1,7 @@
 import Foundation
+import Darwin
 
-/// SPEC-003 v0.8 FR-C9.3 — atomically persist a self-minted provisional
-/// `provider_token` into the on-disk YAML config so the next reconnect
-/// (or the next process restart) authenticates with `Authorization:
-/// Bearer <token>`.
+/// Atomic compatibility-token mutation for the provider YAML config.
 ///
 /// Persist strategy: read the current config text, surgically replace
 /// (or append) the top-level `provider_token:` line, write the result to
@@ -12,15 +10,16 @@ import Foundation
 /// path. Round-tripping through a YAML encoder is intentionally avoided
 /// — comments and key ordering would be lost.
 ///
-/// FR-C9.3 mandates that persist failure MUST NOT crash the binary.
-/// Callers catch `ProviderTokenPersistError` and log a warning; the
-/// next reconnect will mint another token (FR-C9.4) which gives the
-/// persist a fresh attempt.
+/// New credentials are never written to YAML. `write` remains for legacy
+/// callers and regression coverage; the Option 2 migration uses `remove`
+/// only after a restarted, CLI-Keychain-backed provider is admitted.
 public enum ProviderTokenPersistError: Error, CustomStringConvertible {
     case readFailed(path: String, underlying: String)
     case writeFailed(path: String, underlying: String)
     case renameFailed(path: String, underlying: String)
     case chmodFailed(path: String, underlying: String)
+    case syncFailed(path: String, underlying: String)
+    case lockFailed(path: String, underlying: String)
     case parentDirectoryMissing(path: String)
 
     public var description: String {
@@ -33,9 +32,56 @@ public enum ProviderTokenPersistError: Error, CustomStringConvertible {
             return "provider_token persist: atomic rename failed at \(path): \(underlying)"
         case let .chmodFailed(path, underlying):
             return "provider_token persist: chmod 0600 failed at \(path): \(underlying)"
+        case let .syncFailed(path, underlying):
+            return "provider_token persist: durable sync failed at \(path): \(underlying)"
+        case let .lockFailed(path, underlying):
+            return "provider_token persist: advisory lock failed at \(path): \(underlying)"
         case let .parentDirectoryMissing(path):
             return "provider_token persist: parent directory missing at \(path)"
         }
+    }
+}
+
+/// Cross-process serialization for every mutation of the shared provider YAML.
+///
+/// The lock file is deliberately stable across atomic config renames. Writers
+/// must hold it for the complete read/modify/write transaction, not merely for
+/// the final rename, so credential cleanup cannot overwrite a concurrent model
+/// or lifecycle update with a stale snapshot.
+public enum ProviderConfigMutationLock {
+    public static func withExclusiveLock<T>(
+        configPath: String,
+        _ body: () throws -> T
+    ) throws -> T {
+        let resolved = ConfigLoader.expandTilde(configPath)
+        let parent = (resolved as NSString).deletingLastPathComponent
+        guard FileManager.default.fileExists(atPath: parent) else {
+            throw ProviderTokenPersistError.parentDirectoryMissing(path: parent)
+        }
+
+        let lockPath = parent + "/." + ((resolved as NSString).lastPathComponent) + ".lock"
+        let lockFD = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW, mode_t(0o600))
+        guard lockFD >= 0 else {
+            throw ProviderTokenPersistError.lockFailed(
+                path: lockPath,
+                underlying: String(cString: strerror(errno))
+            )
+        }
+        defer { close(lockFD) }
+        guard fchmod(lockFD, mode_t(0o600)) == 0 else {
+            throw ProviderTokenPersistError.lockFailed(
+                path: lockPath,
+                underlying: String(cString: strerror(errno))
+            )
+        }
+        guard flock(lockFD, LOCK_EX) == 0 else {
+            throw ProviderTokenPersistError.lockFailed(
+                path: lockPath,
+                underlying: String(cString: strerror(errno))
+            )
+        }
+        defer { flock(lockFD, LOCK_UN) }
+        return try body()
     }
 }
 
@@ -54,22 +100,61 @@ public enum ProviderTokenPersist {
     public static func write(token: String, configPath: String) throws {
         let resolved = ConfigLoader.expandTilde(configPath)
         let parent = (resolved as NSString).deletingLastPathComponent
-        guard FileManager.default.fileExists(atPath: parent) else {
-            throw ProviderTokenPersistError.parentDirectoryMissing(path: parent)
-        }
+        try ProviderConfigMutationLock.withExclusiveLock(configPath: resolved) {
+            let existingText: String
+            if FileManager.default.fileExists(atPath: resolved) {
+                do {
+                    existingText = try String(contentsOfFile: resolved, encoding: .utf8)
+                } catch {
+                    throw ProviderTokenPersistError.readFailed(path: resolved, underlying: String(describing: error))
+                }
+            } else {
+                existingText = ""
+            }
 
-        let existingText: String
-        if FileManager.default.fileExists(atPath: resolved) {
+            let newText = applyProviderTokenLine(in: existingText, token: token)
+            try replaceAtomically(newText, resolved: resolved, parent: parent)
+        }
+    }
+
+    /// Remove the top-level compatibility token only when every top-level
+    /// value exactly matches `expectedToken`. The comparison and atomic rename
+    /// occur under the same advisory lock used by `write`, so a concurrent
+    /// config update cannot turn admission proof for one token into deletion
+    /// of another token.
+    @discardableResult
+    public static func remove(expectedToken: String, configPath: String) throws -> Bool {
+        let resolved = ConfigLoader.expandTilde(configPath)
+        let parent = (resolved as NSString).deletingLastPathComponent
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: resolved) {
+            try sanitizeAutotuneBackups(resolved: resolved, parent: parent)
+            guard FileManager.default.fileExists(atPath: resolved) else { return false }
+            let existingText: String
             do {
                 existingText = try String(contentsOfFile: resolved, encoding: .utf8)
             } catch {
                 throw ProviderTokenPersistError.readFailed(path: resolved, underlying: String(describing: error))
             }
-        } else {
-            existingText = ""
-        }
 
-        let newText = applyProviderTokenLine(in: existingText, token: token)
+            let expected = expectedToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let values = existingText
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .compactMap { line -> String? in
+                    guard line.hasPrefix("provider_token:") else { return nil }
+                    return line.dropFirst("provider_token:".count)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                }
+            guard !expected.isEmpty, !values.isEmpty, values.allSatisfy({ $0 == expected }) else {
+                return false
+            }
+
+            try replaceAtomically(removingProviderTokenLines(in: existingText), resolved: resolved, parent: parent)
+            return true
+        }
+    }
+
+    private static func replaceAtomically(_ newText: String, resolved: String, parent: String) throws {
 
         // Same-directory temp so atomic rename stays within one
         // filesystem. Suffix uses UUID so concurrent persists do not
@@ -99,6 +184,25 @@ public enum ProviderTokenPersist {
             throw ProviderTokenPersistError.writeFailed(path: tempPath, underlying: String(describing: error))
         }
 
+        let tempFD = open(tempPath, O_RDONLY | O_NOFOLLOW)
+        guard tempFD >= 0 else {
+            try? FileManager.default.removeItem(atPath: tempPath)
+            throw ProviderTokenPersistError.syncFailed(
+                path: tempPath,
+                underlying: String(cString: strerror(errno))
+            )
+        }
+        let tempSyncResult = fsync(tempFD)
+        let tempSyncErrno = errno
+        close(tempFD)
+        guard tempSyncResult == 0 else {
+            try? FileManager.default.removeItem(atPath: tempPath)
+            throw ProviderTokenPersistError.syncFailed(
+                path: tempPath,
+                underlying: String(cString: strerror(tempSyncErrno))
+            )
+        }
+
         // POSIX rename(2). Foundation's
         // FileManager.replaceItem(at:withItemAt:...) on Darwin lowers
         // to renameat — same semantics, but it also tries to copy
@@ -110,6 +214,65 @@ public enum ProviderTokenPersist {
             try? FileManager.default.removeItem(atPath: tempPath)
             throw ProviderTokenPersistError.renameFailed(path: resolved, underlying: err)
         }
+
+
+        let directoryFD = open(parent, O_RDONLY)
+        guard directoryFD >= 0 else {
+            throw ProviderTokenPersistError.syncFailed(
+                path: parent,
+                underlying: String(cString: strerror(errno))
+            )
+        }
+        let directorySyncResult = fsync(directoryFD)
+        let directorySyncErrno = errno
+        close(directoryFD)
+        guard directorySyncResult == 0 else {
+            throw ProviderTokenPersistError.syncFailed(
+                path: parent,
+                underlying: String(cString: strerror(directorySyncErrno))
+            )
+        }
+    }
+
+    /// Redact legacy autotune backups created before v1.8.34. These files are
+    /// machine-owned rollback snapshots (`config.yaml.bak-<unix>-<counter>`),
+    /// not credential sources. Operator-named archives and emergency rollback
+    /// evidence are deliberately outside this narrow pattern.
+    private static func sanitizeAutotuneBackups(resolved: String, parent: String) throws {
+        let baseName = (resolved as NSString).lastPathComponent
+        let prefix = baseName + ".bak-"
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: parent)
+        } catch {
+            throw ProviderTokenPersistError.readFailed(path: parent, underlying: String(describing: error))
+        }
+
+        for name in names.sorted() {
+            guard name.hasPrefix(prefix) else { continue }
+            let suffix = name.dropFirst(prefix.count).split(separator: "-", omittingEmptySubsequences: false)
+            guard suffix.count == 2, suffix.allSatisfy({ Int($0) != nil }) else { continue }
+            let path = parent + "/" + name
+            var info = stat()
+            guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { continue }
+            let text: String
+            do {
+                text = try String(contentsOfFile: path, encoding: .utf8)
+            } catch {
+                throw ProviderTokenPersistError.readFailed(path: path, underlying: String(describing: error))
+            }
+            let redacted = removingProviderTokenLines(in: text)
+            guard redacted != text else { continue }
+            try replaceAtomically(redacted, resolved: path, parent: parent)
+        }
+    }
+
+    public static func removingProviderTokenLines(in existing: String) -> String {
+        existing
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("provider_token:") }
+            .map(String.init)
+            .joined(separator: "\n")
     }
 
     /// Pure helper exposed for testing — given existing config text and

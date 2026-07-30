@@ -1,0 +1,1 @@
+{"mutation":{"operation":"delete_spec_file","path":"specs/SPEC-002-two.md"},"expected":"referenced SPEC file does not exist"}

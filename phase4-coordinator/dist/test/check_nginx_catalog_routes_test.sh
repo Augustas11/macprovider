@@ -32,6 +32,29 @@ if ! grep -qE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/v1/pool/check[[:sp
   fail "missing active 'location = /v1/pool/check { ... }' block"
 fi
 
+if ! grep -qE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/v1/autotune-release[[:space:]]+\{' <<<"$ACTIVE"; then
+  fail "missing active 'location = /v1/autotune-release { ... }' block"
+fi
+
+AUTOTUNE_RELEASE_PROXY=$(awk '
+  /^[[:space:]]*location[[:space:]]+=[[:space:]]+\/v1\/autotune-release[[:space:]]+\{/ { in_block=1; depth=1; next }
+  in_block {
+    nopen=gsub(/\{/, "{")
+    nclose=gsub(/\}/, "}")
+    depth += nopen - nclose
+    if ($0 ~ /proxy_pass[[:space:]]+/) { print }
+    if (depth == 0) { in_block=0 }
+  }
+' <<<"$ACTIVE")
+expected_autotune_release_proxy='proxy_pass http://127.0.0.1:8443/v1/autotune-release$is_args$args'
+if ! grep -Fq "$expected_autotune_release_proxy" <<<"$AUTOTUNE_RELEASE_PROXY"; then
+  fail "/v1/autotune-release block proxy_pass is not $expected_autotune_release_proxy; got: $(echo "$AUTOTUNE_RELEASE_PROXY" | tr -d '\n' | head -c 200)"
+fi
+AUTOTUNE_RELEASE_PROXY_COUNT=$(grep -cE 'proxy_pass[[:space:]]+' <<<"$AUTOTUNE_RELEASE_PROXY" || true)
+if [ "$AUTOTUNE_RELEASE_PROXY_COUNT" -ne 1 ]; then
+  fail "/v1/autotune-release block has $AUTOTUNE_RELEASE_PROXY_COUNT proxy_pass directives, want exactly 1"
+fi
+
 POOL_CHECK_PROXY=$(awk '
   /^[[:space:]]*location[[:space:]]+=[[:space:]]+\/v1\/pool\/check[[:space:]]+\{/ { in_block=1; depth=1; next }
   in_block {
@@ -86,7 +109,9 @@ fi
 # is found — the ordering invariant cannot be asserted without it.
 CATALOG_LINE=$(grep -nE '^[[:space:]]*location[[:space:]]+/catalog/' <<<"$ACTIVE" | head -1 | cut -d: -f1)
 POOL_CHECK_LINE=$(grep -nE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/v1/pool/check' <<<"$ACTIVE" | head -1 | cut -d: -f1)
+AUTOTUNE_RELEASE_LINE=$(grep -nE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/v1/autotune-release' <<<"$ACTIVE" | head -1 | cut -d: -f1)
 CATCHALL_LINE=$(awk '/^[[:space:]]*location[[:space:]]+\/[[:space:]]+\{/ { saved=NR; next } saved && /^[[:space:]]*return[[:space:]]+404/ { print saved; saved=0 }' <<<"$ACTIVE" | tail -1)
+V1_CATCHALL_LINE=$(grep -nE '^[[:space:]]*location[[:space:]]+/v1/[[:space:]]+\{' <<<"$ACTIVE" | tail -1 | cut -d: -f1)
 if [ -z "$CATCHALL_LINE" ]; then
   fail "TLS catch-all 'location / { return 404; }' block not found — nginx conf shape changed; the catalog-route ordering assertion would silently pass without this anchor"
 elif [ -n "$CATALOG_LINE" ] && [ "$CATALOG_LINE" -gt "$CATCHALL_LINE" ]; then
@@ -94,6 +119,11 @@ elif [ -n "$CATALOG_LINE" ] && [ "$CATALOG_LINE" -gt "$CATCHALL_LINE" ]; then
 fi
 if [ -n "$POOL_CHECK_LINE" ] && [ "$POOL_CHECK_LINE" -gt "$CATCHALL_LINE" ]; then
   fail "/v1/pool/check block (line $POOL_CHECK_LINE) declared AFTER the catch-all location / { return 404 } block (line $CATCHALL_LINE)"
+fi
+if [ -z "$V1_CATCHALL_LINE" ]; then
+  fail "catch-all 'location /v1/ { return 404; }' block not found"
+elif [ -n "$AUTOTUNE_RELEASE_LINE" ] && [ "$AUTOTUNE_RELEASE_LINE" -gt "$V1_CATCHALL_LINE" ]; then
+  fail "/v1/autotune-release block (line $AUTOTUNE_RELEASE_LINE) declared AFTER the /v1/ catch-all block (line $V1_CATCHALL_LINE)"
 fi
 
 if [ "$FAIL" -eq 0 ]; then

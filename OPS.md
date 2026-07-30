@@ -35,6 +35,32 @@ deliberately allowlists public paths).
 External monitor: a Python `macprovider-monitor.py` runs on the same VPS as a
 `systemd` timer, alerting via Gmail SMTP (see §5).
 
+### 1.1 Entry 172 Referral Activation
+
+Use [`ops/runbooks/entry-172-referral-activation.md`](./ops/runbooks/entry-172-referral-activation.md)
+for the docs-only, reversible private-prebeta referral activation checklist. Do
+not duplicate the procedure here; the runbook is the operator surface for Entry
+172 / SPEC-034 §8 and does not flip flags by itself.
+
+### 1.2 Production Exception Register
+
+Use [`ops/exceptions/production-exceptions.json`](./ops/exceptions/production-exceptions.json)
+and [`ops/runbooks/production-exception-register.md`](./ops/runbooks/production-exception-register.md)
+as the #615 operator-facing inventory of temporary production exceptions.
+
+Enforcement scaffolding (validator, CLI/JSON report, deploy gate via
+`check-deploy-config.sh`, stable-promotion gate, tombstone anti-resurrection
+check) is landed. Default deploy mode is fail-closed on invalid/ownerless/
+clock-expired-active/resurrected rows and warn-only on `status=expired` or
+unbounded active rows unless `MACPROVIDER_EXCEPTION_ENFORCEMENT=1`. Stable
+promotion always uses `--mode=promote` (fail-closed). This does not mutate
+Pearl, flip flags, or close #615.
+
+```bash
+make check-exceptions
+python3 scripts/check-production-exceptions.py report
+```
+
 ## 2. Safe coordinator restart
 
 The scripted path is `phase4-coordinator/dist/deploy-pearl-vps.sh`. Two
@@ -68,9 +94,13 @@ sudo -u macprovider bash deploy-pearl-vps.sh        # safe path
 
 Post-restart: the script polls `/healthz` and asserts the deployed `version`
 field matches the freshly built binary (M0-5 phase 2 provenance check). A
-mismatch implies the systemd unit started a stale binary; the script exits
-non-zero and the operator's responsibility is to investigate **before**
-declaring success.
+mismatch emits a `WARN provenance mismatch` line and the script CONTINUES
+to `DONE`. A MISSING version field (predates PR #18) emits a
+`CRITICAL provenance MISSING` line and also continues unless
+`STRICT_PROVENANCE=1` is set (in which case the script exits 7). The
+operator's responsibility is to scan the script output for `WARN` /
+`CRITICAL provenance` lines **before** declaring success — fail-loud
+exit is opt-in via `STRICT_PROVENANCE=1`.
 
 Observed timing from the first M0-5/M1-6 production deploy (2026-06-11,
 v1.3.0-24-g87b3a6b -> v1.3.1-5-gba04cd4): there is no retry loop. Step 7
@@ -90,30 +120,98 @@ M1-6). Mirrors the coordinator pattern:
   `check-deploy-config.sh` (now enforced — the pre-M1-6 path treated a
   missing input as a warning, which was a real gap). `SKIP_C2_CHECK=1`
   exists as an explicit override but should not be the default path.
-- **Steps 1–2:** verify the freshly built `dist/gateway-linux-amd64` and the
-  systemd unit file.
+- **Steps 1–2:** SSH/DNS check, then verify `/etc/macprovider/gateway.env`
+  exists on Pearl (secrets ship out-of-band, script does not touch it).
+- **Step 2b (#290):** ensure macprovider user exists + `/opt/macprovider`
+  is `root:macprovider 0750` before any file install (idempotent).
+- **Step 2c (#290 R2):** connected-buyer guard on `/healthz` in-flight
+  count — MOVED to BEFORE binary swap (was step 5). Fails CLOSED if the
+  metric is missing/unparseable (#290 R3 SEC HIGH). `FORCE_RESTART=1`
+  writes an audit tombstone via `mktemp` under `umask 077`.
+- **Step 2d (#290 R2, issue #196):** pre-binary-swap WAL-consistent
+  snapshot of `gateway.db` via `sqlite3 .backup` running as macprovider
+  under `umask 077` (#290 R1 CRITICAL — never chmod/chown as root on a
+  daemon-writable path). Snapshot happens BEFORE the binary swap so a
+  crash/reboot between install and restart can't boot the new
+  schema-migrating binary against an unsnapshotted DB. Retains the 5
+  most recent snapshots; prune is python-strict-regex as macprovider
+  (#290 R2 CODE HIGH — closes filename-injection window).
 - **Step 3:** snapshot the live `/opt/macprovider/gateway` binary as
-  `gateway.prev` so rollback is `cp gateway.prev gateway && systemctl restart`.
-- **Steps 4–7:** copy, restart, poll `/healthz`, assert version.
-- **Step 8:** remote backup of `gateway.db` to the operator's stored S3-like
-  bucket (M1-6 added this; without it the WAL file was unbacked).
+  `gateway.prev` via `install -o root -g macprovider -m 0750`. After
+  any schema-bumping deploy, single-file binary rollback is INVALID; use
+  the schema-aware rollback command below (binary + db snapshot + WAL
+  cleanup, per #290 R3 CODE HIGH).
+- **Step 4:** upload binary + systemd unit + nginx site to a per-deploy
+  `mktemp -d` staging dir (#290 mirrors #244 R5), then root `install`s
+  each artifact to its final location. EXIT trap cleans up staging.
+- **Steps 6–8:** enable + start + healthz version check + journal tail.
+  (Steps 5 and 5b were merged into 2c and 2d by #290 R2.)
 
-**Rollback procedure:**
+**Rollback procedure (schema-aware — default; issue #196):**
+
+After ANY deploy that could have run a schema migration, use this
+block. It restores BOTH the previous binary AND the pre-deploy DB
+snapshot atomically. **Critical: the `-wal` and `-shm` sidecars must
+be removed before installing the snapshot**, or SQLite will replay
+the stale WAL and reintroduce post-deploy state — silently defeating
+the rollback (verified by #290 R3 CODE HIGH SQLite repro).
+
+Run this as a single `&&`-chained pipeline so ANY step failing aborts
+the rollback (matching the script's printed rollback shape; #290 R5
+ARCH HIGH — a non-chained runbook could stop the service then bail
+before the DB was restored, splitting binary and DB rollback state).
 
 ```bash
 ssh pearl
-cd /opt/macprovider/gateway
-sudo -u macprovider cp gateway.prev gateway
-sudo systemctl restart macprovider-gateway
+# #290 R4 ARCH HIGH + R5 MED — resolve + VALIDATE snapshot BEFORE
+# touching any live DB state. Uses `sudo -u macprovider` consistently
+# for validation so a sudo-capable non-root operator does not fail
+# the plain-shell -r check on a 0750 daemon-owned directory.
+LATEST=$(sudo -u macprovider sh -c 'ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1') &&
+[ -n "$LATEST" ] && sudo -u macprovider test -f "$LATEST" && sudo -u macprovider test -r "$LATEST" &&
+sudo -u macprovider sqlite3 "$LATEST" "PRAGMA integrity_check;" | head -1 | grep -q "^ok$" &&
+# Also validate the binary .prev exists and is executable (#290 R5
+# ARCH HIGH belt-and-braces — don't stop the service to swap in
+# something that isn't there).
+sudo test -x /opt/macprovider/gateway.prev &&
+# Snapshot + binary verified. Now stop service + swap binary + restore DB.
+sudo systemctl stop macprovider-gateway &&
+sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&
+# Remove stale WAL/SHM sidecars before restoring the snapshot.
+sudo rm -f /var/lib/macprovider/gateway.db-wal /var/lib/macprovider/gateway.db-shm &&
+sudo install -o macprovider -g macprovider -m 0600 "$LATEST" /var/lib/macprovider/gateway.db &&
+sudo -u macprovider sqlite3 /var/lib/macprovider/gateway.db "PRAGMA integrity_check;" &&
+sudo systemctl start macprovider-gateway &&
 curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 ```
 
+If any step fails, the chain stops. Investigate the failing step before
+retrying — do NOT run subsequent commands manually, as split
+binary/DB state is worse than either alone.
+
+**Binary-only rollback (ONLY if you are certain no schema bump ran):**
+
+```bash
+ssh pearl
+sudo test -x /opt/macprovider/gateway.prev &&
+sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&
+sudo systemctl restart macprovider-gateway &&
+curl -s http://127.0.0.1:9443/healthz
+```
+
+Do NOT use the binary-only variant after a schema-bumping deploy —
+the old binary against the upgraded DB reopens issue #196's
+wrong-account / money-path integrity failure.
+
 Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
 services maintain a single `.prev` artifact that is overwritten on each
-deploy, owned `macprovider:macprovider`, mode `0755`:
+deploy. Both deploy scripts (coordinator: #244 R4+R5; gateway: #290)
+now install their binary + .prev as `root:macprovider 0750` (was
+`macprovider:macprovider 0755`) so a compromised daemon UID can no
+longer rewrite the previous binary.
 
-- `/opt/macprovider/coordinator.prev`
-- `/opt/macprovider/gateway.prev`
+- `/opt/macprovider/coordinator.prev` — `root:macprovider 0750`
+- `/opt/macprovider/gateway.prev` — `root:macprovider 0750` (#290)
 
 For the coordinator, the deploy script additionally writes a timestamped
 config backup at `/opt/macprovider/coordinator.yaml.bak-<UTC>` (UTC stamp
@@ -155,7 +253,9 @@ quota table, which has no BEFORE-DELETE trigger.
 - `phase5-gateway/dist/archive-restore.sh` — forensic-restore path.
   Verifies the `.sha256` checksum, decompresses, runs `PRAGMA
   integrity_check`, refuses if the archive's `schema_migrations` max
-  version exceeds the binary's expected version (currently 1), and
+  version exceeds the binary's expected version (currently 3 — after
+  #196 made `usage_events` PK composite and #210 made
+  `demo_usage_events` PK composite), and
   installs to a tempfile target (default `/tmp/gateway-restored-<ts>.db`).
   `--to-live` does the destructive replace-the-live-DB path; requires
   `ASSUME_YES=1`. Snapshots the existing live DB to a `.pre-restore.<ts>`
@@ -175,11 +275,12 @@ quota table, which has no BEFORE-DELETE trigger.
 
 ```bash
 ssh pearl
-# Install scripts to /usr/local/sbin (root-owned parent dir). The
-# /opt/macprovider parent is owned by macprovider:macprovider per the
-# coordinator deploy — installing the root-run archive scripts there would
-# let a compromised macprovider user substitute the script before the next
-# timer fires (audit-iter-2 security HIGH).
+# Install scripts to /usr/local/sbin (root-owned parent dir). Issue #244
+# R4+R5 tightened /opt/macprovider to root:macprovider 0750 (was
+# macprovider:macprovider 0755), so installing root-run scripts there
+# would now actually be safe — but /usr/local/sbin is the conventional
+# location for operator-installed root scripts, and the original
+# audit-iter-2 reasoning (defense in depth) still applies.
 sudo install -o root -g root -m 0755 archive-rotate.sh /usr/local/sbin/macprovider-archive-rotate.sh
 sudo install -o root -g root -m 0755 archive-restore.sh /usr/local/sbin/macprovider-archive-restore.sh
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
@@ -322,9 +423,10 @@ play:
   human-admin power.
 - `auth.gateway_service_token` in `coordinator.yaml` — service-to-service
   credential the coordinator accepts on `/internal/routing` and
-  `/internal/sticky`. The operator key is ALSO accepted on those paths
-  as a backward-compat fallback until the cutover gate is met (see
-  `audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md`).
+  `/internal/sticky`. After PR #172 merges, the operator key is no longer
+  accepted on `/internal/*`; the required 30-day gate and earliest merge
+  date (2026-07-26) are tracked in
+  `audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md`.
 - `coordinator.service_token` in `gateway.yaml` — outbound credential
   the gateway sends on upstream `/internal/*` calls.
 
@@ -387,7 +489,7 @@ gateway side fails closed on the same pattern as of the same fix.
 
 ### 6.1 `coordinator.env` permissions
 
-`/etc/macprovider/coordinator.env` holds `OPERATOR_KEY` and (optionally)
+`/etc/macprovider/coordinator.env` holds `OPERATOR_KEY` and the required
 `GATEWAY_SERVICE_TOKEN`. It is read by the coordinator unit (running
 as root → drops to macprovider via `User=`) and by the de-rooted
 monitor unit (running as macprovider). The required mode is **0640
@@ -611,3 +713,288 @@ first-session provider.
 
 `list-tokens` is read-only and safe to run any time; the output is
 a TSV that pipes cleanly into `awk` / `grep` / `column`.
+
+## 10. SPEC-017 Network Stats API — operator runbook
+
+SPEC-017 v0.1.8 ships the public Network Stats API at
+`https://stats.streamvc.live/v1/stats/{overview,leaderboard,health}`.
+The handler is in-process (same `coordinator` binary), the rollup
+runs on a per-table cadence, and nginx fronts the public surface
+with rate-limit + cache directives per BUILD §2 Step 4.B.
+
+### 10.1 Rotating a partner key
+
+```bash
+# Issue a successor. stdout is EXACTLY ONE raw mpk_* token line
+# (AC-17 contract); the operator-facing metadata (`id=... label=...
+# prefix=... ...`) lands on stderr. If invoking under
+# systemd-run / journalctl, set `--token-out /tmp/partner-rotated.token`
+# (mode 0600) instead and stdout will be empty.
+#
+# `--config` MUST be passed explicitly: a manual `sudo -u
+# macprovider /opt/macprovider/coordinator ...` invocation does
+# NOT inherit the systemd unit's WorkingDirectory or env file
+# (see macprovider-coordinator.service); without `--config` the
+# CLI looks for the relative path `coordinator.yaml` in the
+# current working directory and fails to resolve the admin DSN.
+#
+# PRODUCTION issuance: the gate is CONFIG-DRIVEN, not flag-
+# driven (ARCH r3 + CODE r3 closure). The deployed
+# `coordinator.yaml` sets
+# `stats.partner_keys.production_signoff_path: /opt/macprovider/spec017-signoff.txt`
+# on the production Pearl deploy. The CLI reads that file
+# before any INSERT and refuses issuance if the file is
+# missing, empty, or malformed. Record the sign-off per §10.5
+# below — the act of writing the file IS the gate. Staging
+# deploys MUST NOT set production_signoff_path; the field
+# absence is the staging signal.
+sudo -u macprovider /opt/macprovider/coordinator partner-keys issue \
+  --config /opt/macprovider/coordinator.yaml \
+  --label "ACME inc rotated 2026-09-01" \
+  --rotate-from 17
+
+# Operator-decided overlap window (default suggestion: 7 days). After
+# the partner confirms they've cut over, revoke the predecessor:
+sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
+  --config /opt/macprovider/coordinator.yaml \
+  --id 17 --reason "rotation completed"
+```
+
+The predecessor row stays `revoked_at = NULL` after the new issue —
+revoking is a separate operator action. Both keys unlock the partner
+projection until the revoke fires.
+
+**If this fails:** if the `issue` command exits non-zero AFTER the
+INSERT (e.g. operator's terminal closed during the stdout print, or
+`--token-out` file write failed), the CLI's stderr names the orphan
+row id and the exact `revoke` command to run before re-issuing. If
+`revoke` itself fails, inspect via `coordinator partner-keys list`
+to confirm the row state and re-run with the correct id.
+
+### 10.2 Revoking a partner key in incident
+
+```bash
+# Takes effect on the next request (no in-memory cache).
+# `--config` MUST be passed explicitly (see §10.1 note).
+sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
+  --config /opt/macprovider/coordinator.yaml \
+  --id 23 --reason "key suspected exposed in <PARTNER>'s GitHub repo"
+```
+
+The next request bearing this token returns 401 with the §5.9
+`unauthorized` envelope. Existing in-flight requests complete.
+
+**If this fails:** the CLI returns `no row with id=N` when the id
+doesn't exist OR `id=N was already revoked at <ts>` if it had been
+previously revoked — both are clean exits and require no further
+action. If `revoke` returns a Postgres connection error, fix the
+admin DSN / connectivity and re-run; the revoke is idempotent.
+
+### 10.3 Restarting the rollup scheduler after a panic-restart loop
+
+The Step 2 runner recovers per-tick panics in-place; the goroutine
+continues at the next interval. A persistent panic surface indicates
+a rollup-code bug; mitigation is to disable the offending component
+via the `stats.rollup.<component>_interval = 0` config knob and
+investigate before re-enabling.
+
+```bash
+# Check which component is panicking
+sudo journalctl -u macprovider-coordinator -n 200 | grep stats_rollup_panic
+
+# Disable the offending component, restart, file an issue
+sudo nano /opt/macprovider/coordinator.yaml   # set the interval to 0
+sudo systemctl restart macprovider-coordinator
+```
+
+**If this fails:** if the coordinator process itself crashed (not
+just one rollup tick), systemd auto-restarts via the unit's
+`Restart=on-failure` directive — confirm with `systemctl status
+macprovider-coordinator`. If the unit enters a tight restart
+loop, disable it (`systemctl disable --now macprovider-coordinator`)
+and investigate offline before re-enabling.
+
+### 10.4 Emergency provider-visibility revert (operator-only)
+
+If a provider's `exact` visibility setting was clearly opted-in by
+mistake (e.g. legal/safety incident), the operator may flip the row
+back to `bucketed` with an audit trail:
+
+```bash
+# `--config` MUST be passed explicitly (see §10.1 note).
+sudo -u macprovider /opt/macprovider/coordinator visibility revert \
+  --config /opt/macprovider/coordinator.yaml \
+  --id <provider_id> \
+  --reason "incident IR-2026-09 — leaked exact $ via public scrape"
+```
+
+The CLI HARDCODES `new_mode='bucketed'` and `actor_kind='operator'`;
+there is NO operator path to write `mode='exact'`. The
+`bucketed → exact` direction is exclusively the SPEC-014 v0.9
+provider-authenticated portal flow.
+
+`coordinator visibility exact ...` hard-rejects with a clear
+operator-redirect message. AC-20 CI assertion catches any
+`new_mode='exact' AND actor_kind='operator'` row in
+`provider_visibility_audit` on every PR.
+
+**If this fails:** the CLI prints `no provider_visibility row for
+id=<X>` when the provider has never opted into `exact` (default is
+`bucketed` — nothing to revert) OR `id=<X> is already 'bucketed'
+(nothing to revert)` for the same row twice. Both are clean exits
+and write nothing. If `revert` fails with a Postgres error, fix
+the admin DSN and retry — the whole revert runs in one
+transaction, so no partial state exists.
+
+### 10.5 Partner-key exact-dollar exposure — provider disclosure obligation
+
+Per SPEC-017 §6.6.2 (v0.1.7-tightened to a hard launch-sequencing
+MUST):
+
+> Trusted partners with an operator-issued API key see every
+> provider's exact earnings figures (`earnings_usd`,
+> `earnings_work_usd`, `earnings_rewards_usd`), even when the
+> provider's public mode is `bucketed`.
+
+Providers MUST be informed of this exposure at onboarding time.
+SPEC-014 v0.9 owns the in-portal disclosure; until that surface
+ships, this OPS.md section is the authoritative copy.
+
+#### Cutover-runbook gate (BLOCKING for first PRODUCTION partner-key issuance)
+
+The operator MUST NOT issue any partner key against the production
+coordinator until ALL THREE conditions are satisfied on
+`portal.streamvc.live`:
+
+1. SPEC-014 v0.9 has merged AND is deployed to
+   `portal.streamvc.live`.
+2. The §6.6.2 disclosure copy above is shown on the
+   provider-account-creation page AND on a static portal page
+   that every existing provider sees on their next portal login.
+3. This runbook contains a signed-off entry naming the SPEC-014
+   v0.9 commit SHA + the date both disclosure surfaces went live.
+
+Staging keys against staging coordinators for AC fixtures or partner
+integration dry-runs are EXEMPT. Staging keys MUST NOT be returnable
+from a production coordinator response.
+
+#### Sign-off template
+
+```
+PARTNER-KEY PRODUCTION ISSUANCE SIGN-OFF — SPEC-017 v0.1.8 §6.6.2
+
+SPEC-014 v0.9 commit SHA       : <fill: 40-char SHA>
+SPEC-014 v0.9 portal deploy date: <fill: YYYY-MM-DD>
+Provider-creation disclosure live: <fill: YES/NO + date>
+Existing-provider disclosure live: <fill: YES/NO + date>
+Operator name + role            : <fill: e.g. "augstar — sole operator">
+Signed off at                   : <fill: ISO 8601 UTC>
+```
+
+**Current status (2026-06-26): NOT YET SATISFIED.** SPEC-014 v0.9
+disclosure deployment is the remaining cutover prerequisite before
+any production partner-key issuance. The Step 4.C PR may merge
+with this template in place; the live sign-off is the operator-side
+gate executed AFTER the merge.
+
+## 11. Operator-side provider watchdog (issue #189 / #191)
+
+Every install of `macprovider-cli` via the public
+`get.streamvc.live/install.sh` flow now ships an external LaunchAgent
+that catches a class of silent half-open-TCP wedge originally tracked
+in issue #189 (the in-process bounded send + Darwin.exit(1) liveness
+watchdog landed in PR #204 prevents the wedge on fresh builds; this
+external watchdog is the belt-and-suspenders insurance for operators
+on older binaries and a long-tail catch for any future regression).
+
+### What it does
+
+`~/.local/share/macprovider-watchdog/watchdog.sh` runs every 60s via
+launchd (label `live.streamvc.macprovider-watchdog`). It:
+
+1. Reads the operator's `provider_id` from
+   `~/.config/macprovider/config.yaml`.
+2. Resolves `coordinator.streamvc.live` via dscacheutil (with `host`
+   fallback).
+3. Runs `netstat -an -p tcp` and looks for an ESTABLISHED outbound
+   row to `<coord_ip>.443`.
+4. If absent, runs
+   `launchctl kickstart -k gui/$UID/live.streamvc.macprovider` to
+   restart the provider LaunchAgent.
+
+Healthy ticks are silent so the log file does not bloat. Detection
+ticks and kicks write to `~/Library/Logs/macprovider/watchdog.log`.
+
+### Recovery target
+
+- **Detection latency**: ≤60s after a previously-armed connection
+  drops (one tick interval). The watchdog stays disarmed until it
+  has observed at least one healthy ESTABLISHED connection, so a
+  cold-start install with a 10-20 min model load is NOT killed
+  prematurely.
+- **Post-kick grace**: ≥300s between kicks
+  (`MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS`), so a launchd
+  respawn that triggers a model reload is not re-kicked while it
+  is still warming back up.
+- **End-to-end recovery (wedge → ESTABLISHED again)**: typically
+  ≤75s on a warm model (kick + launchd respawn + cached model load
+  + reconnect). Cold-cache adds the full model-load window (often
+  10-20 min); the grace period is sized to absorb that.
+- **Known limitation**: the netstat check matches *any* local
+  ESTABLISHED connection to `coordinator.streamvc.live.443`, not
+  specifically the provider's process. A separate process (a
+  browser tab on the portal, another shell with curl, etc.)
+  holding a long-lived connection to the coordinator host can mask
+  a wedged provider. Tightening this to the provider's PID via
+  `lsof` is tracked as future work — for the current fleet a
+  spurious 443 connection to coord is rare on operator macs.
+
+### Install
+
+Automatic via the public installer (`curl -fsSL get.streamvc.live/install.sh | sh`).
+To install or re-install manually from the repo:
+
+```bash
+bash ops/macprovider-watchdog/install.sh
+```
+
+Set `MACPROVIDER_NO_WATCHDOG=1` on the main installer's env to skip
+the watchdog (expert / debug override only).
+
+### Inspect
+
+```bash
+launchctl list | grep live.streamvc.macprovider-watchdog
+cat ~/Library/Logs/macprovider/watchdog.log
+```
+
+To force a tick out-of-cadence (useful for testing the kick path
+without waiting 60s):
+
+```bash
+launchctl kickstart -k gui/$UID/live.streamvc.macprovider-watchdog
+```
+
+### Uninstall
+
+The main provider uninstaller (`phase3-binary/dist/uninstall.sh`)
+removes the watchdog alongside the provider. To remove the watchdog
+alone (e.g. to disable it on a specific Mac without touching the
+provider):
+
+```bash
+bash ops/macprovider-watchdog/uninstall.sh
+```
+
+### Failure modes the watchdog does NOT catch
+
+- **Provider connected but silently dropped from the coordinator's
+  `ready` pool.** Different failure mode: TCP is ESTABLISHED but the
+  coordinator no longer routes inference. Polling
+  `/v1/models` server-side from the watchdog was scoped out of #191
+  pending evidence we see this happen in production; for now the
+  in-process liveness watchdog (#189 / PR #204) is the primary
+  detection path.
+- **macprovider-cli process not running at all.** launchd's
+  `KeepAlive` on the main service handles this; the watchdog only
+  helps when the process is running but its WebSocket is wedged.

@@ -131,6 +131,80 @@ func TestGitHubCallback_StateRace_OneSucceedsOneInvalid(t *testing.T) {
 	}
 }
 
+func TestGitHubCallbackRejectsOriginHashMismatch(t *testing.T) {
+	s, _ := newSpec014AuthTestServer(t, true)
+	start := httptest.NewRequest(http.MethodGet, "/v1/auth/github/start", nil)
+	start.RemoteAddr = "198.51.100.10:1234"
+	start.Header.Set("User-Agent", "origin-a")
+	startRR := httptest.NewRecorder()
+	s.Handler().ServeHTTP(startRR, start)
+	if startRR.Code != http.StatusFound {
+		t.Fatalf("start status=%d body=%s", startRR.Code, startRR.Body.String())
+	}
+	redirect, err := url.Parse(startRR.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	state := redirect.Query().Get("state")
+	if state == "" {
+		t.Fatalf("missing state in redirect %q", redirect.String())
+	}
+	callback := httptest.NewRequest(http.MethodGet, "/v1/auth/github/callback?state="+url.QueryEscape(state)+"&code=ok", nil)
+	callback.RemoteAddr = "198.51.100.11:5678"
+	callback.Header.Set("User-Agent", "origin-a")
+	callbackRR := httptest.NewRecorder()
+	s.Handler().ServeHTTP(callbackRR, callback)
+	assertAuthError(t, callbackRR, http.StatusBadRequest, "state_invalid")
+}
+
+func TestGitHubStartRateLimitsOAuthStatesByOrigin(t *testing.T) {
+	s, _ := newSpec014AuthTestServer(t, true)
+	handler := s.Handler()
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/auth/github/start", nil)
+		req.RemoteAddr = "198.51.100.20:1234"
+		req.Header.Set("User-Agent", "origin-rate")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusFound {
+			t.Fatalf("start %d status=%d body=%s, want 302", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/github/start", nil)
+	req.RemoteAddr = "198.51.100.20:1234"
+	req.Header.Set("User-Agent", "origin-rate")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assertAuthError(t, rr, http.StatusTooManyRequests, "rate_limited")
+}
+
+func TestGitHubStartRateLimitIgnoresSpoofedForwardedHeaders(t *testing.T) {
+	s, _ := newSpec014AuthTestServer(t, true)
+	handler := s.Handler()
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/auth/github/start", nil)
+		req.RemoteAddr = "198.51.100.30:1234"
+		req.Header.Set("User-Agent", "origin-spoof")
+		req.Header.Set("X-Forwarded-For", "203.0.113."+itoa(i+1))
+		req.Header.Set("X-Real-IP", "203.0.113."+itoa(i+101))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusFound {
+			t.Fatalf("start %d status=%d body=%s, want 302", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/github/start", nil)
+	req.RemoteAddr = "198.51.100.30:1234"
+	req.Header.Set("User-Agent", "origin-spoof")
+	req.Header.Set("X-Forwarded-For", "203.0.113.250")
+	req.Header.Set("X-Real-IP", "203.0.113.251")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	assertAuthError(t, rr, http.StatusTooManyRequests, "rate_limited")
+}
+
 func TestGitHubCallback_RequestLogRedactsCodeAndState(t *testing.T) {
 	var logs bytes.Buffer
 	logger := zerolog.New(&logs)

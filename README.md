@@ -19,16 +19,16 @@
 
 # MacProvider
 
-**Make any Apple Silicon Mac a remote-addressable MLX inference endpoint.** Built on `mlx-lm`. OpenAI-compatible API. Every response carries a signed receipt binding (prompt, output, provider) verifiable with the open-source [macprovider-verify](phase7-verify/README.md) CLI — verifiable inference, without a datacenter.
+**Make any Apple Silicon Mac a remote-addressable MLX inference endpoint.** Built on `mlx-lm`. OpenAI-compatible API — streaming, multi-turn tool calling, JSON-schema structured output, sticky conversations with KV-cache reuse. Every response carries a signed receipt binding the prompt, output, provider key, catalog-resolved model hash, and timestamp; the open-source [macprovider-verify](phase7-verify/README.md) CLI verifies that a provider signing key signed that tuple. The receipt does not prove model honesty, hardware attestation, or detection of a provider falsifying its own model-hash measurement.
 
-A lot of the most interesting LLM applications — long-running personal agents, privacy-sensitive tooling, dev workflows that hammer a model thousands of times a day — don't really belong in a cloud datacenter. But the moment you want your Mac's MLX endpoint to be reachable from somewhere that isn't localhost, you fall off a cliff: auth, tunneling, multi-tenant routing, observability, none of it exists out of the box. MacProvider is a thin layer over `mlx-lm` that fills that gap.
+A lot of the most interesting LLM applications — long-running personal agents, privacy-sensitive tooling, dev workflows that hammer a model thousands of times a day — don't really belong in a cloud datacenter. But the moment you want your Mac's MLX endpoint to be reachable from somewhere that isn't localhost, you fall off a cliff: auth, tunneling, multi-tenant routing, billing, observability, none of it exists out of the box. MacProvider is a thin layer over `mlx-lm` that fills that gap.
 
 | For Providers | For Buyers |
 |---|---|
 | Run MLX models locally on any M1+ Mac | OpenAI-compatible `/v1/chat/completions` endpoint |
 | Outbound WebSocket only — no port-forwarding needed | Route to the full pool or pin to a specific provider |
 | Choose which models to serve from your Mac | Pay only for compute, no subscription required |
-| Manage your node at [portal.streamvc.live](https://portal.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
+| Manage your provider at [portal.streamvc.live](https://portal.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
 
 ## Console
 
@@ -76,11 +76,22 @@ curl -fsSL https://get.streamvc.live/install.sh | bash
 
 The installer:
 
-- Picks a recommended MLX model based on available RAM (you can override)
+- Picks a recommended MLX model by running the SPEC-023 `autotune-recommend` flow against a signed static feed of demand rank + candidate models. Eligibility is gated by RAM headroom (catalog `min_ram_gb` vs Mac RAM minus a 4 GB safety margin), bandwidth tier, and a local benchmark probe; scoring ranks eligible rows by `demand_weight × completion_rate_per_mtok × sustained_tps` using live `/v1/rate-card` per-token rates (you can override)
 - Asks for a stable provider handle used as your pool identity
 - Downloads and verifies the latest `macprovider-cli` release against a signed checksum manifest
 - Installs under `~/macprovider` and sets up a user-level launchd service
 - Runs a local `/v1/models` check and a coordinator pool visibility check
+- Enrolls the provider in autoupdate (SPEC-020): once the coordinator advertises a newer `recommended_binary_version`, the provider validates the signed release, drains in-flight traffic, and swaps itself in place
+
+Normal recovery for an already-installed provider:
+
+```bash
+macprovider-cli update
+macprovider-cli --version
+macprovider-cli status
+```
+
+If the installed CLI is still public **1.8.48** and cannot reach the coordinator, re-run the signed installer upgrade-in-place (see `ops/runbooks/entry-610-first-hop-recovery.md`).
 
 **Security note:** `curl | bash` gives the downloaded script control of your user account. Inspect first if you prefer:
 
@@ -114,38 +125,39 @@ print(response.choices[0].message.content)
 ```
 
 Get an API key → [api.streamvc.live/auth/github/start](https://api.streamvc.live/auth/github/start)  
-API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.live/docs#api-reference)
+API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.live/docs#api-reference)  
+Cookbook (tool calling, structured output, sticky conversations, receipt verification) → [docs/using-macprovider-with-openai-sdk.md](docs/using-macprovider-with-openai-sdk.md)
+
+### What the OpenAI-shape surface covers
+
+- **Streaming** (`stream: true`) with token-incremental deltas.
+- **Tool calling** (SPEC-018) — multi-turn agent loops for Qwen and Llama 3.3 tool-call templates. First-turn `tool_calls[]` emission plus second-turn `role: "tool"` acceptance and assistant-history rendering. Anchor framework: [Cline](https://github.com/cline/cline). Caps: 1 MiB per `function.arguments`, 2 MiB per response, 256 KiB per `role: "tool"` message.
+- **Structured output** (SPEC-019, LOCKED) — `response_format: {"type": "json_schema", "json_schema": {...}}` with OpenAI strict-mode subset, and a bundled fix that makes `json_object` actually enforce top-level JSON.
+- **Sticky conversations + KV-cache reuse** (SPEC-024) — pass a stable `conversation_id`; the coordinator routes back to the same provider and reports `cached_prompt_tokens` in the OpenAI `usage` object. Prefix-cache billing is metered separately.
+
+See [docs/using-macprovider-with-openai-sdk.md](docs/using-macprovider-with-openai-sdk.md) for worked examples.
+
+### Security model: buyer-side validation obligation
+
+For tool-calling responses, emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution. MacProvider transports the parsed OpenAI-compatible shape; it does not decide whether a requested tool name or argument payload is safe for your agent policy. Treat emitted tool calls with the same trust posture you would apply to a model running on local hardware: parsed output, not provider-verified intent.
 
 ## Releases
 
 Latest release and signed binaries: [github.com/augustas11/macprovider/releases](https://github.com/augustas11/macprovider/releases) (badge above auto-updates).
 
-## Roadmap
+## Shipped
 
-:white_check_mark: **Signed inference receipts — Shipped in v1.0.0.** The SPEC-015 v0.2 verifier is available as the open-source [macprovider-verify](phase7-verify/README.md) CLI.
+- **Signed inference receipts (SPEC-015).** Every response carries a v0.3 nine-field receipt tuple (`model_hash`, `model_id`, `output_hash`, `prompt_hash`, `provider_pubkey`, `receipt_version`, `tokens_out`, `ttft_ms`, `unix_ts`) signed with the provider's Ed25519 receipt key. Verify with the open-source [macprovider-verify](phase7-verify/README.md) CLI; back-compat with legacy v0.1/v0.2 receipts is preserved. Streaming responses now emit a settlement-capable receipt as well.
+- **Verified model settlement (SPEC-022).** Coordinator receipt verdicts drive gateway buyer debit/refund decisions on the money path. Missing / malformed / unverifiable receipts settle as `FaultBreakerQualifying` with zero provider-positive credits.
+- **Multi-turn OpenAI tool calling (SPEC-018).** First-turn emission plus second-turn `role: "tool"` acceptance and assistant-history rendering for Qwen and Llama 3.3 templates. Cline drop-in works.
+- **Structured output (SPEC-019, LOCKED).** `response_format: json_schema` with OpenAI strict-mode subset; post-hoc validate-and-fault.
+- **Prefix-cache reuse + billing (SPEC-024).** Sticky `conversation_id` routing, `cached_prompt_tokens` in `usage`, prefix-cache metering.
+- **Provider autoupdate (SPEC-020).** Coordinator advertises `recommended_binary_version`; providers auto-drain, verify the signed release, and swap in place.
+- **Installer-integrated autotune-recommend (SPEC-023 v0.4 LOCKED).** Signed static demand-rank + candidate-catalog feeds off Pearl nginx; RAM/benchmark eligibility gates at install time; per-token payout transcript (recommended model or donor-only fallback — no hourly projection or starter tier).
+- **Provider payout pipeline (SPEC-016).** USDC payout design on Base, gated on the operator hot-wallet prerequisites in §9; converged after 20 codex audit rounds.
 
-:white_check_mark: **OpenAI-compatible tool calling — Shipped for recognized MLX tool-call templates.** Requests with `tools` are rendered through the MLX chat template, and Qwen-style `<tool_call>...</tool_call>` or Llama 3.3-style `<|python_tag|>...<|eom_id|>` outputs emit `choices[0].message.tool_calls[]` with `function.arguments` as a JSON string. Other models safely fall back to normal assistant text unless their template emits one of those recognized formats. See [examples/tool_calling_demo.py](examples/tool_calling_demo.py).
+## In flight
 
-Every request through MacProvider carries a signed receipt that lets the caller later prove which provider signed the canonical prompt/output binding. The receipt is issued on the response path and signed with the provider's receipt key:
-
-```json
-{
-  "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
-  "prompt_hash": "sha256:7c3f...",
-  "output_hash": "sha256:9b2a...",
-  "provider_id": "m1-anon",
-  "provider_pubkey": "ed25519:...",
-  "ttft_ms": 646,
-  "tokens_out": 142,
-  "ts": "2026-06-04T12:34:56Z",
-  "sig": "ed25519:..."
-}
-```
-
-What this enables:
-
-- **Audit trail.** A buyer can prove an inference happened, on which model, at which provider — without trusting the gateway to be honest after the fact.
-- **Provider accountability.** Disputes over output quality or downtime become resolvable from receipts rather than from memory.
-- **New compositions.** Receipts can be replayed into systems that don't trust the issuer but trust the signature (escrow, reputation, on-chain settlement).
-
-The verifier contract is documented in [phase7-verify](phase7-verify/README.md). Feedback welcome via Issues.
+- **Native Mac app (SPEC-025, "Malibu").** Signed `.dmg` + menu-bar wrapper around `macprovider-cli` — non-developer-facing brand and installer path. P0 skeleton shipped.
+- **Browserless one-click provider onboarding (SPEC-026 draft).** Deep-link launch flow so new providers can join without a terminal.
+- **Self-hosted coordinator.** For buyers who need local-only trust; see the trust-model note above.

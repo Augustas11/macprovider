@@ -7,6 +7,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,6 +19,8 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 	ts := time.Date(2026, 5, 31, 12, 34, 56, 789, time.UTC)
 	promptTokens := int64(11)
 	completionTokens := int64(7)
+	ttftMs := 42.0
+	decodeMs := 315.0
 
 	if err := store.Insert(ctx, Row{
 		TSUtc:              ts,
@@ -28,6 +31,8 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 		CompletionTokens:   &completionTokens,
 		LatencyMs:          123.5,
 		RoutingMs:          4.5,
+		TTFTMs:             &ttftMs,
+		DecodeMs:           &decodeMs,
 		Status:             200,
 		Stream:             true,
 		BuyerIP:            "203.0.113.1:41234",
@@ -51,6 +56,8 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 		TotalTokens        sql.NullInt64
 		LatencyMs          float64
 		RoutingMs          float64
+		TTFTMs             sql.NullFloat64
+		DecodeMs           sql.NullFloat64
 		Status             int
 		Stream             int
 		BuyerIP            string
@@ -63,7 +70,7 @@ func TestRequestLogInsertAndRead(t *testing.T) {
 	err := store.db.QueryRowContext(ctx, `
 SELECT id, ts_utc, request_id, model, provider_assigned_id,
        prompt_tokens, completion_tokens, total_tokens, latency_ms,
-       routing_ms, status, stream, buyer_ip, error, error_code,
+       routing_ms, ttft_ms, decode_ms, status, stream, buyer_ip, error, error_code,
        pref_header, provider_header, retried
 FROM request_log
 WHERE request_id = ?`, "req-roundtrip").Scan(
@@ -77,6 +84,8 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 		&got.TotalTokens,
 		&got.LatencyMs,
 		&got.RoutingMs,
+		&got.TTFTMs,
+		&got.DecodeMs,
 		&got.Status,
 		&got.Stream,
 		&got.BuyerIP,
@@ -99,6 +108,8 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 		got.TotalTokens.Int64 != 18 || !got.TotalTokens.Valid ||
 		got.LatencyMs != 123.5 ||
 		got.RoutingMs != 4.5 ||
+		got.TTFTMs.Float64 != 42 || !got.TTFTMs.Valid ||
+		got.DecodeMs.Float64 != 315 || !got.DecodeMs.Valid ||
 		got.Status != 200 ||
 		got.Stream != 1 ||
 		got.BuyerIP != "203.0.113.1:41234" ||
@@ -108,6 +119,32 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 		got.ProviderHeader.String != "p1" || !got.ProviderHeader.Valid ||
 		got.Retried != 2 {
 		t.Fatalf("row mismatch: %#v", got)
+	}
+}
+
+func TestRequestLogInsertWritesFixedWidthTimestampText(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
+
+	if err := store.Insert(ctx, Row{
+		TSUtc:              ts,
+		RequestID:          "req-fixed-ts",
+		Model:              "model-a",
+		ProviderAssignedID: "session-1",
+		Status:             200,
+		BuyerIP:            "203.0.113.1:41234",
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var got string
+	if err := store.db.QueryRowContext(ctx, `SELECT ts_utc FROM request_log WHERE request_id = ?`, "req-fixed-ts").Scan(&got); err != nil {
+		t.Fatalf("query timestamp: %v", err)
+	}
+	if got != "2026-05-31T12:34:56.000000000Z" {
+		t.Fatalf("ts_utc=%q want fixed-width UTC nanosecond text", got)
 	}
 }
 
@@ -241,24 +278,24 @@ func TestReserveIdempotencyKeyDetectsReplayConflictAndPrunes(t *testing.T) {
 	old := time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC)
 	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
-	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "idem-old", "hash-a", "req-a", old)
+	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "", "idem-old", "hash-a", "req-a", old)
 	if err != nil {
 		t.Fatalf("ReserveIdempotencyKey first: %v", err)
 	}
 	if replay || requestID != "req-a" {
 		t.Fatalf("first reserve requestID=%q replay=%v", requestID, replay)
 	}
-	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "idem-old", "hash-a", "req-b", cutoff)
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "", "idem-old", "hash-a", "req-b", cutoff)
 	if err != nil {
 		t.Fatalf("ReserveIdempotencyKey replay: %v", err)
 	}
 	if !replay || requestID != "req-a" {
 		t.Fatalf("replay requestID=%q replay=%v", requestID, replay)
 	}
-	if _, _, err := store.ReserveIdempotencyKey(ctx, "idem-old", "hash-b", "req-c", cutoff); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "", "idem-old", "hash-b", "req-c", cutoff); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("mismatch err=%v want ErrIdempotencyConflict", err)
 	}
-	if _, _, err := store.ReserveIdempotencyKey(ctx, "idem-new", "hash-n", "req-n", cutoff.Add(time.Second)); err != nil {
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "", "idem-new", "hash-n", "req-n", cutoff.Add(time.Second)); err != nil {
 		t.Fatalf("ReserveIdempotencyKey new: %v", err)
 	}
 	if _, err := store.PruneBefore(ctx, cutoff); err != nil {
@@ -276,6 +313,108 @@ func TestReserveIdempotencyKeyDetectsReplayConflictAndPrunes(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("new idempotency keys=%d want 1", count)
+	}
+}
+
+func TestReserveIdempotencyKeyScopesByAccount(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "acct-a", "same-key", "hash-a", "req-a", now)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey account A: %v", err)
+	}
+	if replay || requestID != "req-a" {
+		t.Fatalf("account A first requestID=%q replay=%v", requestID, replay)
+	}
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "acct-b", "same-key", "hash-b", "req-b", now)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey account B: %v", err)
+	}
+	if replay || requestID != "req-b" {
+		t.Fatalf("account B first requestID=%q replay=%v", requestID, replay)
+	}
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "acct-a", "same-key", "hash-a", "req-a2", now)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey account A replay: %v", err)
+	}
+	if !replay || requestID != "req-a" {
+		t.Fatalf("account A replay requestID=%q replay=%v", requestID, replay)
+	}
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "acct-a", "same-key", "hash-b", "req-a3", now); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("account A mismatch err=%v want ErrIdempotencyConflict", err)
+	}
+}
+
+func TestMigrateIdempotencyKeysBackfillsLegacyAccountScope(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE request_log (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc               TEXT    NOT NULL,
+    request_id           TEXT    NOT NULL,
+    account_id           TEXT    NULL,
+    model                TEXT    NOT NULL,
+    provider_assigned_id TEXT    NULL,
+    prompt_tokens        INTEGER NULL,
+    completion_tokens    INTEGER NULL,
+    total_tokens         INTEGER NULL,
+    latency_ms           REAL    NOT NULL,
+    routing_ms           REAL    NOT NULL,
+    status               INTEGER NOT NULL,
+    stream               INTEGER NOT NULL,
+    buyer_ip             TEXT    NOT NULL DEFAULT '',
+    error                TEXT    NULL,
+    pref_header          TEXT    NULL,
+    provider_header      TEXT    NULL,
+    retried              INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE request_idempotency_keys (
+    idempotency_key TEXT PRIMARY KEY,
+    body_sha256    TEXT NOT NULL,
+    request_id     TEXT NOT NULL UNIQUE,
+    created_at_utc TEXT NOT NULL
+)`); err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+INSERT INTO request_log (
+    ts_utc, request_id, account_id, model, provider_assigned_id,
+    prompt_tokens, completion_tokens, total_tokens, latency_ms, routing_ms,
+    status, stream, buyer_ip, error, pref_header, provider_header, retried
+) VALUES (?, 'req-legacy', 'acct-legacy', 'model-a', 'session-a', NULL, NULL, NULL, 0, 0, 200, 0, '127.0.0.1', NULL, NULL, NULL, 0)`,
+		now.UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO request_idempotency_keys (idempotency_key, body_sha256, request_id, created_at_utc)
+VALUES ('idem-legacy', 'hash-a', 'req-legacy', ?)`,
+		now.UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed idempotency key: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	requestID, replay, err := store.ReserveIdempotencyKey(context.Background(), "acct-legacy", "idem-legacy", "hash-a", "req-new", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey replay: %v", err)
+	}
+	if !replay || requestID != "req-legacy" {
+		t.Fatalf("replay requestID=%q replay=%v want req-legacy/true", requestID, replay)
+	}
+	if _, _, err := store.ReserveIdempotencyKey(context.Background(), "acct-legacy", "idem-legacy", "hash-b", "req-conflict", now.Add(2*time.Second)); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("mismatch err=%v want ErrIdempotencyConflict", err)
 	}
 }
 
@@ -382,9 +521,37 @@ CREATE TABLE request_log (
 	if err != nil {
 		t.Fatalf("seed old schema: %v", err)
 	}
+	// Seed a row INTO the old schema (no external_request_id column),
+	// directly via raw SQL — this is the actual pre-migration row the
+	// assertion below verifies. Insert via store.Insert (after OpenStore)
+	// would be post-migration and wouldn't test the legacy path.
+	if _, err := db.Exec(`
+INSERT INTO request_log (
+    ts_utc, request_id, model, provider_assigned_id,
+    prompt_tokens, completion_tokens, total_tokens,
+    latency_ms, routing_ms, status, stream,
+    buyer_ip, error, pref_header, provider_header, retried
+) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, 0, ?, 0, ?, NULL, NULL, NULL, 0)`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		"req-pre-migration",
+		"model-a",
+		"session-pre",
+		200,
+		"127.0.0.1",
+	); err != nil {
+		t.Fatalf("seed pre-migration row: %v", err)
+	}
 	_ = db.Close()
 
 	store, err := OpenStore(dbPath)
+	// SPEC-002 v1.4.2 R-2 / ISS-188 R4 audit: OpenStore is column-only;
+	// the partial-NULL index ships via MigrateIndexes invoked from main.
+	// Tests asserting index presence call it synchronously here.
+	if err == nil {
+		if mErr := store.MigrateIndexes(context.Background()); mErr != nil {
+			t.Fatalf("MigrateIndexes: %v", mErr)
+		}
+	}
 	if err != nil {
 		t.Fatalf("open migrated store: %v", err)
 	}
@@ -407,11 +574,59 @@ CREATE TABLE request_log (
 	if !errorCode.Valid || errorCode.String != "error_internal" {
 		t.Fatalf("error_code = %#v, want error_internal", errorCode)
 	}
-	for _, name := range []string{"idx_request_log_ts_utc", "idx_request_log_request_id_id"} {
+	for _, name := range []string{"idx_request_log_ts_utc", "idx_request_log_request_id_id", "idx_request_log_external_request_id"} {
 		var got string
 		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
 			t.Fatalf("index %s missing: %v", name, err)
 		}
+	}
+	// SPEC-002 v1.4.2 R-2: the row inserted INTO the old schema above
+	// predates external_request_id; a SELECT after migration MUST
+	// return NULL (not an error and not a garbage default) so the
+	// reconciliation join (gateway.usage_events.request_id =
+	// coord.request_log.external_request_id) cleanly skips legacy
+	// rows instead of false-matching them.
+	var migrated sql.NullString
+	if err := store.db.QueryRow(`SELECT external_request_id FROM request_log WHERE request_id = ?`, "req-pre-migration").Scan(&migrated); err != nil {
+		t.Fatalf("query external_request_id on pre-migration row: %v", err)
+	}
+	if migrated.Valid {
+		t.Fatalf("pre-migration row external_request_id = %#v, want NULL", migrated)
+	}
+	var preTTFT, preDecode sql.NullFloat64
+	if err := store.db.QueryRow(`SELECT ttft_ms, decode_ms FROM request_log WHERE request_id = ?`, "req-pre-migration").Scan(&preTTFT, &preDecode); err != nil {
+		t.Fatalf("query timing columns on pre-migration row: %v", err)
+	}
+	if preTTFT.Valid || preDecode.Valid {
+		t.Fatalf("pre-migration timing = (%#v, %#v), want both NULL", preTTFT, preDecode)
+	}
+	// A fresh insert with ExternalRequestID set MUST persist the value.
+	freshTTFT := 12.0
+	freshDecode := 34.0
+	if err := store.Insert(context.Background(), Row{
+		TSUtc:             time.Now().UTC(),
+		RequestID:         "req-fresh",
+		ExternalRequestID: "55555555-5555-4555-8555-555555555555",
+		Model:             "model-a",
+		TTFTMs:            &freshTTFT,
+		DecodeMs:          &freshDecode,
+		Status:            200,
+	}); err != nil {
+		t.Fatalf("insert fresh row with external_request_id: %v", err)
+	}
+	var fresh sql.NullString
+	if err := store.db.QueryRow(`SELECT external_request_id FROM request_log WHERE request_id = ?`, "req-fresh").Scan(&fresh); err != nil {
+		t.Fatalf("query external_request_id on fresh row: %v", err)
+	}
+	if !fresh.Valid || fresh.String != "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("fresh external_request_id = %#v, want UUID", fresh)
+	}
+	var gotTTFT, gotDecode sql.NullFloat64
+	if err := store.db.QueryRow(`SELECT ttft_ms, decode_ms FROM request_log WHERE request_id = ?`, "req-fresh").Scan(&gotTTFT, &gotDecode); err != nil {
+		t.Fatalf("query timing columns on fresh row: %v", err)
+	}
+	if !gotTTFT.Valid || gotTTFT.Float64 != 12 || !gotDecode.Valid || gotDecode.Float64 != 34 {
+		t.Fatalf("fresh timing = (%#v, %#v), want 12/34", gotTTFT, gotDecode)
 	}
 }
 
@@ -592,4 +807,427 @@ func openTestStore(t *testing.T) *Store {
 		t.Fatalf("open store: %v", err)
 	}
 	return store
+}
+
+// TestMigrationStateReportsPerKeyStatesAndAggregate exercises SPEC-002
+// v1.5.1 R-2 / issue #197: MigrationState MUST report per-key state
+// (legacy | unindexed | indexed) plus an aggregate, distinguishing
+// "column-present + index-absent" (unindexed) from "column-absent"
+// (legacy) so reconciliation tooling can fail closed under state (B)
+// rather than silently fuzzy-matching.
+func TestMigrationStateReportsPerKeyStatesAndAggregate(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	// Fresh OpenStore: both columns present (ensureColumns ran), no
+	// composite-PK indexes (MigrateIndexes is operator-driven). This
+	// is the "unindexed" / state (B) rollout window for both keys.
+	status, err := store.MigrationState(ctx)
+	if err != nil {
+		t.Fatalf("MigrationState: %v", err)
+	}
+	if status.Aggregate != "unindexed" {
+		t.Fatalf("aggregate=%q, want unindexed (state B both keys)", status.Aggregate)
+	}
+	if len(status.Keys) != 2 {
+		t.Fatalf("len(keys)=%d, want 2: %#v", len(status.Keys), status.Keys)
+	}
+	for _, k := range status.Keys {
+		if k.State != "unindexed" {
+			t.Errorf("key %q state=%q, want unindexed", k.Key, k.State)
+		}
+		if !k.ColumnsPresent {
+			t.Errorf("key %q columns_present=false, want true", k.Key)
+		}
+		if k.IndexPresent {
+			t.Errorf("key %q index_present=true, want false", k.Key)
+		}
+	}
+
+	if err := store.MigrateIndexes(ctx); err != nil {
+		t.Fatalf("MigrateIndexes: %v", err)
+	}
+	status, err = store.MigrationState(ctx)
+	if err != nil {
+		t.Fatalf("MigrationState post-migrate: %v", err)
+	}
+	if status.Aggregate != "indexed" {
+		t.Fatalf("aggregate post-migrate=%q, want indexed", status.Aggregate)
+	}
+	for _, k := range status.Keys {
+		if k.State != "indexed" {
+			t.Errorf("key %q post-migrate state=%q, want indexed", k.Key, k.State)
+		}
+		if !k.IndexPresent {
+			t.Errorf("key %q post-migrate index_present=false", k.Key)
+		}
+	}
+
+	// Simulate a partial-rollout legacy mix: drop both indexes (their
+	// account_id reference would block DROP COLUMN), then drop the
+	// account_id column. account_external_request_id key → legacy
+	// (column absent). external_request_id key → unindexed (column
+	// present, no index). Aggregate MUST be legacy (any-legacy wins).
+	if _, err := store.db.ExecContext(ctx, `DROP INDEX idx_request_log_account_external_request_id`); err != nil {
+		t.Fatalf("DROP INDEX composite: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DROP INDEX idx_request_log_external_request_id`); err != nil {
+		t.Fatalf("DROP INDEX ext: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `ALTER TABLE request_log DROP COLUMN account_id`); err != nil {
+		t.Skipf("DROP COLUMN unsupported on this sqlite build (need 3.35+): %v", err)
+	}
+	status, err = store.MigrationState(ctx)
+	if err != nil {
+		t.Fatalf("MigrationState mixed: %v", err)
+	}
+	if status.Aggregate != "legacy" {
+		t.Fatalf("aggregate mixed=%q, want legacy (any-legacy wins)", status.Aggregate)
+	}
+	var sawLegacy, sawUnindexed bool
+	for _, k := range status.Keys {
+		switch k.Key {
+		case "account_external_request_id":
+			if k.State != "legacy" {
+				t.Errorf("account key state=%q, want legacy", k.State)
+			}
+			sawLegacy = true
+		case "external_request_id":
+			if k.State != "unindexed" {
+				t.Errorf("ext key state=%q, want unindexed", k.State)
+			}
+			sawUnindexed = true
+		}
+	}
+	if !sawLegacy || !sawUnindexed {
+		t.Fatalf("expected one legacy + one unindexed key; got %#v", status.Keys)
+	}
+}
+
+// TestInsertPopulatesMonotonicAttemptN pins SPEC-002 v1.5.2 / issue
+// #168: the writer MUST assign attempt_n monotonically within each
+// (account_id, request_id) group at INSERT time, race-free under the
+// SetMaxOpenConns(1) discipline.
+func TestInsertPopulatesMonotonicAttemptN(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, Row{
+			TSUtc:     ts.Add(time.Duration(i) * time.Second),
+			RequestID: "req-acct-A",
+			AccountID: "acct-A",
+			Model:     "model-a",
+			Status:    200,
+			BuyerIP:   "127.0.0.1",
+		}); err != nil {
+			t.Fatalf("insert row %d: %v", i, err)
+		}
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-acct-A' AND account_id='acct-A' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("attempt_n is NULL on a v1.5.2 write; want monotonic int")
+		}
+		got = append(got, int(n.Int64))
+	}
+	if want := []int{0, 1, 2}; !slicesEqualInt(got, want) {
+		t.Fatalf("attempt_n sequence = %v, want %v", got, want)
+	}
+
+	if err := store.Insert(ctx, Row{
+		TSUtc:     ts.Add(10 * time.Second),
+		RequestID: "req-acct-B",
+		AccountID: "acct-B",
+		Model:     "model-a",
+		Status:    200,
+		BuyerIP:   "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("insert acct-B: %v", err)
+	}
+	var bN sql.NullInt64
+	if err := store.db.QueryRowContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-acct-B' AND account_id='acct-B'`).Scan(&bN); err != nil {
+		t.Fatalf("acct-B scan: %v", err)
+	}
+	if !bN.Valid || bN.Int64 != 0 {
+		t.Fatalf("acct-B attempt_n = %v, want 0 (new group)", bN)
+	}
+
+	// Same request_id with EMPTY account_id is a SEPARATE group from
+	// acct-A (the v1.5.0 IS-clustering rule: NULL clusters with NULL
+	// only). attempt_n should start fresh at 0.
+	if err := store.Insert(ctx, Row{
+		TSUtc:     ts.Add(20 * time.Second),
+		RequestID: "req-acct-A",
+		AccountID: "",
+		Model:     "model-a",
+		Status:    200,
+		BuyerIP:   "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("insert NULL-account: %v", err)
+	}
+	var nullN sql.NullInt64
+	if err := store.db.QueryRowContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-acct-A' AND account_id IS NULL`).Scan(&nullN); err != nil {
+		t.Fatalf("NULL-account scan: %v", err)
+	}
+	if !nullN.Valid || nullN.Int64 != 0 {
+		t.Fatalf("NULL-account attempt_n = %v, want 0 (separate group from acct-A)", nullN)
+	}
+}
+
+// TestBackfillAttemptNPopulatesLegacyNullRows pins the v0.3.1 → v0.3.3
+// migration path: legacy rows with NULL attempt_n receive monotonic
+// values byte-identical to the read-time fallback derivation.
+func TestBackfillAttemptNPopulatesLegacyNullRows(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, Row{
+			TSUtc:     ts.Add(time.Duration(i) * time.Second),
+			RequestID: "req-legacy",
+			AccountID: "acct-L",
+			Model:     "model-a",
+			Status:    200,
+			BuyerIP:   "127.0.0.1",
+		}); err != nil {
+			t.Fatalf("insert legacy row %d: %v", i, err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE request_log SET attempt_n = NULL WHERE request_id = 'req-legacy'`); err != nil {
+		t.Fatalf("null out: %v", err)
+	}
+
+	status, err := store.AttemptNState(ctx)
+	if err != nil {
+		t.Fatalf("AttemptNState: %v", err)
+	}
+	if status.MigrationState != "populating" || status.NullCount != 3 {
+		t.Fatalf("pre-backfill state=%+v, want populating with 3 NULL rows", status)
+	}
+
+	updated, err := store.BackfillAttemptN(ctx)
+	if err != nil {
+		t.Fatalf("BackfillAttemptN: %v", err)
+	}
+	if updated != 3 {
+		t.Fatalf("updated=%d, want 3", updated)
+	}
+
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id = 'req-legacy' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query post-backfill: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("attempt_n still NULL after backfill")
+		}
+		got = append(got, int(n.Int64))
+	}
+	if want := []int{0, 1, 2}; !slicesEqualInt(got, want) {
+		t.Fatalf("backfilled attempt_n = %v, want %v", got, want)
+	}
+
+	status, err = store.AttemptNState(ctx)
+	if err != nil {
+		t.Fatalf("AttemptNState post-backfill: %v", err)
+	}
+	if status.MigrationState != "populated" || status.NullCount != 0 {
+		t.Fatalf("post-backfill state=%+v, want populated/0", status)
+	}
+
+	updated2, err := store.BackfillAttemptN(ctx)
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if updated2 != 0 {
+		t.Fatalf("second backfill updated=%d, want 0 (idempotent)", updated2)
+	}
+}
+
+// TestBackfillAttemptNHandlesMixedRolloutState pins SPEC-002 v1.5.2
+// behavior under the realistic rollout window: some rows have non-NULL
+// attempt_n (written under v1.5.2), some have NULL (written under
+// v1.5.1 OR during a brief v1.5.2 → v1.5.1 rollback). BackfillAttemptN
+// MUST assign correct monotonic ordinals to the NULL rows so the
+// combined sequence is the canonical id-ASC ordering. R1 code MEDIUM.
+func TestBackfillAttemptNHandlesMixedRolloutState(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	// Insert 3 rows; null out only rows 1 and 2 (keep row 0's
+	// persisted attempt_n=0). Simulates "row 0 written under v1.5.2,
+	// then v1.5.1 rollback wrote rows 1+2 with NULL".
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, Row{
+			TSUtc:     ts.Add(time.Duration(i) * time.Second),
+			RequestID: "req-mixed",
+			AccountID: "acct-M",
+			Model:     "model-a",
+			Status:    200,
+			BuyerIP:   "127.0.0.1",
+		}); err != nil {
+			t.Fatalf("insert row %d: %v", i, err)
+		}
+	}
+	// Null out the last 2 rows to simulate a partial-rollout mix.
+	if _, err := store.db.ExecContext(ctx, `
+UPDATE request_log SET attempt_n = NULL
+ WHERE request_id = 'req-mixed'
+   AND id IN (SELECT id FROM request_log WHERE request_id='req-mixed' ORDER BY id LIMIT 2 OFFSET 1)
+`); err != nil {
+		t.Fatalf("null out: %v", err)
+	}
+
+	updated, err := store.BackfillAttemptN(ctx)
+	if err != nil {
+		t.Fatalf("BackfillAttemptN: %v", err)
+	}
+	if updated != 2 {
+		t.Fatalf("updated=%d, want 2 (only the NULL rows)", updated)
+	}
+
+	// Verify final sequence is [0, 1, 2] — backfilled rows received
+	// ordinals 1 and 2 respectively, preserving the existing row 0=0.
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id = 'req-mixed' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("row still NULL after mixed-state backfill")
+		}
+		got = append(got, int(n.Int64))
+	}
+	if want := []int{0, 1, 2}; !slicesEqualInt(got, want) {
+		t.Fatalf("post-backfill sequence = %v, want %v", got, want)
+	}
+}
+
+// TestInsertConcurrentSameGroupProducesMonotonicAttemptN proves the
+// R1 code CRITICAL fix: Store.Insert is now race-free when multiple
+// goroutines insert into the same (account_id, request_id) group.
+// Prior to the fix, COUNT and INSERT were two distinct *sql.DB calls
+// that could each acquire a fresh connection from the pool, even
+// under SetMaxOpenConns(1), interleaving such that two goroutines
+// would both see count=0 and both INSERT attempt_n=0. The fix pins
+// a single *sql.Conn around the pair.
+func TestInsertConcurrentSameGroupProducesMonotonicAttemptN(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	const N = 16
+	var wg sync.WaitGroup
+	errCh := make(chan error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := store.Insert(ctx, Row{
+				TSUtc:     ts.Add(time.Duration(i) * time.Millisecond),
+				RequestID: "req-race",
+				AccountID: "acct-R",
+				Model:     "model-a",
+				Status:    200,
+				BuyerIP:   "127.0.0.1",
+			}); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent insert: %v", err)
+	}
+
+	// Every row in the group MUST have a distinct attempt_n in the
+	// range [0, N-1]. If the race were present, two rows would share
+	// the same attempt_n.
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-race' ORDER BY attempt_n`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	seen := map[int]bool{}
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("attempt_n NULL on concurrent insert")
+		}
+		v := int(n.Int64)
+		if seen[v] {
+			t.Fatalf("duplicate attempt_n=%d under concurrent insert (race not closed)", v)
+		}
+		seen[v] = true
+	}
+	if len(seen) != N {
+		t.Fatalf("got %d distinct attempt_n values; want %d (rows missing)", len(seen), N)
+	}
+	for i := 0; i < N; i++ {
+		if !seen[i] {
+			t.Fatalf("attempt_n=%d missing from concurrent insert results", i)
+		}
+	}
+}
+
+func slicesEqualInt(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestOpenStoreCapsPoolAtOneConn pins the SetMaxOpenConns(1) +
+// SetMaxIdleConns(1) discipline at the constructor that owns it. Issue
+// #21 / ARCH-3: billing reuses this *sql.DB via
+// billing.NewStore(reqLogStore.DB()), so the cap here serializes the
+// whole money-path. If a future contributor deletes the cap, this
+// test fails directly in the requestlog package; the parallel cap-
+// dependent nested-cursor regressions in internal/billing remain as
+// failure-mode coverage.
+func TestOpenStoreCapsPoolAtOneConn(t *testing.T) {
+	store := openTestStore(t)
+	stats := store.DB().Stats()
+	if stats.MaxOpenConnections != 1 {
+		t.Fatalf("MaxOpenConnections=%d, want 1 (issue #21 cap)", stats.MaxOpenConnections)
+	}
 }

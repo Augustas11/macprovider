@@ -1,0 +1,73 @@
+# 05_mid_stream_drop.yaml — kill THIS Mac's provider process while a
+# buyer is mid-stream against the model that provider serves.
+#
+# This Mac is provider augustass-macbook-air, serving
+# mlx-community/Qwen3-32B-4bit, managed by launchd label
+# `live.streamvc.macprovider`. Chaos events use local launchctl —
+# no SSH required.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Per chat_proxy.go:495, gateway DOES NOT failover mid-stream.
+#    Expectation: buyer sees a terminal SSE error envelope
+#    (stream_truncated) before the final [DONE] frame, billing settles
+#    for tokens already delivered, no reroute.
+#  - Does I4 (silent hang) fire? It SHOULD NOT — there should be a
+#    terminating error.
+#  - Does I1 reconcile show partial token count consistently across
+#    coordinator and gateway?
+#  - PHASE B TRIAGE: is "no failover" the contract for beta, or should
+#    the gateway retry with the exclude list?
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+#
+# IMPORTANT: this scenario stops the local provider. The second chaos
+# event restarts it via launchctl kickstart -k. If launchd KeepAlive is
+# enabled (it is, per live.streamvc.macprovider managed unit), the
+# restart is automatic and the kickstart is a belt-and-suspenders.
+name: mid_stream_drop
+description: |
+  One buyer fires a streaming chat completion to Qwen3-32B (served only
+  by this Mac). At t=5s a chaos event kills the local provider process.
+  Harness records buyer outcome, partial token count, billing settlement.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Buyer should see Outcome != "ok" with SHORT completion_tokens_received > 0.
+   - SawTerminator may be true (stream_truncated marker) or false.
+   - I4 (silent hang) should NOT fire — gateway should write a terminal
+     SSE error envelope before the final [DONE] frame.
+   - I1 should show partial token agreement: coord.completion ==
+     gw.completion == bytes-derived count.
+   - PHASE B TRIAGE: confirm or refute "no mid-stream reroute" as contract.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 1
+
+duration: 60s
+request_timeout: 45s
+silent_hang_threshold: 20s
+
+prompts:
+  - model: mlx-community/Qwen3-32B-4bit
+    # Long generation so we reliably hit mid-stream when chaos fires at t=5s.
+    user: "Write a 200-word story about a lighthouse keeper. Take your time."
+    max_tokens: 384
+
+chaos_events:
+  - at: 5s
+    description: "Kill local provider process — buyer is mid-stream"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  - at: 25s
+    description: "Sanity restart (launchd KeepAlive should already have brought it back)"
+    command: launchctl kickstart gui/$(id -u)/live.streamvc.macprovider

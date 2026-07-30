@@ -17,7 +17,13 @@ type AuthStore interface {
 	RevokeAPIKeyForAccount(ctx context.Context, accountID, keyID, actor, requestID string) error
 	RotateAPIKey(ctx context.Context, oldKeyID, accountID string, newKey APIKey, actor, requestID string) error
 	StoreOAuthState(ctx context.Context, state OAuthState) error
-	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action string, err error)
+	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
+	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action, returnTo string, err error)
+	StoreOAuthHandoff(ctx context.Context, handoff OAuthHandoff) error
+	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (apiKey string, err error)
+	PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error)
+	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
+	ReservePublicIssuance(ctx context.Context, reservation PublicIssuanceReservation) error
 	RecordSignupEvent(ctx context.Context, event SignupEvent) error
 	CountSignupEventsSince(ctx context.Context, clientIP string, since time.Time) (int, error)
 	RecordDemoSessionEvent(ctx context.Context, event DemoSessionEvent) error
@@ -31,6 +37,7 @@ type AccountStore interface {
 	LookupAccount(ctx context.Context, accountID string) (Account, error)
 	RecordSignupEvent(ctx context.Context, event SignupEvent) error
 	CountSignupEventsSince(ctx context.Context, clientIP string, since time.Time) (int, error)
+	ReservePublicIssuance(ctx context.Context, reservation PublicIssuanceReservation) error
 }
 
 type KeyStore interface {
@@ -44,7 +51,12 @@ type KeyStore interface {
 
 type OAuthStateStore interface {
 	StoreOAuthState(ctx context.Context, state OAuthState) error
-	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action string, err error)
+	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
+	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action, returnTo string, err error)
+	StoreOAuthHandoff(ctx context.Context, handoff OAuthHandoff) error
+	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (apiKey string, err error)
+	PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error)
+	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
 }
 
 type DemoSessionStore interface {
@@ -57,7 +69,44 @@ type UsageStore interface {
 	SettleReservation(ctx context.Context, settlement ReservationSettlement) error
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
+	ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error
+	MarkReservationStaleHeld(ctx context.Context, accountID, requestID string, staleAt time.Time) error
+	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
+	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
+	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
+	// EnsureUsageEvent inserts a usage_events row idempotently. The
+	// idempotency key is the composite (account_id, request_id), matching
+	// the usage_events primary key. That is the SPEC-006 § 17.7 money-path
+	// contract for the failure-mode fallback in chat_proxy.settleAfterCommit
+	// (issue #187):
+	//
+	//   - Returns nil on a fresh insert.
+	//   - Returns nil when an existing row at the same account_id and
+	//     request_id matches the incoming event in EVERY billing-relevant
+	//     field (demo_identity, window_date, prompt_tokens,
+	//     completion_tokens, total_tokens, token_source, outcome).
+	//   - Returns ErrUsageEventConflict when an existing row at the same
+	//     account_id and request_id DIFFERS from the incoming event in any
+	//     of those fields.
+	//   - Allows the same request_id under a different account_id to be
+	//     stored independently; cross-account ambiguity is handled by
+	//     lookup callers that accept request_id without account_id.
+	//
+	// The caller must treat ErrUsageEventConflict as a failure to
+	// settle (i.e., the audit trail is unrecoverable for THIS event)
+	// and proceed to refund + log loudly.
+	EnsureUsageEvent(ctx context.Context, event UsageEvent) error
+	// EnsureDemoUsageEvent is the demo-token sibling of
+	// EnsureUsageEvent: idempotently inserts a demo_usage_events row
+	// (INSERT OR IGNORE on request_id PK). Used by the SPEC-006
+	// fallback path when SettleDemoReservation fails so the demo
+	// audit trail required by SPEC-006 §4.5 / §14.3 still exists.
+	// Returns nil on insert OR on a benign duplicate; the gateway's
+	// fallback path bounds collision exposure via the earlier
+	// EnsureUsageEvent call, which already runs the cross-account
+	// payload-mismatch check.
+	EnsureDemoUsageEvent(ctx context.Context, event DemoUsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
 	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)
 	// DeleteTerminalQuotaReservations drops quota_reservations rows in a
@@ -77,6 +126,7 @@ type HealthStore interface {
 type FeedbackStore interface {
 	InsertFeedbackEvent(ctx context.Context, event FeedbackEvent) error
 	ListFeedbackEventsSince(ctx context.Context, since time.Time) ([]FeedbackSummaryEvent, error)
+	ListFeedbackEventsSinceLimit(ctx context.Context, since time.Time, limit int) ([]FeedbackSummaryEvent, error)
 }
 
 type AuditStore interface {
@@ -90,13 +140,21 @@ type CapacityStore interface {
 	SetCapacityTier(ctx context.Context, tier CapacityTier) error
 	GetKillSwitch(ctx context.Context) (KillSwitchState, error)
 	SetKillSwitch(ctx context.Context, state KillSwitchState) error
+	CompareAndSwapKillSwitch(ctx context.Context, expectedVersion int64, state KillSwitchState) (bool, error)
 }
 
 type ExplorerStore interface {
 	ExplorerListBuyers(ctx context.Context, q ExplorerBuyerQuery) (ExplorerBuyerList, error)
 	ExplorerBuyerDetail(ctx context.Context, accountID string, q ExplorerDetailQuery) (ExplorerBuyerDetail, error)
 	ExplorerListSessions(ctx context.Context, q ExplorerSessionQuery) (ExplorerSessionList, error)
-	ExplorerSessionDetail(ctx context.Context, requestID string) (ExplorerSessionDetail, error)
+	// ExplorerSessionDetail looks up the row trail for a request_id.
+	// accountID may be empty for backward-compat callers; when empty
+	// AND the request_id resolves to multiple accounts (allowed since
+	// issue #196 made usage_events PK composite), the call returns
+	// ErrExplorerAmbiguousRequestID and populates
+	// ExplorerSessionDetail.MatchedAccountIDs so the caller can
+	// disambiguate.
+	ExplorerSessionDetail(ctx context.Context, accountID, requestID string) (ExplorerSessionDetail, error)
 	ExplorerActivity(ctx context.Context, q ExplorerActivityQuery) (ExplorerActivityList, error)
 	ExplorerHealth(ctx context.Context, since time.Time) (ExplorerHealth, error)
 }

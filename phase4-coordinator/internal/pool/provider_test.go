@@ -3,9 +3,91 @@ package pool
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"math"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 )
+
+func TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate(t *testing.T) {
+	const artifactHash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+	const weightsHash = "0baf13715db1eeb56e6d0806b0d764aa1c44497aaaaf8d2ba90c21128d9fe2fe"
+	var verifiedHash string
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(_, expected, reported, algorithm string) HashStatus {
+		if expected != artifactHash || algorithm != modelidentity.SnapshotManifestV1 {
+			return HashStatusInvalid
+		}
+		verifiedHash = reported
+		return HashStatusVerified
+	}))
+	start := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	registerHeartbeatProvider(t, registry, "old-model", "", HashStatusUncatalogued, start)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:                    StateReady,
+		ModelID:                   "mlx-community/Llama-3.2-3B-Instruct-4bit",
+		ModelHash:                 artifactHash,
+		ModelHashPresent:          true,
+		ModelHashAlgorithm:        modelidentity.SnapshotManifestV1,
+		ModelHashAlgorithmPresent: true,
+		WeightsManifestSHA256:     weightsHash,
+		WeightsHashAlgorithm:      modelidentity.SafetensorsManifestV1,
+		ExpectedModelHash:         artifactHash,
+		MaxContextTokens:          8192,
+		MaxConcurrency:            1,
+		SlotsFree:                 1,
+		SlotsTotal:                1,
+		At:                        start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat rejected Air provider")
+	}
+	if verifiedHash != artifactHash || provider.ModelHash != artifactHash {
+		t.Fatalf("canonical verifier saw %q, provider stored %q", verifiedHash, provider.ModelHash)
+	}
+	if provider.WeightsManifestSHA256 != weightsHash ||
+		provider.WeightsHashAlgorithm != modelidentity.SafetensorsManifestV1 {
+		t.Fatalf("weights identity lost or substituted: %+v", provider)
+	}
+}
+
+func TestHeartbeatModelChangeClearsPriorExpectedCatalogHash(t *testing.T) {
+	const hashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var seenExpected string
+	registry := NewRegistry(nil, WithModelIdentityVerifier(func(_, expected, _, _ string) HashStatus {
+		seenExpected = expected
+		if expected == "" {
+			return HashStatusUncatalogued
+		}
+		return HashStatusVerified
+	}))
+	start := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	registerHeartbeatProvider(t, registry, "model-a", hashA, HashStatusVerified, start)
+	registry.providers["p1"].ModelHashAlgorithm = modelidentity.SnapshotManifestV1
+	registry.providers["p1"].ExpectedModelHash = hashA
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:                    StateReady,
+		ModelID:                   "uncatalogued-model-b",
+		ModelHash:                 hashA,
+		ModelHashPresent:          true,
+		ModelHashAlgorithm:        modelidentity.SnapshotManifestV1,
+		ModelHashAlgorithmPresent: true,
+		ExpectedModelHash:         "",
+		SlotsFree:                 1,
+		SlotsTotal:                1,
+		At:                        start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat rejected provider")
+	}
+	if seenExpected != "" || provider.ExpectedModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("stale expected hash survived model change: seen=%q provider=%+v", seenExpected, provider)
+	}
+}
 
 // TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock pins the M2-2 / ARCH-2
 // invariant: the swap emitter MUST NOT run while Registry.mu is held.
@@ -51,6 +133,44 @@ func TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock(t *testing.T) {
 	}
 	if !seenModelLookup {
 		t.Fatal("ModelKnown should have observed model-b after swap completion")
+	}
+}
+
+func TestReplaceTier2SessionRequiresCurrentAssignedIDAndKeyEpoch(t *testing.T) {
+	registry := NewRegistry(nil)
+	oldSession := &Tier2Session{KeyID: "old-kid"}
+	provider := &Provider{
+		ProviderID: "provider-rekey", AssignedID: "assigned-current", ModelID: "model-a",
+		State: StateReady, SlotsFree: 1, SlotsTotal: 1, Tier2Session: oldSession,
+	}
+	if _, ok := registry.Register(provider, nil); !ok {
+		t.Fatal("register provider")
+	}
+	next := &Tier2Session{
+		KeyID:        "next-kid",
+		C2PKey:       bytes.Repeat([]byte{0x11}, 32),
+		P2CKey:       bytes.Repeat([]byte{0x22}, 32),
+		C2PNonceBase: []byte{0x01, 0x02, 0x03, 0x04},
+		P2CNonceBase: []byte{0x05, 0x06, 0x07, 0x08},
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-stale", "old-kid", next) {
+		t.Fatal("stale assigned ID replaced Tier-2 session")
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-current", "wrong-kid", next) {
+		t.Fatal("wrong prior KID replaced Tier-2 session")
+	}
+	if !registry.ReplaceTier2Session("provider-rekey", "assigned-current", "old-kid", next) {
+		t.Fatal("current assigned session and prior KID did not advance epoch")
+	}
+	resolved, ok := registry.Resolve("provider-rekey", "assigned-current")
+	if !ok || resolved.Tier2Session != next {
+		t.Fatalf("resolved Tier-2 session = %#v ok=%v, want next epoch", resolved.Tier2Session, ok)
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-current", "old-kid", &Tier2Session{KeyID: "attacker-kid"}) {
+		t.Fatal("replayed old epoch replaced current Tier-2 session")
+	}
+	if registry.ReplaceTier2Session("provider-rekey", "assigned-current", "next-kid", &Tier2Session{KeyID: "next-kid"}) {
+		t.Fatal("same or incomplete key epoch replaced current Tier-2 session")
 	}
 }
 
@@ -135,6 +255,12 @@ func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
 	failedAt := time.Date(2026, 6, 7, 12, 6, 0, 0, time.UTC)
 	p.CanaryLastCheckedAt = &checkedAt
 	p.CanaryLastFailedAt = &failedAt
+	p.SafetyTelemetry = &ProviderSafetyTelemetry{
+		SchemaVersion: 1, ProviderID: p.ProviderID, ModelID: p.ModelID, ModelLoaded: true,
+		RuntimeState: "ready", HardwareTier: "m1-16gb", MemoryCapacityMB: 16384,
+		MemoryPressure: "normal", ThermalState: "nominal", CoordinatorConnected: true,
+		ObservationID: "observation-a", ObservedAt: "2026-07-14T12:00:00Z", ValidForMS: 90000,
+	}
 
 	got, err := json.Marshal(p)
 	if err != nil {
@@ -148,6 +274,10 @@ func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
 	models, ok := fields["supported_models"].([]any)
 	if !ok || len(models) != 1 || models[0] != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
 		t.Fatalf("supported_models = %#v, want one model id", fields["supported_models"])
+	}
+	telemetry, ok := fields["safety_telemetry"].(map[string]any)
+	if !ok || telemetry["observation_id"] != "observation-a" || telemetry["memory_pressure"] != "normal" {
+		t.Fatalf("safety_telemetry = %#v", fields["safety_telemetry"])
 	}
 	if fields["publishes_supported_models"] != true {
 		t.Fatalf("publishes_supported_models = %#v, want true", fields["publishes_supported_models"])
@@ -228,10 +358,158 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if bearerless.RoutingEligible() {
 		t.Fatal("AuthBearerlessDuplicate MUST be excluded — SPEC-003 v0.8.3 FR-C9.4 credential trust gate")
 	}
+	selfMinted := base
+	selfMinted.AuthState = AuthSelfMinted
+	if selfMinted.RoutingEligible() {
+		t.Fatal("AuthSelfMinted MUST be excluded until the provider proves custody of the minted bearer")
+	}
+	if selfMinted.CapacityEligible() {
+		t.Fatal("AuthSelfMinted MUST be excluded from published serving capacity")
+	}
+	if selfMinted.ServingCapable() {
+		t.Fatal("AuthSelfMinted MUST be excluded from buyer-serving capability")
+	}
+	selfMintedVerified := base
+	selfMintedVerified.AuthState = AuthSelfMintedVerified
+	if !selfMintedVerified.RoutingEligible() {
+		t.Fatal("AuthSelfMintedVerified should be route eligible once proof-of-custody has completed")
+	}
 	pendingReceiptKey := base
 	pendingReceiptKey.PendingReceiptPubkey = []byte("pending")
 	if pendingReceiptKey.RoutingEligible() {
 		t.Fatal("pending receipt pubkey sessions must be excluded from routing until state_update publishes the key")
+	}
+	if pendingReceiptKey.CapacityEligible() {
+		t.Fatal("pending receipt pubkey sessions must be excluded from published serving capacity")
+	}
+	if pendingReceiptKey.ServingCapable() {
+		t.Fatal("pending receipt pubkey sessions must be excluded from buyer-serving capability")
+	}
+	legacyCatalog := base
+	legacyCatalog.CatalogAdmissionMode = "legacy"
+	if legacyCatalog.RoutingEligible() || legacyCatalog.CapacityEligible() {
+		t.Fatal("metadata-free legacy catalog sessions must remain visible but receive no buyer traffic or serving-capacity credit")
+	}
+	updateBridge := base
+	updateBridge.CatalogAdmissionMode = "update_bridge"
+	if updateBridge.RoutingEligible() || updateBridge.CapacityEligible() || updateBridge.ServingCapable() {
+		t.Fatal("#610 first-hop update_bridge sessions must remain visible but receive no buyer traffic or serving-capacity credit")
+	}
+	for _, mode := range []string{"", "not_required", "current", "previous"} {
+		admitted := base
+		admitted.CatalogAdmissionMode = mode
+		if !admitted.RoutingEligible() || !admitted.CapacityEligible() {
+			t.Fatalf("catalog admission mode %q should remain routing and capacity eligible", mode)
+		}
+		if !admitted.ServingCapable() {
+			t.Fatalf("catalog admission mode %q should remain buyer-serving capable", mode)
+		}
+	}
+	busy := base
+	busy.State = StateBusy
+	busy.SlotsFree = 0
+	if busy.RoutingEligible() || !busy.ServingCapable() {
+		t.Fatal("busy provider must be serving capable without being immediately routable")
+	}
+}
+
+func TestRegisterRefusesCredentialBypassedSandboxOverCredentialBearingSession(t *testing.T) {
+	t.Parallel()
+	registry := NewRegistry(nil)
+	existing := &Provider{
+		ProviderID:     "provider-a",
+		AssignedID:     "self-minted-session",
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		AuthState:      AuthSelfMinted,
+		Tier:           TierProvisional,
+		MaxConcurrency: 1,
+	}
+	if _, registered, refusal := registry.RegisterAtDetailed(existing, nil, time.Now().UTC()); !registered || refusal != RegisterRefusalNone {
+		t.Fatalf("register existing self-minted provider registered=%v refusal=%q", registered, refusal)
+	}
+
+	sandbox := &Provider{
+		ProviderID:                         "provider-a",
+		AssignedID:                         "sandbox-session",
+		State:                              StateReady,
+		SlotsFree:                          1,
+		SlotsTotal:                         1,
+		AdmissionSandboxed:                 true,
+		AdmissionSandboxCredentialBypassed: true,
+		Tier:                               TierProvisional,
+		MaxConcurrency:                     1,
+	}
+	if _, registered, refusal := registry.RegisterAtDetailed(sandbox, nil, time.Now().UTC()); registered || refusal != RegisterRefusalSandboxCredentialBypass {
+		t.Fatalf("credential-bypassed sandbox registered=%v refusal=%q, want sandbox credential-bypass refusal", registered, refusal)
+	}
+	current, ok := registry.Resolve("provider-a", "")
+	if !ok {
+		t.Fatal("existing provider missing after sandbox refusal")
+	}
+	if current.AssignedID != "self-minted-session" || current.AuthState != AuthSelfMinted {
+		t.Fatalf("sandbox refusal did not preserve existing credential-bearing session: %+v", current)
+	}
+}
+
+func TestExpireLegacyBridgeAdmissionsRemovesBuyerServingCapacity(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:           "bridge-provider",
+		AssignedID:           "bridge-session",
+		State:                StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		CatalogAdmissionMode: "legacy_bridge",
+	}
+	if _, registered := registry.Register(provider, nil); !registered {
+		t.Fatal("register bridge provider")
+	}
+	if updated := registry.ExpireLegacyBridgeAdmissions(); updated != 1 {
+		t.Fatalf("ExpireLegacyBridgeAdmissions() = %d, want 1", updated)
+	}
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("resolve expired bridge provider")
+	}
+	if got.CatalogAdmissionMode != "legacy" {
+		t.Fatalf("CatalogAdmissionMode = %q, want legacy", got.CatalogAdmissionMode)
+	}
+	if got.RoutingEligible() || got.ServingCapable() {
+		t.Fatal("expired bridge provider must remain visible but lose buyer routing and serving capacity")
+	}
+	if updated := registry.ExpireLegacyBridgeAdmissions(); updated != 0 {
+		t.Fatalf("second ExpireLegacyBridgeAdmissions() = %d, want idempotent 0", updated)
+	}
+}
+
+func TestExpireLegacyModelHashAdmissionsFencesOnlyUntypedSessions(t *testing.T) {
+	registry := NewRegistry(nil)
+	for _, provider := range []*Provider{
+		{
+			ProviderID: "legacy", AssignedID: "legacy-session", ModelID: "model-a",
+			ModelHash: strings.Repeat("a", 64), HashStatus: HashStatusUncatalogued,
+			State: StateReady, SlotsFree: 1, SlotsTotal: 1,
+		},
+		{
+			ProviderID: "modern", AssignedID: "modern-session", ModelID: "model-a",
+			ModelHash: strings.Repeat("a", 64), ModelHashAlgorithm: modelidentity.SnapshotManifestV1,
+			HashStatus: HashStatusVerified, State: StateReady, SlotsFree: 1, SlotsTotal: 1,
+		},
+	} {
+		if _, ok := registry.Register(provider, nil); !ok {
+			t.Fatalf("register %s", provider.ProviderID)
+		}
+	}
+	expired := registry.ExpireLegacyModelHashAdmissions()
+	if len(expired) != 1 || expired[0].ProviderID != "legacy" {
+		t.Fatalf("expired = %+v", expired)
+	}
+	legacy, _ := registry.Resolve("legacy", "legacy-session")
+	modern, _ := registry.Resolve("modern", "modern-session")
+	if legacy.HashStatus != HashStatusInvalid || modern.HashStatus != HashStatusVerified {
+		t.Fatalf("fence states legacy=%q modern=%q", legacy.HashStatus, modern.HashStatus)
 	}
 }
 
@@ -248,6 +526,20 @@ func TestRecordCanaryResultTripsProvisionalUnavailable(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	// A second eligible provider for the same model keeps the FR-CAN22
+	// last-provider floor from sparing the target, so this test still exercises
+	// the normal trip path.
+	registry.Register(&Provider{
+		ProviderID:       "provisional-b",
+		AssignedID:       "session-b",
+		ModelID:          "model-a",
+		Tier:             TierProvisional,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
+	}, nil)
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 	first := registry.RecordCanaryResult("provisional-a", "session-a", false, at, 3)
@@ -287,6 +579,20 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	// A second eligible provider for the same model keeps the FR-CAN22
+	// last-provider floor from sparing the target, so this test still exercises
+	// the normal pinned-degrade trip path.
+	registry.Register(&Provider{
+		ProviderID:       "pinned-b",
+		AssignedID:       "session-companion",
+		ModelID:          "model-a",
+		Tier:             TierPinned,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
+	}, nil)
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 	first := registry.RecordCanaryResult("pinned-a", "session-a", false, at, 2)
@@ -390,6 +696,265 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 	}
 }
 
+// registerFloorPeer registers a second routing-eligible provider serving
+// modelID so the FR-CAN22 last-provider floor does not spare the provider under
+// test — letting sanction/recovery tests still exercise the trip path.
+func registerFloorPeer(registry *Registry, id, modelID string) {
+	registry.Register(&Provider{
+		ProviderID:       id,
+		AssignedID:       id + "-session",
+		ModelID:          modelID,
+		Tier:             TierProvisional,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
+	}, nil)
+}
+
+// TestRecordCanaryResultFloorSparesSoleProvider verifies the FR-CAN22
+// last-provider floor: a sole routing-eligible provider that fails canaries past
+// the threshold is NOT removed — it stays ready/routable, keeps accruing the
+// fail count, and reports CanaryTripFloorHeld so the caller can alert. Covers
+// both tiers (provisional ban path and pinned degrade path).
+func TestRecordCanaryResultFloorSparesSoleProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tier Tier
+	}{
+		{"provisional", TierProvisional},
+		{"pinned", TierPinned},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{
+				ProviderID:       "sole-a",
+				AssignedID:       "session-a",
+				ModelID:          "model-a",
+				Tier:             tc.tier,
+				State:            StateReady,
+				SlotsFree:        1,
+				SlotsTotal:       1,
+				MaxConcurrency:   1,
+				MaxContextTokens: 4096,
+			}, nil)
+			at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+			// Fail well past the threshold; the sole provider is never removed.
+			for i := 0; i < 5; i++ {
+				res := registry.RecordCanaryResult("sole-a", "session-a", false, at.Add(time.Duration(i)*time.Minute), 3)
+				if res.Count < 3 {
+					if res.Tripped != CanaryTripNone {
+						t.Fatalf("sub-threshold result %d = %+v, want no trip", i, res)
+					}
+					continue
+				}
+				if res.Tripped != CanaryTripFloorHeld {
+					t.Fatalf("at/over-threshold result %d = %+v, want CanaryTripFloorHeld", i, res)
+				}
+			}
+			got, ok := registry.Resolve("sole-a", "session-a")
+			if !ok {
+				t.Fatal("provider not found")
+			}
+			if got.State != StateReady || !got.RoutingEligible() {
+				t.Fatalf("sole provider = %+v, want spared (ready/routable)", got)
+			}
+			if got.CanaryFailCount != 5 {
+				t.Fatalf("canary fail count = %d, want 5 (still accruing while spared)", got.CanaryFailCount)
+			}
+		})
+	}
+}
+
+// TestRecordCanaryResultFloorRequiresBuyerServingTarget verifies that the floor
+// protects only an actual buyer-serving sole provider. A target excluded by the
+// same predicate used for peers must take the normal sanction path; otherwise a
+// zero-context or Tier-2-excluded provider could remain Ready as "floor held".
+func TestRecordCanaryResultFloorRequiresBuyerServingTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		maxContext int
+	}{
+		{name: "zero-context", maxContext: 0},
+		{name: "negative-context", maxContext: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := NewRegistry(nil)
+			registry.Register(&Provider{
+				ProviderID:       "target",
+				AssignedID:       "session-t",
+				ModelID:          "model-a",
+				Tier:             TierProvisional,
+				State:            StateReady,
+				SlotsFree:        1,
+				SlotsTotal:       1,
+				MaxConcurrency:   1,
+				MaxContextTokens: tc.maxContext,
+			}, nil)
+
+			result := registry.RecordCanaryResult(
+				"target",
+				"session-t",
+				false,
+				time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
+				1,
+			)
+			if result.Tripped != CanaryTripUnavailable {
+				t.Fatalf("result = %+v, want CanaryTripUnavailable", result)
+			}
+			got, ok := registry.Resolve("target", "session-t")
+			if !ok || got.State != StateUnavailable {
+				t.Fatalf("provider = %+v, ok=%v, want unavailable", got, ok)
+			}
+		})
+	}
+
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID:       "target",
+		AssignedID:       "session-t",
+		ModelID:          "model-a",
+		Tier:             TierPinned,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
+	}, nil)
+	registry.SetBuyerServingPredicate(func(p Provider) bool { return p.ProviderID != "target" })
+	result := registry.RecordCanaryResult(
+		"target",
+		"session-t",
+		false,
+		time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
+		1,
+	)
+	if result.Tripped != CanaryTripDegraded {
+		t.Fatalf("predicate-excluded target result = %+v, want CanaryTripDegraded", result)
+	}
+}
+
+// TestRecordCanaryResultFloorLiftsWithSecondProvider verifies the floor is scoped
+// to being the sole provider passing the request-INDEPENDENT routability gates for
+// the ACTIVE model. Only a RoutingEligible (ready + free slots) peer with a positive
+// context window lifts the floor (in this pool-package test via the nil fallback,
+// which omits the ws-only transport/Tier-2 gates); peers unroutable on a
+// request-independent field do NOT:
+//   - degraded (not RoutingEligible),
+//   - busy / zero free slots (not routable now — over-protective, safe),
+//   - negative free slots (heartbeat-authored, stored verbatim),
+//   - zero context window (rejected for every buyer request),
+//   - a peer serving model-b that only DECLARES model-a via SupportedModels.
+func TestRecordCanaryResultFloorLiftsWithSecondProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "target", AssignedID: "session-t", ModelID: "model-a",
+		Tier: TierProvisional, State: StateReady,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
+	}, nil)
+	// None of these unroutable peers may lift model-a's floor.
+	for _, p := range []*Provider{
+		// degraded → not RoutingEligible.
+		{ProviderID: "degraded-peer", AssignedID: "sd", ModelID: "model-a", Tier: TierProvisional,
+			State: StateDegraded, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+		// busy / zero free slots → not routable now.
+		{ProviderID: "busy-peer", AssignedID: "sb", ModelID: "model-a", Tier: TierProvisional,
+			State: StateBusy, SlotsFree: 0, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+		// negative free slots → not routable.
+		{ProviderID: "neg-peer", AssignedID: "sn", ModelID: "model-a", Tier: TierProvisional,
+			State: StateReady, SlotsFree: -1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+		// zero context window → rejected for every request.
+		{ProviderID: "noctx-peer", AssignedID: "sx", ModelID: "model-a", Tier: TierProvisional,
+			State: StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 0},
+		// declared-but-cold (serves model-b, only declares model-a).
+		{ProviderID: "cold-declarer", AssignedID: "sc", ModelID: "model-b", SupportedModels: []string{"model-a"},
+			Tier: TierProvisional, State: StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096},
+	} {
+		registry.Register(p, nil)
+	}
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	held := registry.RecordCanaryResult("target", "session-t", false, at, 1)
+	if held.Tripped != CanaryTripFloorHeld {
+		t.Fatalf("with no routable model-a peer, result = %+v, want CanaryTripFloorHeld", held)
+	}
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel(model-a) = %d, want 1 (target only)", n)
+	}
+
+	// A genuinely routable peer (ready + free slot + context) lifts the floor.
+	registry.Register(&Provider{
+		ProviderID: "ready-peer", AssignedID: "sr", ModelID: "model-a", Tier: TierProvisional,
+		State: StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
+	}, nil)
+	if n := registry.BuyerServingCountForModel("model-a"); n != 2 {
+		t.Fatalf("BuyerServingCountForModel(model-a) = %d, want 2", n)
+	}
+	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
+	if tripped.Tripped != CanaryTripUnavailable {
+		t.Fatalf("with a routable peer, result = %+v, want CanaryTripUnavailable", tripped)
+	}
+	got, _ := registry.Resolve("target", "session-t")
+	if got.State != StateUnavailable {
+		t.Fatalf("state = %q, want unavailable", got.State)
+	}
+}
+
+// TestRecordCanaryResultFloorRespectsBuyerServingPredicate verifies the floor uses
+// the injected buyer-serving predicate (a custom closure here), not its default: a
+// ready same-model peer that the injected predicate rejects (standing in for the
+// production Tier-2 / transport exclusions the pool package cannot evaluate) must
+// NOT lift the floor.
+func TestRecordCanaryResultFloorRespectsBuyerServingPredicate(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID:     "target",
+		AssignedID:     "session-t",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	registry.Register(&Provider{
+		ProviderID:     "excluded-peer",
+		AssignedID:     "session-e",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+
+	// Predicate rejects the peer (simulating a Tier-2/quota exclusion the raw
+	// ServingCapable check would miss) → the peer does not count → floor holds.
+	registry.SetBuyerServingPredicate(func(p Provider) bool {
+		return p.ProviderID != "excluded-peer" && p.ServingCapable()
+	})
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 1 (peer excluded by predicate)", n)
+	}
+	held := registry.RecordCanaryResult("target", "session-t", false, at, 1)
+	if held.Tripped != CanaryTripFloorHeld {
+		t.Fatalf("with a predicate-excluded peer, result = %+v, want CanaryTripFloorHeld", held)
+	}
+
+	// Predicate now accepts the peer → it lifts the floor → target trips.
+	registry.SetBuyerServingPredicate(func(p Provider) bool { return p.ServingCapable() })
+	if n := registry.BuyerServingCountForModel("model-a"); n != 2 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 2", n)
+	}
+	tripped := registry.RecordCanaryResult("target", "session-t", false, at.Add(time.Minute), 1)
+	if tripped.Tripped != CanaryTripUnavailable {
+		t.Fatalf("with the peer buyer-serving, result = %+v, want CanaryTripUnavailable", tripped)
+	}
+}
+
 func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
 	beforeRestart := NewRegistry(nil)
 	provider := &Provider{
@@ -403,6 +968,7 @@ func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	beforeRestart.Register(provider, nil)
+	registerFloorPeer(beforeRestart, "floor-peer", "model-a")
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	beforeRestart.RecordCanaryResult("pinned-restart", "session-a", false, at, 2)
 	beforeRestart.RecordCanaryResult("pinned-restart", "session-a", false, at.Add(time.Minute), 2)
@@ -436,6 +1002,59 @@ func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
 	}
 }
 
+func TestClearCanarySanctionRecoversOnlyCanaryHeldProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "pinned-recovery",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	registerFloorPeer(registry, "floor-peer", "model-a")
+	at := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	registry.RecordCanaryResult("pinned-recovery", "session-a", false, at, 1)
+
+	if !registry.ClearCanarySanction("pinned-recovery") {
+		t.Fatal("clear did not report canary state")
+	}
+	recovered, ok := registry.Resolve("pinned-recovery", "session-a")
+	if !ok {
+		t.Fatal("provider not found after recovery")
+	}
+	if recovered.State != StateDegraded || recovered.CanaryFailCount != 0 || recovered.CanaryLastFailedAt != nil {
+		t.Fatalf("recovered provider = %+v, want current session degraded with cleared canary failures", recovered)
+	}
+	if registry.CanaryRecoveryEligible("pinned-recovery", "session-a") {
+		t.Fatal("canary recovery hold survived operator recovery")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 0 {
+		t.Fatalf("canary sanctions = %+v, want none", sanctions)
+	}
+	if registry.ClearCanarySanction("pinned-recovery") {
+		t.Fatal("idempotent clear reported stale canary state")
+	}
+	replacement := &Provider{
+		ProviderID:     "pinned-recovery",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(replacement, nil)
+	reconnected, ok := registry.Resolve("pinned-recovery", "session-b")
+	if !ok || reconnected.State != StateReady || !reconnected.RoutingEligible() {
+		t.Fatalf("reconnected provider = %+v, want fresh ready session", reconnected)
+	}
+}
+
 func TestStaleTerminalCanaryPassDoesNotClearSanction(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{
@@ -449,6 +1068,7 @@ func TestStaleTerminalCanaryPassDoesNotClearSanction(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	registerFloorPeer(registry, "floor-peer", "model-a")
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 	registry.RecordCanaryResult("pinned-terminal", "session-a", false, at, 1)
 	if !registry.MarkState("pinned-terminal", "session-a", StateUnavailable) {
@@ -477,6 +1097,7 @@ func TestCanaryPassDoesNotUndoDrain(t *testing.T) {
 		MaxConcurrency: 1,
 	}
 	registry.Register(provider, nil)
+	registerFloorPeer(registry, "floor-peer", "model-a")
 	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 	registry.RecordCanaryResult("pinned-drain", "session-a", false, at, 1)
@@ -719,7 +1340,7 @@ func TestProviderCannotEscapeBreakerHoldViaDrainingLaundering(t *testing.T) {
 	assertState("after coordinator MarkRecovered", StateReady)
 }
 
-func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
+func TestApplyHeartbeatOmittedIdentityClearsCachedVerification(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
 	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
@@ -728,8 +1349,8 @@ func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
 	if !ok {
 		t.Fatal("heartbeat not applied")
 	}
-	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusVerified {
-		t.Fatalf("legacy unchanged hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
+	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("omitted identity state = (%q, %q), want cleared uncatalogued", provider.ModelHash, provider.HashStatus)
 	}
 	if provider.LastLoadingState {
 		t.Fatal("LastLoadingState changed on absent loading")
@@ -744,6 +1365,203 @@ func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
 	}
 	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
 		t.Fatalf("legacy model change hash state = (%q, %q), want cleared uncatalogued", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+func TestApplyHeartbeatDetailedReportsModelIDChange(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	unchanged := registry.ApplyHeartbeatDetailed("p1", "current", heartbeatUpdateAt("model-a", start.Add(time.Minute)))
+	if !unchanged.OK || unchanged.ModelIDChanged || unchanged.PriorModelID != "model-a" {
+		t.Fatalf("unchanged result = %+v", unchanged)
+	}
+	changed := registry.ApplyHeartbeatDetailed("p1", "current", heartbeatUpdateAt("model-b", start.Add(2*time.Minute)))
+	if !changed.OK || !changed.ModelIDChanged || changed.PriorModelID != "model-a" {
+		t.Fatalf("changed result = %+v", changed)
+	}
+	if changed.Provider == nil || changed.Provider.ModelID != "model-b" {
+		t.Fatalf("changed provider = %+v", changed.Provider)
+	}
+}
+
+func TestApplyHeartbeatStoresHardwareCapacity(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		State:            StateReady,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		ConnectedAt:      start,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		AuthState:        AuthBearerValidated,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-a",
+		RAMGB:            32,
+		MaxContextTokens: 8192,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		HardwareCapacity: &ProviderHardwareCapacity{
+			Chip:              " Apple M4 Pro ",
+			BandwidthGBPerSec: 273,
+			NetworkPowerKW:    0.065,
+			GPUCoresTotal:     20,
+			CPUCoresTotal:     14,
+		},
+		At: start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat ok = false")
+	}
+	if provider.HardwareCapacity == nil {
+		t.Fatal("HardwareCapacity = nil")
+	}
+	if provider.HardwareCapacity.Chip != "Apple M4 Pro" ||
+		provider.HardwareCapacity.BandwidthGBPerSec != 273 ||
+		provider.HardwareCapacity.NetworkPowerKW != 0.065 ||
+		provider.HardwareCapacity.GPUCoresTotal != 20 ||
+		provider.HardwareCapacity.CPUCoresTotal != 14 {
+		t.Fatalf("HardwareCapacity = %+v", provider.HardwareCapacity)
+	}
+	snap := registry.Snapshot()
+	if len(snap) != 1 || snap[0].HardwareCapacity == nil || snap[0].HardwareCapacity.GPUCoresTotal != 20 {
+		t.Fatalf("Snapshot hardware capacity = %+v", snap)
+	}
+}
+
+func TestApplyHeartbeatStoresFreshSafetyTelemetry(t *testing.T) {
+	start := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	registry := NewRegistry(nil)
+	registerHeartbeatProvider(t, registry, "model-a", "", HashStatusUncatalogued, start)
+	telemetry := &ProviderSafetyTelemetry{
+		SchemaVersion: 1, ProviderID: "p1", ModelID: "model-a", ModelLoaded: true,
+		RuntimeState: "ready", HardwareTier: "m1-16gb", MemoryCapacityMB: 16384,
+		MemoryPressure: "normal", ThermalState: "nominal", CoordinatorConnected: true,
+		ObservationID: "observation-a", ObservedAt: "2000-01-01T00:00:00Z", ValidForMS: 90000,
+	}
+	observedAt := start.Add(time.Minute)
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status: StateReady, ModelID: "model-a", SlotsFree: 1, SlotsTotal: 1,
+		SafetyTelemetry: telemetry, At: observedAt,
+	})
+	if !ok || provider.SafetyTelemetry == nil {
+		t.Fatalf("ApplyHeartbeat ok=%v provider=%+v", ok, provider)
+	}
+	if provider.SafetyTelemetry.ObservedAt != observedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("observed_at=%q want coordinator receipt %q", provider.SafetyTelemetry.ObservedAt, observedAt.Format(time.RFC3339Nano))
+	}
+	if telemetry.ObservedAt != "2000-01-01T00:00:00Z" {
+		t.Fatal("ApplyHeartbeat mutated caller telemetry")
+	}
+}
+
+func TestApplyHeartbeatStoresRollingThroughput(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		State:            StateReady,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		ConnectedAt:      start,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		AuthState:        AuthBearerValidated,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:                  StateReady,
+		ModelID:                 "model-a",
+		RAMGB:                   32,
+		MaxContextTokens:        8192,
+		MaxConcurrency:          1,
+		SlotsFree:               1,
+		SlotsTotal:              1,
+		ThroughputTPSEstimate:   0.2,
+		RequestsServedSinceLast: 1,
+		ThroughputTPSSinceLast:  42.5,
+		At:                      start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat ok = false")
+	}
+	if provider.RequestsServedSinceLast != 1 || provider.ThroughputTPSSinceLast != 42.5 {
+		t.Fatalf("rolling throughput = requests:%d tps:%v", provider.RequestsServedSinceLast, provider.ThroughputTPSSinceLast)
+	}
+}
+
+func TestApplyHeartbeatClampsHardwareCapacityBounds(t *testing.T) {
+	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+		return HashStatusVerified
+	}))
+	start := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		State:            StateReady,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		ConnectedAt:      start,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		AuthState:        AuthBearerValidated,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-a",
+		RAMGB:            32,
+		MaxContextTokens: 8192,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		HardwareCapacity: &ProviderHardwareCapacity{
+			Chip:              strings.Repeat("x", MaxProviderHardwareChipBytes+20),
+			BandwidthGBPerSec: int64(^uint64(0) >> 1),
+			NetworkPowerKW:    math.Inf(1),
+			GPUCoresTotal:     int(^uint32(0) >> 1),
+			CPUCoresTotal:     int(^uint32(0) >> 1),
+		},
+		At: start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat ok = false")
+	}
+	if provider.HardwareCapacity == nil {
+		t.Fatal("HardwareCapacity = nil")
+	}
+	if len([]byte(provider.HardwareCapacity.Chip)) > MaxProviderHardwareChipBytes {
+		t.Fatalf("chip length = %d want <= %d", len([]byte(provider.HardwareCapacity.Chip)), MaxProviderHardwareChipBytes)
+	}
+	if provider.HardwareCapacity.BandwidthGBPerSec != MaxProviderHardwareBandwidthGBPerSec {
+		t.Fatalf("BandwidthGBPerSec=%d want %d", provider.HardwareCapacity.BandwidthGBPerSec, MaxProviderHardwareBandwidthGBPerSec)
+	}
+	if provider.HardwareCapacity.NetworkPowerKW != 0 {
+		t.Fatalf("NetworkPowerKW=%f want 0 for non-finite input", provider.HardwareCapacity.NetworkPowerKW)
+	}
+	if provider.HardwareCapacity.GPUCoresTotal != MaxProviderHardwareGPUCoresTotal {
+		t.Fatalf("GPUCoresTotal=%d want %d", provider.HardwareCapacity.GPUCoresTotal, MaxProviderHardwareGPUCoresTotal)
+	}
+	if provider.HardwareCapacity.CPUCoresTotal != MaxProviderHardwareCPUCoresTotal {
+		t.Fatalf("CPUCoresTotal=%d want %d", provider.HardwareCapacity.CPUCoresTotal, MaxProviderHardwareCPUCoresTotal)
 	}
 }
 
@@ -779,7 +1597,7 @@ func TestApplyHeartbeatSPEC011PathReVerifiesOnHashChangeSameModelID(t *testing.T
 	}
 }
 
-func TestApplyHeartbeatSPEC011PathNoChangeWhenBothModelIDAndHashUnchanged(t *testing.T) {
+func TestApplyHeartbeatReverifiesUnchangedIdentity(t *testing.T) {
 	verifierCalls := 0
 	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
 		verifierCalls++
@@ -792,10 +1610,10 @@ func TestApplyHeartbeatSPEC011PathNoChangeWhenBothModelIDAndHashUnchanged(t *tes
 	if !ok {
 		t.Fatal("heartbeat not applied")
 	}
-	if verifierCalls != 0 {
-		t.Fatalf("verifierCalls = %d, want 0", verifierCalls)
+	if verifierCalls != 1 {
+		t.Fatalf("verifierCalls = %d, want 1", verifierCalls)
 	}
-	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusVerified {
+	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusMismatch {
 		t.Fatalf("unchanged SPEC-011 hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
 	}
 }
@@ -969,11 +1787,20 @@ func TestApplyHeartbeatSwapEmitterDoesNotFireWhenNoPriorLoading(t *testing.T) {
 	}
 }
 
-// TestModelKnownShrinksOnProviderDisconnect pins the M2-5 / PERF-5
-// guarantee: ModelKnown answers from currently-connected providers only.
-// Pre-M2-5 the registry-wide seenModels map accumulated forever — a
-// 31-day model id observed once still answered true 1y later.
-func TestModelKnownShrinksOnProviderDisconnect(t *testing.T) {
+// TestModelKnownPersistsInLifetimeAccumulator pins the SPEC-002 § 7.2 /
+// issue #185 contract: ModelKnown returns true for any model id ever
+// advertised during the coordinator process lifetime — not only for
+// currently-connected providers' models. The per-provider
+// seenModelsByProvider map still shrinks on RemoveIfSession (PERF-5
+// memory bound), but the dedicated seenModelsLifetime accumulator is
+// append-only within maxSeenModelsLifetime so cold-start races route
+// to 503 no_provider_available instead of 404 model_not_found.
+//
+// Pre-#185, ModelKnown iterated only seenModelsByProvider, so the
+// "only provider disconnected" case answered false and the buyer port
+// returned 404 — the SPEC-002 § 7.2 violation that this test guards
+// against regressing.
+func TestModelKnownPersistsInLifetimeAccumulator(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
 
@@ -1002,25 +1829,490 @@ func TestModelKnownShrinksOnProviderDisconnect(t *testing.T) {
 	if !registry.ModelKnown("model-a") {
 		t.Fatal("ModelKnown(model-a) = false; per-session memory regressed")
 	}
-	// Disconnect p1 — both models it ever reported should drop from the
-	// global view.
+	// Disconnect p1. seenModelsByProvider["p1"] is dropped (PERF-5
+	// invariant), but seenModelsLifetime retains every model id ever
+	// advertised so SPEC-002 § 7.2's 404-vs-503 distinction is preserved.
 	if !registry.RemoveIfSession("p1", "s1") {
 		t.Fatal("RemoveIfSession returned false")
 	}
-	if registry.ModelKnown("model-a") {
-		t.Fatal("ModelKnown(model-a) still true after the only provider serving it disconnected — leak (PERF-5)")
+	if !registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) = false after p1 disconnected; SPEC-002 § 7.2 cold-start race regressed (issue #185)")
 	}
-	if registry.ModelKnown("model-b") {
-		t.Fatal("ModelKnown(model-b) still true after the only provider serving it disconnected — leak (PERF-5)")
+	if !registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) = false after p1 disconnected; SPEC-002 § 7.2 cold-start race regressed (issue #185)")
+	}
+	// PERF-5 invariant: the per-provider map IS dropped, even though
+	// the lifetime accumulator retains the model ids.
+	registry.mu.RLock()
+	if _, exists := registry.seenModelsByProvider["p1"]; exists {
+		registry.mu.RUnlock()
+		t.Fatal("seenModelsByProvider[p1] still present after RemoveIfSession; PERF-5 cleanup regressed")
+	}
+	registry.mu.RUnlock()
+	// Never-seen model id MUST still answer false — the cap is on
+	// "seen", not on "any id is true".
+	if registry.ModelKnown("nonexistent-model-9000") {
+		t.Fatal("ModelKnown(nonexistent-model-9000) = true; lifetime accumulator returning false positives")
+	}
+}
+
+// TestModelKnownUnionsDeclaredSupportedModels pins SPEC-010 v1.5
+// R-3.3.4: the seen-model index is the UNION of a provider's served
+// ModelID and every entry in its SupportedModels, so ModelKnown()
+// returns true for a model that a provider DECLARES supporting but is
+// not currently serving (cold). This is what makes a buyer request for
+// such a model fall through to 503 no_provider_available (retryable)
+// instead of 404 model_not_found.
+func TestModelKnownUnionsDeclaredSupportedModels(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Provider serves model-y but declares support for model-x (cold)
+	// and Model-X-CASE (mixed case, to exercise the case-folding the
+	// registration path already applies to model ids). R-3.1.4: the
+	// served model_id MUST appear in supported_models, so model-y is
+	// listed too (a duplicate of the modelID argument; it's a no-op
+	// on the seen-index, already recorded via modelID).
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-y",
+		SupportedModels:  []string{"model-y", "model-x", "Model-X-CASE"},
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	// (a) The served model is known.
+	if !registry.ModelKnown("model-y") {
+		t.Fatal("ModelKnown(model-y) = false; served model_id not in seen index")
+	}
+	// (a) A declared-but-cold model is known via the R-3.3.4 union.
+	if !registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = false; declared supported_models entry not unioned into seen index (SPEC-010 R-3.3.4)")
+	}
+	// Case-folding: the union entry is matched regardless of case, the
+	// same as the served model_id path (ModelKnown lowercases + EqualFold).
+	if !registry.ModelKnown("model-x-case") {
+		t.Fatal("ModelKnown(model-x-case) = false; declared supported model not case-folded like model_id")
+	}
+	// (c) A model no provider declares is NOT known — union must not
+	// turn unknown models into false positives (would wrongly 503).
+	if registry.ModelKnown("model-z-undeclared") {
+		t.Fatal("ModelKnown(model-z-undeclared) = true; undeclared model must stay unknown (404), not 503")
+	}
+
+	// (d) Lifecycle: the per-session attribution index carries the
+	// declared supported models while connected, and is dropped on
+	// disconnect EXACTLY as the served model_id is (M2-5 / PERF-5). The
+	// pool-lifetime accumulator (SPEC-002 § 7.2) retains them append-only
+	// so the cold-start race still answers 503 — identical to model_id.
+	registry.mu.RLock()
+	sessionSet := registry.seenModelsByProvider["p1"]
+	_, xInSession := sessionSet["model-x"]
+	_, yInSession := sessionSet["model-y"]
+	registry.mu.RUnlock()
+	if !xInSession || !yInSession {
+		t.Fatalf("seenModelsByProvider[p1] = %v; want served model_id AND declared supported models while connected", sessionSet)
+	}
+
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	// Per-session attribution for the declared model is gone on
+	// disconnect — no leak, same lifecycle as model_id.
+	registry.mu.RLock()
+	_, sessionStillPresent := registry.seenModelsByProvider["p1"]
+	registry.mu.RUnlock()
+	if sessionStillPresent {
+		t.Fatal("seenModelsByProvider[p1] still present after RemoveIfSession; supported-model union leaked into per-session index")
+	}
+	// Lifetime survival (intended, matches model_id / issue #185): a
+	// declared-cold model stays known across a disconnect so the buyer
+	// port keeps answering 503 for the cold-start race window.
+	if !registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = false after disconnect; declared-cold model should survive in lifetime accumulator like model_id (SPEC-002 § 7.2)")
+	}
+}
+
+// TestModelKnownUnionsSupportedModelsOnHeartbeat pins that the R-3.3.4
+// union is re-applied on the heartbeat path too (provider.go heartbeat
+// site), not only at registration.
+//
+// Codex code-lane audit of PR #555 flagged the original version of this
+// test as ineffective: it declared model-x at REGISTRATION time, so the
+// registration-time union alone (not the heartbeat call) already made
+// ModelKnown(model-x) true -- the assertion stayed green even if the
+// heartbeat call were reverted to recordSeenModelLocked(p.ProviderID,
+// hb.ModelID) (dropping SupportedModels).
+//
+// This version exercises a supported-model entry the registration-time
+// union never saw: model-x is appended to the live Provider's
+// SupportedModels (white-box mutation, same package -- the real wire
+// has no post-registration supported_models update path; heartbeat
+// frames don't carry the field) strictly BETWEEN registration and the
+// heartbeat call. The assertion runs AFTER RemoveIfSession disconnects
+// the provider, so ModelKnown's live-provider SupportedModels scan
+// (fallback 1b, the HIGH-severity fix for cap-exhausted entries) no
+// longer applies either -- the only way model-x can still be known is
+// if the heartbeat's recordSeenModelsUnionLocked call recorded it into
+// the seen index while the provider was live.
+func TestModelKnownUnionsSupportedModelsOnHeartbeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-y",
+		SupportedModels:  []string{"model-y"},
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	if registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = true before it was ever declared; fixture bug")
+	}
+
+	// Simulate the provider's declared catalog gaining model-x between
+	// registration and the next heartbeat.
+	registry.mu.Lock()
+	registry.providers["p1"].SupportedModels = append(registry.providers["p1"].SupportedModels, "model-x")
+	registry.mu.Unlock()
+
+	registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt("model-y", start.Add(time.Minute)))
+
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	// Provider is disconnected: ModelKnown's live-provider scans no
+	// longer see it. model-x can only still be known via the seen
+	// index the heartbeat call populated.
+	if !registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = false after disconnect; heartbeat path did not union declared supported_models into the seen index (SPEC-010 R-3.3.4)")
+	}
+}
+
+// TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps pins the HIGH-
+// severity fix from the codex code-lane audit of PR #555: the seen-
+// index union (recordSeenModelsUnionLocked) is a best-effort
+// accumulator bounded by maxSeenModelsPerProvider (per-session, 32),
+// maxLifetimeContribPerProvider (per-provider lifetime, 128), and
+// maxSeenModelsLifetime (global lifetime, 4096). A provider with a
+// declared catalog wider than those caps has entries silently dropped
+// from the seen index -- but ModelKnown's live-provider SupportedModels
+// scan (fallback 1b) must still find them while the declaring provider
+// is CURRENTLY CONNECTED, regardless of cap state. A served model_id
+// never had this gap (the live ModelID scan always covers it); this
+// test pins the equivalent unconditional guarantee for declared models.
+func TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	const totalSupported = 200
+	supported := make([]string, totalSupported)
+	// R-3.1.4: the served model_id MUST appear in supported_models.
+	// This first entry duplicates the modelID argument, so it consumes
+	// no additional seen-index budget (already recorded via modelID).
+	supported[0] = "model-served"
+	for i := 1; i < totalSupported; i++ {
+		supported[i] = fmt.Sprintf("declared-model-%03d", i)
+	}
+	// supported[150] is the 151st DISTINCT entry attempted for this
+	// provider (model-served consumes slot 1; supported[0] is a
+	// no-op duplicate; supported[1..150] consume slots 2..151) --
+	// well past both the 32-entry per-session cap and the 128-entry
+	// per-provider lifetime cap.
+	beyondCapsModel := supported[150]
+
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-served",
+		SupportedModels:  supported,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	// Confirm the fixture actually exhausts both seen-index caps for
+	// this entry -- guards the test itself against a future cap bump
+	// silently un-testing this scenario.
+	registry.mu.RLock()
+	_, inSession := registry.seenModelsByProvider["p1"][beyondCapsModel]
+	_, inLifetime := registry.seenModelsLifetime[strings.ToLower(beyondCapsModel)]
+	registry.mu.RUnlock()
+	if inSession {
+		t.Fatalf("fixture bug: %q unexpectedly fit within the %d-entry per-session cap; adjust the index", beyondCapsModel, maxSeenModelsPerProvider)
+	}
+	if inLifetime {
+		t.Fatalf("fixture bug: %q unexpectedly fit within the %d-entry per-provider lifetime cap; adjust the index", beyondCapsModel, maxLifetimeContribPerProvider)
+	}
+
+	// The seen-index caps dropped it, but the provider is still
+	// connected and declares it right now -- ModelKnown must catch it
+	// via the live-provider SupportedModels scan.
+	if !registry.ModelKnown(beyondCapsModel) {
+		t.Fatalf("ModelKnown(%q) = false; live provider declares it in SupportedModels but seen-index caps dropped it (SPEC-010 R-3.3.4 correctness core, codex HIGH fix)", beyondCapsModel)
+	}
+}
+
+// TestSeenModelsLifetimeCap pins the PERF-5 reconciliation in issue
+// #185: the lifetime accumulator is bounded at maxSeenModelsLifetime.
+// Beyond the cap, further inserts drop (with a warn-once log + a
+// counter), degrading cold-start races to legacy 404 behavior for the
+// dropped ids without unbounded growth.
+//
+// Per-provider gating (security-lane MAJOR R1): the cap exhaustion
+// scenario must be driven via DISTINCT providers, since one provider
+// is limited to maxSeenModelsPerProvider distinct ids by design.
+func TestSeenModelsLifetimeCap(t *testing.T) {
+	registry := NewRegistry(nil)
+
+	// Drive the lifetime set above cap via the locked record path,
+	// using fresh providers per per-provider-budget window.
+	registry.mu.Lock()
+	idsPerProvider := maxLifetimeContribPerProvider
+	providers := (maxSeenModelsLifetime + 10 + idsPerProvider - 1) / idsPerProvider
+	for p := 0; p < providers; p++ {
+		pid := fmt.Sprintf("provider-%d", p)
+		for i := 0; i < idsPerProvider; i++ {
+			modelID := fmt.Sprintf("synthetic-%d-%d", p, i)
+			registry.recordSeenModelLocked(pid, modelID)
+		}
+	}
+
+	got := len(registry.seenModelsLifetime)
+	dropped := registry.lifetimeCapDroppedCount
+	warned := registry.lifetimeCapWarnedOnce
+	// Confirm the early id is retained (filled cap, not cleared).
+	_, earlyRetained := registry.seenModelsLifetime["synthetic-0-0"]
+	// A late id beyond cap must be absent.
+	_, lateAbsent := registry.seenModelsLifetime[fmt.Sprintf("synthetic-%d-%d", providers-1, idsPerProvider-1)]
+	registry.mu.Unlock()
+
+	if got != maxSeenModelsLifetime {
+		t.Fatalf("seenModelsLifetime = %d entries, want exactly %d (cap)", got, maxSeenModelsLifetime)
+	}
+	if !earlyRetained {
+		t.Fatal("seenModelsLifetime dropped the early synthetic-0-0 entry; cap policy is supposed to drop tail, not head")
+	}
+	if lateAbsent {
+		t.Fatal("seenModelsLifetime contains a beyond-cap entry; cap is not enforced")
+	}
+	if dropped == 0 {
+		t.Fatal("lifetimeCapDroppedCount = 0 after driving cap exhaustion; observability counter not wired")
+	}
+	if !warned {
+		t.Fatal("lifetimeCapWarnedOnce = false after driving cap exhaustion; warn-once observability not wired")
+	}
+
+	// Probe ModelKnown for both retained and dropped ids — confirms
+	// the SPEC § 7.2 contract degrades to legacy 404 only for the
+	// dropped ids.
+	if !registry.ModelKnown("synthetic-0-0") {
+		t.Fatal("ModelKnown(synthetic-0-0) = false; retained id not visible to routing decision")
+	}
+	if registry.ModelKnown(fmt.Sprintf("synthetic-%d-%d", providers-1, idsPerProvider-1)) {
+		t.Fatal("ModelKnown(beyond-cap-id) = true; dropped id is leaking into routing decision")
+	}
+}
+
+// TestModelKnownPreservesEqualFoldOnLifetimeOnlyPath pins the
+// ISS-185 R3 code-lane MAJOR fix: ModelKnown's case-folding contract
+// has historically been Unicode strings.EqualFold (not
+// strings.ToLower), so Turkish-I / Greek-sigma edges that
+// EqualFold-match must continue to return true even after the
+// advertising provider disconnects (so the lookup is on the
+// lifetime-only path).
+//
+// strings.ToLower("İ") == "i̇" (with combining dot above) while
+// strings.EqualFold("İ", "İ") == true. A ToLower-only key store
+// would miss this case. With the R3 EqualFold scan fallback on
+// the lifetime accumulator, the SPEC § 7.2 contract is preserved
+// for these edges.
+func TestModelKnownPreservesEqualFoldOnLifetimeOnlyPath(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Greek capital sigma "Σ" and final sigma "ς" EqualFold-match;
+	// ToLower differs.
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-Σ",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	// Now the lookup goes through the lifetime-only path. Both forms
+	// must return true via the EqualFold contract.
+	if !registry.ModelKnown("model-Σ") {
+		t.Fatal("ModelKnown(model-Σ) = false; lifetime-only path lost the recorded id")
+	}
+	if !registry.ModelKnown("model-ς") {
+		t.Fatal("ModelKnown(model-ς) = false; EqualFold contract regressed (ToLower-only canonical key would miss this)")
+	}
+}
+
+// TestRecordSeenModelLockedRejectsOversizeID pins the ISS-185 R1
+// security-lane CRITICAL fix: model_id strings beyond
+// maxModelIDByteLen are not persisted into either the per-provider
+// attribution map or the lifetime accumulator. Without this bound an
+// admitted provider could store arbitrarily-large strings in
+// process-lifetime memory.
+func TestRecordSeenModelLockedRejectsOversizeID(t *testing.T) {
+	registry := NewRegistry(nil)
+	oversize := strings.Repeat("x", maxModelIDByteLen+1)
+	registry.mu.Lock()
+	registry.recordSeenModelLocked("p1", oversize)
+	gotLifetime := len(registry.seenModelsLifetime)
+	gotPerProvider := len(registry.seenModelsByProvider["p1"])
+	registry.mu.Unlock()
+	if gotLifetime != 0 {
+		t.Fatalf("oversize id leaked into seenModelsLifetime: %d entries", gotLifetime)
+	}
+	if gotPerProvider != 0 {
+		t.Fatalf("oversize id leaked into seenModelsByProvider[p1]: %d entries", gotPerProvider)
+	}
+}
+
+// TestRecordSeenModelLockedPerProviderBudgetGatesLifetime pins the
+// ISS-185 R2 security/architect-lane MAJOR fix: the lifetime
+// accumulator is gated INDEPENDENTLY of per-session attribution.
+//
+//   - Per-session map (seenModelsByProvider) caps each session at
+//     maxSeenModelsPerProvider distinct ids; gets cleared on
+//     disconnect / session replacement.
+//   - Lifetime accumulator caps each provider_id at
+//     maxLifetimeContribPerProvider distinct ids OVER THE ENTIRE
+//     PROCESS LIFETIME — survives reconnect — so churn-via-reconnect
+//     cannot consume more lifetime budget than that per-provider
+//     total.
+//
+// This test fires 2x the per-provider lifetime cap and asserts the
+// gate kicks in at exactly maxLifetimeContribPerProvider.
+func TestRecordSeenModelLockedPerProviderBudgetGatesLifetime(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.mu.Lock()
+	// Fire 2x the per-provider lifetime contribution budget from one
+	// provider. Only the first maxLifetimeContribPerProvider should
+	// be retained; the remainder should NOT consume lifetime budget.
+	for i := 0; i < 2*maxLifetimeContribPerProvider; i++ {
+		registry.recordSeenModelLocked("noisy", fmt.Sprintf("id-%d", i))
+	}
+	gotLifetime := len(registry.seenModelsLifetime)
+	gotContrib := registry.lifetimeContribByProvider["noisy"]
+	gotPerSession := len(registry.seenModelsByProvider["noisy"])
+	registry.mu.Unlock()
+	if gotPerSession != maxSeenModelsPerProvider {
+		t.Fatalf("seenModelsByProvider[noisy] = %d, want %d (per-session cap)",
+			gotPerSession, maxSeenModelsPerProvider)
+	}
+	if gotLifetime != maxLifetimeContribPerProvider {
+		t.Fatalf("seenModelsLifetime = %d, want %d (one provider must not consume lifetime past per-provider lifetime budget)",
+			gotLifetime, maxLifetimeContribPerProvider)
+	}
+	if gotContrib != maxLifetimeContribPerProvider {
+		t.Fatalf("lifetimeContribByProvider[noisy] = %d, want %d (per-provider lifetime counter not at cap)",
+			gotContrib, maxLifetimeContribPerProvider)
+	}
+}
+
+// TestLifetimeContribByProviderSurvivesReconnect pins the ISS-185
+// R2 security-lane MAJOR fix: the per-provider lifetime contribution
+// counter is NOT reset on session disconnect / replacement, so a
+// churning attacker cannot bypass the per-provider cap by repeatedly
+// reconnecting.
+func TestLifetimeContribByProviderSurvivesReconnect(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Session 1: contribute up to the per-provider lifetime cap.
+	registry.Register(&Provider{
+		ProviderID:       "churn",
+		AssignedID:       "session-1",
+		ModelID:          "id-anchor",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	registry.mu.Lock()
+	for i := 0; i < maxLifetimeContribPerProvider; i++ {
+		registry.recordSeenModelLocked("churn", fmt.Sprintf("id-%d", i))
+	}
+	contribBefore := registry.lifetimeContribByProvider["churn"]
+	registry.mu.Unlock()
+	if contribBefore < maxLifetimeContribPerProvider {
+		t.Fatalf("setup failed: contribBefore = %d, want >= %d", contribBefore, maxLifetimeContribPerProvider)
+	}
+
+	// Disconnect — per-session map gets cleared by RemoveIfSession.
+	if !registry.RemoveIfSession("churn", "session-1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+
+	// Try to contribute new ids after reconnect. The per-provider
+	// lifetime counter must persist; ALL new ids should drop.
+	registry.mu.Lock()
+	beforeReconnect := len(registry.seenModelsLifetime)
+	for i := 0; i < 64; i++ {
+		registry.recordSeenModelLocked("churn", fmt.Sprintf("postreconnect-%d", i))
+	}
+	afterReconnect := len(registry.seenModelsLifetime)
+	contribAfter := registry.lifetimeContribByProvider["churn"]
+	registry.mu.Unlock()
+	if afterReconnect != beforeReconnect {
+		t.Fatalf("seenModelsLifetime grew by %d after reconnect; per-provider lifetime gate is reset by disconnect (security regression)",
+			afterReconnect-beforeReconnect)
+	}
+	if contribAfter != contribBefore {
+		t.Fatalf("lifetimeContribByProvider[churn] = %d, want %d (counter reset by disconnect)",
+			contribAfter, contribBefore)
 	}
 }
 
 // TestRegisterReplaceSessionClearsSeenModels pins the M2-5 / PERF-5 fix for the
-// codex code-audit 2026-06-11 #47 finding: a session replacement (same
-// provider_id, new assigned_id) MUST clear the per-provider seen-model
-// history, else stale model ids from the prior session survive into the
-// new one and ModelKnown over-reports.
-func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
+// TestRegisterReplaceSessionClearsPerProviderAttribution pins the
+// codex code-audit 2026-06-11 #47 finding at its native level — the
+// per-provider attribution map — after issue #185 split the
+// pool-lifetime accumulator out from per-provider attribution.
+//
+// Audit #47's concern was stale model attribution leaking across a
+// session replacement (same provider_id, new assigned_id), which
+// would have ModelKnown over-report when the old surface aggregated
+// per-provider entries. With #185 in place, ModelKnown reads from the
+// pool-lifetime accumulator (which DOES retain all model ids ever
+// advertised, per SPEC-002 § 7.2 — that's the 404-vs-503 distinction).
+// The audit #47 invariant moved down a layer: session replacement
+// MUST drop seenModelsByProvider[provider_id] so any future
+// per-provider attribution / explorer-style queries see only the
+// current session.
+func TestRegisterReplaceSessionClearsPerProviderAttribution(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
 
@@ -1043,8 +2335,6 @@ func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
 	}
 
 	// Session 2 replaces session 1 with a different model entirely.
-	// (Same provider_id, new assigned_id — the direct-replacement path
-	// inside Register, not the RemoveIfSession path.)
 	registry.Register(&Provider{
 		ProviderID:       "p1",
 		AssignedID:       "s2",
@@ -1060,11 +2350,32 @@ func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
 	if !registry.ModelKnown("model-c") {
 		t.Fatal("session-2 model not recorded after replacement")
 	}
-	if registry.ModelKnown("model-a") {
-		t.Fatal("ModelKnown(model-a) leaked across session replacement; prior history should be cleared")
+
+	// SPEC-002 § 7.2: prior-session models REMAIN in the pool-lifetime
+	// accumulator. ModelKnown reports them — that's the cold-start
+	// race fix (issue #185).
+	if !registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) = false after session replacement; SPEC-002 § 7.2 lifetime accumulator regressed")
 	}
-	if registry.ModelKnown("model-b") {
-		t.Fatal("ModelKnown(model-b) leaked across session replacement; prior history should be cleared")
+	if !registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) = false after session replacement; SPEC-002 § 7.2 lifetime accumulator regressed")
+	}
+
+	// Audit #47 invariant on the per-provider attribution map:
+	// session replacement DROPS the prior session's per-provider
+	// entries so attribution-style queries see only the current
+	// session's models.
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	set := registry.seenModelsByProvider["p1"]
+	if _, has := set["model-a"]; has {
+		t.Fatal("seenModelsByProvider[p1] still contains model-a after session replacement; audit #47 attribution invariant regressed")
+	}
+	if _, has := set["model-b"]; has {
+		t.Fatal("seenModelsByProvider[p1] still contains model-b after session replacement; audit #47 attribution invariant regressed")
+	}
+	if _, has := set["model-c"]; !has {
+		t.Fatal("seenModelsByProvider[p1] missing model-c after registering session 2")
 	}
 }
 

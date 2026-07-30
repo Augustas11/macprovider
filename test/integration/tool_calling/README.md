@@ -32,6 +32,8 @@ the SPEC-015 SDK compatibility smoke. It asserts:
 - Unsupported v1 inputs return expected 400 codes for non-`auto`
   `tool_choice`, assistant `tool_calls`, and `tool` role messages.
 
+Security model: emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution.
+
 By default the JSON artifact is written to
 `artifacts/tool-calling-e2e-<timestamp>.json`. Secrets are not printed.
 

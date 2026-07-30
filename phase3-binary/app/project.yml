@@ -1,0 +1,86 @@
+# XcodeGen spec for Malibu.app
+#
+# Generate with the reviewed XcodeGen artifact installed by
+# scripts/install-pinned-xcodegen.sh.
+# Build:    xcodebuild -project Malibu.xcodeproj -scheme Malibu -configuration Release
+#
+# The CLI binary (macprovider-cli) is built separately from the SwiftPM
+# package one directory up, then copied into Contents/MacOS/ at the
+# release-signing step (see SPEC-025 §6.2). Locally, developers build
+# the CLI with `swift build -c release --package-path ..` and set the
+# MALIBU_CLI_PATH env var so the app can find it.
+
+name: Malibu
+options:
+  bundleIdPrefix: tech.malibu
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Manual
+    MARKETING_VERSION: "1.8.45"
+    CURRENT_PROJECT_VERSION: "45"
+    OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
+
+targets:
+  Malibu:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources/Malibu
+        excludes:
+          - "**/*.md"
+    resources:
+      - Sources/Malibu/Resources
+    entitlements:
+      path: Malibu.entitlements
+    info:
+      path: Sources/Malibu/Info.plist
+      properties:
+        CFBundleName: Malibu
+        CFBundleDisplayName: Malibu
+        CFBundleIdentifier: tech.malibu.app
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "14.0"
+        LSUIElement: true                # menu bar only, no Dock icon
+        MalibuBundledReferralBootstrapV1: true
+        NSHumanReadableCopyright: "Copyright © 2026 Malibu AI, Inc."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_NAME: Malibu
+        PRODUCT_BUNDLE_IDENTIFIER: tech.malibu.app
+        CODE_SIGN_ENTITLEMENTS: Malibu.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+    postBuildScripts:
+      - name: Bundle install.sh
+        basedOnDependencyAnalysis: false
+        script: |
+          install -m 755 "${SRCROOT}/../dist/install.sh" "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/install.sh"
+  # AUDIT R1 ARCHITECT A8 fix: unit-test the audit-critical app-side surfaces
+  # (codec parity vs CLI, URL-scheme nonce validation, snapshot presenter,
+  # config CRLF handling). Runs under xcodebuild test -scheme Malibu.
+  MalibuTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Tests/MalibuTests
+    dependencies:
+      - target: Malibu
+    settings:
+      base:
+        PRODUCT_NAME: MalibuTests
+        PRODUCT_BUNDLE_IDENTIFIER: tech.malibu.tests
+        GENERATE_INFOPLIST_FILE: YES
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Malibu.app/Contents/MacOS/Malibu"

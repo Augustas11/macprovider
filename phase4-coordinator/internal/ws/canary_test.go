@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,11 @@ func TestBuildCanaryBodyUsesPrivateChallengeTemplates(t *testing.T) {
 	req := decodeCanaryBody(t, body)
 	if req.Model != "model-a" || req.MaxTokens != 8 || req.Stream {
 		t.Fatalf("canary request = %+v", req)
+	}
+	// Greedy decoding must be pinned so a healthy provider echoes the nonce
+	// exactly rather than sampling and hallucinating it (spurious nonce_mismatch).
+	if req.Temperature == nil || *req.Temperature != 0 {
+		t.Fatalf("canary request temperature = %v, want 0", req.Temperature)
 	}
 	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
 		t.Fatalf("messages = %+v", req.Messages)
@@ -99,6 +105,7 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	s := NewServer(cfg, registry, zerolog.Nop())
 	session := newProviderSession("p1", "s1", serverConn, 1)
 	s.sessions.Store(sessionKey("p1", "s1"), session)
+	registerCanaryFloorPeer(s, registry, "model-a")
 	go session.runWriter()
 
 	passDone := make(chan struct{})
@@ -144,6 +151,156 @@ func TestRunCanaryProbeRecordsPassAndThresholdFailure(t *testing.T) {
 	}
 }
 
+// TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates verifies the injected
+// predicate counts a peer only when it passes the coordinator's request-independent
+// routability gates: RoutingEligible (ready + free slots), transport-reachable (a
+// live open WS session or a non-empty endpoint), a positive context window, and not
+// Tier-2-excluded. Provider-asserted-but-unroutable states (busy, negative/zero
+// slots, zero/negative context, unreachable transport, closed/absent WS session,
+// Tier-2 exclusion) must NOT lift the floor. (Request-dependent context/quota are
+// deferred to FR-CAN23 and not asserted here.)
+func TestCanaryBuyerServingAppliesRoutabilityAndTier2Gates(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	base := pool.Provider{
+		ProviderID: "p", AssignedID: "s", ModelID: "model-a", Tier: pool.TierProvisional,
+		InferencePath: pool.InferencePathWSTunneled,
+		State:         pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		MaxContextTokens: 4096, EncryptedLeg: false,
+	}
+	// canaryBuyerServing requires a live stored session for WS-tunneled peers.
+	baseConn, _ := net.Pipe()
+	s.sessions.Store(sessionKey("p", "s"), newProviderSession("p", "s", baseConn, 1))
+	if !s.canaryBuyerServing(base) {
+		t.Fatal("baseline ready+free-slot+context+WS-tunneled+session provider should be buyer-serving")
+	}
+	mutate := func(f func(p *pool.Provider)) pool.Provider {
+		p := base
+		f(&p)
+		return p
+	}
+	// Unroutable / unreachable on a request-independent gate — none may be buyer-serving.
+	for name, p := range map[string]pool.Provider{
+		"busy/zero-free":   mutate(func(p *pool.Provider) { p.State = pool.StateBusy; p.SlotsFree = 0 }),
+		"negative-free":    mutate(func(p *pool.Provider) { p.SlotsFree = -1 }),
+		"zero-total":       mutate(func(p *pool.Provider) { p.SlotsTotal = 0; p.SlotsFree = 0; p.MaxConcurrency = 0 }),
+		"zero-context":     mutate(func(p *pool.Provider) { p.MaxContextTokens = 0 }),
+		"negative-context": mutate(func(p *pool.Provider) { p.MaxContextTokens = -1 }),
+		"degraded":         mutate(func(p *pool.Provider) { p.State = pool.StateDegraded }),
+		// HTTPForwardingOnly (drops IsWSTunneled) with no endpoint → unreachable.
+		"http-no-endpoint": mutate(func(p *pool.Provider) { p.HTTPForwardingOnly = true; p.EndpointURL = "" }),
+		// WS-tunneled but no stored session (registration/disconnect window) → unreachable.
+		"ws-no-session": mutate(func(p *pool.Provider) { p.ProviderID = "no-session-peer"; p.AssignedID = "x" }),
+	} {
+		if s.canaryBuyerServing(p) {
+			t.Fatalf("%s provider must not be buyer-serving (would falsely lift the floor)", name)
+		}
+	}
+	// A WS peer whose stored session is CLOSED (the disconnect window: closed before
+	// the map entry is deleted / the provider marked unavailable) is unreachable —
+	// dispatch would return ErrRelayClosed — and must not lift the floor.
+	closedConn, _ := net.Pipe()
+	closedSess := newProviderSession("closed-peer", "cs", closedConn, 1)
+	closedSess.close()
+	s.sessions.Store(sessionKey("closed-peer", "cs"), closedSess)
+	closedPeer := mutate(func(p *pool.Provider) { p.ProviderID = "closed-peer"; p.AssignedID = "cs" })
+	if s.canaryBuyerServing(closedPeer) {
+		t.Fatal("WS peer with a closed stored session must not be buyer-serving")
+	}
+	// Tier-2 exclusion (requires an encrypted leg the provider lacks).
+	s.SetTier2Config(config.Tier2Config{RequireEncryptedLeg: true})
+	if s.canaryBuyerServing(base) {
+		t.Fatal("Tier-2-excluded provider must not be buyer-serving")
+	}
+}
+
+// TestFloorUsesInstalledPredicateExcludesTier2Peer drives RecordCanaryResult
+// through the NewServer-installed buyer-serving predicate (not an arbitrary test
+// closure): a same-model peer that is Tier-2-excluded must not lift the floor, so
+// the sole real provider is spared. Removing the NewServer injection would fail
+// this test.
+func TestFloorUsesInstalledPredicateExcludesTier2Peer(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	cfg := config.Default()
+	cfg.Pool.CanaryFailureThreshold = 1
+	// Tier-2 requires an encrypted leg; the peer lacks it → Tier-2-excluded.
+	cfg.Tier2.RequireEncryptedLeg = true
+	s := NewServer(cfg, registry, zerolog.Nop())
+
+	// Target: real, buyer-serving (encrypted leg present + live WS session).
+	// HashStatus pinned so the encrypted-leg requirement is the sole Tier-2
+	// discriminator in this test.
+	tConn, _ := net.Pipe()
+	registry.Register(&pool.Provider{
+		ProviderID: "target", AssignedID: "st", ModelID: "model-a",
+		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
+		EncryptedLeg: true, HashStatus: pool.HashStatusVerified,
+	}, tConn)
+	s.sessions.Store(sessionKey("target", "st"), newProviderSession("target", "st", tConn, 1))
+	// Peer: routable + same model + session, but Tier-2-excluded (no encrypted leg).
+	pConn, _ := net.Pipe()
+	registry.Register(&pool.Provider{
+		ProviderID: "tier2-excluded-peer", AssignedID: "sp", ModelID: "model-a",
+		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled,
+		State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1, MaxContextTokens: 4096,
+		EncryptedLeg: false, HashStatus: pool.HashStatusVerified,
+	}, pConn)
+	s.sessions.Store(sessionKey("tier2-excluded-peer", "sp"), newProviderSession("tier2-excluded-peer", "sp", pConn, 1))
+
+	if n := registry.BuyerServingCountForModel("model-a"); n != 1 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 1 (Tier-2-excluded peer omitted)", n)
+	}
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	res := registry.RecordCanaryResult("target", "st", false, at, 1)
+	if res.Tripped != pool.CanaryTripFloorHeld {
+		t.Fatalf("with only a Tier-2-excluded peer, result = %+v, want CanaryTripFloorHeld", res)
+	}
+}
+
+// TestFloorDoesNotSpareTier2ExcludedTarget verifies the installed production
+// predicate applies symmetrically to the target. An otherwise-ready HTTP provider
+// excluded by Tier-2 is not the sole buyer-serving provider and therefore takes
+// the normal pinned sanction path instead of remaining Ready as floor-held.
+func TestFloorDoesNotSpareTier2ExcludedTarget(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	cfg := config.Default()
+	cfg.Tier2.RequireEncryptedLeg = true
+	_ = NewServer(cfg, registry, zerolog.Nop())
+	registry.Register(&pool.Provider{
+		ProviderID:       "target",
+		AssignedID:       "st",
+		ModelID:          "model-a",
+		Tier:             pool.TierPinned,
+		State:            pool.StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
+		EndpointURL:      "http://127.0.0.1:9999",
+		EncryptedLeg:     false,
+		HashStatus:       pool.HashStatusVerified,
+	}, nil)
+
+	if n := registry.BuyerServingCountForModel("model-a"); n != 0 {
+		t.Fatalf("BuyerServingCountForModel = %d, want 0 (target is Tier-2-excluded)", n)
+	}
+	res := registry.RecordCanaryResult(
+		"target",
+		"st",
+		false,
+		time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC),
+		1,
+	)
+	if res.Tripped != pool.CanaryTripDegraded {
+		t.Fatalf("Tier-2-excluded target result = %+v, want CanaryTripDegraded", res)
+	}
+	got, ok := registry.Resolve("target", "st")
+	if !ok || got.State != pool.StateDegraded {
+		t.Fatalf("provider = %+v, ok=%v, want degraded", got, ok)
+	}
+}
+
 func TestRunCanaryProbePersistsPinnedSanctionAndClearsOnPass(t *testing.T) {
 	serverConn, providerConn := net.Pipe()
 	defer providerConn.Close()
@@ -171,6 +328,7 @@ func TestRunCanaryProbePersistsPinnedSanctionAndClearsOnPass(t *testing.T) {
 	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
 	session := newProviderSession("pinned-p1", "pinned-s1", serverConn, 1)
 	s.sessions.Store(sessionKey("pinned-p1", "pinned-s1"), session)
+	registerCanaryFloorPeer(s, registry, "model-a")
 	go session.runWriter()
 
 	runFailedCanaryProbe(t, s, providerConn, provider)
@@ -245,6 +403,7 @@ func TestRunCanaryProbeDoesNotDeletePersistedSanctionOnStaleTerminalPass(t *test
 	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
 	session := newProviderSession("pinned-stale", "pinned-stale-s1", serverConn, 1)
 	s.sessions.Store(sessionKey("pinned-stale", "pinned-stale-s1"), session)
+	registerCanaryFloorPeer(s, registry, "model-a")
 	go session.runWriter()
 
 	runFailedCanaryProbe(t, s, providerConn, provider)
@@ -591,10 +750,11 @@ func TestHTTPCanaryEndpointResetCountsAsFailure(t *testing.T) {
 }
 
 type decodedCanaryBody struct {
-	Model     string `json:"model"`
-	MaxTokens int    `json:"max_tokens"`
-	Stream    bool   `json:"stream"`
-	Messages  []struct {
+	Model       string   `json:"model"`
+	MaxTokens   int      `json:"max_tokens"`
+	Stream      bool     `json:"stream"`
+	Temperature *float64 `json:"temperature"`
+	Messages    []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
@@ -607,6 +767,76 @@ func decodeCanaryBody(t *testing.T, body []byte) decodedCanaryBody {
 		t.Fatalf("canary body json: %v", err)
 	}
 	return req
+}
+
+func TestRunCanaryProbeUsesAutotuneAdmissionKeyForModelClassProbe(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:          "p1",
+		AssignedID:          "s1",
+		ModelID:             "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		MaxAdmittedModelKey: "qwen3-coder-30b-a3b-instruct",
+		Tier:                pool.TierPinned,
+		InferencePath:       pool.InferencePathWSTunneled,
+		State:               pool.StateReady,
+		SlotsFree:           1,
+		SlotsTotal:          1,
+		MaxConcurrency:      1,
+	}
+	registry.Register(provider, serverConn)
+	cfg := config.Default()
+	cfg.Pool.CanaryTimeoutS = 1
+	cfg.Pool.CanaryMaxTokens = 8
+	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{{
+		Prompt:   "global {nonce}",
+		Expected: "{nonce}",
+	}}
+	cfg.Pool.ModelClassChallenges = map[string][]config.CanaryChallengeConfig{
+		"qwen3-coder-30b-a3b-instruct": {testCanaryChallenge()},
+	}
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 1)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	done := make(chan struct{})
+	go func() {
+		s.runCanaryProbe(*provider)
+		close(done)
+	}()
+	req := readCanaryInferenceRequest(t, providerConn)
+	body := decodeCanaryBody(t, []byte(req.Body))
+	if body.Model != "qwen3-coder-30b-a3b-instruct" {
+		t.Fatalf("canary body model = %q, want admitted key", body.Model)
+	}
+	if len(body.Messages) != 1 || !strings.Contains(body.Messages[0].Content, "Which US state") {
+		t.Fatalf("canary prompt = %+v, want model-class challenge", body.Messages)
+	}
+	expected := expectedAnswerFromCanaryRequest(t, req)
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: req.RequestID,
+		Seq:       0,
+		Data:      `{"choices":[{"message":{"content":"` + expected + `"}}]}`,
+	}))
+	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  req.RequestID,
+		Status:     "complete",
+		ChunksSent: 1,
+	}))
+	waitForCanary(t, done)
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider not found after canary")
+	}
+	if got.ModelClassOPoIPass == nil || !*got.ModelClassOPoIPass {
+		t.Fatalf("ModelClassOPoIPass = %v, want true", got.ModelClassOPoIPass)
+	}
 }
 
 func readCanaryInferenceRequest(t *testing.T, conn net.Conn) InferenceRequest {
@@ -674,6 +904,35 @@ func testCanaryChallenge() config.CanaryChallengeConfig {
 	}
 }
 
+// registerCanaryFloorPeer registers a second buyer-serving provider for modelID so
+// the FR-CAN22 last-provider floor does not spare the provider under test — letting
+// canary tests still exercise the normal trip path. It is WS-tunneled with a LIVE
+// stored session (canaryBuyerServing requires storedSessionFor for WS peers).
+// FR-CAN23 shared-fingerprint re-dispatch may force-probe this peer; callers that
+// fail the primary must answer the peer via completePendingCorrelationPeers.
+func registerCanaryFloorPeer(s *Server, registry *pool.Registry, modelID string) net.Conn {
+	const id, session = "canary-floor-peer", "canary-floor-peer-session"
+	peerConn, _ := net.Pipe()
+	registry.Register(&pool.Provider{
+		ProviderID:       id,
+		AssignedID:       session,
+		ModelID:          modelID,
+		Tier:             pool.TierProvisional,
+		InferencePath:    pool.InferencePathWSTunneled,
+		State:            pool.StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxConcurrency:   1,
+		MaxContextTokens: 4096,
+	}, peerConn)
+	ps := newProviderSession(id, session, peerConn, 1)
+	s.sessions.Store(sessionKey(id, session), ps)
+	go ps.runWriter()
+	// Observed-serving stamp so the peer can lift FR-CAN23 residual floor.
+	registry.NoteBuyerSuccess(id, time.Now().UTC())
+	return peerConn
+}
+
 func runFailedCanaryProbe(t *testing.T, s *Server, providerConn net.Conn, provider *pool.Provider) {
 	t.Helper()
 	done := make(chan struct{})
@@ -695,6 +954,28 @@ func runFailedCanaryProbe(t *testing.T, s *Server, providerConn net.Conn, provid
 		ChunksSent: 1,
 	}))
 	waitForCanary(t, done)
+	// FR-CAN23: a multi-provider correctness failure stages until snapshot peers
+	// complete the shared-fingerprint re-dispatch (or the window expires).
+	completePendingCorrelationPeers(t, s)
+}
+
+// completePendingCorrelationPeers force-resolves any open FR-CAN23 epoch with
+// AllowIncomplete so hermetic unit tests (which typically only answer the
+// primary provider pipe) still progress counters. Production relies on shared
+// re-dispatch + the FR-CAN12 window in runCanarySweep instead.
+func completePendingCorrelationPeers(t *testing.T, s *Server) {
+	t.Helper()
+	s.canaryCorrMu.Lock()
+	var pending []*liveCorrelationEpoch
+	for key, ep := range s.canaryCorrByModel {
+		pending = append(pending, ep)
+		delete(s.canaryCorrByModel, key)
+	}
+	s.canarySharedDispatch = nil
+	s.canaryCorrMu.Unlock()
+	for _, ep := range pending {
+		s.resolveAndApplyCorrelation(ep, true)
+	}
 }
 
 func waitForCanary(t *testing.T, done <-chan struct{}) {
@@ -706,10 +987,212 @@ func waitForCanary(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+func TestOperatorDeleteRejectClearsAdmissionAndCanarySanctions(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	registry := pool.NewRegistry(nil)
+	registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-a",
+		FailCount:  3,
+	}})
+	store := &recordingCanarySanctionStore{}
+	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
+	s.admission.Reject("provider-a", "false-positive canary")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("recovery request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("recover provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("recovery status = %d, want 200", resp.StatusCode)
+	}
+	if s.admission.Rejected("provider-a") {
+		t.Fatal("admission rejection survived operator recovery")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 0 {
+		t.Fatalf("runtime canary sanctions = %+v, want none", sanctions)
+	}
+	if deleted := store.deletedProviders(); len(deleted) != 1 || deleted[0] != "provider-a" {
+		t.Fatalf("persisted sanction deletions = %v, want provider-a", deleted)
+	}
+}
+
+func TestOperatorDeleteRejectFailsClosedWhenCanaryPersistenceFails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	registry := pool.NewRegistry(nil)
+	registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-a",
+		FailCount:  3,
+	}})
+	store := &recordingCanarySanctionStore{deleteErr: errors.New("sqlite unavailable")}
+	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
+	s.admission.Reject("provider-a", "false-positive canary")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("recovery request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("recover provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("recovery status = %d, want 500", resp.StatusCode)
+	}
+	if !s.admission.Rejected("provider-a") {
+		t.Fatal("failed durable recovery removed admission rejection")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 1 {
+		t.Fatalf("runtime canary sanctions = %+v, want retained sanction", sanctions)
+	}
+}
+
+func TestOperatorDeleteRejectFailsClosedWhenAdmissionPersistenceFails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	registry := pool.NewRegistry(nil)
+	registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-a",
+		FailCount:  3,
+	}})
+	store := &recordingCanarySanctionStore{}
+	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
+	s.admission.Reject("provider-a", "false-positive canary")
+	s.admission.SetPersistence(failingAdmissionStateStore{err: errors.New("sqlite unavailable")}, nil)
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("recovery request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("recover provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("recovery status = %d, want 500", resp.StatusCode)
+	}
+	if !s.admission.Rejected("provider-a") {
+		t.Fatal("failed durable recovery removed admission rejection")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 1 {
+		t.Fatalf("runtime canary sanctions = %+v, want retained sanction", sanctions)
+	}
+}
+
+func TestOperatorDeleteRejectRequiresAuthAndCanonicalProviderID(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop())
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	unauthorized, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("unauthorized request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(unauthorized)
+	if err != nil {
+		t.Fatalf("unauthorized recovery: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want 401", resp.StatusCode)
+	}
+
+	invalid, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider%2Fchild", nil)
+	if err != nil {
+		t.Fatalf("invalid provider request: %v", err)
+	}
+	invalid.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err = http.DefaultClient.Do(invalid)
+	if err != nil {
+		t.Fatalf("invalid provider recovery: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid provider status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestOperatorRecoveryFencesInflightCanaryResult(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"wrong"}}]}`))
+	}))
+	defer ts.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "http-p1",
+		AssignedID:     "http-s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathHTTPForwarding,
+		EndpointURL:    ts.URL,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	cfg := config.Default()
+	cfg.Pool.CanaryFailureThreshold = 1
+	cfg.Pool.CanaryTimeoutS = 2
+	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
+	s := NewServer(cfg, registry, zerolog.Nop())
+	epoch := s.canaryEpoch(provider.ProviderID).Load()
+	done := make(chan struct{})
+	go func() {
+		s.runCanaryProbeAtEpoch(*provider, epoch)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canary request did not start")
+	}
+	if _, _, err := s.recoverProvider(provider.ProviderID); err != nil {
+		t.Fatalf("operator recovery: %v", err)
+	}
+	close(release)
+	waitForCanary(t, done)
+
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.CanaryFailCount != 0 || got.State != pool.StateReady || s.admission.Rejected(provider.ProviderID) {
+		t.Fatalf("stale canary result survived recovery fence: %+v", got)
+	}
+}
+
 type recordingCanarySanctionStore struct {
-	mu      sync.Mutex
-	saved   []pool.CanarySanctionSnapshot
-	deleted []string
+	mu        sync.Mutex
+	saved     []pool.CanarySanctionSnapshot
+	deleted   []string
+	deleteErr error
 }
 
 func (s *recordingCanarySanctionStore) LoadCanarySanctions(context.Context) ([]pool.CanarySanctionSnapshot, error) {
@@ -726,6 +1209,9 @@ func (s *recordingCanarySanctionStore) UpsertCanarySanction(_ context.Context, s
 func (s *recordingCanarySanctionStore) DeleteCanarySanction(_ context.Context, providerID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	s.deleted = append(s.deleted, providerID)
 	return nil
 }

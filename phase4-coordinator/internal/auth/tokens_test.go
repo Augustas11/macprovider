@@ -1,17 +1,1128 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
+
+func bootstrapRequest(providerID, sourceIP string, key []byte, now time.Time) auth.BootstrapMintRequest {
+	return auth.BootstrapMintRequest{
+		ProviderID: bootstrapPrincipal(providerID), ProviderName: providerID + " host", SourceIP: sourceIP,
+		ReceiptPubkey: append([]byte(nil), key...), Now: now, TTL: 10 * time.Minute,
+		PerIPLimitPerHour: 8, PerProviderPerHour: 3, GlobalLimitPerHour: 128,
+		UnconfirmedIDMax: 64, OutstandingTokenMax: 64, IdentityRetention: 7 * 24 * time.Hour,
+	}
+}
+
+func bootstrapPrincipal(label string) string {
+	sum := sha256.Sum256([]byte(label))
+	return "mp-" + hex.EncodeToString(sum[:16])
+}
+
+func TestValidateTokenReadOnlyAuthenticatesWithoutRefreshingUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record, bearer, err := store.IssueToken(ctx, "provider-read-only", "dashboard polling")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, valid, err := store.ValidateTokenReadOnly(ctx, bearer)
+	if err != nil || !valid || providerID != "provider-read-only" {
+		t.Fatalf("provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+	row, err := lookupTokenRow(ctx, t, store, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.LastUsedAt.Valid {
+		t.Fatalf("read-only validation refreshed last_used_at=%v", row.LastUsedAt)
+	}
+	if providerID, valid, err := store.ValidateTokenReadOnly(ctx, "not-a-token"); err != nil || valid || providerID != "" {
+		t.Fatalf("invalid provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+}
+
+func TestOpenStoreUpgradesPreRecoverySocialTablesAdditively(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE referral_social_verifications (
+    provider_id TEXT NOT NULL,
+    campaign TEXT NOT NULL,
+    issuer_id TEXT NOT NULL,
+    post_id TEXT NOT NULL UNIQUE,
+    author_id TEXT NOT NULL,
+    share_url_hash TEXT NOT NULL,
+    verification_method TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    pending_since TEXT NOT NULL,
+    granted_at TEXT,
+    failed_at TEXT,
+    PRIMARY KEY(provider_id, campaign)
+);
+CREATE TABLE referral_social_verification_history (
+    archive_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    campaign TEXT NOT NULL,
+    issuer_id TEXT NOT NULL,
+    post_id TEXT NOT NULL UNIQUE,
+    author_id TEXT NOT NULL,
+    share_url_hash TEXT NOT NULL,
+    verification_method TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    pending_since TEXT NOT NULL,
+    granted_at TEXT,
+    failed_at TEXT NOT NULL,
+    archived_at TEXT NOT NULL
+)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := auth.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for table, columns := range map[string][]string{
+		"referral_social_verifications":        {"challenge_hash", "next_check_at", "recheck_attempts", "lease_token", "lease_until"},
+		"referral_social_verification_history": {"challenge_hash"},
+	} {
+		rows, err := store.DB().Query(`PRAGMA table_info(` + table + `)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, kind string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			got[name] = true
+		}
+		rows.Close()
+		for _, column := range columns {
+			if !got[column] {
+				t.Fatalf("%s missing upgraded column %s", table, column)
+			}
+		}
+	}
+	var failureTableCount int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = 'referral_social_failures'`).Scan(&failureTableCount); err != nil || failureTableCount != 1 {
+		t.Fatalf("social failure table count=%d err=%v", failureTableCount, err)
+	}
+	var indexCount int
+	if err := store.DB().QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'index' AND name = 'idx_referral_social_recheck_pending'`).Scan(&indexCount); err != nil || indexCount != 1 {
+		t.Fatalf("recheck index count=%d err=%v", indexCount, err)
+	}
+}
+
+func TestBindAdmissionIdentityPreservesLegacyProviderIDAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := store.IssueToken(ctx, "mac", "legacy production provider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubkey := bytes.Repeat([]byte{0x91}, 32)
+	if err := store.BindAdmissionIdentity(ctx, "mac", bearer, pubkey, time.Now().UTC()); err != nil {
+		t.Fatalf("bind legacy admission identity: %v", err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, "mac", bearer, pubkey, time.Now().UTC()); err != nil {
+		t.Fatalf("idempotent bind: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, ok, err := reopened.LookupAdmissionIdentityPubkey(ctx, "mac")
+	if err != nil || !ok || !bytes.Equal(stored, pubkey) {
+		t.Fatalf("restart-safe identity ok=%v key=%x err=%v", ok, stored, err)
+	}
+	if exists, err := reopened.AdmissionIdentityExists(ctx, "mac"); err != nil || !exists {
+		t.Fatalf("identity exists=%v err=%v", exists, err)
+	}
+}
+
+func TestBindAdmissionIdentityRequiresExactActiveBearerAndNeverReplaces(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ownerBearer, err := store.IssueToken(ctx, "mac", "legacy owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherBearer, err := store.IssueToken(ctx, "other-mac", "other owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bytes.Repeat([]byte{0x92}, 32)
+	if err := store.BindAdmissionIdentity(ctx, "mac", otherBearer, key, time.Now().UTC()); !errors.Is(err, auth.ErrAdmissionIdentityBearerMismatch) {
+		t.Fatalf("cross-provider bearer bind err=%v", err)
+	}
+	if exists, _ := store.AdmissionIdentityExists(ctx, "mac"); exists {
+		t.Fatal("cross-provider bearer created durable identity")
+	}
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, key, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	rotated := bytes.Repeat([]byte{0x93}, 32)
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, rotated, time.Now().UTC()); !errors.Is(err, auth.ErrAdmissionIdentityMismatch) {
+		t.Fatalf("unreviewed replacement err=%v", err)
+	}
+	stored, ok, err := store.LookupAdmissionIdentityPubkey(ctx, "mac")
+	if err != nil || !ok || !bytes.Equal(stored, key) {
+		t.Fatalf("replacement mutated key ok=%v key=%x err=%v", ok, stored, err)
+	}
+}
+
+func TestRotateAdmissionIdentityAdvancesGenerationAndSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := store.IssueToken(ctx, "mac", "rotation owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := bytes.Repeat([]byte{0x94}, 32)
+	next := bytes.Repeat([]byte{0x95}, 32)
+	now := time.Date(2026, 7, 14, 9, 0, 0, 0, time.UTC)
+	if err := store.BindAdmissionIdentity(ctx, "mac", bearer, current, now); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := store.RotateAdmissionIdentity(ctx, "mac", bearer, current, next, 1, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Generation != 2 || !bytes.Equal(state.CurrentPublicKey, next) ||
+		!bytes.Equal(state.PreviousPublicKey, current) || state.PreviousValidUntil == nil {
+		t.Fatalf("rotated state=%+v", state)
+	}
+	// A retry after the coordinator committed but before the provider received
+	// the response returns the same generation rather than rotating again.
+	replayed, err := store.RotateAdmissionIdentity(ctx, "mac", bearer, current, next, 1, now.Add(2*time.Minute))
+	if err != nil || replayed.Generation != 2 || !bytes.Equal(replayed.CurrentPublicKey, next) {
+		t.Fatalf("idempotent replay state=%+v err=%v", replayed, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored, ok, err := reopened.LookupAdmissionIdentityState(ctx, "mac", now.Add(time.Hour))
+	if err != nil || !ok || restored.Generation != 2 ||
+		!bytes.Equal(restored.CurrentPublicKey, next) || !bytes.Equal(restored.PreviousPublicKey, current) {
+		t.Fatalf("restart state=%+v ok=%v err=%v", restored, ok, err)
+	}
+	afterGrace, ok, err := reopened.LookupAdmissionIdentityState(
+		ctx, "mac", now.Add(time.Minute).Add(auth.AdmissionIdentityPreviousKeyGrace).Add(time.Second),
+	)
+	if err != nil || !ok || len(afterGrace.PreviousPublicKey) != 0 || afterGrace.PreviousValidUntil == nil ||
+		!afterGrace.PreviousValidUntil.Equal(*state.PreviousValidUntil) {
+		t.Fatalf("expired previous state=%+v ok=%v err=%v", afterGrace, ok, err)
+	}
+}
+
+func TestRotateAdmissionIdentityRequiresExactBearerKeyAndGeneration(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ownerBearer, err := store.IssueToken(ctx, "mac", "rotation owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherBearer, err := store.IssueToken(ctx, "other-mac", "other owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := bytes.Repeat([]byte{0x96}, 32)
+	next := bytes.Repeat([]byte{0x97}, 32)
+	wrong := bytes.Repeat([]byte{0x98}, 32)
+	now := time.Now().UTC()
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, current, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.RotateAdmissionIdentity(ctx, "mac", otherBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityBearerMismatch) {
+		t.Fatalf("cross-provider bearer err=%v", err)
+	}
+	if _, err := store.RotateAdmissionIdentity(ctx, "mac", ownerBearer, wrong, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRotationMismatch) {
+		t.Fatalf("wrong current err=%v", err)
+	}
+	if _, err := store.RotateAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 2, now); !errors.Is(err, auth.ErrAdmissionIdentityRotationMismatch) {
+		t.Fatalf("wrong generation err=%v", err)
+	}
+	state, ok, err := store.LookupAdmissionIdentityState(ctx, "mac", now)
+	if err != nil || !ok || state.Generation != 1 || !bytes.Equal(state.CurrentPublicKey, current) || len(state.PreviousPublicKey) != 0 {
+		t.Fatalf("rejected rotation mutated state=%+v ok=%v err=%v", state, ok, err)
+	}
+}
+
+func TestRecoverAdmissionIdentityRequiresBearerCASAndClearsRollbackKey(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, ownerBearer, err := store.IssueToken(ctx, "mac", "recovery owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherBearer, err := store.IssueToken(ctx, "other-mac", "other owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := bytes.Repeat([]byte{0xa1}, 32)
+	next := bytes.Repeat([]byte{0xa2}, 32)
+	wrong := bytes.Repeat([]byte{0xa3}, 32)
+	now := time.Date(2026, 7, 14, 10, 0, 0, 0, time.UTC)
+	if err := store.BindAdmissionIdentity(ctx, "mac", ownerBearer, current, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", otherBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityBearerMismatch) {
+		t.Fatalf("cross-provider recovery err=%v", err)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, wrong, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRecoveryMismatch) {
+		t.Fatalf("wrong-current recovery err=%v", err)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRecoveryMismatch) {
+		t.Fatalf("missing-authority recovery err=%v", err)
+	}
+	authorization := approveRecoveryAuthorization(t, store, "mac", current, next, 1, now)
+
+	state, consumed, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 1, now)
+	if err != nil || state.Generation != 2 || !bytes.Equal(state.CurrentPublicKey, next) || len(state.PreviousPublicKey) != 0 {
+		t.Fatalf("recovered state=%+v err=%v", state, err)
+	}
+	if consumed.PendingID != authorization.PendingID || consumed.ApprovedBy != "operator:bob" {
+		t.Fatalf("consumed authorization=%+v", consumed)
+	}
+	if _, _, err := store.RecoverAdmissionIdentity(ctx, "mac", ownerBearer, current, next, 1, now); !errors.Is(err, auth.ErrAdmissionIdentityRecoveryMismatch) {
+		t.Fatalf("consumed recovery replay err=%v", err)
+	}
+	stored, ok, err := store.LookupAdmissionIdentityState(ctx, "mac", now.Add(time.Hour))
+	if err != nil || !ok || stored.Generation != 2 || !bytes.Equal(stored.CurrentPublicKey, next) || len(stored.PreviousPublicKey) != 0 {
+		t.Fatalf("stored recovery state=%+v ok=%v err=%v", stored, ok, err)
+	}
+}
+
+func TestRecoverAdmissionIdentityMigratesExternalAuthorityIntoSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, bearer, err := store.IssueToken(ctx, "mac", "external identity owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalCurrent := bytes.Repeat([]byte{0xb1}, 32)
+	next := bytes.Repeat([]byte{0xb2}, 32)
+	now := time.Now().UTC().Truncate(time.Second)
+	approveRecoveryAuthorization(t, store, "mac", externalCurrent, next, 1, now)
+	state, _, err := store.RecoverAdmissionIdentity(
+		ctx, "mac", bearer, externalCurrent, next, 1, now,
+	)
+	if err != nil || state.Generation != 2 || !bytes.Equal(state.CurrentPublicKey, next) {
+		t.Fatalf("external migration state=%+v err=%v", state, err)
+	}
+	if exists, err := store.AdmissionIdentityExists(ctx, "mac"); err != nil || !exists {
+		t.Fatalf("migrated identity exists=%v err=%v", exists, err)
+	}
+}
+
+func approveRecoveryAuthorization(
+	t *testing.T,
+	store *auth.Store,
+	providerID string,
+	current, candidate []byte,
+	generation int,
+	now time.Time,
+) auth.AdmissionIdentityRecoveryAuthorization {
+	t.Helper()
+	currentDigest := sha256.Sum256(current)
+	candidateDigest := sha256.Sum256(candidate)
+	authorization := auth.AdmissionIdentityRecoveryAuthorization{
+		PendingID:                      "recovery-" + hex.EncodeToString(candidateDigest[:8]),
+		ProviderID:                     providerID,
+		CandidatePublicKeySHA256:       hex.EncodeToString(candidateDigest[:]),
+		ExpectedCurrentPublicKeySHA256: hex.EncodeToString(currentDigest[:]),
+		ExpectedGeneration:             generation,
+		RequestedBy:                    "operator:alice",
+		RequestedUntil:                 now.Add(time.Hour),
+		Reason:                         "test recovery",
+		IncidentID:                     "INC-" + hex.EncodeToString(candidateDigest[:8]),
+	}
+	requested, err := store.RequestAdmissionIdentityRecovery(context.Background(), authorization, now)
+	if err != nil {
+		t.Fatalf("request recovery authorization: %v", err)
+	}
+	if requested.PendingID != authorization.PendingID {
+		t.Fatalf("request recovery pending_id=%q want=%q", requested.PendingID, authorization.PendingID)
+	}
+	approved, err := store.ApproveAdmissionIdentityRecovery(
+		context.Background(), authorization.PendingID, "operator:bob", now,
+	)
+	if err != nil {
+		t.Fatalf("approve recovery authorization: %v", err)
+	}
+	return approved
+}
+
+func TestBootstrapTokenRecoveryRequiresExactUnusedRetainedIdentity(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	key := bytes.Repeat([]byte{0x11}, 32)
+	first, err := store.MintBootstrapToken(ctx, bootstrapRequest("bootstrap-owner", "192.0.2.1", key, now))
+	if err != nil || first.Replaced || first.ProviderToken == "" {
+		t.Fatalf("first mint=%+v err=%v", first, err)
+	}
+
+	different := bootstrapRequest("bootstrap-owner", "192.0.2.1", bytes.Repeat([]byte{0x22}, 32), now.Add(time.Second))
+	if _, err := store.MintBootstrapToken(ctx, different); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+		t.Fatalf("different-key err=%v", err)
+	}
+	if _, valid, _ := store.ValidateToken(ctx, first.ProviderToken); !valid {
+		t.Fatal("different-key attempt mutated the original token")
+	}
+
+	recovered, err := store.MintBootstrapToken(ctx, bootstrapRequest("bootstrap-owner", "192.0.2.1", key, now.Add(2*time.Second)))
+	if err != nil || !recovered.Replaced || recovered.ProviderToken == first.ProviderToken {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	if _, valid, _ := store.ValidateToken(ctx, first.ProviderToken); valid {
+		t.Fatal("response-loss recovery left the prior token active")
+	}
+	if err := store.MarkTokenUsed(ctx, recovered.ProviderToken); err != nil {
+		t.Fatalf("mark recovered token used: %v", err)
+	}
+	if _, err := store.MintBootstrapToken(ctx, bootstrapRequest("bootstrap-owner", "192.0.2.1", key, now.Add(3*time.Second))); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+		t.Fatalf("used-token recovery err=%v", err)
+	}
+}
+
+func TestBootstrapTokenRejectsOrdinaryAndExpiredCredentials(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 16, 0, 0, 0, time.UTC)
+	key := bytes.Repeat([]byte{0x33}, 32)
+
+	t.Run("ordinary active token", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		providerID := bootstrapPrincipal("ordinary-owner")
+		_, token, err := store.IssueToken(ctx, providerID, "ordinary")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, bootstrapRequest("ordinary-owner", "192.0.2.2", key, now)); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+			t.Fatalf("ordinary-token err=%v", err)
+		}
+		if _, valid, _ := store.ValidateToken(ctx, token); !valid {
+			t.Fatal("ordinary token was revoked by bootstrap")
+		}
+	})
+
+	t.Run("ordinary revoked token", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		providerID := bootstrapPrincipal("ordinary-revoked-owner")
+		record, _, err := store.IssueToken(ctx, providerID, "ordinary revoked")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.RevokeToken(ctx, record.TokenPrefix); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, bootstrapRequest("ordinary-revoked-owner", "192.0.2.22", key, now)); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+			t.Fatalf("revoked ordinary token converted to bootstrap identity: err=%v", err)
+		}
+	})
+
+	t.Run("expired bootstrap token", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		req := bootstrapRequest("expired-owner", "192.0.2.3", key, now)
+		req.TTL = time.Minute
+		mint, err := store.MintBootstrapToken(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		different := bootstrapRequest("expired-owner", "192.0.2.3", bytes.Repeat([]byte{0x34}, 32), now.Add(2*time.Minute))
+		if _, err := store.MintBootstrapToken(ctx, different); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+			t.Fatalf("different key reclaimed expired bootstrap identity: err=%v", err)
+		}
+		retry := bootstrapRequest("expired-owner", "192.0.2.3", key, now.Add(2*time.Minute))
+		replacement, err := store.MintBootstrapToken(ctx, retry)
+		if err != nil || !replacement.Replaced || replacement.ProviderToken == "" {
+			t.Fatalf("expired same-key principal was not recovered: mint=%+v err=%v", replacement, err)
+		}
+		if _, valid, _ := store.ValidateToken(ctx, mint.ProviderToken); valid {
+			t.Fatal("expired bootstrap token remained active")
+		}
+	})
+
+	t.Run("operator revoked bootstrap token", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		req := bootstrapRequest("operator-revoked-bootstrap", "192.0.2.23", key, now)
+		mint, err := store.MintBootstrapToken(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.RevokeToken(ctx, mint.TokenRecord.TokenPrefix); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, bootstrapRequest("operator-revoked-bootstrap", "192.0.2.23", key, now.Add(time.Second))); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+			t.Fatalf("operator-revoked bootstrap token recovered: err=%v", err)
+		}
+	})
+}
+
+func TestOrdinaryIssuanceRejectsBootstrapBoundProvider(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	req := bootstrapRequest("mixed-track-owner", "192.0.2.35", bytes.Repeat([]byte{0x65}, 32), time.Now().UTC())
+	if _, err := store.MintBootstrapToken(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeBootstrapIdentity(ctx, req.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, req.ProviderID, "ordinary replacement"); !errors.Is(err, auth.ErrBootstrapIdentityExists) {
+		t.Fatalf("ordinary token crossed durable bootstrap boundary: err=%v", err)
+	}
+	if _, err := store.MintAdmissionTokenAndPairOT(ctx, req.ProviderID, "oauth replacement", time.Now().UTC()); !errors.Is(err, auth.ErrBootstrapIdentityExists) {
+		t.Fatalf("oauth token crossed durable bootstrap boundary: err=%v", err)
+	}
+}
+
+func TestOrdinaryAndBootstrapTrackRacesHaveSingleWinner(t *testing.T) {
+	ctx := context.Background()
+	for _, admission := range []struct {
+		name string
+		mint func(*auth.Store, string) error
+	}{
+		{
+			name: "plain issue",
+			mint: func(store *auth.Store, providerID string) error {
+				_, _, err := store.IssueToken(ctx, providerID, "ordinary racer")
+				return err
+			},
+		},
+		{
+			name: "oauth compound issue",
+			mint: func(store *auth.Store, providerID string) error {
+				_, err := store.MintAdmissionTokenAndPairOT(ctx, providerID, "oauth racer", time.Now().UTC())
+				return err
+			},
+		},
+	} {
+		t.Run(admission.name, func(t *testing.T) {
+			for iteration := 0; iteration < 20; iteration++ {
+				store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				providerLabel := fmt.Sprintf("track-race-%s-%d", admission.name, iteration)
+				req := bootstrapRequest(providerLabel, "192.0.2.37", bytes.Repeat([]byte{byte(0x70 + iteration)}, 32), time.Now().UTC())
+				start := make(chan struct{})
+				var ordinaryErr, bootstrapErr error
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					<-start
+					ordinaryErr = admission.mint(store, req.ProviderID)
+				}()
+				go func() {
+					defer wg.Done()
+					<-start
+					_, bootstrapErr = store.MintBootstrapToken(ctx, req)
+				}()
+				close(start)
+				wg.Wait()
+				store.Close()
+				if ordinaryErr == nil && errors.Is(bootstrapErr, auth.ErrBootstrapIdentityMismatch) {
+					continue
+				}
+				if bootstrapErr == nil && errors.Is(ordinaryErr, auth.ErrBootstrapIdentityExists) {
+					continue
+				}
+				t.Fatalf("iteration=%d ordinaryErr=%v bootstrapErr=%v", iteration, ordinaryErr, bootstrapErr)
+			}
+		})
+	}
+}
+
+func TestPruneUnusedTokensPreservesOrdinaryInstallerOwnership(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	providerID := bootstrapPrincipal("pruned-ordinary-owner")
+	record, token, err := store.IssueToken(ctx, providerID, "ordinary installer owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryRecord, _, err := store.IssueToken(ctx, "ordinary-prune-control", "ordinary control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.PruneUnusedTokens(ctx, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired != 2 {
+		t.Fatalf("retired=%d want 2", retired)
+	}
+	row, err := lookupTokenRow(ctx, t, store, record.ID)
+	if err != nil {
+		t.Fatalf("installer ownership tombstone missing: %v", err)
+	}
+	if !row.RevokedAt.Valid {
+		t.Fatal("pruned installer ordinary token remained active")
+	}
+	if _, valid, err := store.ValidateToken(ctx, token); err != nil || valid {
+		t.Fatalf("pruned installer bearer valid=%v err=%v", valid, err)
+	}
+	records, err := store.ListTokens(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range records {
+		if candidate.ID == ordinaryRecord.ID {
+			t.Fatal("ordinary non-installer prune row was retained")
+		}
+	}
+	req := bootstrapRequest("pruned-ordinary-owner", "192.0.2.36", bytes.Repeat([]byte{0x66}, 32), time.Now().UTC())
+	if _, err := store.MintBootstrapToken(ctx, req); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+		t.Fatalf("pruned ordinary identity became bootstrap-claimable: err=%v", err)
+	}
+}
+
+func TestBootstrapTokenDurableRateAndOutstandingLimits(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 16, 0, 0, 0, time.UTC)
+
+	firstReq := bootstrapRequest("quota-one", "192.0.2.10", bytes.Repeat([]byte{0x41}, 32), now)
+	firstReq.PerIPLimitPerHour = 1
+	firstReq.PerProviderPerHour = 1
+	firstReq.OutstandingTokenMax = 1
+	if _, err := store.MintBootstrapToken(ctx, firstReq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MintBootstrapToken(ctx, firstReq); !errors.Is(err, auth.ErrBootstrapRateLimited) {
+		t.Fatalf("provider durable quota err=%v", err)
+	}
+
+	ipReq := bootstrapRequest("quota-two", "192.0.2.10", bytes.Repeat([]byte{0x42}, 32), now.Add(time.Second))
+	ipReq.PerIPLimitPerHour = 1
+	if _, err := store.MintBootstrapToken(ctx, ipReq); !errors.Is(err, auth.ErrBootstrapRateLimited) {
+		t.Fatalf("ip durable quota err=%v", err)
+	}
+
+	globalReq := bootstrapRequest("quota-three", "192.0.2.11", bytes.Repeat([]byte{0x43}, 32), now.Add(time.Second))
+	globalReq.OutstandingTokenMax = 1
+	if _, err := store.MintBootstrapToken(ctx, globalReq); !errors.Is(err, auth.ErrBootstrapOutstandingLimit) {
+		t.Fatalf("outstanding cap err=%v", err)
+	}
+
+	pruneReq := bootstrapRequest("quota-pruned", "192.0.2.12", bytes.Repeat([]byte{0x44}, 32), now.Add(11*time.Minute))
+	pruneReq.OutstandingTokenMax = 1
+	if _, err := store.MintBootstrapToken(ctx, pruneReq); err != nil {
+		t.Fatalf("expired outstanding token was not pruned: %v", err)
+	}
+}
+
+func TestBootstrapTokenGlobalBudgetAndUnconfirmedIdentityBound(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 10, 16, 0, 0, 0, time.UTC)
+
+	t.Run("rotating ip and id still hits durable global budget", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		for i := 0; i < 2; i++ {
+			req := bootstrapRequest(fmt.Sprintf("global-%d", i), fmt.Sprintf("192.0.2.%d", 20+i), bytes.Repeat([]byte{byte(0x50 + i)}, 32), now.Add(time.Duration(i)*time.Second))
+			req.GlobalLimitPerHour = 2
+			if _, err := store.MintBootstrapToken(ctx, req); err != nil {
+				t.Fatalf("mint %d: %v", i, err)
+			}
+		}
+		req := bootstrapRequest("global-2", "198.51.100.99", bytes.Repeat([]byte{0x52}, 32), now.Add(2*time.Second))
+		req.GlobalLimitPerHour = 2
+		if _, err := store.MintBootstrapToken(ctx, req); !errors.Is(err, auth.ErrBootstrapRateLimited) {
+			t.Fatalf("rotating global budget err=%v", err)
+		}
+	})
+
+	t.Run("unconfirmed identity count is explicitly bounded", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		first := bootstrapRequest("identity-0", "192.0.2.30", bytes.Repeat([]byte{0x60}, 32), now)
+		first.UnconfirmedIDMax = 1
+		if _, err := store.MintBootstrapToken(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		second := bootstrapRequest("identity-1", "192.0.2.31", bytes.Repeat([]byte{0x61}, 32), now.Add(time.Second))
+		second.UnconfirmedIDMax = 1
+		if _, err := store.MintBootstrapToken(ctx, second); !errors.Is(err, auth.ErrBootstrapOutstandingLimit) {
+			t.Fatalf("unconfirmed identity cap err=%v", err)
+		}
+	})
+
+	t.Run("expired custody leaves live cap and remains operator-reviewable", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		first := bootstrapRequest("expired-identity-0", "192.0.2.32", bytes.Repeat([]byte{0x62}, 32), now)
+		first.TTL = time.Minute
+		first.UnconfirmedIDMax = 1
+		if _, err := store.MintBootstrapToken(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		second := bootstrapRequest("expired-identity-1", "192.0.2.33", bytes.Repeat([]byte{0x63}, 32), now.Add(2*time.Minute))
+		second.UnconfirmedIDMax = 1
+		if _, err := store.MintBootstrapToken(ctx, second); err != nil {
+			t.Fatalf("expired custody blocked a new live identity: %v", err)
+		}
+		identities, err := store.ListBootstrapIdentities(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundExpired := false
+		for _, identity := range identities {
+			if identity.ProviderID == first.ProviderID && identity.ExpiresAt.Valid {
+				foundExpired = true
+			}
+		}
+		if !foundExpired {
+			t.Fatal("expired recovery custody was not operator-reviewable")
+		}
+		if err := store.RevokeBootstrapIdentity(ctx, first.ProviderID); err != nil {
+			t.Fatalf("operator tombstone expired custody: %v", err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, first); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+			t.Fatalf("tombstoned identity recovered: err=%v", err)
+		}
+	})
+}
+
+func TestRevokeBootstrapIdentityRevokesActiveBearerAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	req := bootstrapRequest("operator-identity-revoke", "192.0.2.34", bytes.Repeat([]byte{0x64}, 32), time.Now().UTC())
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeBootstrapIdentity(ctx, req.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.ValidateToken(ctx, mint.ProviderToken); err != nil || valid {
+		t.Fatalf("identity tombstone left bearer valid=%v err=%v", valid, err)
+	}
+	if err := store.RevokeBootstrapIdentity(ctx, req.ProviderID); err != nil {
+		t.Fatalf("identity tombstone must be idempotent: %v", err)
+	}
+	if _, err := store.MintBootstrapToken(ctx, req); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+		t.Fatalf("identity tombstone allowed remint: err=%v", err)
+	}
+}
+
+func TestBootstrapGCIsBoundedAuditableAndPreservesConfirmedOwnership(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	collected := bootstrapRequest("gc-collected", "192.0.2.49", bytes.Repeat([]byte{0x7f}, 32), now.Add(-8*24*time.Hour))
+	collected.TTL = time.Minute
+	if _, err := store.MintBootstrapToken(ctx, collected); err != nil {
+		t.Fatal(err)
+	}
+
+	expired := bootstrapRequest("gc-expired", "192.0.2.50", bytes.Repeat([]byte{0x80}, 32), now.Add(-2*time.Hour))
+	expired.TTL = time.Minute
+	if _, err := store.MintBootstrapToken(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := bootstrapRequest("gc-confirmed", "192.0.2.51", bytes.Repeat([]byte{0x81}, 32), now)
+	mint, err := store.MintBootstrapToken(ctx, confirmed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.ValidateAndMarkTokenUsed(ctx, mint.ProviderToken); err != nil || !valid {
+		t.Fatalf("validate bootstrap identity valid=%v err=%v", valid, err)
+	}
+	if err := store.MarkTokenUsed(ctx, mint.ProviderToken); err != nil {
+		t.Fatalf("confirm bootstrap identity: %v", err)
+	}
+
+	trigger := bootstrapRequest("gc-trigger", "198.51.100.50", bytes.Repeat([]byte{0x82}, 32), now.Add(2*time.Hour))
+	if _, err := store.MintBootstrapToken(ctx, trigger); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var auditRows, removedIdentities, removedTokens, removedLogs int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(1), total_removed_identities, total_removed_tokens, total_removed_logs
+  FROM bootstrap_gc_audit`).Scan(&auditRows, &removedIdentities, &removedTokens, &removedLogs); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 1 || removedIdentities < 1 || removedTokens < 2 || removedLogs < 3 {
+		t.Fatalf("gc audit rows=%d identities=%d tokens=%d logs=%d", auditRows, removedIdentities, removedTokens, removedLogs)
+	}
+	var collectedCount int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM provider_bootstrap_identities WHERE provider_id = ?`, collected.ProviderID).Scan(&collectedCount); err != nil {
+		t.Fatal(err)
+	}
+	if collectedCount != 0 {
+		t.Fatal("unconfirmed identity survived beyond configured recovery retention")
+	}
+	var expiredKey []byte
+	if err := db.QueryRowContext(ctx, `
+SELECT receipt_pubkey FROM provider_bootstrap_identities WHERE provider_id = ?`, expired.ProviderID).Scan(&expiredKey); err != nil {
+		t.Fatalf("expired custody binding was collected: %v", err)
+	}
+	if !bytes.Equal(expiredKey, expired.ReceiptPubkey) {
+		t.Fatalf("expired custody key changed: got=%x want=%x", expiredKey, expired.ReceiptPubkey)
+	}
+	var confirmedAt sql.NullString
+	if err := db.QueryRowContext(ctx, `
+SELECT confirmed_at FROM provider_bootstrap_identities WHERE provider_id = ?`, confirmed.ProviderID).Scan(&confirmedAt); err != nil {
+		t.Fatalf("confirmed identity was collected: %v", err)
+	}
+	if !confirmedAt.Valid {
+		t.Fatal("first bearer use did not durably confirm ownership")
+	}
+	rebound := collected
+	rebound.Now = trigger.Now.Add(time.Second)
+	rebound.ReceiptPubkey = bytes.Repeat([]byte{0x83}, 32)
+	if _, err := store.MintBootstrapToken(ctx, rebound); err != nil {
+		t.Fatalf("never-admitted identity did not become rowless after retention: %v", err)
+	}
+}
+
+func TestBootstrapExpiredFirstUseRevokesButConfirmedTokenSurvivesTTL(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	t.Run("expired first use", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		req := bootstrapRequest("ttl-first-use", "192.0.2.40", bytes.Repeat([]byte{0x70}, 32), now.Add(-2*time.Hour))
+		req.TTL = time.Minute
+		mint, err := store.MintBootstrapToken(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if providerID, valid, err := store.ValidateAndMarkTokenUsed(ctx, mint.ProviderToken); err != nil || valid || providerID != "" {
+			t.Fatalf("expired first use provider=%q valid=%v err=%v", providerID, valid, err)
+		}
+		if _, valid, err := store.ValidateToken(ctx, mint.ProviderToken); err != nil || valid {
+			t.Fatalf("expired first-use token remained active: valid=%v err=%v", valid, err)
+		}
+	})
+
+	t.Run("confirmed token is ordinary after bootstrap ttl", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+		store, err := auth.OpenStore(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		req := bootstrapRequest("ttl-confirmed", "192.0.2.41", bytes.Repeat([]byte{0x71}, 32), now)
+		mint, err := store.MintBootstrapToken(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, valid, err := store.ValidateAndMarkTokenUsed(ctx, mint.ProviderToken); err != nil || !valid {
+			t.Fatalf("pre-admission validation valid=%v err=%v", valid, err)
+		}
+		if err := store.MarkTokenUsed(ctx, mint.ProviderToken); err != nil {
+			t.Fatalf("accepted admission confirmation: %v", err)
+		}
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.ExecContext(ctx, `UPDATE provider_tokens SET bootstrap_expires_at = ? WHERE id = ?`, timeTextForTest(now.Add(-time.Hour)), mint.TokenRecord.ID); err != nil {
+			t.Fatal(err)
+		}
+		if providerID, valid, err := store.ValidateAndMarkTokenUsed(ctx, mint.ProviderToken); err != nil || !valid || providerID != req.ProviderID {
+			t.Fatalf("confirmed post-ttl provider=%q valid=%v err=%v", providerID, valid, err)
+		}
+	})
+}
+
+func TestValidateTokenRevokesExpiredProvisionalWithoutConfirmingIt(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	req := bootstrapRequest("readonly-expired", "192.0.2.42", bytes.Repeat([]byte{0x72}, 32), time.Now().UTC().Add(-2*time.Hour))
+	req.TTL = time.Minute
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if providerID, valid, err := store.ValidateToken(ctx, mint.ProviderToken); err != nil || valid || providerID != "" {
+		t.Fatalf("read-only expired validation provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var revokedAt, lastUsedAt, confirmedAt sql.NullString
+	if err := db.QueryRowContext(ctx, `
+SELECT t.revoked_at, t.last_used_at, i.confirmed_at
+  FROM provider_tokens t
+  JOIN provider_bootstrap_identities i ON i.provider_id = t.provider_id
+ WHERE t.id = ?`, mint.TokenRecord.ID).Scan(&revokedAt, &lastUsedAt, &confirmedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !revokedAt.Valid || lastUsedAt.Valid || confirmedAt.Valid {
+		t.Fatalf("expired read-only validation state revoked=%v last_used=%v confirmed=%v", revokedAt, lastUsedAt, confirmedAt)
+	}
+}
+
+func TestLookupBootstrapIdentityPubkeyUsesDurableActiveOrConfirmedBinding(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	key := bytes.Repeat([]byte{0x73}, 32)
+	req := bootstrapRequest("identity-lookup", "192.0.2.43", key, time.Now().UTC())
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pubkey, ok, err := store.LookupBootstrapIdentityPubkey(ctx, req.ProviderID)
+	if err != nil || !ok || !bytes.Equal(pubkey, key) {
+		t.Fatalf("active provisional lookup ok=%v pubkey=%x err=%v", ok, pubkey, err)
+	}
+	if err := store.MarkTokenUsed(ctx, mint.ProviderToken); err != nil {
+		t.Fatalf("confirm bootstrap token: %v", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities SET expires_at = ? WHERE provider_id = ?`, timeTextForTest(time.Now().UTC().Add(-time.Hour)), req.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	pubkey, ok, err = store.LookupBootstrapIdentityPubkey(ctx, req.ProviderID)
+	if err != nil || !ok || !bytes.Equal(pubkey, key) {
+		t.Fatalf("confirmed durable lookup ok=%v pubkey=%x err=%v", ok, pubkey, err)
+	}
+}
+
+func TestBootstrapIdentityExistenceDistinguishesAbsentActiveAndInactive(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	providerID := bootstrapPrincipal("identity-states")
+
+	if exists, err := store.BootstrapIdentityExists(ctx, providerID); err != nil || exists {
+		t.Fatalf("absent identity exists=%v err=%v", exists, err)
+	}
+	req := bootstrapRequest("identity-states", "192.0.2.44", bytes.Repeat([]byte{0x74}, 32), time.Now().UTC())
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := store.LookupBootstrapIdentityPubkey(ctx, providerID); err != nil || !active {
+		t.Fatalf("active identity active=%v err=%v", active, err)
+	}
+	if exists, err := store.BootstrapIdentityExists(ctx, providerID); err != nil || !exists {
+		t.Fatalf("active identity exists=%v err=%v", exists, err)
+	}
+	if _, err := store.RevokeToken(ctx, mint.TokenRecord.TokenPrefix); err != nil {
+		t.Fatalf("revoke provisional token: %v", err)
+	}
+	if _, active, err := store.LookupBootstrapIdentityPubkey(ctx, providerID); err != nil || active {
+		t.Fatalf("inactive identity active=%v err=%v", active, err)
+	}
+	if exists, err := store.BootstrapIdentityExists(ctx, providerID); err != nil || !exists {
+		t.Fatalf("inactive identity exists=%v err=%v", exists, err)
+	}
+}
+
+func TestBootstrapValidationDoesNotConsumeRejectedSessionAndGCReclaimsIt(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	req := bootstrapRequest("rejected-session", "192.0.2.70", bytes.Repeat([]byte{0x91}, 32), now)
+	req.TTL = time.Minute
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerID, valid, err := store.ValidateAndMarkTokenUsed(ctx, mint.ProviderToken); err != nil || !valid || providerID != req.ProviderID {
+		t.Fatalf("provisional validation provider=%q valid=%v err=%v", providerID, valid, err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var lastUsed, confirmedAt sql.NullString
+	if err := db.QueryRowContext(ctx, `
+SELECT t.last_used_at, i.confirmed_at
+  FROM provider_tokens t
+  JOIN provider_bootstrap_identities i ON i.provider_id = t.provider_id
+ WHERE t.id = ?`, mint.TokenRecord.ID).Scan(&lastUsed, &confirmedAt); err != nil {
+		t.Fatal(err)
+	}
+	if lastUsed.Valid || confirmedAt.Valid {
+		t.Fatalf("rejected-session validation consumed bootstrap row: last_used=%v confirmed=%v", lastUsed, confirmedAt)
+	}
+
+	trigger := bootstrapRequest("rejected-session-gc-trigger", "192.0.2.71", bytes.Repeat([]byte{0x92}, 32), now.Add(2*time.Minute))
+	if _, err := store.MintBootstrapToken(ctx, trigger); err != nil {
+		t.Fatalf("trigger bounded GC: %v", err)
+	}
+	var tokenCount, identityCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_tokens WHERE id = ?`, mint.TokenRecord.ID).Scan(&tokenCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_bootstrap_identities WHERE provider_id = ?`, req.ProviderID).Scan(&identityCount); err != nil {
+		t.Fatal(err)
+	}
+	if tokenCount != 0 || identityCount != 1 {
+		t.Fatalf("expired rejected-session token was not reclaimed with custody retained: tokens=%d identities=%d", tokenCount, identityCount)
+	}
+}
+
+func timeTextForTest(value time.Time) string {
+	return value.UTC().Format("2006-01-02T15:04:05Z")
+}
 
 func TestBearerTokenMatchesHeader(t *testing.T) {
 	headers := http.Header{}
@@ -52,11 +1163,11 @@ func TestOperatorOnlyBearerMatches(t *testing.T) {
 	}
 }
 
-// TestGatewayInternalBearerMatchesScoping pins the codex PR #73 HIGH-1
-// fix at the helper level for the gateway-internal class: BOTH the
-// operator key and the gateway service token are accepted. The kind
-// return identifies which one matched so the call-site can audit-log
-// correctly.
+// TestGatewayInternalBearerMatchesScoping pins the M3-2 / SECU-4
+// gateway-internal credential check after PR #87 item 3 removed the
+// legacy operator_key fallback. The helper now accepts the
+// gateway_service_token ONLY; any other bearer (including what was
+// formerly the operator-key fallback) returns BearerKindNone.
 func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -64,15 +1175,15 @@ func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
 		want     auth.InternalBearerKind
 		wantName string
 	}{
-		{name: "service_token preferred", bearer: "service-secret", want: auth.BearerKindServiceToken, wantName: "service_token"},
-		{name: "operator_key fallback", bearer: "operator-secret", want: auth.BearerKindOperatorKey, wantName: "operator_key"},
+		{name: "service_token accepted", bearer: "service-secret", want: auth.BearerKindServiceToken, wantName: "service_token"},
+		{name: "operator-key shaped bearer rejected post-cutover", bearer: "operator-secret", want: auth.BearerKindNone, wantName: ""},
 		{name: "no match", bearer: "wrong", want: auth.BearerKindNone, wantName: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			headers := http.Header{}
 			headers.Set("Authorization", "Bearer "+tc.bearer)
-			got := auth.GatewayInternalBearerMatches(headers, "operator-secret", "service-secret")
+			got := auth.GatewayInternalBearerMatches(headers, "service-secret")
 			if got != tc.want {
 				t.Fatalf("kind=%v want=%v", got, tc.want)
 			}
@@ -83,53 +1194,58 @@ func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
 	}
 }
 
-// TestGatewayInternalBearerMatchesEmptyConfigs ensures that an empty
-// gateway_service_token cannot widen the auth surface (matches the
-// invariant in M3-2 / SECU-4), and that an empty operator_key denies
-// even when the request's bearer is also empty.
-func TestGatewayInternalBearerMatchesEmptyConfigs(t *testing.T) {
+// TestGatewayInternalBearerMatchesEmptyServiceToken pins the M1-5 /
+// SECU-5 invariant: an empty service_token DENIES, even when the
+// request also carries an empty bearer. Post-#87-item-3 the operator
+// key is no longer accepted as a fallback, so a misconfigured
+// coordinator (no service_token) cannot route any /internal/* traffic.
+func TestGatewayInternalBearerMatchesEmptyServiceToken(t *testing.T) {
+	// Non-empty bearer + empty service_token → DENY.
 	headers := http.Header{}
-	headers.Set("Authorization", "Bearer operator-secret")
-
-	// Empty service_token, valid operator_key → accept under operator.
-	if got := auth.GatewayInternalBearerMatches(headers, "operator-secret", ""); got != auth.BearerKindOperatorKey {
-		t.Fatalf("empty service_token broke operator fallback: %v", got)
-	}
-	// Empty operator_key, valid service_token → accept under service.
 	headers.Set("Authorization", "Bearer service-secret")
-	if got := auth.GatewayInternalBearerMatches(headers, "", "service-secret"); got != auth.BearerKindServiceToken {
-		t.Fatalf("empty operator_key broke service accept: %v", got)
+	if got := auth.GatewayInternalBearerMatches(headers, ""); got != auth.BearerKindNone {
+		t.Fatalf("empty service_token accepted: %v", got)
 	}
-	// Both empty → always deny, even when the request also has empty bearer.
+	// Empty bearer + empty service_token → DENY.
 	empty := http.Header{}
-	if got := auth.GatewayInternalBearerMatches(empty, "", ""); got != auth.BearerKindNone {
-		t.Fatalf("both empty configs admitted: %v", got)
+	if got := auth.GatewayInternalBearerMatches(empty, ""); got != auth.BearerKindNone {
+		t.Fatalf("both empty admitted: %v", got)
 	}
 }
 
-// TestGatewayInternalBearerMatchesEvaluatesBoth asserts the MEDIUM
-// timing-oracle fix from codex PR #73: the helper must evaluate BOTH
-// credentials before branching. We can't directly observe the branch
-// at this level, but we can pin the public contract that no short-
-// circuit is exposed by checking the helper succeeds when EITHER
-// credential is correct and only the OTHER is configured. (A naive
-// implementation that broke on empty would fail one of these.)
-func TestGatewayInternalBearerMatchesEvaluatesBoth(t *testing.T) {
-	headers := http.Header{}
-	// service_token matches; operator_key is non-empty but unmatched.
-	headers.Set("Authorization", "Bearer svc")
-	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindServiceToken {
-		t.Fatalf("svc match: %v", got)
+func TestCreateOAuthStateBoundRateLimitIsConcurrentSafe(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
-	// operator_key matches; service_token is non-empty but unmatched.
-	headers.Set("Authorization", "Bearer op")
-	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindOperatorKey {
-		t.Fatalf("op match: %v", got)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	const attempts = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, attempts)
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- store.CreateOAuthStateBound(context.Background(), "state-"+string(rune('a'+i)), "/", nil, "origin", now)
+		}(i)
 	}
-	// Neither matches.
-	headers.Set("Authorization", "Bearer nope")
-	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindNone {
-		t.Fatalf("nope: %v", got)
+	wg.Wait()
+	close(errs)
+
+	var created, limited int
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, auth.ErrOAuthStateRateLimited):
+			limited++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if created != 20 || limited != attempts-20 {
+		t.Fatalf("created=%d limited=%d, want 20/%d", created, limited, attempts-20)
 	}
 }
 
@@ -192,6 +1308,65 @@ func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].TokenPrefix != record.TokenPrefix || records[0].ProviderID != "m4-anon" || !records[0].LastUsedAt.Valid {
 		t.Fatalf("records = %#v", records)
+	}
+}
+
+func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	const providerID = "p_apptrackprovider"
+
+	first, err := store.MintProviderTokenAppTrack(ctx, providerID, nil, nil)
+	if err != nil {
+		t.Fatalf("first app-track mint: %v", err)
+	}
+	if len(first) != 64 {
+		t.Fatalf("first token len=%d want 64", len(first))
+	}
+
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("unused active without proof err=%v want ErrAppTrackExistingTokenNoProof", err)
+	}
+	if provider, ok, err := store.ValidateToken(ctx, first); err != nil || !ok || provider != providerID {
+		t.Fatalf("first token should remain active provider=%q ok=%v err=%v", provider, ok, err)
+	}
+	wrong := "wrong-token"
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("active token with wrong proof err=%v want ErrAppTrackExistingTokenNoProof", err)
+	}
+
+	second, err := store.MintProviderTokenAppTrack(ctx, providerID, &first, nil)
+	if err != nil {
+		t.Fatalf("active token with current proof should reissue: %v", err)
+	}
+	if second == first {
+		t.Fatal("proof reissue returned same token")
+	}
+	if err := store.MarkTokenUsed(ctx, second); err != nil {
+		t.Fatalf("mark second used: %v", err)
+	}
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &second, nil); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
+		t.Fatalf("cooldown reissue err=%v want ErrAppTrackReissueCooldown", err)
+	}
+}
+
+func TestMintProviderTokenAppTrackUsesFreshClientCandidate(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	candidate := strings.Repeat("c", 64)
+	got, err := store.MintProviderTokenAppTrack(context.Background(), "p_apptrackcandidate", nil, &candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != candidate {
+		t.Fatalf("token=%q want client candidate", got)
 	}
 }
 

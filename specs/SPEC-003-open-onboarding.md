@@ -1,7 +1,26 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.10 (2026-06-21, FR-C10 — pair_ot minting policy on provisional admission, SPEC-014 v0.2 upstream amendment)
-**Depends on:** SPEC-001 v1.5, SPEC-002 v1.3.5
+**Version:** 0.11.0 (2026-07-16, referral-gated CLI bootstrap integration)
+
+**Change log v0.11.0:** Adds FR-C9.7 as the open-onboarding integration point
+for SPEC-034. A referral code is optional WS bootstrap input when enforcement is
+off and required only for a fresh public credential when enforcement is on.
+Validation/redemption and bootstrap credential mint are one coordinator-owned
+commitment. Operational admission remains the later authenticated WS decision;
+the bootstrap-only connection never creates a routable pool entry. Valid
+incumbent bearers, identity rotation/recovery, and operator/pinned issuance are
+not retroactively gated. Provider identity and returned bearer remain CLI-owned.
+
+**Change log v0.10.3:** Adds **FR-C9.2a**, the coordinator emission policy for the OPTIONAL `auth_state` admission-verdict field on both v1 `hello_ack` and v2 `auth_response` accept frames (`pool.AuthState`: `bearer_validated` / `self_minted` / `bearerless_duplicate`; `mint_failed`/rejects close the connection and never ride an ack; omitted when no token issuer). The field's wire shape/domain is owned by SPEC-001 §6.5.1 and its autoupdate interpretation by SPEC-020 v0.1.7; FR-C9.2a is the sibling of FR-C9.2's existing `assigned_provider_token` ack contract. This propagates the coordinator's own admission verdict so the SPEC-020 bearerless-duplicate notify-only floor is client-enforceable, closing the SPEC-020 tokenless race-loser residual. Additive `omitempty`; a pre-item-23 binary ignores the key and a pre-item-23 coordinator omits it (client falls back to inference) — no behavior change either direction.
+
+**Change log v0.10.2:** Issue #585 Option 2 changes the binary-side
+`assigned_provider_token` commit authority from YAML-only persistence to CLI-owned
+Keychain custody. Newly assigned credentials are never written to YAML. In-memory
+adoption and the authenticated reconnect remain persist-before-adopt. Redacted status
+also exposes conflict and pending-migration state.
+**Depends on:** SPEC-001 v1.9.0, SPEC-002 v1.3.5, SPEC-034 v0.4.0
+
+**Change log v0.10.1:** Additive patch on v0.10 (no wire-shape changes). Closes issue #82 item 3. The FR-C9.4 flag-flip runbook (text added under v0.8.4) referenced a tracking issue for the `coordinator-cli pre-flip-audit --max-last-used-age=24h` command; the command is now shipped and normatively required. Updates the runbook prose to point at the shipped command rather than a tracking issue. No primitive added; no wire field changed.
 
 **Change log v0.10:** Adds **FR-C10**, the coordinator-side emission policy for SPEC-001 v1.5's `pair_ot` / `claim_url` and ownership-status wire surfaces. The amendment exists because the downstream SPEC-014 v0.2 GitHub-auth design identified a protocol-owner split: SPEC-001 owns the field and frame shape, SPEC-003 owns the open-onboarding coordinator mint policy, and SPEC-014 consumes both through its portal and bind flows. The SPEC-014 round-1 A.1 audit found that putting this policy in the GitHub-auth spec would cross the spec boundary, so FR-C10 is written as the sibling of FR-C9's existing `assigned_provider_token` mint contract rather than as a downstream-only implementation note. L-1 baseline preservation is explicit: deployments with `GITHUB_OAUTH_ENABLED=false` or unset MUST NOT emit `pair_ot`, `claim_url`, `ownership_event`, or `needs_claim`; the additive SPEC-001 v1.5 wire fields exist but remain absent on the wire unless the deployment opts into the new surfaces. FR-C10 keeps FR-C9 unchanged and piggybacks only on the same admission that minted a fresh `assigned_provider_token`. Dual-path delivery follows FR-C9's v1/v2 discipline: if the gate passes, the coordinator fills the optional fields defined by SPEC-001 v1.5 §6.5.1 for v1 `hello_ack` or §6.7.2.1 for proof-stage-accepted v2 `auth_response`. Ownership change and migration hints use SPEC-001 v1.5 §6.12 (`ownership_event` / `ownership_status`) and §6.5.2 (`needs_claim`) without redefining those wire shapes.
 
@@ -525,7 +544,7 @@ When `prepareProviderAdmission` (`phase4-coordinator/internal/ws/server.go`) ret
 
 If the unrevoked row has `last_used_at IS NOT NULL` (strict TOFU path), the coordinator MUST NOT mint and MUST close the connection per FR-C9.4. If IssueToken races and returns `ErrActiveTokenAlreadyExists` (race-loss path), the coordinator MUST admit the connection bearer-less with `AuthBearerlessDuplicate` marking — non-routable, non-billable, eviction-defended — per FR-C9.4. The mint MUST happen AFTER admission is approved and BEFORE the corresponding ack frame is written so that ack-write failure does not leave the operator without a record that a token was promised. v0.8.1 specified the mint MUST NOT be conditional on prior rows (multi-mint by design); v0.8.2 narrowed this to "MUST be conditional on FR-C9.4 TOFU" (blanket reject); v0.8.4 composes self-heal-on-NULL (PR #78 deploy-gap recovery) with strict-reject-on-USED (credential-capture closure) and adds the race-loss admit-quarantined branch (PR #69) — see FR-C9.4 for the full security rationale.
 
-If the INSERT succeeds, the cleartext token MUST be returned in the ack frame so the binary can persist it (FR-C9.3). If the INSERT fails on the partial unique index (`ErrActiveTokenAlreadyExists`), the coordinator MUST admit the connection without including `assigned_provider_token` in the ack — see FR-C9.4 for the settling-window rationale. If the INSERT fails on any other DB error, the coordinator MUST admit the connection tokenless and log a warning.
+If the INSERT succeeds, the cleartext token MUST be returned in the ack frame so the binary can persist it (FR-C9.3). If the INSERT fails on the partial unique index (`ErrActiveTokenAlreadyExists`), the coordinator MUST admit the connection without including `assigned_provider_token` in the ack — see FR-C9.4 for the settling-window rationale — marking the session `AuthBearerlessDuplicate` (the ack carries `auth_state: "bearerless_duplicate"` per FR-C9.2a). If the INSERT fails on any other (transient) DB error, the coordinator MUST **fail closed** — mark the admission `AuthMintFailed`, emit the structured `fr_c9_1_mint_failed` log event (the session closes before registration, so `AuthMintFailed` is a rejected-admission log signal, not a `/poolz` pool-snapshot state — SPEC-002), and CLOSE the connection with `CloseInvalidToken` (no ack) so the binary retries cleanly on next reconnect (SPEC-003 v0.8.4 fix-pass-5; the prior "admit tokenless and log a warning" was removed because an empty-`AuthState` session was treated as routable, amplifying a token-store outage into a routing-admission DoS). Because `AuthMintFailed` closes the connection, it never rides an ack — consistent with FR-C9.2a's ack value set.
 
 The minting backend MUST enforce the one-active-token-per-provider_id invariant at the database layer (a partial unique index on `provider_tokens(provider_id) WHERE revoked_at IS NULL` is the normative implementation; the v0.8.2 reference store in `phase4-coordinator/internal/auth/tokens.go` installs this index in `migrate()`). The `IssueToken` call MUST surface a constraint failure as a distinct sentinel error (`ErrActiveTokenAlreadyExists` in the reference implementation) so the caller can apply the v0.8.3 admit-tokenless contract (mark the session `AuthBearerlessDuplicate`, exclude from routing + billing, refuse to evict an existing routable session — see FR-C9.4) without leaking a generic 500 to the wire. This DB-layer enforcement closes the TOCTOU race the codex security re-audit on PR #44 (MAJOR-1) flagged in the v0.8.1 implementation, where two concurrent tokenless connects could both pass the `HasActiveTokenForProvider` check before either insert.
 
@@ -541,19 +560,31 @@ The minted token MUST be returned to the binary in BOTH ack frames under the fie
 
 Both ack writes happen AFTER `prepareProviderAdmission` and AFTER `releaseUnauth()`, on the path that also calls `s.tokens.MarkTokenUsed` for already-validated tokens. The mint hook is symmetric: same condition (`s.tokens != nil && !auth.validated`), same call shape, different surrounding struct.
 
-**FR-C9.3. Binary MUST persist atomically with 0600 perms; persist SHOULD NOT block the WS receive loop.**
+**FR-C9.2a. `auth_state` admission-verdict field on the accept ack (runbook item 23).** The coordinator MUST also stamp its admission verdict on BOTH accept ack frames under the field name `auth_state` (string, OPTIONAL `omitempty`) — the `pool.AuthState` for the registered session: one of `bearer_validated`, `self_minted`, or `bearerless_duplicate`. (`mint_failed` and the reject paths close the connection and therefore never ride an ack; a coordinator with no token issuer omits the field.) `HelloAck` (v1) and `AuthResponse` (v2) each gain `AuthState string \`json:"auth_state,omitempty"\``, written from the value `resolveProvisionalToken` already returns, at the same accept-ack sites as `assigned_provider_token`. The field's on-the-wire shape/domain is owned by SPEC-001 §6.5.1; its autoupdate-trust interpretation (the bearerless-duplicate notify-only floor) is owned by SPEC-020 v0.1.7. This closes the SPEC-020 tokenless race-loser residual: a `bearerless_duplicate` session is now client-enforceable notify-only rather than heuristically inferred. Compatibility: a pre-item-23 binary ignores the unknown key; a pre-item-23 coordinator omits it and the client falls back to its inference — no behavior change either direction.
+
+**FR-C9.3. Binary MUST commit to CLI-owned restart-safe custody before adoption; persistence SHOULD NOT block the WS receive loop.**
 On receipt of an ack frame carrying `assigned_provider_token`, the phase3-binary MUST:
 
-1. Write the token value to a temporary file in the same directory as the config file, with file mode 0600 set BEFORE writing the secret.
-2. Atomically rename the temp file to the final config file path (`rename(2)` semantics — POSIX-atomic on same-filesystem renames).
-3. Match a **top-level** YAML key only: `provider_token: <value>`. Indented `provider_token:` entries nested under a parent block (e.g. an `auth:` map) MUST be preserved verbatim; the persist routine owns only the top-level key. If multiple top-level `provider_token:` lines exist (from a prior botched write), ALL such lines MUST be collapsed to a single canonical entry with the new value.
-4. **AWAIT the persist completion before adopting the token in memory.** The in-memory token MUST be updated ONLY after the rename(2) returns successfully. v0.8.2 hardening: v0.8.1 adopted in memory FIRST then fired a fire-and-forget persist; the codex security re-audit on PR #44 (MINOR-1) flagged the resulting brick window — a process crash between in-memory adoption and persist flush leaves the coordinator with a valid token row that the binary never persisted, and on next process restart the binary reconnects tokenless and TOFU-rejects. Awaiting closes the window: persist either succeeds (both sides have the token) or fails (neither side has it, current WS session continues with the pre-existing bearer).
+1. Write and exact-readback-verify the token in the CLI-owned Keychain service
+   `live.streamvc.macprovider.provider-token.v1`, account `<provider_id>`. The access
+   MUST be non-interactive so launchd never raises a credential prompt.
+2. **AWAIT the Keychain result before adopting the token in memory.** On success,
+   adopt it and reconnect with `source=cli_keychain,state=ready,restart_safe=true`.
+3. Trigger the authenticated reconnect only after the Keychain commit succeeds. On
+   failure, do not mutate YAML, do not adopt the assigned token, fail the current
+   admission attempt without exposing the token, and allow the coordinator's
+   unused-token recovery policy to settle a later retry.
 
-The persist write SHOULD execute outside the WS receive loop synchronously (e.g. via `Task.detached(...).value` await) so disk I/O cannot stall the runtime even though the receive-handling actor suspends. The intent is "disk I/O does not block other actors / Tasks", not "disk I/O is fire-and-forget."
+The writes SHOULD execute in a detached utility task whose result is awaited, so the
+receive-handling actor suspends without blocking unrelated actors. This is never a
+fire-and-forget write.
 
-On persist failure (disk full, permission denied, parent directory missing) the binary MUST log a JSON-encoded structured-log line with `event=provider_token_persist_failed`, `error=<cause>`, `config_path=<resolved>`, continue serving the current WS session with the previously-configured bearer (or no bearer), and NOT crash. The JSON line MUST be encoded via a JSON encoder, not hand-built string interpolation, so embedded quotes/newlines/backslashes in the error description or path cannot break the JSON envelope.
+Every outcome MUST use JSON-encoded structured events, including
+`provider_token_keychain_persisted` and `provider_token_keychain_persist_failed`.
+Error descriptions and config paths
+MUST be encoded by a JSON serializer; logs and status MUST NOT expose token material.
 
-The persist target is the top-level `provider_token` YAML key (already wired by M1-1 SPEC-001 v1.3.1 § config). If the config file already has a top-level token populated, the new one REPLACES it. Pre-v0.8.1 prose referenced `auth.provider_token` (nested); the correct contract is flat top-level.
+The legacy YAML writer is not a permitted assigned-token commit path after v0.10.2.
 
 **FR-C9.4. TOFU (trust-on-first-use), composed: self-heal-on-NULL + strict-reject-on-USED + race-loss admit-quarantined + pool-registry eviction defense.**
 
@@ -614,7 +645,9 @@ This closes the pool-slot capture vector flagged by the PR #69 codex security re
 1. Revoke + ask the legitimate provider to reconnect (they will then race for a fresh mint; if the same `last_used_at IS NULL` outcome repeats, the legitimate provider's binary likely cannot persist tokens and a binary upgrade is required), OR
 2. Coordinate out-of-band with the legitimate provider to issue them a pinned-tier token via `coordinator-cli issue-token` and have them paste it into their `provider_token` config field manually.
 
-Pure "row existence" is NOT operational evidence under the v0.8.4 contract. The runbook MUST gate the flag flip on `last_used_at` freshness — not on `list-tokens` enumeration alone — to prevent flipping with an attacker-owned bearer in the active set. The operator MUST also verify zero `AuthBearerlessDuplicate` entries and zero unproven `AuthSelfMinted` sessions (those with `last_used_at IS NULL`) in `/poolz` before flipping. Tracking issue #82 captures the `coordinator-cli pre-flip-audit --max-last-used-age=24h` command that automates this gate.
+Pure "row existence" is NOT operational evidence under the v0.8.4 contract. The runbook MUST gate the flag flip on `last_used_at` freshness — not on `list-tokens` enumeration alone — to prevent flipping with an attacker-owned bearer in the active set. The operator MUST also verify zero `AuthBearerlessDuplicate` entries and zero unproven `AuthSelfMinted` sessions (those with `last_used_at IS NULL`) in `/poolz` before flipping.
+
+The `last_used_at` freshness check is automated by `coordinator-cli pre-flip-audit --max-last-used-age=24h` (#82 item 3, shipped in v0.10.1). The command lists every active `provider_tokens` row, flags any with `last_used_at IS NULL` or older than the cutoff, and exits non-zero on any offender. Operators MUST integrate this command into the deploy pipeline as a precondition before flipping `RequireProviderTokens=true` — a non-zero exit MUST block the flip until each offender is either reconnected (so `MarkTokenUsed` stamps a fresh `last_used_at`) or revoked. The default cutoff matches the runbook recommendation; tighter values (e.g. `--max-last-used-age=1h`) are appropriate for short-deploy-window operators. `--json` emits a machine-readable report with the same exit-code contract for pipeline integration.
 
 **What stays unchanged from v0.8.2.** The partial unique index, `ErrActiveTokenAlreadyExists` sentinel, and migration step are all preserved as-is. The credential-capture attack the codex security audit on PR #44 (MAJOR-1) closed remains closed — an attacker still cannot mint a parallel bearer for someone else's `provider_id`, because the INSERT fails on the unique constraint. The v0.8.4 composition adds two further closures: (a) atomic `ValidateAndMarkTokenUsed` removes the brief window where a Bearer-validated provider's row was still `last_used_at IS NULL` and could be self-healed by a concurrent attacker, and (b) extended `pool.Registry.Register` eviction defense refuses non-Bearer-validated sessions from replacing an existing routable Bearer-validated session.
 
@@ -631,7 +664,11 @@ auth:
   allow_tokenless_provisional_bootstrap: true
 ```
 
-Invite-only deployments MAY keep `allow_tokenless_provisional_bootstrap=false`, but then each new provider needs an operator-preprovisioned `provider_token` before first connect.
+Invite-only deployments using the legacy operator-token path MAY keep
+`allow_tokenless_provisional_bootstrap=false`, but then each new provider needs an
+operator-preprovisioned `provider_token` before first connect. Referral-gated
+public onboarding instead enables tokenless provisional bootstrap and applies
+FR-C9.7; a referral code is admission input, never a preprovisioned bearer.
 
 **Supersedes SPEC-002 v1.3.5 FR-P12 / PG-1 for tokenless provisional admission.** Those locked clauses say provisional providers may continue without tokens under `require_provider_tokens=true`; SPEC-003 v0.8.1 explicitly narrows that to "providers with at least one unrevoked token row." The locked SPEC-002 text is intentionally preserved as-is; this supersede is normative for the open-onboarding tier (per codex architect MAJOR-1, PR #44). A future SPEC-002 revision SHOULD amend FR-P12 / PG-1 to reflect this.
 
@@ -643,8 +680,52 @@ The flag flip is safe AFTER:
 
 Old binaries that cannot parse `assigned_provider_token` will silently drop the field (Swift's JSON decoder ignores unknown keys) and never persist a token; at flag-flip time they are rejected at the WS handshake — same blast radius as the original M1-1 plan, no worse. Entry 60 records this as the explicit compatibility cutoff. The operator action `coordinator-cli list-tokens` may be used during the settling window to verify that all expected provider IDs have at least one unrevoked token row before flipping the flag.
 
-**FR-C9.6. install.sh is NOT modified.**
-The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues to write a tokenless `config.yaml`. Token acquisition happens automatically on the first WS connect after install. This preserves the single-shell-pipe UX that the open-onboarding tier exists to provide; gating provisional token issuance on operator action would re-create the very approval bottleneck Q2 was about removing.
+**FR-C9.6. Installer changes preserve the ordinary open-onboarding path.**
+The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues
+to work without a referral input and obtains a credential through the CLI-owned
+WS bootstrap. SPEC-034's optional referral integration may modify `install.sh`
+only to capture and unset the path supplied as
+`MACPROVIDER_REFERRAL_CODE_FILE`, then pass that owner-only source path to
+`bootstrap-auth --referral-code-file`. The installer MUST NOT read, copy, log, or
+persist the code. The CLI's owner-only durable onboarding journal stores only the
+provider/receipt/code digests, attempt identity, and typed state; it never stores
+plaintext referral input. Neither installer nor CLI may write the code to
+`config.yaml`, logs, argv, lifecycle status, or Malibu storage. With the variable
+absent, installer behavior remains the ordinary single-shell-pipe flow.
+
+**FR-C9.7. Referral admission composes with fresh credential bootstrap.**
+The initial and proof-stage bootstrap frames MAY carry the optional
+`referral_code` field owned by SPEC-001. The launchd-managed CLI is the only live
+client that submits it and the only client that adopts the returned provider
+credential. Malibu may collect the non-secret input but MUST pass it through a
+supported installed-CLI/install interface; it does not call the coordinator or
+receive the bearer.
+
+When `referrals.require_for_registration` is absent or false, omission of
+`referral_code` preserves all FR-C9 behavior. When true, the coordinator requires
+a valid SPEC-034 code only for a fresh public credential/bootstrap. It MUST
+validate and redeem the code in the same recoverable SQLite decision as exact
+receipt-key binding and unused bootstrap-token mint, and MUST expose only typed,
+non-secret referral failures. That bootstrap-only socket then closes without
+reserving admission capacity or registering a pool entry. Operational admission
+occurs on the later bearer-authenticated connection through the unchanged
+compatibility, admission-identity, capacity, token-confirmation, and pool path.
+The gate MUST NOT reject a valid incumbent bearer, a proven admission-identity
+rotation or recovery, a pinned/operator-issued principal, or an idempotent retry
+of an already-committed same-code attempt.
+
+The optional unauthenticated `/v1/referrals/validate` convenience route is not
+part of admission and is mounted only when the independent
+`referrals.enable_public_validation` flag is true. That flag defaults false.
+Malibu performs local syntax validation when the route/capability is unavailable;
+the CLI bootstrap transaction remains the authoritative validation.
+
+The coordinator compares the replay-stable referral field in the signed v2
+transcript. Retrying with the same `(campaign, provider_id, exact receipt key,
+code_digest)` consumes no additional capacity; presenting another code for an
+already-attributed provider fails without consuming either issuer. Referral
+semantics, serving qualification, invite balance, and advocacy rewards are owned
+by SPEC-034 and are not duplicated here.
 
 **FR-C10. `pair_ot` minting policy on provisional admission.**
 
@@ -1171,7 +1252,7 @@ their own integration testing.**
 
 ## 11. Open questions
 
-**OQ-1. Code signing strategy.**
+**OQ-1. Code signing strategy.** _RESOLVED 2026-06-25 (PR #62, #148, #149) — Apple Developer ID enrollment landed and the release pipeline now ships Developer-ID-signed + notarized + stapled `.pkg` assets alongside the compatibility tarball. v1.6.1 (2026-06-25) is the first release with the stapled `.pkg`. macOS 26.3.1 launchd AMFI rejection of adhoc-signed binaries is unblocked. The "Phase 6+" deferral below is superseded._
 Apple Developer ID signing ($99/yr) vs `xattr -d com.apple.quarantine`
 workaround. SPEC-001 NFR-6 says "signed with Developer ID, not
 notarized." For `install.sh` strangers, the xattr workaround is

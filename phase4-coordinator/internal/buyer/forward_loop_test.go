@@ -40,6 +40,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -50,10 +51,45 @@ import (
 	"github.com/rs/zerolog"
 )
 
+func assertTimingHeaderPresent(t *testing.T, h http.Header, name string) int64 {
+	t.Helper()
+	raw := h.Get(name)
+	if raw == "" {
+		t.Fatalf("%s missing", name)
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		t.Fatalf("%s = %q, want integer milliseconds", name, raw)
+	}
+	if value < 0 {
+		t.Fatalf("%s = %d, want non-negative milliseconds", name, value)
+	}
+	return value
+}
+
+func assertTimingHeaderBelow(t *testing.T, h http.Header, name string, maxExclusive int64) {
+	t.Helper()
+	if value := assertTimingHeaderPresent(t, h, name); value >= maxExclusive {
+		t.Fatalf("%s = %d, want below %d to prove final-attempt timing did not include the failed first attempt", name, value, maxExclusive)
+	}
+}
+
+func assertTimingHeaderAtLeast(t *testing.T, h http.Header, name string, minInclusive int64) {
+	t.Helper()
+	if value := assertTimingHeaderPresent(t, h, name); value < minInclusive {
+		t.Fatalf("%s = %d, want at least %d", name, value, minInclusive)
+	}
+}
+
 // Scenario 1: HTTP success on first attempt. One row, retried=0.
 func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 	const requestID = "aaaaaaaa-1111-4111-8111-111111111111"
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(120 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
 	}))
 	defer okUpstream.Close()
@@ -79,6 +115,7 @@ func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	assertTimingHeaderAtLeast(t, rr.Header(), "X-MacProvider-Timing-Provider-Prefill-Ms", 80)
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 1 {
 		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
@@ -92,6 +129,12 @@ func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 	if rows[0].ProviderAssignedID.String != "s1" {
 		t.Fatalf("rows[0].ProviderAssignedID = %q, want s1", rows[0].ProviderAssignedID.String)
 	}
+	if !rows[0].TTFTMs.Valid || rows[0].TTFTMs.Float64 < 80 {
+		t.Fatalf("rows[0].TTFTMs = %#v, want persisted non-null provider TTFT >= 80", rows[0].TTFTMs)
+	}
+	if !rows[0].DecodeMs.Valid {
+		t.Fatalf("rows[0].DecodeMs = %#v, want persisted non-null provider decode timing", rows[0].DecodeMs)
+	}
 }
 
 // Scenario 2: HTTP 502 → advance → HTTP 200. Two rows with explicit
@@ -100,10 +143,12 @@ func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	const requestID = "bbbbbbbb-2222-4222-8222-222222222222"
 	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}))
 	defer failUpstream.Close()
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(10 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
 	}))
 	defer okUpstream.Close()
@@ -133,6 +178,7 @@ func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	assertTimingHeaderBelow(t, rr.Header(), "X-MacProvider-Timing-Provider-Dispatch-Ms", 150)
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
@@ -158,6 +204,111 @@ func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	}
 	if rows[1].Retried != 1 {
 		t.Fatalf("rows[1].Retried = %d, want 1", rows[1].Retried)
+	}
+}
+
+func TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming(t *testing.T) {
+	const requestID = "eeeeeeee-5555-4555-8555-555555555555"
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(120 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"error":{"code":"provider_failed"}}`))
+	}))
+	defer failUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want failed provider row + no-provider row: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[0].Status != http.StatusBadGateway {
+		t.Fatalf("provider failure row = %#v, want s1/502", rows[0])
+	}
+	if !rows[0].TTFTMs.Valid || !rows[0].DecodeMs.Valid {
+		t.Fatalf("provider failure timing = (%#v, %#v), want non-null values", rows[0].TTFTMs, rows[0].DecodeMs)
+	}
+	if rows[1].ProviderAssignedID.Valid {
+		t.Fatalf("final row provider_assigned_id = %#v, want NULL no-provider row", rows[1].ProviderAssignedID)
+	}
+	if rows[1].TTFTMs.Valid || rows[1].DecodeMs.Valid {
+		t.Fatalf("no-provider timing = (%#v, %#v), want both NULL", rows[1].TTFTMs, rows[1].DecodeMs)
+	}
+}
+
+func TestB1_RequestLogPreDispatchProviderRowDoesNotInheritPriorTiming(t *testing.T) {
+	const requestID = "ffffffff-6666-4666-8666-666666666666"
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(120 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"error":{"code":"provider_failed"}}`))
+	}))
+	defer failUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "invalid", EndpointURL: "%"},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "invalid", "s2", "model-a", pool.StateReady, 20000, 1, "%", 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want failed provider row + pre-dispatch provider row: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || !rows[0].TTFTMs.Valid || !rows[0].DecodeMs.Valid {
+		t.Fatalf("provider failure row = %#v, want s1 with non-null timing", rows[0])
+	}
+	if rows[1].ProviderAssignedID.String != "s2" || rows[1].Status != http.StatusBadGateway {
+		t.Fatalf("pre-dispatch provider row = %#v, want s2/502", rows[1])
+	}
+	if rows[1].TTFTMs.Valid || rows[1].DecodeMs.Valid {
+		t.Fatalf("pre-dispatch provider timing = (%#v, %#v), want both NULL", rows[1].TTFTMs, rows[1].DecodeMs)
 	}
 }
 
@@ -190,7 +341,7 @@ func TestM2_1C_RowSequence_StreamingCommittedSingleRow(t *testing.T) {
 			chunks := make(chan providerws.InferenceResponseChunk, 1)
 			done := make(chan providerws.InferenceResponseEnd)
 			errs := make(chan error)
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: "data: partial\n\n"}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: `data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"}
 			go func() {
 				time.Sleep(10 * time.Millisecond)
 				errs <- providerws.ErrRelayClosed
@@ -207,7 +358,7 @@ func TestM2_1C_RowSequence_StreamingCommittedSingleRow(t *testing.T) {
 	}
 	// One chunk emitted before the relay closes; the buyer must have
 	// written it (committed=true) before the disconnect was observed.
-	if !bytes.Contains(rr.Body.Bytes(), []byte("data: partial")) {
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"partial"`)) {
 		t.Fatalf("body missing committed chunk; body=%s", rr.Body.String())
 	}
 	rows := queryAllRequestLogRows(t, dbPath)
@@ -257,16 +408,20 @@ func TestM2_1C_RowSequence_WSNonStreamingFailoverDoesNotBumpRetried(t *testing.T
 			StickyMaxEntries: 10000,
 		}),
 		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, reqID string, body []byte, stream bool) (*providerws.RelayStream, error) {
-			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			chunks := make(chan providerws.InferenceResponseChunk, 2)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
 			if provider.ProviderID == "p1" {
 				// Drive into wsForwardProviderDisconnected — pre-commit.
-				errs <- providerws.ErrRelayClosed
-				return &providerws.RelayStream{RequestID: reqID, Chunks: chunks, Done: done, Errors: errs}, nil
+				time.Sleep(200 * time.Millisecond)
+				return nil, providerws.ErrRelayClosed
 			}
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`}
-			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: reqID, Status: "complete", ChunksSent: 1}
+			go func() {
+				chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: ""}
+				time.Sleep(120 * time.Millisecond)
+				chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 1, Data: `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`}
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: reqID, Status: "complete", ChunksSent: 2}
+			}()
 			return &providerws.RelayStream{RequestID: reqID, Chunks: chunks, Done: done, Errors: errs}, nil
 		}, time.Second),
 	)
@@ -280,6 +435,9 @@ func TestM2_1C_RowSequence_WSNonStreamingFailoverDoesNotBumpRetried(t *testing.T
 	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
 		t.Fatalf("provider = %q, want p2 (after failover)", rr.Header().Get("X-MacProvider-Provider"))
 	}
+	assertTimingHeaderBelow(t, rr.Header(), "X-MacProvider-Timing-Provider-Dispatch-Ms", 150)
+	assertTimingHeaderAtLeast(t, rr.Header(), "X-MacProvider-Timing-Provider-Prefill-Ms", 80)
+	assertTimingHeaderBelow(t, rr.Header(), "X-MacProvider-Timing-Provider-Decode-Ms", 150)
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2 (failover-disconnect then success): %#v", len(rows), rows)
@@ -308,6 +466,487 @@ func TestM2_1C_RowSequence_WSNonStreamingFailoverDoesNotBumpRetried(t *testing.T
 	}
 	if rows[1].Retried != 0 {
 		t.Fatalf("rows[1].Retried = %d, want 0 (failover ≠ retry — must not bump explicitRetries)", rows[1].Retried)
+	}
+}
+
+// Scenario 6 (issue #92): HTTP-streaming provider returns 200 OK then
+// disconnects with zero body bytes. PRE-FIX (server.go:2086 WriteHeader
+// before first read) this returned wsForwardProviderDisconnectedCommitted
+// → classifier set committed=true → terminal exit, no failover, buyer
+// observed 200 + empty body. Revenue-gaming surface: provider could
+// collect attribution credit for doing zero work.
+//
+// POST-FIX: forwardStreaming peeks the first body byte before WriteHeader.
+// Zero-body upstream returns wsForwardProviderDisconnected (classifier
+// sets retryable=true + failoverEligible=true), unified loop advances
+// to a healthy provider, buyer sees a normal SSE stream from provider #2.
+//
+// Pins:
+//   - 2 logAttempt rows (zero-body then success)
+//   - row 0 status = 502 (NOT 200 — Committed-with-zero-body is the bug)
+//   - row 1 served by the second provider with retried=1
+func TestM92_RowSequence_HTTPStreamingZeroBodyTriggersFailover(t *testing.T) {
+	const requestID = "ffffffff-9292-4292-8292-929292929292"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Send 200 OK with no body bytes. Handler returns immediately;
+		// net/http closes the response with Content-Length: 0, the
+		// buyer's resp.Body EOFs on first read.
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from zero-body provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"ok"`)) {
+		t.Fatalf("body missing failover provider's stream; body=%s", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2 (zero-body then success): %#v", len(rows), rows)
+	}
+	// Row 0: bad provider returned 200-with-zero-body. POST-FIX this is
+	// logged as 502 (Disconnected, not Committed/200). If this is 200, the
+	// fix has regressed and revenue-gaming is back.
+	if rows[0].ProviderAssignedID.String != "s1" {
+		t.Fatalf("rows[0].ProviderAssignedID = %q, want s1", rows[0].ProviderAssignedID.String)
+	}
+	if rows[0].Status != http.StatusBadGateway {
+		t.Fatalf("rows[0].Status = %d, want 502 (zero-body MUST NOT be logged as 200 Committed)", rows[0].Status)
+	}
+	if rows[0].Retried != 0 {
+		t.Fatalf("rows[0].Retried = %d, want 0", rows[0].Retried)
+	}
+	// Row 1: ok provider served the actual stream after the buyer's
+	// failover/retry. retried=1 because zero-body Disconnected (retryable=true)
+	// goes through advanceToNextProvider → explicitRetries++.
+	if rows[1].ProviderAssignedID.String != "s2" {
+		t.Fatalf("rows[1].ProviderAssignedID = %q, want s2", rows[1].ProviderAssignedID.String)
+	}
+	if rows[1].Status != http.StatusOK {
+		t.Fatalf("rows[1].Status = %d, want 200", rows[1].Status)
+	}
+	if rows[1].Retried != 1 {
+		t.Fatalf("rows[1].Retried = %d, want 1 (zero-body Disconnected = retryable; advance bumps retries)", rows[1].Retried)
+	}
+}
+
+// Scenario 7 (issue #92 codex audit MAJOR): HTTP-streaming provider sends
+// exactly 1 byte then EOFs. The initial #92 fix (Peek(1)) considered this
+// "first byte received" and committed 200 OK + sticky to the provider,
+// which let the provider collect attribution credit for ~zero work. The
+// final fix requires a complete first SSE event (\n\n terminator after at
+// least one non-blank line) before commit. The 1-byte body fails the
+// non-blank-then-blank check and triggers failover.
+func TestM92_RowSequence_HTTPStreamingOneBytePartialTriggersFailover(t *testing.T) {
+	const requestID = "11111111-9201-4201-8201-111111111111"
+	// Distinctive sentinel — a regex-unfriendly two-byte payload that cannot
+	// appear in the legitimate failover stream below, so the body assertion
+	// can be a clean unconditional "sentinel must not leak".
+	const badSentinel = "\xfb\xad"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte(badSentinel))
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from 1-byte-EOF provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(badSentinel)) {
+		t.Fatalf("buyer body leaked the malicious pre-commit sentinel %q; body=%q", badSentinel, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"ok"`)) {
+		t.Fatalf("body missing failover provider's stream; body=%q", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2 (1-byte then success): %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[0].Status != http.StatusBadGateway || rows[0].Retried != 0 {
+		t.Fatalf("rows[0] = %+v, want s1/502/retried=0 (1-byte body MUST NOT be Committed)", rows[0])
+	}
+	if rows[1].ProviderAssignedID.String != "s2" || rows[1].Status != http.StatusOK || rows[1].Retried != 1 {
+		t.Fatalf("rows[1] = %+v, want s2/200/retried=1", rows[1])
+	}
+}
+
+// Scenario 8 (issue #92): POSITIVE COVERAGE — legitimate provider sends
+// its first SSE event after a brief delay. This is not a revert-sensitive
+// regression test (a slow-but-valid stream also succeeded pre-fix); kept
+// to assert that the protocol-aware threshold does NOT accidentally fail
+// over legitimate slow providers. The real revert-sensitive coverage for
+// the protocol-aware threshold lives in Scenarios 9 and 10.
+func TestM92_RowSequence_HTTPStreamingSlowFirstEventCommits(t *testing.T) {
+	const requestID = "22222222-9202-4202-8202-222222222222"
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"id\":\"slow\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer slowUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "slow", EndpointURL: slowUpstream.URL},
+	})
+	registerWithEndpoint(registry, "slow", "s1", "model-a", pool.StateReady, 20000, 1, slowUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"hi"`)) {
+		t.Fatalf("body missing slow provider's stream; body=%s", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("slow-first-event rows = %d, want 1 (no failover, single committed success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusOK || rows[0].Retried != 0 || rows[0].ProviderAssignedID.String != "s1" {
+		t.Fatalf("rows[0] = %+v, want s1/200/retried=0", rows[0])
+	}
+}
+
+// Scenario 9 (issue #92 codex r2 MAJOR): SSE-comment-only provider. Sends
+// `:\n\n` (a single SSE keep-alive comment + event terminator) then EOFs.
+// Pre-r2 fix this committed as success because the threshold was "first
+// non-blank line followed by blank line" — a comment line is non-blank.
+// Post-r2 fix the threshold is "first commit-worthy data: chunk" — comment
+// lines don't qualify, so this fails over to a healthy provider.
+func TestM92_RowSequence_HTTPStreamingCommentOnlyTriggersFailover(t *testing.T) {
+	const requestID = "33333333-9203-4203-8203-333333333333"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte(":\n\n"))
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from comment-only provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (comment-only then success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusBadGateway || rows[0].Retried != 0 {
+		t.Fatalf("rows[0] = %+v, want 502/retried=0 (comment-only MUST NOT be Committed)", rows[0])
+	}
+	if rows[1].Status != http.StatusOK || rows[1].Retried != 1 {
+		t.Fatalf("rows[1] = %+v, want 200/retried=1", rows[1])
+	}
+}
+
+// Scenario 10 (issue #92 codex r2 MAJOR): terminator-literal-only provider.
+// Sends `data: [DONE]\n\n` (OpenAI stream-end marker, no preceding content
+// chunk) then EOFs. Pre-r2 fix this committed because the line is non-blank
+// and JSON-shape isn't validated. Post-r2 fix isCommitWorthyDataLine rejects
+// the literal `[DONE]` payload, so this fails over.
+func TestM92_RowSequence_HTTPStreamingDoneOnlyTriggersFailover(t *testing.T) {
+	const requestID = "44444444-9204-4204-8204-444444444444"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from [DONE]-only provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 ([DONE]-only then success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusBadGateway || rows[0].Retried != 0 {
+		t.Fatalf("rows[0] = %+v, want 502/retried=0 (data: [DONE] alone MUST NOT be Committed)", rows[0])
+	}
+	if rows[1].Status != http.StatusOK || rows[1].Retried != 1 {
+		t.Fatalf("rows[1] = %+v, want 200/retried=1", rows[1])
+	}
+}
+
+func TestSpec018_HTTPStreamingMalformedToolCallsThenContentTriggersFailover(t *testing.T) {
+	const requestID = "55555555-1818-4818-8818-555555555555"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"must-not-commit\"}}]}\n\n"))
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from malformed tool_calls provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("must-not-commit")) {
+		t.Fatalf("malformed pre-commit provider bytes reached buyer: %s", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (malformed tool_calls then success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusBadGateway || rows[0].Retried != 0 {
+		t.Fatalf("rows[0] = %+v, want 502/retried=0 (malformed pre-commit tool_calls MUST NOT be Committed)", rows[0])
+	}
+	if rows[1].Status != http.StatusOK || rows[1].Retried != 1 {
+		t.Fatalf("rows[1] = %+v, want 200/retried=1", rows[1])
+	}
+}
+
+// Scenario 11 (issue #92 codex r4 MINOR): legitimate provider first event
+// is a usage-only chunk (OpenAI shape when stream_options.include_usage=true
+// is set with no content chunks beforehand — rare but valid). The commit
+// predicate's `usage` branch must accept this, the pre-commit flow must
+// commit, and the buyer must see one successful row. Locks the security
+// boundary against future tightening that accidentally rejects the
+// legitimate usage-only path.
+func TestM92_RowSequence_HTTPStreamingUsageOnlyFirstChunkCommits(t *testing.T) {
+	const requestID = "55555555-9205-4205-8205-555555555555"
+	usageUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer usageUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "usage", EndpointURL: usageUpstream.URL},
+	})
+	registerWithEndpoint(registry, "usage", "s1", "model-a", pool.StateReady, 20000, 1, usageUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("usage-only-first-chunk rows = %d, want 1 (no failover, single committed success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusOK || rows[0].Retried != 0 || rows[0].ProviderAssignedID.String != "s1" {
+		t.Fatalf("rows[0] = %+v, want s1/200/retried=0", rows[0])
 	}
 }
 

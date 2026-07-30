@@ -51,6 +51,7 @@ type OAuthState struct {
 	StateHash   []byte
 	SessionID   string
 	RedirectURI string
+	ReturnTo    string
 	ClientIP    string
 	// Action is an optional operator-initiated intent threaded from the
 	// /auth/github/start query string to the /auth/github/callback handler.
@@ -58,6 +59,14 @@ type OAuthState struct {
 	// stale-cookie pollution, parallel-flow races, and uncleared cookies on
 	// early callback errors. Currently the only non-empty value is "mint".
 	Action     string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	ConsumedAt time.Time
+}
+
+type OAuthHandoff struct {
+	TokenHash  []byte
+	APIKey     string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	ConsumedAt time.Time
@@ -75,6 +84,14 @@ type DemoSessionEvent struct {
 	EventID   string
 	ClientIP  string
 	CreatedAt time.Time
+}
+
+type PublicIssuanceReservation struct {
+	Surface     string
+	ClientIP    string
+	WindowStart time.Time
+	Limit       int
+	CreatedAt   time.Time
 }
 
 type DemoUsageEvent struct {
@@ -107,6 +124,15 @@ type ReservationRequest struct {
 	DailyQuota      int64
 	ExpiresAt       time.Time
 	CreatedAt       time.Time
+}
+
+type ActiveReservation struct {
+	AccountID      string
+	RequestID      string
+	WindowDate     string
+	ReservedTokens int64
+	ExpiresAt      time.Time
+	CreatedAt      time.Time
 }
 
 type QuotaDecision struct {
@@ -192,6 +218,7 @@ type CapacityTier struct {
 type KillSwitchState struct {
 	DemoOnly     bool      `json:"demo_only"`
 	AllPublicAPI bool      `json:"all_public_api"`
+	Version      int64     `json:"version"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -344,14 +371,51 @@ type ExplorerSessionList struct {
 
 type ExplorerSessionDetail struct {
 	RequestID              string                          `json:"request_id"`
+	AccountID              string                          `json:"account_id,omitempty"`
 	UsageEvent             *ExplorerUsageEvent             `json:"usage_event"`
 	QuotaReservation       *ExplorerQuotaReservation       `json:"quota_reservation"`
 	ConcurrencyReservation *ExplorerConcurrencyReservation `json:"concurrency_reservation"`
 	FeedbackEvents         []ExplorerFeedbackEvent         `json:"feedback_events"`
 	AuditEvents            []ExplorerAuditEvent            `json:"audit_events"`
-	Partial                bool                            `json:"partial"`
-	Error                  any                             `json:"error"`
+	// MatchedAccountIDs is populated when the lookup is ambiguous —
+	// i.e. accountID was empty AND the request_id resolves to rows
+	// from multiple accounts (issue #196 composite-PK semantics).
+	// Returned together with ErrExplorerAmbiguousRequestID so the
+	// caller can re-issue scoped lookups.
+	//
+	// #231 v0.4: bounded at ExplorerMatchedAccountIDsCap entries; the
+	// MatchedAccountIDsTruncated flag is set when the underlying UNION
+	// resolved to more than the cap and protects the 409 body against
+	// malicious collision floods + bounds operator log noise. The
+	// bounded forensic sample (capped at ExplorerForensicMatchedAccountIDsCap)
+	// is emitted to audit_events for forensic retrieval — never
+	// silently dropped.
+	MatchedAccountIDs               []string `json:"matched_account_ids,omitempty"`
+	MatchedAccountIDsTruncated      bool     `json:"matched_account_ids_truncated"` // #231 R1 arch LOW: explicit presence required by SPEC §6.4 contract — `omitempty` would drop `false` and break clients that branch on field presence.
+	MatchedAccountIDsForensicSample []string `json:"-"`                             // #231 R2: bounded forensic sample (cap ExplorerForensicMatchedAccountIDsCap+1) for the audit_events emit; never sent over the wire. Renamed from MatchedAccountIDsUntrimmed in R2 — the list is bounded, not "untrimmed", and the audit payload surfaces partial capture via forensic_truncated_at.
+	// MatchedAccountIDsForensicDegraded is true when the forensic
+	// SELECT failed and the slice fell back to the bounded ambiguity
+	// probe. Surface in audit payload as `forensic_source =
+	// "response_probe"` so an operator can tell the partial sample
+	// apart from a genuine "exactly 11 accounts" result.
+	MatchedAccountIDsForensicDegraded bool `json:"-"`
+	Partial                           bool `json:"partial"`
+	Error                             any  `json:"error"`
 }
+
+// ExplorerMatchedAccountIDsCap is the §6.4 v0.4 normative cap on the
+// number of entries returned in the 409 ambiguity response body
+// (#231). The 11th row triggers the truncation flag.
+const ExplorerMatchedAccountIDsCap = 10
+
+// ExplorerForensicMatchedAccountIDsCap bounds the size of the FULL
+// forensic account_id sample emitted to audit_events on the
+// truncation path. R1 SEC HIGH closure: caps both the SQL scan AND
+// the audit row so a malicious cross-account-collision attacker
+// cannot drive an unbounded scan/materialization in the request
+// path. When more accounts than the cap exist, the audit payload's
+// `forensic_truncated_at` field surfaces the partial capture.
+const ExplorerForensicMatchedAccountIDsCap = 100
 
 type ExplorerUsageEvent struct {
 	RequestID        string    `json:"request_id"`

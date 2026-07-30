@@ -30,7 +30,7 @@ func (s *Server) handleFeedbackSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	end := s.now()
 	start := end.AddDate(0, 0, -days)
-	events, err := s.store.ListFeedbackEventsSince(r.Context(), start)
+	events, err := s.store.ListFeedbackEventsSinceLimit(r.Context(), start, 1000)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "feedback_summary_failed", "Could not summarize feedback")
 		return
@@ -47,40 +47,72 @@ func (s *Server) handleKillSwitch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		DemoOnly     *bool `json:"demo_only"`
-		AllPublicAPI *bool `json:"all_public_api"`
+		DemoOnly     *bool  `json:"demo_only"`
+		AllPublicAPI *bool  `json:"all_public_api"`
+		Version      *int64 `json:"version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_kill_switch", "Invalid kill switch request")
 		return
 	}
-	s.mu.RLock()
-	old := s.cfg.KillSwitch
-	next := s.cfg
-	s.mu.RUnlock()
-	if req.DemoOnly != nil {
-		next.KillSwitch.DemoOnly = *req.DemoOnly
-	}
-	if req.AllPublicAPI != nil {
-		next.KillSwitch.AllPublicAPI = *req.AllPublicAPI
-	}
-	if err := s.store.SetKillSwitch(r.Context(), storage.KillSwitchState{
-		DemoOnly:     next.KillSwitch.DemoOnly,
-		AllPublicAPI: next.KillSwitch.AllPublicAPI,
-		UpdatedAt:    s.now(),
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error", "kill_switch_persist_failed", "Could not persist kill switch")
+	if req.Version == nil || *req.Version < 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_kill_switch_version", "Kill switch version must be provided")
 		return
 	}
+	current, err := s.store.GetKillSwitch(r.Context())
+	if err != nil {
+		s.adminMetrics.recordError(adminStateWriteHandlerKillSwitch)
+		slog.Error("admin state write failed", "handler", adminStateWriteHandlerKillSwitch, "error", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "admin_state_write_failed", "Could not load kill switch")
+		return
+	}
+	if current.UpdatedAt.IsZero() {
+		s.mu.RLock()
+		current.DemoOnly = s.cfg.KillSwitch.DemoOnly
+		current.AllPublicAPI = s.cfg.KillSwitch.AllPublicAPI
+		s.mu.RUnlock()
+	}
+	next := current
+	if req.DemoOnly != nil {
+		next.DemoOnly = *req.DemoOnly
+	}
+	if req.AllPublicAPI != nil {
+		next.AllPublicAPI = *req.AllPublicAPI
+	}
+	next.UpdatedAt = s.now()
+	applied, err := s.store.CompareAndSwapKillSwitch(r.Context(), *req.Version, next)
+	if err != nil {
+		s.adminMetrics.recordError(adminStateWriteHandlerKillSwitch)
+		slog.Error("admin state write failed", "handler", adminStateWriteHandlerKillSwitch, "error", err)
+		writeError(w, http.StatusInternalServerError, "server_error", "admin_state_write_failed", "Could not persist kill switch")
+		return
+	}
+	if !applied {
+		latest, latestErr := s.store.GetKillSwitch(r.Context())
+		if latestErr != nil {
+			s.adminMetrics.recordError(adminStateWriteHandlerKillSwitch)
+			slog.Error("admin state write failed", "handler", adminStateWriteHandlerKillSwitch, "error", latestErr)
+			writeError(w, http.StatusInternalServerError, "server_error", "admin_state_write_failed", "Could not load current kill switch")
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":           map[string]any{"message": "Kill switch state changed; refetch and retry", "type": "conflict_error", "param": "version", "code": "kill_switch_version_conflict"},
+			"current_version": latest.Version,
+			"kill_switch":     latest,
+		})
+		return
+	}
+	next.Version = *req.Version + 1
 	s.mu.Lock()
-	s.cfg.KillSwitch = next.KillSwitch
+	s.cfg.KillSwitch.DemoOnly = next.DemoOnly
+	s.cfg.KillSwitch.AllPublicAPI = next.AllPublicAPI
 	s.mu.Unlock()
 	_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
 		EventID: mustID("audit"), RequestID: requestID(r), Actor: "operator", Type: "kill_switch_toggled",
-		Payload:   fmt.Sprintf(`{"old_demo_only":%t,"new_demo_only":%t,"old_all_public_api":%t,"new_all_public_api":%t}`, old.DemoOnly, next.KillSwitch.DemoOnly, old.AllPublicAPI, next.KillSwitch.AllPublicAPI),
+		Payload:   fmt.Sprintf(`{"old_demo_only":%t,"new_demo_only":%t,"old_all_public_api":%t,"new_all_public_api":%t,"old_version":%d,"new_version":%d}`, current.DemoOnly, next.DemoOnly, current.AllPublicAPI, next.AllPublicAPI, current.Version, next.Version),
 		CreatedAt: s.now(),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kill_switch": next.KillSwitch})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "kill_switch": next})
 }
 
 func (s *Server) handleCapacitySignal(w http.ResponseWriter, r *http.Request) {
@@ -107,15 +139,34 @@ func (s *Server) handleCapacitySignal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Firing {
-		tier, _ := s.store.GetCapacityTier(r.Context())
+		tier, err := s.store.GetCapacityTier(r.Context())
+		if err != nil {
+			s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+			return
+		}
 		if req.Signal == "monthly_cost" && req.Value >= float64(s.cfg.Capacity.MonthlyBudgetUSD) {
-			_ = s.setCapacityTier(r.Context(), 3, req.Signal, "capacity_tier_escalated")
-			s.setAllPublicPaused(r.Context(), true, "capacity_tier_3")
+			if err := s.setCapacityTier(r.Context(), 3, req.Signal, "capacity_tier_escalated"); err != nil {
+				s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+				return
+			}
+			if err := s.setAllPublicPaused(r.Context(), true, "capacity_tier_3"); err != nil {
+				s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+				return
+			}
 		} else if req.Signal == "provider_drop" && req.Value >= 2 {
-			_ = s.setCapacityTier(r.Context(), 3, req.Signal, "capacity_tier_escalated")
-			s.setAllPublicPaused(r.Context(), true, "capacity_tier_3")
+			if err := s.setCapacityTier(r.Context(), 3, req.Signal, "capacity_tier_escalated"); err != nil {
+				s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+				return
+			}
+			if err := s.setAllPublicPaused(r.Context(), true, "capacity_tier_3"); err != nil {
+				s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+				return
+			}
 		} else if tier.Tier == 0 {
-			_ = s.setCapacityTier(r.Context(), 1, req.Signal, "capacity_tier_escalated")
+			if err := s.setCapacityTier(r.Context(), 1, req.Signal, "capacity_tier_escalated"); err != nil {
+				s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+				return
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "event_id": event.EventID})
@@ -148,12 +199,21 @@ func (s *Server) handleCapacityEvaluate(w http.ResponseWriter, r *http.Request) 
 	below := !anyFiring
 	if previous == 1 && !below && s.now().Sub(tier.UpdatedAt) >= 7*24*time.Hour {
 		next = 2
-		_ = s.setCapacityTier(r.Context(), next, "tier_1_signal_still_firing", "capacity_tier_escalated")
+		if err := s.setCapacityTier(r.Context(), next, "tier_1_signal_still_firing", "capacity_tier_escalated"); err != nil {
+			s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+			return
+		}
 	} else if previous > 0 && below && s.now().Sub(tier.UpdatedAt) >= time.Duration(s.cfg.Capacity.TierCooldownSeconds)*time.Second {
 		next = previous - 1
-		_ = s.setCapacityTier(r.Context(), next, "signals_below_threshold", "capacity_tier_deescalated")
+		if err := s.setCapacityTier(r.Context(), next, "signals_below_threshold", "capacity_tier_deescalated"); err != nil {
+			s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+			return
+		}
 		if previous == 3 {
-			s.setAllPublicPaused(r.Context(), false, "capacity_tier_deescalated")
+			if err := s.setAllPublicPaused(r.Context(), false, "capacity_tier_deescalated"); err != nil {
+				s.adminStateWriteFailed(w, adminStateWriteHandlerCapacity, err)
+				return
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"previous_tier": previous, "new_tier": next, "signals_below_threshold": below})
@@ -170,13 +230,13 @@ func (s *Server) setCapacityTier(ctx context.Context, tier int, signals, eventTy
 	})
 }
 
-func (s *Server) setAllPublicPaused(ctx context.Context, paused bool, reason string) {
+func (s *Server) setAllPublicPaused(ctx context.Context, paused bool, reason string) error {
 	s.mu.Lock()
 	old := s.cfg.KillSwitch.AllPublicAPI
 	s.cfg.KillSwitch.AllPublicAPI = paused
 	s.mu.Unlock()
 	if old == paused {
-		return
+		return nil
 	}
 	if err := s.store.SetKillSwitch(ctx, storage.KillSwitchState{
 		DemoOnly:     s.demoPaused(),
@@ -184,11 +244,22 @@ func (s *Server) setAllPublicPaused(ctx context.Context, paused bool, reason str
 		UpdatedAt:    s.now(),
 	}); err != nil {
 		slog.Error("kill switch persistence failed", "error", err, "reason", reason)
+		s.mu.Lock()
+		s.cfg.KillSwitch.AllPublicAPI = old
+		s.mu.Unlock()
+		return err
 	}
 	_ = s.store.InsertAuditEvent(ctx, storage.AuditEvent{
 		EventID: mustID("audit"), RequestID: mustID("req"), Actor: "capacity_monitor", Type: "kill_switch_toggled",
 		Payload: fmt.Sprintf(`{"old_all_public_api":%t,"new_all_public_api":%t,"reason":%q}`, old, paused, reason), CreatedAt: s.now(),
 	})
+	return nil
+}
+
+func (s *Server) adminStateWriteFailed(w http.ResponseWriter, handler string, err error) {
+	s.adminMetrics.recordError(handler)
+	slog.Error("admin state write failed", "handler", handler, "error", err)
+	writeError(w, http.StatusInternalServerError, "server_error", "admin_state_write_failed", "Could not persist admin state")
 }
 
 func buildFeedbackSummary(events []storage.FeedbackSummaryEvent, start, end time.Time) map[string]any {
@@ -198,7 +269,9 @@ func buildFeedbackSummary(events []storage.FeedbackSummaryEvent, start, end time
 		if event.RequestID != "" {
 			key = event.AccountID + "\x00" + event.RequestID
 		}
-		latest[key] = event
+		if existing, ok := latest[key]; !ok || event.CreatedAt.After(existing.CreatedAt) {
+			latest[key] = event
+		}
 	}
 	distribution := map[string]int{"1": 0, "2": 0, "3": 0, "4": 0}
 	type scopeAgg struct {

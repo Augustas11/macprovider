@@ -1,0 +1,34 @@
+**Verdict:** FIX REQUIRED
+**Tally:** C/H/M/m/Q = 0/0/2/1/0
+
+## Closure verified
+
+- r2 F-1: CLOSED. §5 now has a normative validator panic / fatal-error catch-all requiring every structured-output postprocess failure after inference starts to become a terminal HTTP 502 SPEC-019 envelope with `inference_ran:true`, `settlement_ran:true`, `FaultBreakerQualifying`, no success receipt, no sticky-success route, and zero provider-positive credits. It explicitly covers thrown errors, runtime panics or fatal assertions, recursion / stack-overflow, resource-limit aborts including timeout / memory, and unexpected validator internal errors (`specs/SPEC-019-structured-output.md:557-568`). AC-26 also requires validator exceptions, resource-limit aborts, and recursion overflow to convert to terminal 502 with zero provider-positive credits (`specs/SPEC-019-structured-output.md:325-336`).
+- r2 F-2: CLOSED. §3 literally requires the anchored regex `^[A-Za-z0-9_-]{1,64}$` at both provider parser and coordinator, and requires identical constraint semantics including coordinator-direct rejection (`specs/SPEC-019-structured-output.md:455-463`). AC-8a asserts provider + coordinator rejection for 65-byte, non-ASCII, newline/control, substring-only, and punctuation bypass fixtures, while accepting `person-v1` (`specs/SPEC-019-structured-output.md:182-189`).
+- r2 F-3: CLOSED. AC-9 now names the adversarial NFC/NFD abuse explicitly: NFC `"café"` in schema plus visually-equivalent NFD output `"cafe\u0301"` must reject as `json_schema_validation_failed`, preserve the offending byte sequence/codepoints in logs or envelope, and forbid Unicode normalization at log time (`specs/SPEC-019-structured-output.md:193-203`).
+
+## Fresh findings
+
+### Finding 1: Compressed request handling lacks a decompressed-byte cap
+- Severity: MEDIUM
+- Location: SPEC §7 (`specs/SPEC-019-structured-output.md:717`); AC-28a (`specs/SPEC-019-structured-output.md:354`); coordinator code `phase4-coordinator/internal/buyer/server.go:1317`
+- Issue: §7 newly requires the gateway to forward compressed inbound bodies unchanged and says the coordinator reader-side handles decompression with identical byte semantics (`specs/SPEC-019-structured-output.md:717-725`). AC-28a tests byte-equivalence for a 14 KiB gzip schema (`specs/SPEC-019-structured-output.md:354-359`). The text does not say that coordinator decompression is streaming-bounded by the existing request-body cap, nor does it define the failure mode for a small compressed body that expands far beyond the coordinator/gateway 1 MiB request-body defaults. Current code has raw `LimitReader` caps at the gateway and coordinator (`phase5-gateway/internal/router/chat_proxy.go:102-108`, `phase4-coordinator/internal/buyer/server.go:1317-1328`), and SPEC-006 only orders a request-body size check before auth/quota (`specs/SPEC-006-buyer-api.md:1650-1657`); neither closes the future decompression-bomb path introduced by §7.
+- Recommendation: Amend §7 / AC-28a to require both a raw compressed-body cap and a decompressed-byte cap before JSON parse, schema extraction, JCS hashing, provider dispatch, or inference. A gzip/deflate/br body whose decompressed request exceeds the configured request-body cap should fail with HTTP 413 before request validation side effects. Add an adversarial fixture with a <= gateway-cap compressed body expanding beyond the coordinator decompressed cap.
+
+### Finding 2: Validator internal aborts can reuse stale partial validation state
+- Severity: MEDIUM
+- Location: SPEC §5 (`specs/SPEC-019-structured-output.md:557`, `specs/SPEC-019-structured-output.md:592`)
+- Issue: The new catch-all maps validator internals to `json_schema_validation_failed` (`specs/SPEC-019-structured-output.md:557-568`), while the normal `json_schema_validation_failed` contract requires the "first offending" RFC 6901 pointer in `error.param` (`specs/SPEC-019-structured-output.md:592-598`). For a partially-completed validator that has validated some fields and then panics, times out, overflows recursion, or hits a memory abort, there may be no reliable first offending pointer. The spec does not require discarding partial validator accumulators before emitting the fallback envelope, so an implementation could leak or rely on stale partial state and present a misleading pointer.
+- Recommendation: Add one sentence to the §5 catch-all: for validator internal errors, panics, recursion overflow, resource aborts, or any failure where validation did not complete normally, partial validation state MUST be discarded; the envelope MUST use a generic message and `error.param:""` (root) or another explicitly-defined generic value, not a path derived from partially-completed validation.
+
+### Finding 3: Fixed-depth sibling sprawl lacks an explicit linear-walk requirement
+- Severity: minor
+- Location: SPEC §6 (`specs/SPEC-019-structured-output.md:645`, `specs/SPEC-019-structured-output.md:663`)
+- Issue: The specific `additionalProperties` schema-sprawl attack is rejected because v0.1.2 allows `additionalProperties` only as exactly `false` (`specs/SPEC-019-structured-output.md:425`). The 16,384-byte schema cap also bounds absolute sibling property count (`specs/SPEC-019-structured-output.md:645-651`). However, §6 now says sibling schemas do not increase depth (`specs/SPEC-019-structured-output.md:663-669`) without requiring the provider/coordinator schema walker and validator to run in time linear in schema bytes/nodes. That leaves a small implementation-quality gap for broad fixed-depth `properties` schemas that trigger repeated whole-tree scans.
+- Recommendation: Add a narrow hardening sentence or AC: schema validation setup MUST walk each schema node at most a bounded number of times, O(schema bytes + decoded output bytes) for the accepted subset, and broad same-depth property fixtures near 16 KiB must not trigger superlinear validator behavior.
+
+## Verdict justification
+
+The r2 security closures are real: the panic catch-all, anchored name regex with provider/coordinator parity, and adversarial NFC/NFD fixture are now explicit. The double-settlement regression probe is safe at the SPEC level: §7 says the gateway must not invoke `settleBeforeResponse` for `malformed_json_response` / `json_schema_validation_failed` because those are coordinator-settled downstream `FaultBreakerQualifying` outcomes (`specs/SPEC-019-structured-output.md:727-733`), and §8 requires zero provider-positive credits for those failures (`specs/SPEC-019-structured-output.md:750-760`).
+
+The body is not ready to lock because the new compressed-body preservation block introduces a decompression-bomb ambiguity at the coordinator boundary, and the new catch-all does not define how to handle partially-completed validator state. Both are narrow text fixes; no broad redesign is needed.

@@ -27,11 +27,9 @@ import (
 // bodies. See audits/2026-06-10/REMAINING_WORK.md ARCH-1/CODE-1 for
 // the "RESOLVED_DIFFERENTLY" status disposition.
 //
-// Shape locked in audits/2026-06-10/M2-1B_DESIGN.md §forwardState — five
-// fields, no per-loop scratch (excluded, failoverAttempted). The
-// per-loop scratch intentionally stays in each helper's local scope
-// because each helper handles exactly one transport sequence; scratch
-// does not survive transport boundaries.
+// Shape locked in audits/2026-06-10/M2-1B_DESIGN.md §forwardState for retry
+// state. SPEC-024 adds typed sticky outcome fields because cache billing must
+// validate provider reports against the actual per-attempt sticky decision.
 //
 // Audit refs: REPO_AUDIT.md §3.1 item 3 (ARCH-1 / CODE-1),
 // REMAINING_WORK.md M2-1.
@@ -42,6 +40,23 @@ type forwardState struct {
 	// decision, not the original one (the audit-cited invariant —
 	// the billing ledger keys routing_ms off the last selection).
 	routingDone time.Time
+
+	// queueWait records coordinator-side slot-queue wait time for the
+	// active provider attempt. Queue delay is buyer-visible routing
+	// latency, not provider billable work; request_log writes it
+	// separately from token settlement so expired queued requests
+	// remain non-billable.
+	queueWait time.Duration
+
+	// phaseTiming carries per-request spans that the gateway copies into
+	// its completion log. It is kept with forwardState because retries and
+	// failover already mutate the active route through this struct.
+	phaseTiming requestPhaseTiming
+
+	// queuedSlotProviderID is set when the slot queue reserves a
+	// recovered provider slot for this request. It is released when
+	// the request leaves that active route.
+	queuedSlotProviderID string
 
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by
@@ -69,4 +84,35 @@ type forwardState struct {
 	// advance (failover or retry). The three forwardFn closures read
 	// state.provider to drive their dispatch.
 	provider pool.Provider
+
+	// dailyKey is the UTC YYYY-MM-DD bucket snapshot captured ONCE at
+	// request start (handleChatCompletions, derived from startedAt
+	// for atomic snapshot at the UTC-midnight boundary) and reused by
+	// every retry attempt's seedForRequest derivation. This preserves
+	// FR-SR-17 reproducibility for requests that span UTC midnight:
+	// the daily-key component of (request_id, daily_key) → seed stays
+	// sticky to the request, not to wall-clock time at the per-attempt
+	// derivation point. (Each retry attempt's request_id IS distinct
+	// — advanceToNextProvider rolls a fresh uuid per advance — so the
+	// per-attempt seed values differ; what survives midnight is the
+	// daily-key bucket each derivation consumes.) The bucket value
+	// is NOT emitted as its own log field; downstream auditors
+	// reproduce the seed by reading the request_log row's start
+	// timestamp (which uses the same UTC date) and feeding it back
+	// through seedForRequestWithKey alongside the per-attempt
+	// request_id. Issue #266 T1 safety/correctness item.
+	dailyKey string
+
+	// estimatedTokens is the prompt-token estimate captured ONCE at
+	// request start. The retry routing-decision log's PreflightResult
+	// field is derived from this (vs s.preflightThreshold + whether
+	// s.preflight is wired): when preflight ran, the just-selected
+	// provider was accepted by it (else selectProviderExcluding would
+	// have returned an error before afterAdvance fired); when
+	// preflight was skipped (low estimate OR no preflight func), the
+	// label is "not_applicable". Issue #266 T1 R1 audit MEDIUM fix.
+	estimatedTokens int
+
+	stickyResult     string
+	stickyMissReason string
 }

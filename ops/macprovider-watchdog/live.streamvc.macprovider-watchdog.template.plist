@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>live.streamvc.macprovider-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WATCHDOG_PATH__</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/watchdog.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/watchdog.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__USER_HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MACPROVIDER_WATCHDOG_LABEL</key>
+    <string>__SERVICE_LABEL__</string>
+    <key>MACPROVIDER_CONFIG_PATH</key>
+    <string>__CONFIG_PATH__</string>
+    <key>MACPROVIDER_BINARY_PATH</key>
+    <string>__BINARY_PATH__</string>
+    <key>MACPROVIDER_COORDINATOR_HOST</key>
+    <string>__COORDINATOR_HOST__</string>
+    <key>MACPROVIDER_LOG_DIR</key>
+    <string>__LOG_DIR__</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

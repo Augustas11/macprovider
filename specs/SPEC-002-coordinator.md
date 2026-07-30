@@ -1,7 +1,476 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.4 (2026-06-22, SPEC-015 v0.1.3 /poolz receipt pubkey absorption)
-**Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9)
+**Version:** 1.5.6 (2026-07-29, B1 request-log TTFT/decode persistence)
+**Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.6 (2026-07-29, B1 — per-request provider TTFT/decode persistence):**
+- `request_log` gains nullable `ttft_ms` and `decode_ms` columns. New
+  coordinator writes populate them from the existing provider phase-timing
+  anchors: `ttft_ms` is provider dispatch completion to provider first byte,
+  and `decode_ms` is provider first byte to provider completion. Rows where
+  either endpoint was not observed keep NULL, including legacy rows and
+  pre-dispatch failures. The columns are observability-only and require no
+  indexes.
+
+**Change log v1.5.5 (2026-07-28, issue #784 — C2 streaming-ceiling retarget):**
+- Retargets the deploy-time C2 timer relation after gateway #760 decomposed
+  streaming deadlines. `routing.request_timeout_s` and `provider_http.timeout_s`
+  now MUST cover the gateway's `timeouts.stream_ceiling_max_seconds`; otherwise
+  the coordinator/provider HTTP wall truncates healthy long streams before the
+  gateway streaming ceiling can fire. C2 also requires the effective gateway
+  `timeouts.non_stream_request_seconds` wall to be strictly greater than
+  coordinator `routing.request_timeout_s`, so coordinator relay-timeout
+  attribution wins before gateway buyer cancellation on slow non-streaming
+  work. C2b now checks gateway header transport timeout against
+  max(`timeouts.coordinator_admission_seconds`, effective
+  `timeouts.non_stream_request_seconds`). No wire-protocol change.
+
+**Change log v1.5.4 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
+- R-3.X.6 strengthened from `MAY` to `MUST`: the coordinator MUST union declared `Provider.SupportedModels` into `seenModels`, reconciling with SPEC-010 v1.5 R-3.3.4 (authoritative — the more specific rule, matching shipped behavior; #555). No dispatch-outcome change; the only buyer-visible effect is SPEC-010 R-3.3.4's error-code substitution for a declared-but-cold model on default routing (404 `model_not_found` → 503 `no_provider_available`). §7.2 "404 vs 503 split" + the HTTP-status 404 row now name declared `supported_models` alongside served/seen as "known". Paired with SPEC-006 §17.2. Docs-only; no coordinator behavior change.
+
+**Change log v1.5.3 (2026-07-06, issue #374 — bounded coordinator slot queue):**
+- **Bounded zero-slot queue.** Non-pinned requests MAY enter a
+  coordinator-side pre-dispatch queue when at least one otherwise
+  eligible `ready` provider for the requested model reports
+  `slots_free == 0`. Queue admission is still quota-filtered before
+  waiting. The queue is FIFO per `provider_id`, caps pending waiters at
+  4 per provider, and uses a total deadline no longer than 750 ms.
+  Pinned provider/session requests do not enter this queue and retain
+  immediate 503 behavior when the pinned target has no free slot.
+- **Queue wait observability.** `request_log` gains
+  `queue_wait_ms REAL NOT NULL DEFAULT 0`, populated per active
+  provider attempt. The value measures coordinator slot-queue dwell
+  before preflight/provider dispatch; it does not include provider
+  execution time or preflight latency.
+- **Provider-queue boundary.** The coordinator remains responsible only
+  for bounded pre-dispatch slot smoothing. Provider-side tokenization,
+  execution queueing, and model-specific inference work remain provider
+  responsibilities.
+
+**Change log v1.5.2 (2026-06-29, issue #168 — monotonic `attempt_n` column on `request_log`):**
+- **New column.** `request_log` gains `attempt_n INTEGER NULL` (zero-based
+  monotonic attempt ordinal). NULL on legacy rows written before
+  v1.5.2; non-NULL on all v1.5.2+ writes. Existing reconciliation
+  contracts (SPEC-005 v0.3+, SPEC-007 v0.3+) continue to work in the
+  rollout window because the read-side prefers the persisted
+  `attempt_n` when non-NULL and falls back to the v0.3.1 id-ASC
+  derivation when NULL.
+- **Write-time population semantics.** At `request_log` INSERT,
+  `attempt_n` MUST be assigned monotonically as `COUNT(*) FROM
+  request_log WHERE account_id IS ? AND request_id = ?` over the
+  rows already in the same `(account_id, request_id)` group under
+  SQLite `IS` semantics, computed in the same writer transaction.
+  Because the request-log store caps the pool at one writer
+  connection (`SetMaxOpenConns(1)` per the v1.4.2 R-2 + #21 / ARCH-3
+  discipline), this read-then-insert is race-free. The first row in
+  any group receives `attempt_n=0`; the n-th row receives
+  `attempt_n=n-1`. This is the same arithmetic the prior v0.3.1
+  read-time derivation produced; v1.5.2 just persists it at write
+  time so the value is stable across audit, reconciliation, and
+  replay.
+- **Read-side discipline.** SPEC-005 v0.3.3+ MUST consume
+  `request_log.attempt_n` directly when non-NULL. When NULL (legacy
+  pre-v1.5.2 row OR rollback window), the read-side falls back to
+  the v0.3.1 id-ASC derivation within the same
+  `(account_id, request_id)` group. The fallback is exactly the
+  arithmetic the writer would have produced, so a backfilled row and
+  a derivation-time row are byte-identical.
+- **Backfill subcommand.** A new operator subcommand
+  `coordinator backfill-attempt-n` walks legacy rows in id-ASC order
+  within each `(account_id, request_id)` group and assigns
+  `attempt_n` monotonically (the same arithmetic the v0.3.1 fallback
+  produces, executed once as a one-shot DDL-class operation rather
+  than per-read). Idempotent: rows that already have non-NULL
+  `attempt_n` are skipped. Read-only `--check --format=text|json`
+  reports a count of NULL vs populated rows so operators can verify
+  completion before they consider the migration done.
+- **Migration state machine.** Three observable states, parallel to
+  the v1.5.1 per-key state machine but PER-COLUMN (no index, since
+  `attempt_n` is a per-row ordinal, not a join key):
+  - `legacy` — column absent. Read-side MUST fall back to id-ASC
+    derivation; SPEC-005 v0.3.3 fallback rules apply (row 3+ credited
+    normally via the byte-identical id-ASC arithmetic; only
+    `attempt_n=1` with `retried=0` quarantined as the legitimate-
+    retry-without-marker class).
+  - `populating` — column present, some rows have NULL `attempt_n`
+    (either pre-v1.5.2 rows awaiting backfill OR a rollback window
+    where the v1.5.2 binary briefly ran then reverted). Read-side
+    prefers persisted `attempt_n` on non-NULL rows, falls back to
+    id-ASC derivation on NULL rows. Both paths produce byte-
+    identical ordinals because the writer derivation matches the
+    fallback derivation.
+  - `populated` — column present, zero NULL rows. Steady-state.
+  Tooling MAY check state via `backfill-attempt-n --check --format
+  json` which returns `{"migration_state": "legacy|populating|
+  populated", "null_count": N, "total_count": M}`.
+- **No race with the v1.5.0 AttemptN derivation.** The v1.5.0
+  AttemptN scoping in `hotpath.go` / `recovery.go` /
+  `endpoints.go` (defense-in-depth COUNT-based derivation
+  scoped by `(account_id, request_id) IS`) remains correct on
+  legacy rows. v1.5.2 writes populate `attempt_n` BEFORE the
+  derivation point so the derivation simply prefers the
+  persisted column when non-NULL — same arithmetic either
+  way.
+- **Quarantine rule change (cross-spec, see SPEC-005 v0.3.3).**
+  With persisted monotonic `attempt_n`, the v0.3.1 "row 3+ MUST
+  be quarantined until SPEC-002 gains monotonic attempt_n" rule
+  is satisfied in BOTH paths — the persisted monotonic `attempt_n`
+  path AND the byte-identical id-ASC fallback path. Row 3+ in either
+  path receives a stable `attempt_n=2, 3, ...` ordinal and is credited
+  normally (subject to the existing `retried` flag and identity-
+  snapshot rules). Quarantining is reserved for one genuine ambiguity
+  class: `attempt_n=1` with `retried=0` (legitimate retry without an
+  explicit `retried` marker — see SPEC-005 §OQ-5, issue #169).
+- **Deploy ordering.** Coordinator v1.5.2 MUST be deployed before
+  any out-of-process tooling that reads `attempt_n` directly. The
+  ALTER TABLE runs at daemon startup; the operator runs
+  `coordinator backfill-attempt-n` once per deployment. During the
+  `populating` window (column present, some NULL rows), the read-side
+  discipline above keeps every consumer correct.
+- **Backfill live-safety.** `coordinator backfill-attempt-n` SHOULD
+  run during a maintenance window (the same window as
+  `migrate-indexes` is the natural choice). It MAY run live against
+  a running daemon — the request-log writer-connection cap from
+  issue #21 / ARCH-3 serializes the backfill UPDATE against new
+  hot-path INSERTs, preserving correctness — but operators MUST
+  accept that the backfill UPDATE will hold the writer lock for the
+  duration of its scan, potentially exceeding the 6s INSERT timeout
+  on the hot path and triggering buyer-visible 503s. The
+  recommended sequence is: take the deploy briefly offline, run
+  `backfill-attempt-n`, then restore traffic.
+  **Preflight wall-clock measurement.** `coordinator
+  backfill-attempt-n --dry-run` executes the same UPDATE inside a
+  transaction and ROLLBACKs without persisting; it reports the
+  rows-that-would-be-updated count plus the wall-clock elapsed
+  time on the operator's actual production corpus. Operators MUST
+  use this dry-run to measure against the 6s hot-path INSERT budget
+  BEFORE deciding whether to run a live backfill — the dry-run
+  itself holds the writer lock for the same duration as a live run
+  would, but is observability-only (no row mutation). The CLI emits
+  a WARNING if dry-run elapsed exceeds 4 seconds (75% of the 6s
+  budget). A dry-run that warns means the operator SHOULD use a
+  maintenance window; a clean dry-run authorizes a live backfill.
+
+**Change log v1.5.1 (2026-06-29, issue #197 — R-2 normative clarifications + sanitizer hardening):**
+- **`external_request_id` UUID-tolerance clause.** Formalizes the
+  pre-existing implementation contract for the inbound `X-Request-ID`
+  header: `request_log.external_request_id` is **opaque sanitized
+  text**, not a UUIDv4-shape-required field. Gateway-routed traffic
+  carries a UUIDv4 per SPEC-006 R-G3 (the gateway middleware mints a
+  UUIDv4 if the inbound `X-Request-ID` is absent or non-UUIDv4-like).
+  Direct coordinator buyer-port traffic (no gateway in front) MAY
+  carry an arbitrary printable, sanitized string up to 128 bytes.
+  Coordinator implementations MUST NOT reject non-UUID-shaped
+  inbound IDs but MUST apply the sanitization documented in this
+  section: trim whitespace; cap at 128 bytes; reject invalid UTF-8;
+  reject control bytes **at byte granularity** (`< 0x20`, `0x7f`,
+  and the C1 range `0x80-0x9f`). Rune-based iteration is NOT
+  sufficient — raw bytes in `0x80-0x9f` decode to `utf8.RuneError`
+  (U+FFFD) and would otherwise pass a rune-only check, bypassing
+  the load-bearing C1/CSI rejection that the
+  `c1-control-chars-terminal-sanitizer-bypass` hardening was added
+  for. On failure the value is treated as if the header was absent
+  and the malformed payload MUST NOT be echoed to structured logs
+  (re-introduces the log-injection class the sanitizer exists to
+  defeat). Cross-service reconciliation MUST NOT assume UUIDv4
+  shape when joining gateway `usage_events` to coordinator
+  `request_log` by `external_request_id`; parity is byte-exact on
+  the sanitized string. The same sanitization applies to
+  `X-MacProvider-Account` → `request_log.account_id` (SPEC-002
+  v1.5.0); both headers share `sanitizeOpaqueHeader`.
+- **Registry invariant.** The composite-key registry
+  (`migrationKeyDefs` in code, table in this SPEC) MUST be non-empty.
+  Entries are append-only: future SPEC versions add reconciliation keys
+  by appending entries and MUST NOT rename existing `key` strings. The
+  JSON `keys` array order is **normative** — consumers MAY rely on the
+  i-th entry being stable across coordinator versions; new entries
+  append at the end. If a `key` ever must be replaced
+  (irreconcilable shape change — including cosmetic rename or
+  same-columns-different-name), the path is **deprecate-and-add**:
+  the OLD `key` entry continues to enumerate with its real
+  `legacy | unindexed | indexed` state — the state-enum vocabulary
+  is NOT extended, no new `deprecated` state value is introduced —
+  while the SPEC change-log explicitly marks the old `key` as
+  deprecated and names the new `key` as its replacement. If the
+  rename is cosmetic (same columns + same index), both entries
+  report the same state derived from the same underlying schema;
+  if the shape changed, the old `key` reports `unindexed` (its
+  index dropped) or `legacy` (its column dropped) while the new
+  `key` reports the new shape's state. The deprecated `key` is
+  dropped in a later SPEC version after at least one minor-version
+  deprecation window. Tooling MUST match by `key` and MUST
+  tolerate additional entries beyond what it knows about
+  (forward-compat).
+- **Per-key migration-state machine.** Each composite reconciliation
+  key on `request_log` has its OWN three-state migration:
+  - state `legacy` — required column(s) absent in
+    `PRAGMA table_info(request_log)`. Exact composite-key
+    reconciliation is unavailable; downstream tooling MAY fall
+    back to the prior-version key (e.g.
+    `account_external_request_id` legacy → `external_request_id`
+    alone, documented ambiguity).
+  - state `unindexed` — column(s) present but the partial-NULL
+    composite index is absent in `sqlite_master`. Exact
+    reconciliation is **available** but unindexed, with the
+    operator-visible performance penalty of a full `request_log`
+    scan per join. This is NOT legacy.
+  - state `indexed` — column(s) AND partial-NULL composite index
+    present. Steady-state.
+  The aggregate `migration_state` across all keys is `legacy` if
+  ANY key is legacy; `indexed` only if EVERY key is indexed;
+  `unindexed` otherwise. Reconciliation tooling MUST decide join
+  strategy per-key, not whole-schema, because v1.4.2 R-2 and
+  v1.5.0 added separate composite keys at different times
+  (`idx_request_log_external_request_id` and
+  `idx_request_log_account_external_request_id` respectively) and
+  may be at different states on the same deployment.
+- **Canonical state vocabulary.** The strings `"legacy"`,
+  `"unindexed"`, `"indexed"` are normative. Reconciliation
+  harnesses, dashboards, and operator tooling MUST emit these
+  literal strings (no synonyms, no casing variation) so that
+  cross-team tooling is interoperable.
+- **Machine-readable surface.** The coordinator MUST expose this
+  state via `coordinator migrate-indexes --check --format json`
+  (a read-only sibling of the existing build path). JSON shape:
+  ```json
+  {
+    "migration_state": "legacy|unindexed|indexed",
+    "keys": [
+      {
+        "key": "<key-name>",
+        "column_names": ["<col>", ...],
+        "columns_present": true|false,
+        "index_name": "<idx>",
+        "index_present": true|false,
+        "state": "legacy|unindexed|indexed"
+      }
+    ]
+  }
+  ```
+  Implementation: `requestlog.Store.MigrationState(ctx)`. The
+  `--check` form does NOT mutate the schema; it is the canonical
+  state probe for external tooling.
+- **State `(unindexed)` operational binding.** Scope is by
+  **data-surface contract, not process placement**. In scope:
+  any reconciliation surface that performs **closing-the-books
+  joins** between coordinator `request_log` and gateway
+  `usage_events` / `audit_events` by composite reconciliation
+  key — out-of-process harnesses AND any future coordinator-
+  hosted endpoint that exposes the same join. Out of scope:
+  coordinator's own in-process AttemptN paths (`hotpath.go`,
+  `recovery.go`, `endpoints.go` `/admin/ledger/reconcile`)
+  which derive ordinals via single-table SQLite `IS`
+  clustering on `(account_id, request_id)` and are correct
+  (just unindexed-slow) under state `unindexed`. In-scope
+  tooling MUST fail closed when it observes state `unindexed`
+  for a composite key it depends on. Operator response: run
+  `coordinator migrate-indexes` once, then resume. Tooling MAY
+  support an explicit override (`--allow-unindexed-scan`,
+  bounded by row-count or wall-clock budget) for fixture, dev,
+  or one-shot recovery use; the override MUST NOT be the
+  default. Falling back silently to fuzzy match under state
+  `unindexed` is a SPEC violation — it conflates with state
+  `legacy` and hides an operator-action gap.
+- **Expected operator workflow.** Normal sequence is (A) daemon
+  startup applies ALTER TABLE migrations (legacy → unindexed),
+  then (B) operator runs `coordinator migrate-indexes`
+  (unindexed → indexed). The `migrate-indexes` subcommand also
+  calls `requestlog.OpenStore` and so applies any pending ALTER
+  TABLE migrations itself before building indexes; running it
+  against a legacy DB takes the schema directly to indexed in
+  one invocation.
+- **Sanitizer hardening (code change).** v1.5.1 ships byte-level
+  C1 rejection + invalid-UTF-8 rejection in
+  `sanitizeExternalRequestID` and `sanitizeAccountID` via a
+  shared `sanitizeOpaqueHeader` helper. Pre-v1.5.1 the rune-based
+  loop accepted raw C1 bytes via `utf8.RuneError` decoding;
+  v1.5.1 closes that bypass and pins it with regression tests
+  for `0x80`, `0x9b`, `0x9f`, and invalid UTF-8 leads.
+- **Cross-SPEC alignment.** SPEC-005 reconciliation tooling that
+  enforces schema-check (failing closed on missing indexes) MUST
+  read the per-key state vocabulary defined here. SPEC-007 v0.3
+  explorer surface gates by resolved row fields (not schema
+  state) and is independent of this state machine. SPEC-006
+  R-G3 (gateway UUIDv4 minting) is unchanged — gateway-routed
+  traffic remains UUIDv4-shaped; the v1.5.1 opaque-text tolerance
+  is scoped to the direct coordinator buyer-port input.
+
+**Change log v1.5.0 (2026-06-29, issue #211 — coordinator-side counterpart to #196 composite-PK):**
+- `request_log` gains an `account_id TEXT NULL` column. The
+  reconciliation key joining gateway `usage_events` to coordinator
+  `request_log` is now the composite `(account_id, external_request_id)`,
+  not `external_request_id` alone. After #196 a buyer-supplied
+  `X-Request-ID` MAY legitimately appear in `usage_events` rows
+  belonging to distinct accounts; under the v1.4.2-shipped key
+  (`external_request_id` only) the coordinator could not attribute a
+  `request_log` row to the correct gateway account.
+- **Gateway forward contract.** Gateway MUST send
+  `X-MacProvider-Account: <subject.AccountID>` on every forwarded
+  buyer request (including the non-sticky routing path; the prior
+  conditional emit on the sticky path only is insufficient for
+  reconciliation). The coordinator MUST persist this header value
+  into `request_log.account_id` for every row written for that
+  request. Absent header MUST be tolerated (legacy gateway, demo
+  traffic, direct legacy buyer calls); the column carries NULL in
+  that case and reconciliation degrades to the prior
+  `external_request_id`-only key with the documented ambiguity.
+  Because `selectProviderExcluding` already treats
+  `X-MacProvider-Account` as an internal-routing header (see
+  `hasInternalRoutingHeader` / `internalBearerAuthorized`),
+  v1.5.0 also requires the gateway to send the upstream
+  `Authorization: Bearer <UpstreamCoordinatorBearer>` together
+  with the account header on every forward; pre-v1.5.0 the
+  bearer was only set on the sticky path. The coordinator's
+  acceptance logic is unchanged — only the gateway's emission
+  envelope. See SPEC-006 v0.9.1 for the gateway-side rule.
+- **Money-path scope (hot path + recovery + admin reconcile).**
+  Coordinator queries that attribute multiple `request_log` rows
+  to a single logical request — `internal/billing/hotpath.go`
+  AttemptN derivation, `internal/billing/recovery.go` startup /
+  nightly reconciliation, and `internal/billing/endpoints.go`
+  `/admin/ledger/reconcile` `buyerEquivalentCredits` — MUST scope
+  by `(account_id, request_id)` using SQLite `IS` semantics
+  (`account_id IS ?` / `prior.account_id IS rl.account_id`).
+  Note: `request_log.request_id` is coordinator-internal
+  (server-minted UUID v4 per buyer call), so two accounts do not
+  naturally collide on it; the buyer-supplied collision class
+  motivating #211 lives on `external_request_id` and is fully
+  addressed by the composite `(account_id, external_request_id)`
+  reconciliation key. The internal-`request_id` account scoping
+  here is therefore defense-in-depth so that any UUID v4
+  collision, retry-loop bug, or future schema change that ever
+  causes the same internal `request_id` to appear in rows from
+  different accounts cannot inflate the count and silently
+  trigger the `ambiguous_attempt_n` zero-credit path under the
+  SPEC-005 v0.3.1 multi-attempt attribution contract. Legacy
+  NULL-`account_id` rows cluster with NULL-`account_id` rows
+  only (NULL = NULL true under `IS`), preserving the pre-v1.5.0
+  intra-NULL grouping without bleeding non-NULL rows into the
+  legacy bucket. All three sites MUST use identical NULL
+  semantics so the same row gets the same `attempt_n`
+  derivation regardless of which path scans it.
+- **Index.** A new partial-NULL composite index
+  `idx_request_log_account_external_request_id ON request_log(account_id, external_request_id) WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL`
+  supports reconciliation scans. Built by the operator-runbook
+  subcommand `coordinator migrate-indexes` (same pattern as the
+  v1.4.2 `idx_request_log_external_request_id` index), NOT from
+  daemon startup.
+- **Deploy ordering.** Coordinator MUST be deployed before gateway
+  begins sending the unconditional header so that even pre-gateway
+  rollout coordinator writes accept and persist the new column.
+  Coordinator without the column behaves as if `account_id` were
+  always NULL. Downstream auditors MAY use
+  `PRAGMA table_info(request_log)` only to detect "column absent —
+  pre-v1.5.0 schema; fall back wholesale to the v1.4.2 R-2
+  reconciliation key". Once the column exists, all audit /
+  reconciliation gating MUST be per-row `account_id IS NOT NULL`
+  (see §11 "Deploy ordering" canonical sequence). Column presence
+  alone is NOT sufficient because a v1.5.0 coordinator can be
+  serving pre-v0.9.1 gateway traffic OR rolled back to a v1.4.x
+  binary that doesn't populate the column — both cases produce
+  rows with NULL `account_id` despite the column being present.
+- **Cross-spec.** SPEC-006 §6 gains a forward-header requirement
+  for `X-MacProvider-Account`. SPEC-007 §6.4 records the
+  gateway-side composite-PK addendum once issue #212 / PR #221
+  merges; the coordinator-side parallel is documented in this
+  v1.5.0 entry. The two PRs are merge-order independent — the
+  cross-pointers describe relative state, not a strict ordering.
+- **Explorer deferral.** Coordinator-side explorer queries
+  (`phase4-coordinator/internal/explorer/store.go`
+  `SessionDetail` / `RecentSessions`) still join `request_log`
+  by `request_id` alone and do not return `account_id` in
+  session output. This is intentionally deferred from v1.5.0 —
+  the reconciliation contract (the focus of issue #211) is
+  the key change-log item; explorer surface enrichment lands
+  in a separate SPEC-007 follow-up. Operators querying
+  `request_log` for cross-account audit MUST use direct SQL
+  with the composite key for the v1.5.0 window.
+- **Triage:** the in-flight "SPEC-002 v1.4.2 R-2" references in
+  `phase4-coordinator/internal/requestlog/store.go` and tests reflect
+  external_request_id work that never received a formal change-log
+  entry; that gap is the subject of issue #197 and is intentionally
+  NOT closed here. v1.5.0 builds on top of the v1.4.2 R-2 work as
+  shipped (column + index already present) and does not relitigate
+  it.
+
+**Change log v1.4.1 (2026-06-26, additive — issue #82 item 1):**
+- FR-O2 `/poolz` provider row gains the optional `auth_state` string
+  field (`omitempty`). Enum: `bearer_validated`, `self_minted`,
+  `bearerless_duplicate` (SPEC-003 v0.8.3 FR-C9.4), plus the
+  `mint_failed` value reserved by SPEC-003 v0.8.4. Absent / empty
+  preserves pre-v0.8.3 behavior (routable). The field is
+  documentational on the coordinator side (`pool.Provider.AuthState`
+  has been emitted via the embedded `pool.Provider` struct since
+  SPEC-003 v0.8.3) and is now normatively part of the SPEC-002
+  `/poolz` contract surface. **Observability scope:** today only
+  `bearer_validated`, `self_minted`, `bearerless_duplicate`, and the
+  empty pre-v0.8.3 value actually appear on registered `/poolz` rows.
+  `mint_failed` is a reserved enum value — the coordinator returns it
+  internally from `resolveProvisionalToken` on transient DB-write
+  failure but immediately closes the WebSocket with `CloseInvalidToken`
+  before the session is registered (`phase4-coordinator/internal/ws/server.go`
+  `handleHello` / `handleAuthRequest` close paths), so it does NOT
+  currently surface as a `/poolz` row. Issue #82 item 2 may publish
+  an observable non-routable `mint_failed` row in the future — when
+  it does, the aggregation rule below MUST be re-evaluated.
+- Adds normative aggregation rule for downstream `/poolz` consumers
+  (SPEC-006 gateway `/v1/status`): provider rows with
+  `auth_state == "bearerless_duplicate"` MUST be excluded from ALL
+  buyer-facing capacity counters derived from the detailed pool
+  array, including top-level `Pool.TotalProviders`, top-level
+  `Pool.Ready`, per-model `ProviderCount`, per-model
+  `ReadyProviderCount`, slot totals, model availability, and
+  per-model `supported_models` unions. This mirrors
+  `pool.Provider.RoutingEligible()` on the coordinator side — a
+  bearerless duplicate is admitted to `/poolz` for operator
+  visibility but is non-routable; counting it would over-promise
+  capacity the coordinator will refuse to route. Other `auth_state`
+  values (empty, `bearer_validated`, `self_minted`, and currently
+  `mint_failed` — which never appears on registered rows today) are
+  aggregated normally; the eventual `mint_failed`-becomes-observable
+  decision is intentionally deferred to issue #82 item 2 and is NOT
+  in scope for v1.4.1.
+- **Buyer-vs-operator counter separation (Q1 resolution).** On
+  buyer-facing surfaces derived from `/poolz` (the SPEC-006 gateway
+  `/v1/status`), `total_providers` is a routable-eligible count, not
+  a raw session count — it excludes `bearerless_duplicate` rows by
+  the aggregation rule above. The operator-facing `/poolz` body
+  itself still surfaces ALL admitted sessions in its `pool` array
+  (including bearerless duplicates) and in its top-level `summary`;
+  operator visibility is preserved precisely because operators must
+  be able to see WHY a session is non-routable. Consumers that need
+  raw operator-visible session counts MUST read the `/poolz`
+  `summary` block (which is coordinator-emitted and includes
+  bearerless rows in `total_providers`); consumers that surface
+  buyer-facing counts MUST apply the aggregation rule.
+- **Summary-fallback prohibition (covers the all-bearerless edge
+  case).** Auth-state-aware consumers that derive buyer-facing
+  counts from `/poolz` MUST NOT use the coordinator-supplied
+  `summary` block as a fallback to repopulate counts that have been
+  excluded by the aggregation rule when the detailed `pool` array
+  was present. The coordinator's `summary.total_providers` is
+  `len(providers)` on the coordinator side (includes bearerless);
+  using it as a fallback after filtering would reintroduce excluded
+  capacity. The gateway IMPL gates its summary fallback on
+  `len(poolz.Pool) == 0` (no detailed rows at all), not on
+  `out.Pool.TotalProviders == 0` after filtering.
+- Wire-additive change. Pre-v1.4.1 consumers that ignore unknown
+  fields continue to work unchanged; the only behaviour change is
+  the gateway aggregation exclusion. No SPEC-001 wire change.
+- **Cross-spec follow-up (deferred).** SPEC-006 (buyer-facing gateway)
+  currently describes `/v1/status` without the `auth_state`
+  exclusion. A SPEC-006 amendment carrying a pointer to this rule is
+  the right place to surface the invariant for implementers reading
+  the gateway spec alone; that amendment is out of scope for
+  v1.4.1 and lands as part of issue #82 closure.
+
+**Change log v1.4.0 (2026-06-26):**
+- **v1.4.0 (2026-06-26, issue #92):** FR-P11a streaming-failover paragraph
+  now defines "committed" with the post-#92 predicate inline. Adds the
+  buyer-visible TTFT note and the gateway `coordinator_header_timeout_seconds`
+  constraint (header timeout MUST be >= request budget, deploy-checked at
+  `phase4-coordinator/dist/check-deploy-config.sh` C2b). No wire-protocol
+  change; SPEC-001 unaffected.
 
 **Change log v1.4:**
 - **v1.4 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds two
@@ -14,6 +483,9 @@
   the SPEC-015 v0.1.3 reconnect-based rotation grace window. This is a
   `/poolz` JSON shape absorption only; durable receipt-key storage is
   deferred to future specs.
+
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §12 OQ-6 (`X-MacProvider-Tier` to buyers) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-002.
 
 **Change log v1.3.5:**
 - **v1.3.5 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 + SPEC-001 v1.3 absorption):** Adds coordinator-side surface for three now-LOCKED companion specs. SPEC-010 v1.5 adds the `Provider` data-model extension (`SupportedModels[]`, `PublishesSupportedModels`); opt-in `/v1/status.supported_models` echo per R-3.3.3 / AC-21. SPEC-011 v0.5 adds heartbeat parsing for optional `model_hash` + `loading: bool` per R-3.3.0 / R-3.3.1; REPLACES the locked `ApplyHeartbeat` hash-clearing semantics with a two-path (legacy clear / SPEC-011 re-verify) contract at `phase4-coordinator/internal/pool/provider.go:411-432`; adds NEW §7.10 audit-log infrastructure + normative `operator_model_swap` event schema. ALSO adds a new normative §7.8 v2 `auth_request` provider handshake section — the v2 contract has been in code since SPEC-002 v1.2.x but was never normatively documented in SPEC-002; v1.3.5 closes that gap on the coordinator side (matching SPEC-001 v1.3 §6.7 binary-side closure). ALSO adds a new normative §7.9 auth-attempt lifecycle section (10-minute timeout per `s.now().Add(10 * time.Minute)` at server.go:355; per-attempt state release on success/reject/expiry/disconnect); takes over as the source of truth from SPEC-010 v1.5 R-3.1.10 clauses 1 and 5 per SPEC-010 §6.2 transition note. L-1 baseline preserved literally: a v1.3 binary in the unset/unset cell continues to be accepted and processed exactly as a pre-SPEC-010/SPEC-011 binary per SPEC-001 v1.3 §6.7.3 cell 1 and SPEC-010 §4.1 back-compat analysis. NO new buyer HTTP surface; NO routing-behavior change; NO Tier-2 (SPEC-008) expansion; NO change to existing FR-P* numbering or AC numbering.
@@ -369,12 +841,18 @@ generated auth-attempt ID. The L-1 baseline rule from SPEC-010 v1.5
 R-3.1.10 clause 1 remains binding: if neither SPEC-010 field is present
 on an initial-stage frame, no SPEC-010 retention entry is created.
 
-R-3.X.6 The coordinator MAY populate the internal `seenModels` index
+R-3.X.6 The coordinator MUST populate the internal `seenModels` index
 from the union of `Provider.ModelID` and every entry in
-`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1, but
-v1.3.5 MUST NOT change dispatch outcomes. A request still requires an
-otherwise eligible currently loaded provider; buyer HTTP behavior and
-§5 routing results remain unchanged under all defaults.
+`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1
+(SPEC-010 R-3.3.4 is authoritative on this question — the more specific
+rule, matching shipped behavior; #555). This MUST NOT change dispatch
+outcomes: a request still requires an otherwise eligible currently loaded
+provider, and §5 routing/dispatch results remain unchanged. The only
+buyer-visible effect is the SPEC-010 R-3.3.4 error-code substitution for a
+declared-but-cold model on default (unpinned) routing — `404
+model_not_found` → `503 no_provider_available` (retryable) — an error-code
+change, not a routing change. (v1.5.4: strengthened from `MAY` to `MUST`
+to reconcile with SPEC-010 R-3.3.4; runbook item 22.)
 
 ### Tier 2 hook points summary
 
@@ -681,18 +1159,26 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   twice, never B.
 - **Excluded (MUST NOT count):** preflight rejection/timeout (FR-P7),
   graceful drain, and genuine buyer cancellation / client hangup.
-  **Cancel-vs-timeout race rule (C2):** because the gateway's
-  `coordinator_request_seconds` and the coordinator's `request_timeout_s` may
-  be equal (both default 300s), a buyer-side context cancellation can race
-  the relay timeout. The coordinator MUST use the observed relay error to
+  **Cancel-vs-timeout race rule (C2):** because multiple components enforce
+  related timeout budgets, a buyer-side context cancellation can race relay
+  timeout attribution. The coordinator MUST use the observed relay error to
   disambiguate: a provider-side `relay-timeout-mid-inference` counts, while a
   buyer-context cancellation is excluded in both streaming and non-streaming
-  paths, even if no chunks have been received yet. Operators SHOULD set the
-  coordinator `request_timeout_s` strictly below the gateway
-  `coordinator_request_seconds` so the coordinator's relay-timeout fires
-  first and is unambiguously provider-attributable; with equal timers a
-  gateway-initiated cancel can pre-empt the coordinator's timeout and an
-  unfit provider may escape detection until a non-cancelled request times out.
+  paths, even if no chunks have been received yet. After gateway #760, the
+  streaming path is no longer bounded by `timeouts.coordinator_request_seconds`;
+  operators MUST set coordinator `routing.request_timeout_s` and
+  `provider_http.timeout_s` greater than or equal to gateway
+  `timeouts.stream_ceiling_max_seconds`, so healthy long streams are bounded by
+  the gateway streaming ceiling rather than truncated one hop earlier. For
+  non-streaming work, the effective gateway `timeouts.non_stream_request_seconds`
+  MUST be strictly greater than coordinator `routing.request_timeout_s`, so the
+  coordinator relay timeout, not gateway buyer cancellation, determines FR-P11a
+  breaker attribution for a slow provider. Gateway header transport timeout MUST
+  cover both
+  `timeouts.coordinator_admission_seconds` and the effective
+  `timeouts.non_stream_request_seconds` wall, so a slow first valid streaming
+  event or a slow non-streaming completion is bounded by its own gateway budget,
+  not by an unrelated transport default.
 - **Trip condition:** when a provider accumulates
   `pool.breaker_failure_threshold` (default 2) qualifying faults within a
   rolling `pool.breaker_window_s` (default 120s), the coordinator marks it
@@ -914,7 +1400,7 @@ connection. The following rules are normative:
 
 3. **Cleanup.** The coordinator removes a `request_id` from its active
    map after receiving `inference_response_end` OR after
-   `routing.request_timeout_s` expires (default 300 s).
+   `routing.request_timeout_s` expires (default 900 s).
 
 See also SPEC-001 v1.2.4 § 6.6 "Request ID lifecycle and error
 handling" for the provider-side rules.
@@ -929,7 +1415,7 @@ memory budget. Buffer absorbs brief TCP congestion.
 
 **FR-P20. WS-tunneled response timeout.**
 Per outstanding `inference_request`, coordinator starts a timer of
-`routing.request_timeout_s` (default 300 s). On timeout: send
+`routing.request_timeout_s` (default 900 s). On timeout: send
 `cancel_request`, return HTTP 504 to buyer, free slot. The timeout counts
 as a `relay-timeout-mid-inference` fault toward the **FR-P11a** circuit-breaker,
 which (as of v1.2.0) is the single source of truth for timeout-driven
@@ -994,7 +1480,30 @@ request id in logs. For streaming responses, failover is allowed only
 before HTTP status/body bytes are committed; after a chunk has been
 emitted, dead-WS failure MUST mark the provider unavailable and
 terminate the SSE stream with an error event whose code is
-`provider_disconnected`. Explicit `X-MacProvider-Provider` and
+`provider_disconnected`. **(v1.4.0, issue #92):** "committed" is
+defined as "the coordinator has observed a complete, well-formed
+first OpenAI-compatible SSE event from the provider — a `data:` line
+with a JSON object carrying either `choices[].delta` with at least
+one of `content`, `role`, `refusal`, `reasoning`, `tool_calls`,
+`function_call` (value-typed: strings non-empty, arrays/objects
+non-empty), `choices[].message` (same allowlist), `choices[].finish_reason`
+(non-empty string), OR a top-level `usage` object with non-negative
+integer `completion_tokens` AND one of `prompt_tokens` / `total_tokens`,
+all within `maxRequestLogUsageTokens`". Anything weaker — a 200 status
+line without body, a single byte, an SSE comment-only event, a
+`data: [DONE]` terminator-only event, metadata-only JSON, or an
+arbitrary-key delta/message — is NOT committed; the coordinator MUST
+return `wsForwardProviderDisconnected` and failover (subject to the
+same `failover_enabled` + pin rules). The buyer-visible consequence
+  is that streaming HTTP response headers wait for the first commit-worthy
+  event and non-streaming headers wait for the buffered response to complete.
+  Buyer clients MUST tolerate the configured phase budget: streaming pre-header
+  work is bounded by the gateway admission/streaming-ceiling composition, and
+  non-streaming work is bounded by the effective `non_stream_request_seconds`
+  wall. That non-streaming wall MUST be strictly greater than coordinator
+  `routing.request_timeout_s`, and gateway `coordinator_header_timeout_seconds` MUST cover
+  max(`coordinator_admission_seconds`, effective `non_stream_request_seconds`).
+  Explicit `X-MacProvider-Provider` and
 `X-MacProvider-Session` pins MUST NOT fail over because the buyer
 requested that provider/session. The buyer MUST receive one coherent
 response or one clean OpenAI-compatible error envelope; the buyer MUST
@@ -1188,14 +1697,19 @@ Every buyer request is logged to the `request_log` table in SQLite:
 |---|---|---|
 | `id` | INTEGER PK | Auto-increment |
 | `ts_utc` | TEXT | ISO 8601 timestamp |
-| `request_id` | TEXT | UUID v4 from inbound `X-Request-ID` when present, otherwise UUID assigned by coordinator |
-| `model` | TEXT | Requested model |
+| `request_id` | TEXT | Coordinator-internal request/billing id (NOT the inbound `X-Request-ID`). On the non-pinned retry path multiple `request_log` rows for one logical buyer request share this value; pinned-client retries get distinct values. |
+| `external_request_id` | TEXT NULL | Inbound `X-Request-ID` header value. Shared across all `request_log` rows for one logical request and across the gateway's `usage_events.request_id` for the same logical request, enabling end-to-end billing reconciliation. NULL when the inbound request carried no `X-Request-ID`. (v1.4.2 R-2; formally documented here.) |
+| `account_id` | TEXT NULL | (v1.5.0) Gateway account id propagated via `X-MacProvider-Account` on the gateway → coordinator forward. NULL on legacy rows and on direct legacy buyer calls without the header. The composite `(account_id, external_request_id)` is the reconciliation key joining to gateway `usage_events`; `external_request_id` alone is a logical join key only. |
+| `model` | TEXT | Requested model. **Sanitized at the buyer-handler boundary (v1.5.1):** valid-UTF-8 only; C0 / DEL / C1 codepoints stripped via `sanitizeRequestLogText`. The same sanitizer applies to `error`, `pref_header`, `provider_header` below. |
 | `provider_assigned_id` | TEXT | Pool ID of serving provider (null if 503) |
 | `prompt_tokens` | INTEGER | From provider response usage (null if failed) |
 | `completion_tokens` | INTEGER | From provider response usage (null if failed) |
 | `total_tokens` | INTEGER | prompt + completion |
 | `latency_ms` | REAL | Total wall time including routing |
 | `routing_ms` | REAL | Time spent in routing + preflight |
+| `queue_wait_ms` | REAL | Coordinator-side bounded slot queue wait for this attempt; 0 when no slot queue wait occurred |
+| `ttft_ms` | REAL NULL | (v1.5.6) Provider dispatch completion to provider first byte for this attempt. NULL when no provider first byte was observed or the request did not reach provider execution. |
+| `decode_ms` | REAL NULL | (v1.5.6) Provider first byte to provider completion for this attempt. NULL when the first byte or provider completion endpoint was not observed. |
 | `status` | INTEGER | HTTP status returned to buyer |
 | `stream` | INTEGER | 1 if streaming, 0 if not |
 | `buyer_ip` | TEXT | Buyer's IP (for rate limiting in future) |
@@ -1204,22 +1718,68 @@ Every buyer request is logged to the `request_log` table in SQLite:
 | `pref_header` | TEXT | Value of X-MacProvider-Pref if present |
 | `provider_header` | TEXT | Value of X-MacProvider-Provider if present |
 | `retried` | INTEGER | Always 0 in v1 (no coordinator-managed retry). Column reserved for SPEC-004 / SPEC-006 retry policies. |
+| `attempt_n` | INTEGER NULL | (v1.5.2) Zero-based monotonic attempt ordinal within the same `(account_id, request_id)` group under SQLite `IS` semantics. Populated at INSERT time by the writer via `COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?` in the same transaction. NULL only on legacy rows written before v1.5.2 (or written during a v1.5.2 → v1.5.1 rollback window); SPEC-005 v0.3.3 read-side falls back to id-ASC derivation for NULL rows during the migration window. Backfilled by the operator subcommand `coordinator backfill-attempt-n`. |
 
 Token counts are extracted from the provider's response `usage` field.
 For streaming responses, they come from the usage chunk (SPEC-001 FR-7).
+`ttft_ms` and `decode_ms` are written from coordinator-observed phase
+timing only; they are not provider-reported fields and are not billing
+formula inputs.
 
-Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1; the row order within a `request_id` is determined by `id ASC`. This contract is load-bearing for SPEC-005 v0.3 multi-attempt attribution.
+Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts within a single account. Note that `request_log.request_id` is coordinator-internal (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`); it is NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The cross-account collision class motivating #211 lives on `external_request_id`, not on internal `request_id`. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1.
+
+**Attempt ordinal (v1.5.2).** The canonical attempt ordinal within a single `(account_id, request_id)` group is `request_log.attempt_n` — a zero-based monotonic integer populated at INSERT time by the writer (`COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?` in the same transaction; the single-writer pool cap from #21 / ARCH-3 makes this race-free). For legacy NULL-`attempt_n` rows (written pre-v1.5.2 or during a rollback window), the read-side falls back to id-ASC derivation within the same `(account_id, request_id)` group under SQLite `IS` clustering — the same arithmetic the writer would have produced, so backfilled and derivation-time ordinals are byte-identical. Account scoping is defense-in-depth so that if a UUID v4 collision or future schema change ever causes the same internal `request_id` to appear in rows from different accounts, each account's attempt sequence is computed within its own scope. This contract is load-bearing for SPEC-005 v0.3.3 multi-attempt attribution.
 
 `request_id` MUST be indexed. Any service in the request path that fails to propagate `X-Request-ID` degrades cross-layer debuggability; new buyer/request log surfaces MUST include X-Request-ID propagation.
 
 ```sql
 CREATE INDEX idx_request_log_ts_utc ON request_log(ts_utc);
 CREATE INDEX idx_request_log_request_id_id ON request_log(request_id, id);
+-- v1.4.2 R-2 (external_request_id) + v1.5.0 (account-scoped reconciliation):
+CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id)
+    WHERE external_request_id IS NOT NULL;
+CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_id, external_request_id)
+    WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL;
 ```
 
-The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries.
+The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support closing-the-books reconciliation joins to gateway `usage_events` and `audit_events` (whether run as out-of-process harnesses or via a future coordinator-hosted reconciliation endpoint).
 
-Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL` and create the two indexes above.
+Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL` (v1.5.2), `ALTER TABLE request_log ADD COLUMN queue_wait_ms REAL NOT NULL DEFAULT 0` (v1.5.3), `ALTER TABLE request_log ADD COLUMN ttft_ms REAL NULL` (v1.5.6), and `ALTER TABLE request_log ADD COLUMN decode_ms REAL NULL` (v1.5.6), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup. The `attempt_n`, `ttft_ms`, and `decode_ms` columns require no index (they are per-row attributes, not join keys); the operator backfill subcommand `coordinator backfill-attempt-n` populates legacy NULL `attempt_n` rows once per deployment. Legacy `ttft_ms` / `decode_ms` rows remain NULL.
+
+**Per-key migration-state machine (v1.5.1).** Because ALTER TABLE migrations run at daemon startup but the partial-NULL composite indexes are built only by the operator subcommand `coordinator migrate-indexes`, each composite reconciliation key on `request_log` has its OWN three-state migration:
+
+| State | Column(s) | Index | Meaning |
+|---|---|---|---|
+| `legacy` | absent | n/a | pre-migration; exact composite-key reconciliation unavailable |
+| `unindexed` | present | absent | rollout incomplete; exact reconciliation **available** but unindexed |
+| `indexed` | present | present | steady-state |
+
+The state machine is PER-KEY because v1.4.2 R-2 (`external_request_id`) and v1.5.0 (`account_external_request_id`) added their composite indexes at different points in time; the same deployment may be at different states on each. The aggregate `migration_state` across all keys is `legacy` if ANY key is legacy; `indexed` only if EVERY key is indexed; `unindexed` otherwise. **`unindexed` is NOT legacy** — exact composite-key reconciliation is available but unindexed (full-scan), and reconciliation tooling MUST distinguish it. Reconciliation tooling MUST introspect BOTH `PRAGMA table_info(request_log)` (column presence) AND `sqlite_master` (index presence) per key. The canonical state vocabulary is `"legacy" | "unindexed" | "indexed"` — tooling MUST emit these literal strings.
+
+**Machine-readable state surface (v1.5.1).** The coordinator exposes per-key migration state via `coordinator migrate-indexes --check --format json` (a read-only sibling of the existing build path), backed by `requestlog.Store.MigrationState`. JSON shape:
+
+```json
+{
+  "migration_state": "unindexed",
+  "keys": [
+    { "key": "external_request_id", "column_names": ["external_request_id"], "columns_present": true, "index_name": "idx_request_log_external_request_id", "index_present": false, "state": "unindexed" },
+    { "key": "account_external_request_id", "column_names": ["account_id", "external_request_id"], "columns_present": true, "index_name": "idx_request_log_account_external_request_id", "index_present": false, "state": "unindexed" }
+  ]
+}
+```
+
+**State `unindexed` operational binding (v1.5.1).** **Scope is defined by data-surface contract, not process placement:**
+
+- **In scope (MUST fail closed on state `unindexed`/`legacy`):** any reconciliation surface that performs **closing-the-books joins** between coordinator `request_log` and gateway `usage_events` / `audit_events` by the composite reconciliation key — the SPEC-005 v0.3+ closing-the-books contract. This includes both out-of-process harnesses (e.g. nightly reconciler, issue #226 harness) AND any future coordinator-hosted endpoint that exposes the same join (e.g. a hypothetical `/admin/explorer/reconcile` returning cross-table joined rows for external auditors).
+- **Out of scope (MUST NOT fail closed during the `unindexed` rollout window):** coordinator's own in-process AttemptN derivation paths — `internal/billing/hotpath.go`, `internal/billing/recovery.go`, `internal/billing/endpoints.go` `/admin/ledger/reconcile`. These derive attempt ordinals via SQLite `IS` clustering on `(account_id, request_id)` over a single table (`request_log`); they do NOT join gateway tables. They are correct (just unindexed-slow) under state `unindexed`, and the daemon-startup `legacy → unindexed` rollout window is by design a transient state the daemon serves traffic in.
+
+In-scope tooling MUST fail closed when it observes state `unindexed` (or `legacy`) for a composite key it depends on, until the operator runs `coordinator migrate-indexes`. Tooling MAY support an explicit `--allow-unindexed-scan` override (bounded by row-count or wall-clock budget) for fixture, dev, or one-shot recovery use; the override MUST NOT be the default. Silently falling back to fuzzy match under state `unindexed` is a SPEC violation — it conflates with state `legacy` and hides an operator-action gap.
+
+**Expected operator workflow.** Daemon startup applies ALTER TABLE migrations (`legacy → unindexed`), then operator runs `coordinator migrate-indexes` (`unindexed → indexed`). The `migrate-indexes` subcommand also calls `requestlog.OpenStore` and so applies any pending ALTER TABLE migrations itself before building indexes; running it against a `legacy` DB takes the schema directly to `indexed` in one invocation.
+
+**Deploy ordering (v1.5.0).** Coordinator MUST be deployed first; it accepts and persists `X-MacProvider-Account` whether or not the gateway sends it. Gateway then deploys with the unconditional header. Auditor tooling MUST detect the boundary at row granularity (not schema granularity): rows with NULL `account_id` are either (a) pre-v1.5.0-coordinator rows, (b) v1.5.0-coordinator rows from a pre-v0.9.1 gateway, or (c) v1.5.0-coordinator rows written during a v1.4.x rollback window where the column existed but the writer didn't populate it. In all three cases the join MUST fall back to the prior `external_request_id`-only key and accept the documented ambiguity. Tooling MUST NOT use `PRAGMA table_info(request_log)` column-presence as a switch — that would misclassify rollback-window rows as scoped-ready. Use `account_id IS NOT NULL` as the per-row gate instead.
+
+**Money-path: AttemptN read-side discipline (v1.5.2; supersedes v1.5.0 derivation rule).** `internal/billing/hotpath.go`, `internal/billing/recovery.go`, and `internal/billing/endpoints.go` admin-reconcile MUST read `request_log.attempt_n` (SPEC-002 v1.5.2 monotonic ordinal, populated at INSERT time) when non-NULL. For legacy NULL-`attempt_n` rows (pre-v1.5.2 OR rollback window), the read-side falls back to the v1.5.0 COUNT-based derivation over `request_log` rows sharing the same `(account_id, request_id)` group — same arithmetic the writer would have persisted, so backfilled and derivation-time ordinals are byte-identical. **Note on identity:** `request_log.request_id` is the coordinator-internal billing id (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`), NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The buyer-supplied collision class motivating #211 lives on `external_request_id` and is fully addressed by the composite `(account_id, external_request_id)` reconciliation key; it does NOT naturally manifest as collisions on internal `request_id`. Account-scoping the AttemptN derivation (whether persisted at INSERT time under v1.5.2 OR computed at read time under the v1.5.0 fallback) by `(account_id, request_id)` using SQLite `IS` semantics is defense-in-depth — it ensures that if a UUID v4 collision, a misconfigured retry path, or any future schema-level change ever causes the same internal `request_id` to appear in `request_log` rows belonging to different accounts, each account's first attempt is correctly counted within its own scope. All three sites MUST use identical `IS` semantics so the same row gets the same `AttemptN` regardless of which path scans it. The pre-v1.5.0 same-account multi-attempt grouping (legacy NULL-`account_id` rows cluster among themselves) is preserved exactly. **Quarantine class (v0.3.3): only `attempt_n=1` with `retried=0` is quarantined — see SPEC-005 v0.3.3 §15.2; the v0.3.1 "row 3+ MUST quarantine" rule is satisfied in both the persisted and fallback paths.**
 
 ### Routing logic
 
@@ -1339,6 +1899,7 @@ Response:
       "connected_at": "2026-05-27T12:00:00Z",
       "binary_version": "0.1.0",
       "endpoint_url": "https://m4.streamvc.live",
+      "auth_state": "bearer_validated",
       "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
       "receipt_pubkey_prev": null | {
         "pubkey": "<base64-32-byte-ed25519>",
@@ -1367,7 +1928,54 @@ Response:
 }
 ```
 
-The `summary` block is the SPEC-006 v0.3 gateway input for `/v1/status`; the detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
+The `summary` block is the raw coordinator/operator summary; per the SPEC-002 v1.4.1 aggregation rule below, the SPEC-006 gateway derives buyer-facing `/v1/status` counters from the detailed `pool` array (applying the `auth_state == "bearerless_duplicate"` exclusion) when those rows are present, and MAY fall back to `summary` only when the coordinator omitted the detailed `pool` array entirely. The detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
+
+SPEC-002 v1.4.1 documents the optional `auth_state` field shown above
+(SPEC-003 FR-C9.4 absorption — base enum from v0.8.3, `mint_failed`
+reserved by v0.8.4, emitted by the coordinator via embedded
+`pool.Provider.AuthState`). Enum values are `bearer_validated`
+(connect carried a matching Bearer header), `self_minted` (FR-C9.1
+fresh provisional mint, cleartext returned in the ack frame),
+`bearerless_duplicate` (tokenless connect for a provider_id that
+already has an unrevoked token row — admitted for operator visibility
+but non-routable per FR-C9.4), and the reserved `mint_failed` value
+(FR-C9.1 mint attempted but the DB write failed with a non-constraint
+error; today the connect is closed with `CloseInvalidToken` before
+session registration so this value does NOT currently surface on
+registered `/poolz` rows — issue #82 item 2 may change that). The
+field is `omitempty`; absent / empty preserves pre-v0.8.3 behavior
+(routable, billable).
+
+**Aggregation rule for buyer-facing consumers (normative).**
+Downstream `/poolz` consumers that derive buyer-facing capacity
+(SPEC-006 gateway `/v1/status`) MUST exclude rows with `auth_state ==
+"bearerless_duplicate"` from EVERY counter they expose:
+- top-level `Pool.TotalProviders` and top-level `Pool.Ready`,
+- per-model `ProviderCount`, per-model `ReadyProviderCount`,
+- per-model slot totals (`TotalSlots`, `SlotsFree`),
+- per-model availability flags,
+- per-model `supported_models` unions.
+Counting bearerless rows on the buyer surface would over-promise
+capacity the coordinator will refuse to route.
+
+Operator-facing `/poolz` output is not subject to this rule: the raw
+`pool` array still surfaces ALL admitted sessions (including
+bearerless duplicates), and the coordinator-emitted `summary` block
+still counts them in `total_providers` — operator visibility into
+WHY a session is non-routable depends on it. Buyer-facing aggregators
+applying the rule above MUST NOT fall back to the coordinator
+`summary` block to repopulate counters that have been excluded; the
+summary includes bearerless rows in `total_providers` (it is
+`len(providers)` on the coordinator side), so using it as a fallback
+after filtering would silently reintroduce the excluded capacity.
+The gateway implementation lives at
+`phase5-gateway/internal/router/server.go` `aggregateStatus`; its
+summary fallback gates on `len(poolz.Pool) == 0`, not on
+`out.Pool.TotalProviders == 0` after filtering.
+
+SPEC-006 (buyer-facing gateway) currently describes `/v1/status`
+without this exclusion — a SPEC-006 amendment carrying the pointer
+to this rule is deferred to issue #82 closure.
 
 SPEC-015 v0.1.3 adds the two receipt fields shown above as the SPEC-002
 v1.4 absorption. `receipt_pubkey` is `null` when the provider did not
@@ -1463,19 +2071,19 @@ function route(request, pool, headers) -> provider | error:
 
     # Step 2: Filter candidates
     candidates = []
+    queue_candidates = []
     for p in pool:
         if not model_id_equal(p.model_id, model):
             continue
         if p.state != "ready":
             continue
         if p.slots_free <= 0:
+            if p.slots_total > 0 and p.max_context_tokens >= estimated_tokens:
+                queue_candidates.append(p)
             continue
         if p.max_context_tokens < estimated_tokens:
             continue
         candidates.append(p)
-
-    if len(candidates) == 0:
-        return error(503, "No provider available for model " + model)
 
     # Step 2.3: Provisional request quota check (v1.1.1)
     function check_provisional_quota(provider) -> bool:
@@ -1490,6 +2098,15 @@ function route(request, pool, headers) -> provider | error:
                                 if not check_provisional_quota(c)]
     candidates = [c for c in pre_quota_candidates
                   if check_provisional_quota(c)]
+    queue_candidates = [c for c in queue_candidates
+                        if check_provisional_quota(c)]
+
+    if len(candidates) == 0 and len(queue_candidates) > 0:
+        provider = wait_in_bounded_slot_queue(queue_candidates,
+                                             max_pending_per_provider=4,
+                                             deadline_ms=750)
+        if provider is not nil:
+            return provider
 
     if len(candidates) == 0:
         if len(quota_blocked_candidates) > 0 and len(pre_quota_candidates) == len(quota_blocked_candidates):
@@ -1548,7 +2165,10 @@ function route(request, pool, headers) -> provider | error:
 
 3. **State + capacity filter** removes any provider that cannot serve
    the request right now. Only `ready` providers with `slots_free > 0`
-   and sufficient `max_context_tokens` are candidates.
+   and sufficient `max_context_tokens` are immediate candidates. For
+   non-pinned requests, a `ready` provider with `slots_free == 0`,
+   `slots_total > 0`, and sufficient `max_context_tokens` MAY enter the
+   bounded coordinator-side slot queue described below.
 
 4. **Buyer preference** changes the sort order but not the filter.
    All three sort strategies produce a total order — no random
@@ -2088,11 +2708,25 @@ all four SPEC-001 v1.3 §6.7.3 matrix cells per SPEC-001 v1.3 R-6.7.7.
 Wire-compatible with SPEC-001 section 6.2. The harness (`beta/harness.py`)
 is the first buyer and generates SPEC-001-shaped requests.
 
-Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and include it in the `request_log` row. If absent, coordinator MAY generate its own UUID v4. The `request_log` schema includes an indexed `request_id` field for this cross-service correlation key.
+Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and persist it as `request_log.external_request_id` (v1.4.2 R-2). If absent, coordinator's internal `request_log.request_id` is generated locally as a UUID v4 and `external_request_id` is NULL. The `request_log` schema includes a partial-NULL `external_request_id` index for cross-service reconciliation.
+
+**Buyer-controlled text sanitization (v1.5.1).** Every column in `request_log` whose value originates from buyer-controlled input — `external_request_id` (from `X-Request-ID`), `account_id` (from `X-MacProvider-Account`), `model` (from JSON body), `error` (provider/upstream error message), `pref_header` (from `X-MacProvider-Pref`), `provider_header` (from `X-MacProvider-Provider`) — MUST pass through a sanitizer at the buyer-handler boundary:
+- **Opaque headers** (`external_request_id`, `account_id`): `sanitizeOpaqueHeader` — reject the whole value on UTF-8 invalid OR control bytes (C0 `<0x20`, DEL `0x7f`, C1 `0x80-0x9f`) at byte granularity, cap at 128 bytes.
+- **Text fields** (`model`, `error`, `pref_header`, `provider_header`): `sanitizeRequestLogText` — reject UTF-8 invalid; strip C0/DEL/C1 codepoints; cap at 256 runes.
+- **WS provider hello required strings** (`provider_id`, `hostname`, `model_id`, `binary_version` — provider-controlled, not buyer-controlled, but they reach the same structured-log surface): `requireString` rejects control characters at parse time so a malicious provider cannot inject CSI sequences via the hello.
+
+Reason: terminal-control-character (CSI / OSC) sequences in structured logs and SQLite text columns are a load-bearing log-injection class — the `c1-control-chars-terminal-sanitizer-bypass` audit established this for opaque headers and v1.5.1 extends the contract to every buyer-controlled persisted text column.
+
+**UUID-tolerance (v1.5.1).** `external_request_id` is **opaque sanitized text**, not UUIDv4-shape-required. Gateway-routed traffic carries a UUIDv4 per SPEC-006 R-G3 (the gateway middleware mints a UUIDv4 if the inbound `X-Request-ID` is absent or non-UUIDv4-like). Direct coordinator buyer-port traffic MAY carry any non-control 1-128-byte ASCII/UTF-8 string. Coordinator implementations MUST NOT reject non-UUID-shaped inbound IDs but MUST apply `sanitizeExternalRequestID` (trim whitespace; cap at 128 bytes; reject invalid UTF-8; reject control bytes `< 0x20`, `0x7f`, and the C1 range `0x80-0x9f` **at byte granularity** — rune iteration is insufficient because raw C1 bytes decode to `utf8.RuneError` and would otherwise slip through, defeating the load-bearing C1/CSI rejection; on failure treat as absent and DO NOT echo the malformed payload to logs). Cross-service reconciliation MUST NOT assume UUIDv4 shape; the value is opaque text and parity is byte-exact on the sanitized string.
 
 When forwarding work to a provider over the SPEC-001 § 6.6 `inference_request` message, coordinator MUST preserve the request ID it recorded for the buyer request. Providers MAY echo `X-Request-ID` back in usage reporting; this is OPTIONAL under SPEC-001 v1.2.4 and is filed as a SPEC-001 v1.2.3 candidate.
 
-Gateway-originated traffic from SPEC-006 v0.3 uses `X-Request-ID` as the join key between gateway `usage_events`, gateway `audit_events`, and coordinator `request_log`. Direct legacy buyer traffic without this header remains supported.
+**Gateway → coordinator forward contract (v1.5.0).** Gateway-originated traffic from SPEC-006 v0.3+ MUST send two correlation headers on every forwarded buyer request:
+
+- `X-Request-ID: <uuid>` — the buyer-visible request id (honored from the inbound buyer `X-Request-ID` when present, else minted by gateway middleware). Persisted into `request_log.external_request_id`.
+- `X-MacProvider-Account: <account_id>` — the gateway's authenticated subject account id, sourced from the gateway's bearer- or demo-auth subject. Persisted into `request_log.account_id`. MUST be sent unconditionally — earlier gateway code only emitted this header inside the sticky-routing conditional, leaving the non-sticky hot path account-blind. Empty / absent header is tolerated for backwards compatibility but degrades the reconciliation key to `external_request_id` alone for that row.
+
+The composite `(account_id, external_request_id)` is the reconciliation key joining coordinator `request_log` to gateway `usage_events` (and to gateway `audit_events`). `external_request_id` alone is a logical join key only — after #196 the same buyer-supplied `X-Request-ID` MAY appear in `usage_events` rows belonging to distinct accounts, so any reconciliation query that ignores `account_id` is ambiguous on cross-account collisions. Direct legacy buyer traffic without these headers remains supported and writes rows with NULL `account_id` and NULL `external_request_id`; such rows fall back to the prior `request_id`-only key.
 
 #### GET /v1/models
 
@@ -2173,8 +2807,10 @@ Validation order:
 | 8 | Preflight (if applicable) | 503 `preflight_rejected` |
 
 Note: steps 7-8 replace SPEC-001's steps 7-9 (Stage 1/2 pre-flight
-and queue admission). The coordinator does not tokenize or queue —
-the provider handles those.
+and provider queue admission). The coordinator does not tokenize. It
+MAY perform the bounded pre-dispatch slot queue described in this spec;
+provider-side tokenization and execution queueing remain provider
+responsibilities.
 
 **Non-streaming response (200):** Forwarded from provider. Same shape
 as SPEC-001 section 6.2 non-streaming response. The coordinator adds:
@@ -2222,7 +2858,7 @@ the same value space — the stable `provider_id`.)
 |---|---|---|
 | 400 | Missing/invalid fields, malformed tools, n>1 | `invalid_request` or `invalid_tools` |
 | 401 | Invalid buyer auth (future, not enforced in v1) | `invalid_auth` |
-| 404 | No connected provider has ever advertised this `model_id` (model unknown to the pool) | `model_not_found` |
+| 404 | No connected provider serves or declares (`supported_models`) this `model_id`, and it has not been seen this process lifetime — model unknown to the pool (R-3.X.6 / SPEC-010 R-3.3.4; see "404 vs 503 split" below) | `model_not_found` |
 | 429 | Rate limit exceeded (future, not enforced in v1) | `rate_limit_exceeded` |
 | 502 | Selected provider returned an error or disconnected mid-request | `provider_error` |
 | 503 | Model is known to the pool but no eligible provider is currently available (all matching providers busy/degraded/draining/unavailable, or all failed preflight) | `no_provider_available` |
@@ -2230,12 +2866,16 @@ the same value space — the stable `provider_id`.)
 
 **404 vs 503 split (clarified):**
 - **404 `model_not_found`** — the requested `model_id` is not in the
-  union of `model_id` fields across all currently-connected providers
+  union of served `model_id` **and declared `supported_models`** fields
+  across all currently-connected providers (R-3.X.6 / SPEC-010 R-3.3.4),
   AND has not been seen in any provider's hello/heartbeat history during
-  this coordinator process lifetime.
+  this coordinator process lifetime. A model a connected provider
+  *declares* in `supported_models` but has not warmed is NOT 404 — it is
+  known, so it takes the 503 below.
 - **503 `no_provider_available`** — the `model_id` is recognized
-  (some provider serves or has recently served it), but no currently-
-  eligible provider can take the request right now. Retry-friendly.
+  (some provider serves, has recently served, **or declares it in
+  `supported_models`**), but no currently-eligible provider can take the
+  request right now. Retry-friendly.
 
 This split matters because buyers should treat 404 as a misconfiguration
 ("pick a different model") and 503 as transient backoff ("retry soon").
@@ -2401,6 +3041,18 @@ Unknown providers return the same 200 shape with `"state": "unknown"`.
 ```json
 {"error":{"code":"rate_limited","message":"Pool check rate limit exceeded"}}
 ```
+
+**Rate-limit source-IP derivation (issue #125).** The per-source rate-
+limit bucket key is derived as follows: if `r.RemoteAddr` falls inside
+one of the operator-configured `proxy.trusted_proxies` CIDR ranges
+(default `["127.0.0.0/8", "::1/128"]` covers the production nginx-on-
+localhost topology), the coordinator parses the `X-Forwarded-For`
+header rightmost-untrusted-hop first, falling back to `X-Real-IP`,
+then to `r.RemoteAddr`. For peers outside the trusted-proxy CIDR set
+the `X-Forwarded-For` / `X-Real-IP` headers are IGNORED — direct
+internet callers cannot spoof their bucket key. Operators MUST keep
+`proxy.trusted_proxies` narrow; expanding it to non-actual-proxy CIDRs
+admits spoofing.
 
 Purpose: SPEC-003 v0.6 `install.sh` self-test calls this endpoint after
 first WebSocket connect to confirm that a freshly installed provider has
@@ -3283,11 +3935,27 @@ demultiplexing, SSE reassembly).
 
 **Source:** `specs/SPEC-CROSS-006-audit.md`, D-CROSS-3.
 
-**SPEC-002 v1.1.4 encoding:**
+**SPEC-002 v1.1.4 encoding (superseded by v1.4.2 R-2 + v1.5.0 below):**
 Coordinator honors inbound `X-Request-ID` on buyer `/v1/*` requests,
 records it in `request_log`, forwards it as the provider
 `inference_request.request_id`, MAY generate a UUID v4 for legacy direct
 traffic, and treats propagation gaps as audit findings.
+
+**SPEC-002 v1.4.2 R-2 + v1.5.0 encoding (current):**
+Coordinator persists the inbound `X-Request-ID` into
+`request_log.external_request_id` (v1.4.2 R-2) and the gateway-
+forwarded `X-MacProvider-Account` into `request_log.account_id`
+(v1.5.0). Coordinator-internal `request_log.request_id` is
+generated locally as a UUID v4 and is the value forwarded to the
+provider as `inference_request.request_id`. The composite
+`(account_id, external_request_id)` is the cross-service
+reconciliation key joining coordinator `request_log` to gateway
+`usage_events`; `external_request_id` alone is a logical join
+key only and is ambiguous on cross-account collisions after #196.
+Direct legacy traffic without either header writes rows with
+NULL on both columns and falls back to coordinator-internal
+correlation; propagation gaps on either header remain audit
+findings.
 
 ---
 
@@ -3351,9 +4019,15 @@ verify the intended ordering, not merely that both are "set." Reference
 example: coordinator `routing.request_timeout_s` and gateway
 `timeouts.coordinator_request_seconds` were both 300s; equal timers let a
 gateway-initiated cancel race the coordinator relay-timeout, so a slow
-non-streaming provider could escape FR-P11a breaker attribution (the C2
-finding). The coordinator value SHOULD be strictly below the gateway value.
-A deploy-time assertion (`dist/check-deploy-config.sh`) now flags this.
+non-streaming provider could escape FR-P11a breaker attribution (the original
+C2 finding). After gateway #760, streaming has a derived ceiling instead of one
+flat wall; the deploy-time assertion (`dist/check-deploy-config.sh`) now checks
+the streaming relation directly: coordinator `routing.request_timeout_s` and
+`provider_http.timeout_s` MUST cover gateway `timeouts.stream_ceiling_max_seconds`,
+gateway effective `timeouts.non_stream_request_seconds` MUST be strictly greater
+than coordinator `routing.request_timeout_s`, and gateway
+`coordinator_header_timeout_seconds` MUST cover
+max(`coordinator_admission_seconds`, effective `non_stream_request_seconds`).
 
 **AC-1 through AC-10 must ALL pass for the coordinator to be considered
 build-complete. No partial passes. No operator waivers without an
@@ -3502,7 +4176,7 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
 Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
 
 **AC-FR-B9-MULTI. request_log permits one row per provider attempt.**
-A deterministic fixture sends one logical request_id through two SPEC-004 retry attempts. The assertion is two `request_log` rows with the same `request_id`, distinct auto-increment `id` values, provider attribution per attempt, and row order defined by `id ASC`. No uniqueness constraint may reject the repeated `request_id`.
+A deterministic fixture sends one logical request through two SPEC-004 retry attempts (single account). The assertion is two `request_log` rows sharing the same `(account_id, request_id)` group, with distinct auto-increment `id` values, provider attribution per attempt, and row order within that group defined by `id ASC` under SQLite `IS` clustering (so legacy NULL-`account_id` fixtures cluster identically). No uniqueness constraint may reject the repeated `request_id` within an account.
 
 Run by: `go test ./phase4-coordinator/... -run TestRequestLogMultiAttemptRows`
 
@@ -3510,6 +4184,16 @@ Run by: `go test ./phase4-coordinator/... -run TestRequestLogMultiAttemptRows`
 A deterministic null-usage error fixture returns SPEC-001 `inference_response_end.status="error_model_not_loaded"` with no usage object. The assertion is one `request_log` row whose `error_code` is exactly `error_model_not_loaded`, while success and non-SPEC-001 error paths keep `error_code` NULL.
 
 Run by: `go test ./phase4-coordinator/... -run TestRequestLogErrorCodePopulation`
+
+**AC-FR-B9-TIMING. request_log persists provider TTFT/decode observability.**
+A deterministic provider relay fixture delays its first response byte after
+provider dispatch completion and completes normally. The assertion is one
+`request_log` row with non-NULL `ttft_ms` and non-NULL `decode_ms`, where
+`ttft_ms` reflects the provider dispatch-completion to first-byte interval.
+A legacy-schema migration fixture asserts pre-migration rows scan NULL for
+both columns.
+
+Run by: `go test ./phase4-coordinator/internal/requestlog ./phase4-coordinator/internal/buyer -run 'TestRequestLogMigratesExistingTable|TestM2_1C_RowSequence_HTTPSuccessFirstAttempt|TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming|TestB1_RequestLogPreDispatchProviderRowDoesNotInheritPriorTiming'`
 
 **AC-11. Provisional admission.**
 Connect a mock provider with `provider_id` NOT in `config.providers[]`
@@ -3817,7 +4501,7 @@ No open questions remain from v1.0.x. v1.0.2 resolved all prior open items into
 normative requirements (see FR-P11 for the HTTP 530 handling that was
 previously OQ-1).
 
-**OQ-6. How to surface tier=provisional to buyers.**
+**OQ-6. How to surface tier=provisional to buyers.** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — the "do NOT surface" current position has held for a year with no buyer signal demanding tier visibility. Router weight already handles QoS. Revisit only if a buyer use case for routing control surfaces in writing._
 Current design: the tier is invisible to buyers. A buyer cannot
 distinguish a response from a pinned provider vs a provisional
 provider. Should the coordinator add an `X-MacProvider-Tier` response
@@ -4076,9 +4760,12 @@ pool:
 routing:
   preflight_threshold_tokens: 4096   # Skip preflight for prompts under this size
   preflight_timeout_s: 5
-  request_timeout_s: 300
+  request_timeout_s: 900             # Must cover gateway stream_ceiling_max_seconds (C2)
   failover_enabled: true
   failover_timeout_s: 5
+
+provider_http:
+  timeout_s: 900                     # Must cover gateway stream_ceiling_max_seconds (C2)
 
 auth:
   operator_key: "<required>"   # Bearer token for /poolz and /admin/blacklist

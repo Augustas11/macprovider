@@ -436,7 +436,8 @@ struct Stage2Prober: Stage2Probing {
                         measuredPromptTokens: measuredPromptTokens
                     )
                 }
-                if result.ttftMS > Double(gateTTFTMS) {
+                // gateTTFTMS == 0 means the ceiling is disabled (#742: no 60s default).
+                if gateTTFTMS > 0, result.ttftMS > Double(gateTTFTMS) {
                     nErr += 1
                     firstFailure = firstFailure ?? "TTFT \(Int(result.ttftMS.rounded()))ms exceeded gate \(gateTTFTMS)ms"
                     continue

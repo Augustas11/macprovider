@@ -16,6 +16,15 @@ struct Tier2AuthAttempt: @unchecked Sendable {
 final class Tier2ProviderSession: @unchecked Sendable {
     static let aeadSuite = "A256GCM"
 
+    struct RequestPayload: Sendable {
+        let body: String
+        let conversationKey: String?
+    }
+
+    struct LosslessnessProbePayload {
+        let outerEnvelope: [String: Any]
+    }
+
     let providerID: String
     let assignedID: String
     let selectedAEAD: String
@@ -26,6 +35,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
     let p2cNonceBase: Data
 
     private let lock = NSLock()
+    private var responseChunkPlaintextEnvelope = false
     private var c2pCounter: UInt64 = 0
     private var p2cCounter: UInt64 = 0
 
@@ -95,13 +105,82 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
     }
 
+    func enableResponseChunkPlaintextEnvelope() {
+        lock.lock()
+        responseChunkPlaintextEnvelope = true
+        lock.unlock()
+    }
+
     var countersForTest: (c2p: UInt64, p2c: UInt64) {
         lock.lock()
         defer { lock.unlock() }
         return (c2pCounter, p2cCounter)
     }
 
+    func openAEADRekeyCommit(_ message: [String: Any], rekeyID: String) throws -> Data {
+        guard message["encrypted"] as? Bool == true,
+              let enc = message["enc"] as? [String: Any]
+        else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard c2pCounter == 0 else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_commit",
+            direction: "c2p",
+            requestID: rekeyID,
+            stream: false,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: 0
+        )
+        let plaintext = try Self.openEnvelope(
+            enc,
+            key: c2pKey,
+            nonceBase: c2pNonceBase,
+            keyID: keyID,
+            expectedAAD: aad,
+            expectedSeq: 0
+        )
+        c2pCounter = 1
+        return plaintext
+    }
+
+    func sealAEADRekeyCommitted(rekeyID: String, proof: Data) throws -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard p2cCounter == 0 else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_committed",
+            direction: "p2c",
+            requestID: rekeyID,
+            stream: false,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: 0
+        )
+        let enc = try Self.sealEnvelope(
+            proof,
+            key: p2cKey,
+            nonceBase: p2cNonceBase,
+            keyID: keyID,
+            aad: aad,
+            seq: 0
+        )
+        p2cCounter = 1
+        return enc
+    }
+
     func openRequestBody(message: [String: Any], requestID: String, stream: Bool) throws -> String {
+        try openRequestPayload(message: message, requestID: requestID, stream: stream).body
+    }
+
+    func openRequestPayload(message: [String: Any], requestID: String, stream: Bool) throws -> RequestPayload {
         guard message["encrypted"] as? Bool == true,
               let enc = message["enc"] as? [String: Any]
         else {
@@ -121,16 +200,105 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
         let plaintext = try Self.openEnvelope(enc, key: c2pKey, nonceBase: c2pNonceBase, keyID: keyID, expectedAAD: aad, expectedSeq: seq)
         c2pCounter += 1
-        guard let body = String(data: plaintext, encoding: .utf8) else {
+        guard String(data: plaintext, encoding: .utf8) != nil else {
             throw Tier2ProviderError.invalidPlaintext
         }
-        return body
+        guard let envelope = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              envelope["type"] as? String == "inference_request_plaintext",
+              let envelopeBody = envelope["body"] as? String else {
+            throw Tier2ProviderError.invalidPlaintext
+        }
+        let conversationKey = (envelope["conversation_key"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return RequestPayload(
+            body: envelopeBody,
+            conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil
+        )
     }
 
-    func sealResponseChunk(requestID: String, stream: Bool, plaintext: String) throws -> [String: Any] {
+    func openLosslessnessProbeRequestPayload(message: [String: Any], requestID: String) throws -> LosslessnessProbePayload {
+        guard message["type"] as? String == LosslessnessProbeProtocol.encryptedRequestType,
+              message["encrypted"] as? Bool == true,
+              message["stream"] as? Bool == false,
+              let enc = message["enc"] as? [String: Any]
+        else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        let seq = c2pCounter
+        let aad = Tier2FrameAAD(
+            type: LosslessnessProbeProtocol.encryptedRequestType,
+            direction: "c2p",
+            requestID: requestID,
+            stream: false,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: seq
+        )
+        let plaintext = try Self.openEnvelope(enc, key: c2pKey, nonceBase: c2pNonceBase, keyID: keyID, expectedAAD: aad, expectedSeq: seq)
+        c2pCounter += 1
+        guard let envelope = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              envelope["type"] as? String == LosslessnessProbeProtocol.requestPlaintextType,
+              let payload = envelope["payload"] as? [String: Any] else {
+            throw Tier2ProviderError.invalidPlaintext
+        }
+        return LosslessnessProbePayload(outerEnvelope: payload)
+    }
+
+    func sealLosslessnessProbeResult(requestID: String, outerEnvelope: [String: Any]) throws -> [String: Any] {
+        let plaintext = try JSONSerialization.data(
+            withJSONObject: [
+                "type": LosslessnessProbeProtocol.resultPlaintextType,
+                "payload": outerEnvelope,
+            ],
+            options: [.sortedKeys]
+        )
         lock.lock()
         defer { lock.unlock() }
         let seq = p2cCounter
+        let aad = Tier2FrameAAD(
+            type: LosslessnessProbeProtocol.encryptedResultType,
+            direction: "p2c",
+            requestID: requestID,
+            stream: false,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: seq
+        )
+        let enc = try Self.sealEnvelope(
+            plaintext,
+            key: p2cKey,
+            nonceBase: p2cNonceBase,
+            keyID: keyID,
+            aad: aad,
+            seq: seq
+        )
+        p2cCounter += 1
+        return [
+            "type": LosslessnessProbeProtocol.encryptedResultType,
+            "request_id": requestID,
+            "stream": false,
+            "encrypted": true,
+            "enc": enc,
+        ]
+    }
+
+    func sealResponseChunk(requestID: String, stream: Bool, seq: Int, plaintext: String) throws -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        let plaintextData: Data
+        if responseChunkPlaintextEnvelope {
+            let plaintextEnvelope: [String: Any] = [
+                "type": "inference_response_chunk_plaintext",
+                "seq": seq,
+                "data": plaintext,
+            ]
+            plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
+        } else {
+            plaintextData = Data(plaintext.utf8)
+        }
+        let aeadSeq = p2cCounter
         let aad = Tier2FrameAAD(
             type: "inference_response_chunk",
             direction: "p2c",
@@ -138,15 +306,15 @@ final class Tier2ProviderSession: @unchecked Sendable {
             stream: stream,
             providerID: providerID,
             assignedID: assignedID,
-            seq: seq
+            seq: aeadSeq
         )
         let enc = try Self.sealEnvelope(
-            Data(plaintext.utf8),
+            plaintextData,
             key: p2cKey,
             nonceBase: p2cNonceBase,
             keyID: keyID,
             aad: aad,
-            seq: seq
+            seq: aeadSeq
         )
         p2cCounter += 1
         return [
@@ -188,7 +356,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         ]
     }
 
-    static func sealRequestForTest(session: Tier2ProviderSession, requestID: String, stream: Bool, plaintext: String, seq: UInt64 = 0) throws -> [String: Any] {
+    static func sealRequestForTest(session: Tier2ProviderSession, requestID: String, stream: Bool, plaintext: String, conversationKey: String? = nil, seq: UInt64 = 0) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
             type: "inference_request",
             direction: "c2p",
@@ -198,8 +366,16 @@ final class Tier2ProviderSession: @unchecked Sendable {
             assignedID: session.assignedID,
             seq: seq
         )
+        var plaintextEnvelope: [String: Any] = [
+            "type": "inference_request_plaintext",
+            "body": plaintext,
+        ]
+        if let conversationKey = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !conversationKey.isEmpty {
+            plaintextEnvelope["conversation_key"] = conversationKey
+        }
+        let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
         let enc = try sealEnvelope(
-            Data(plaintext.utf8),
+            plaintextData,
             key: session.c2pKey,
             nonceBase: session.c2pNonceBase,
             keyID: session.keyID,
@@ -213,6 +389,63 @@ final class Tier2ProviderSession: @unchecked Sendable {
             "encrypted": true,
             "enc": enc,
         ]
+    }
+
+    static func sealLosslessnessRequestForTest(session: Tier2ProviderSession, requestID: String, outerEnvelope: [String: Any], seq: UInt64 = 0) throws -> [String: Any] {
+        let aad = Tier2FrameAAD(
+            type: LosslessnessProbeProtocol.encryptedRequestType,
+            direction: "c2p",
+            requestID: requestID,
+            stream: false,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: seq
+        )
+        let plaintextEnvelope: [String: Any] = [
+            "type": LosslessnessProbeProtocol.requestPlaintextType,
+            "payload": outerEnvelope,
+        ]
+        let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
+        let enc = try sealEnvelope(
+            plaintextData,
+            key: session.c2pKey,
+            nonceBase: session.c2pNonceBase,
+            keyID: session.keyID,
+            aad: aad,
+            seq: seq
+        )
+        return [
+            "type": LosslessnessProbeProtocol.encryptedRequestType,
+            "request_id": requestID,
+            "stream": false,
+            "encrypted": true,
+            "enc": enc,
+        ]
+    }
+
+    static func openLosslessnessResultForTest(session: Tier2ProviderSession, frame: [String: Any], requestID: String, seq: UInt64 = 0) throws -> [String: Any] {
+        guard frame["type"] as? String == LosslessnessProbeProtocol.encryptedResultType,
+              frame["encrypted"] as? Bool == true,
+              frame["stream"] as? Bool == false,
+              let enc = frame["enc"] as? [String: Any] else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: LosslessnessProbeProtocol.encryptedResultType,
+            direction: "p2c",
+            requestID: requestID,
+            stream: false,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: seq
+        )
+        let plaintext = try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: seq)
+        guard let envelope = try JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              envelope["type"] as? String == LosslessnessProbeProtocol.resultPlaintextType,
+              let payload = envelope["payload"] as? [String: Any] else {
+            throw Tier2ProviderError.invalidPlaintext
+        }
+        return payload
     }
 
     static func openResponseChunkForTest(session: Tier2ProviderSession, frame: [String: Any], requestID: String, stream: Bool, seq: UInt64 = 0) throws -> String {
@@ -229,7 +462,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
             seq: seq
         )
         let plaintext = try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: seq)
-        guard let data = String(data: plaintext, encoding: .utf8) else {
+        guard let object = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              object["type"] as? String == "inference_response_chunk_plaintext",
+              let data = object["data"] as? String else {
             throw Tier2ProviderError.invalidPlaintext
         }
         return data
@@ -254,6 +489,68 @@ final class Tier2ProviderSession: @unchecked Sendable {
             throw Tier2ProviderError.invalidPlaintext
         }
         return dict
+    }
+
+    static func coordinatorSessionForRekeyTest(
+        coordinatorPrivateKey: Curve25519.KeyAgreement.PrivateKey,
+        providerID: String,
+        assignedID: String,
+        providerPublicKeyBase64URL: String,
+        selectedAEAD: String
+    ) throws -> Tier2ProviderSession {
+        let providerPublicRaw = try Data(base64URLUnpadded: providerPublicKeyBase64URL)
+        let providerPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: providerPublicRaw)
+        let sharedSecret = try coordinatorPrivateKey.sharedSecretFromKeyAgreement(with: providerPublic)
+        let coordinatorPublicRaw = coordinatorPrivateKey.publicKey.rawRepresentation
+        let transcript = transcript(
+            providerID: providerID,
+            assignedID: assignedID,
+            providerPublicKey: providerPublicRaw,
+            coordinatorPublicKey: coordinatorPublicRaw,
+            selectedAEAD: selectedAEAD
+        )
+        let keyID = Data(SHA256.hash(data: transcript).prefix(16)).base64URLUnpadded()
+        return try Tier2ProviderSession(
+            providerID: providerID,
+            assignedID: assignedID,
+            selectedAEAD: selectedAEAD,
+            keyID: keyID,
+            c2pKey: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/c2p/aead/v1".utf8), count: 32),
+            p2cKey: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/p2c/aead/v1".utf8), count: 32),
+            c2pNonceBase: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/c2p/nonce/v1".utf8), count: 4),
+            p2cNonceBase: sharedSecret.hkdfData(salt: transcript, info: Data("macprovider/spec008/p2c/nonce/v1".utf8), count: 4)
+        )
+    }
+
+    static func sealAEADRekeyCommitForTest(session: Tier2ProviderSession, rekeyID: String, proof: Data) throws -> [String: Any] {
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_commit",
+            direction: "c2p",
+            requestID: rekeyID,
+            stream: false,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: 0
+        )
+        return try sealEnvelope(proof, key: session.c2pKey, nonceBase: session.c2pNonceBase, keyID: session.keyID, aad: aad, seq: 0)
+    }
+
+    static func openAEADRekeyCommittedForTest(session: Tier2ProviderSession, frame: [String: Any], rekeyID: String) throws -> Data {
+        guard frame["encrypted"] as? Bool == true,
+              let enc = frame["enc"] as? [String: Any]
+        else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "aead_rekey_committed",
+            direction: "p2c",
+            requestID: rekeyID,
+            stream: false,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: 0
+        )
+        return try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: 0)
     }
 
     private static func sealEnvelope(_ plaintext: Data, key: Data, nonceBase: Data, keyID: String, aad: Tier2FrameAAD, seq: UInt64) throws -> [String: Any] {

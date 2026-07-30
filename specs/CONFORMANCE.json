@@ -1,0 +1,2853 @@
+{
+  "$schema": "../schemas/spec-conformance-v1.schema.json",
+  "schema_version": "spec-conformance-v1",
+  "baseline": {
+    "commit": "1df5f76c3fbde1b84619b717fcc28ef1e2c05bc3",
+    "captured_at": "2026-07-16"
+  },
+  "specs": [
+    {
+      "spec_id": "SPEC-001",
+      "title": "Phase 3 Binary: Mac Provider Inference CLI",
+      "version": "1.9.2",
+      "path": "specs/SPEC-001-phase3-binary.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-wire-protocol"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-034"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-002",
+      "title": "Phase 4 Coordinator: Mac Provider Request Router",
+      "version": "1.5.6",
+      "path": "specs/SPEC-002-coordinator.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "coordinator-admission-routing"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-003",
+      "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
+      "version": "0.11.0",
+      "path": "specs/SPEC-003-open-onboarding.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-onboarding-identity"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-034"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-004",
+      "title": "Smart Router",
+      "version": "0.3.3",
+      "path": "specs/SPEC-004-smart-router.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "sticky-routing-identity"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-006",
+        "SPEC-008"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-005",
+      "title": "Billing, Settlement, and Provider Rewards",
+      "version": "0.6.1",
+      "path": "specs/SPEC-005-billing.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "billing-settlement-formula"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-004",
+        "SPEC-006",
+        "SPEC-024"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-006",
+      "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
+      "version": "0.9.12",
+      "path": "specs/SPEC-006-buyer-api.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "buyer-api-error-contract"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-004"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-007",
+      "title": "Internal Operator Protocol Explorer",
+      "version": "0.5.1",
+      "path": "specs/SPEC-007-explorer.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "operator-protocol-explorer"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-008",
+      "title": "Tier-2 Trust Layer",
+      "version": "0.5.1",
+      "path": "specs/SPEC-008-tier2.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "tier2-trust-evidence"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-004",
+        "SPEC-006"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-009",
+      "title": "MacProvider Console v2",
+      "version": "0.1",
+      "path": "specs/SPEC-009-console-v2.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-console"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-010",
+      "title": "Provider Model Catalog",
+      "version": "1.6",
+      "path": "specs/SPEC-010-model-catalog.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "model-catalog-identity"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-011",
+      "title": "Operator-Pushed Warm Swap",
+      "version": "0.5",
+      "path": "specs/SPEC-011-operator-pushed-warm-swap.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "operator-pushed-warm-swap"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-012",
+      "title": "Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility",
+      "version": "0.3",
+      "path": "specs/SPEC-012-coordinator-demand-pull.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "coordinator-demand-pull-model-swap",
+        "buyer-cold-model-visibility"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-004",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-013",
+      "title": "`macprovider-cli autotune` subcommand",
+      "version": "0.3.1",
+      "path": "specs/SPEC-013-cli-autotune.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "autotune-recommendation"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-010",
+        "SPEC-011"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-014",
+      "title": "Provider Portal (seller-facing web surface)",
+      "version": "0.9",
+      "path": "specs/SPEC-014-provider-portal.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-portal"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-015",
+      "title": "Verifiable inference receipts",
+      "version": "0.4.2",
+      "path": "specs/SPEC-015-receipts.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "inference-receipts"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-022"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-016",
+      "title": "Provider payout pipeline (USDC on Base)",
+      "version": "0.1.20",
+      "path": "specs/SPEC-016-payout-pipeline.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "payout-lifecycle"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-014"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-017",
+      "title": "Network Stats API",
+      "version": "0.1.9",
+      "path": "specs/SPEC-017-network-stats-api.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "network-stats"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-014",
+        "SPEC-016"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-018",
+      "title": "Agentic tool calling (provider-side response synthesis)",
+      "version": "0.2.6",
+      "path": "specs/SPEC-018-agentic-tool-calling.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "agentic-tool-calling"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-011",
+        "SPEC-015"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-019",
+      "title": "Structured output (`response_format: json_schema`)",
+      "version": "0.2.5",
+      "path": "specs/SPEC-019-structured-output.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "structured-output"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-006",
+        "SPEC-015",
+        "SPEC-018"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-020",
+      "title": "Provider autoupdate",
+      "version": "v0.1.11",
+      "path": "specs/SPEC-020-provider-autoupdate.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-autoupdate"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-008",
+        "SPEC-010"
+      ],
+      "implementation_status": "partial",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": "91834bcf421324e9e042bd8639e9177294d9c605",
+      "last_reconciled_at": "2026-07-26",
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Implementation and regression mappings now cover signed discovery, manual recovery, local integrity, launchd fencing, and rollback fencing after the closed updater-lifecycle fixes. The physical journey contract is mapped, and 2026-07-27 evidence now proves Air5/Qwen v1.8.61 convergence after the Pearl advertised-version and hardware-trust blockers were removed. SPEC-020 remains pending, not conformant, until the signed journey-result contract exists and the ledger is explicitly promoted."
+      }
+    },
+    {
+      "spec_id": "SPEC-021",
+      "title": "MALIBU bootstrap rewards emission ledger",
+      "version": "0.1.0",
+      "path": "specs/SPEC-021-malibu-emission-ledger.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "malibu-emission-ledger"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-016",
+        "SPEC-017",
+        "SPEC-022",
+        "SPEC-026"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-022",
+      "title": "Verified model settlement",
+      "version": "v0.1.5",
+      "path": "specs/SPEC-022-verified-model-settlement.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "verified-model-settlement"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-002",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-015",
+        "SPEC-016"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-023",
+      "title": "Installer-Integrated Autotune Recommend",
+      "version": "v0.8.6",
+      "path": "specs/SPEC-023-installer-autotune-recommend.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "installer-autotune-policy"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-024",
+      "title": "Prefix-cache billing and provider-local cache isolation",
+      "version": "0.2.1",
+      "path": "specs/SPEC-024-prefix-cache-billing.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "prefix-cache-billing-isolation"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-004",
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-018"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "DUPLICATE_AUTHORITY",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-025",
+      "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
+      "version": "v0.22",
+      "path": "specs/SPEC-025-native-mac-app.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "native-app-lifecycle"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-020",
+        "SPEC-034"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-026",
+      "title": "Browserless Provider Onboarding (one-click Launch Provider)",
+      "version": "v0.26",
+      "path": "specs/SPEC-026-browserless-provider-onboarding.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "browserless-onboarding"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-034"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-027",
+      "title": "Provider Proof of Ownership for App-Track Wallet Changes",
+      "version": "v0.1",
+      "path": "specs/SPEC-027-provider-proof-of-ownership.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-wallet-proof"
+      ],
+      "supersedes": [],
+      "depends_on": [],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-028",
+      "title": "MLX Speculative Decoding for Provider Serve",
+      "version": "0.2-draft",
+      "path": "specs/SPEC-028-mlx-speculative-decoding.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "speculative-decoding"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-013",
+        "SPEC-015"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-029",
+      "title": "Sweep Workload-Class Stratification",
+      "version": "0.1-draft",
+      "path": "specs/SPEC-029-sweep-workload-class-stratification.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "sweep-workload-stratification"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-013",
+        "SPEC-023",
+        "SPEC-028"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-030",
+      "title": "Losslessness Probe",
+      "version": "v0.1",
+      "path": "specs/SPEC-030-losslessness-probe.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "losslessness-probe"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-028"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-031",
+      "title": "Canary Probe, Degrade & Sanction Lifecycle",
+      "version": "v0.2",
+      "path": "specs/SPEC-031-canary-degrade-sanctions.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "canary-sanction-lifecycle"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-006",
+        "SPEC-008",
+        "SPEC-018"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-032",
+      "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
+      "version": "v0.2.2",
+      "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "hardware-evidence-admission"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-003",
+        "SPEC-008",
+        "SPEC-020",
+        "SPEC-030",
+        "SPEC-031"
+      ],
+      "implementation_status": "partial",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-HG7 route exclusion, the FR-HG6 stale-evidence 30s sweep, FR-CFG2 hot reload / atomic existing-session re-gating, and B5's non-buyer/admission-limited/no-credential sandbox for evidence-absent providers are implemented under coordinator unit tests for strict hello-gate deployments. Gate-off production posture remains observe-only. FR-HG5 below-two alert, proactive evidence refresh, real proof-of-weights, and Pearl deploy evidence remain pending."
+      }
+    },
+    {
+      "spec_id": "SPEC-033",
+      "title": "Hardware-Evidence Verifier (`hardware-verifier.v2`)",
+      "version": "v0.6.2",
+      "path": "specs/SPEC-033-hardware-verifier.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "hardware-evidence-verifier"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-023",
+        "SPEC-032"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-034",
+      "title": "Referral admission, provider invites, and advocacy rewards",
+      "version": "v0.4.6",
+      "path": "specs/SPEC-034-referral-gated-prebeta.md",
+      "status": "normative",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "referral-advocacy-policy"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-003",
+        "SPEC-022",
+        "SPEC-025",
+        "SPEC-026"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "pending",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-035",
+      "title": "Provider connection diagnostics and failure history",
+      "version": "v0.4.0",
+      "path": "specs/SPEC-035-provider-connection-diagnostics.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "provider-connection-diagnostics"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-002",
+        "SPEC-003"
+      ],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Partial #535 lands coordinator durable events + operator GETs, provider status --json, authenticated provider diagnostic_status over WSS, and Pearl monitor alerts under contract tests; pearlctl inspect, HTTPS beacon, production deployment, and operating-window evidence remain deferred."
+      }
+    },
+    {
+      "spec_id": "SPEC-037",
+      "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
+      "version": "v0.1.1",
+      "path": "specs/SPEC-037-kv-survival-restart.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "kv-cache-persistence"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-024",
+        "SPEC-032"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC lands first (RESEARCH_233 Approach A); IMPL follows in a separate PR behind a disabled-by-default flag; KVS-01 evidence pending."
+      }
+    },
+    {
+      "spec_id": "SPEC-036",
+      "title": "Compute-Integrity Receipt Companion",
+      "version": "v0.1",
+      "path": "specs/SPEC-036-compute-integrity-receipt.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "compute-integrity-settlement"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-015",
+        "SPEC-022",
+        "SPEC-026",
+        "SPEC-030"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "spec_id": "SPEC-038",
+      "title": "Continuous batching for concurrent provider inference",
+      "version": "v0.2",
+      "path": "specs/SPEC-038-continuous-batching.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "continuous-batching-serving"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-023",
+        "SPEC-024",
+        "SPEC-028",
+        "SPEC-037",
+        "SPEC-039"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC v0.2 reframes activation from the falsified upstream batch API pin to a locally owned scheduler plus forward-referenced SPEC-039 paged-engine capability; IMPL follows in a separate PR behind a disabled-by-default flag, with MSB-01-05 and the FR-CB15 real-hardware enable gate pending."
+      }
+    },
+    {
+      "spec_id": "SPEC-039",
+      "title": "Paged KV / paged-attention engine",
+      "version": "v0.1",
+      "path": "specs/SPEC-039-paged-kv-attention-engine.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "paged-kv-attention"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-015",
+        "SPEC-024",
+        "SPEC-037"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC lands first from verified paged-attention spikes; implementation and exact-parity fixtures land in a separate PR behind a disabled-by-default provider-local gate."
+      }
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "SPEC-002-R001",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/requestlog/store.go:Row",
+        "phase4-coordinator/internal/buyer/phase_timing.go:requestLogTTFTMs",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:record"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/requestlog/store_test.go::TestRequestLogMigratesExistingTable",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go::TestM2_1C_RowSequence_HTTPSuccessFirstAttempt",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go::TestB1_RequestLogNoProviderRetryRowDoesNotInheritProviderTiming",
+        "phase4-coordinator/internal/buyer/forward_loop_test.go::TestB1_RequestLogPreDispatchProviderRowDoesNotInheritPriorTiming"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B1 persists nullable per-request provider TTFT/decode timings in local schema and retry fixtures, but live Pearl coordinator database migration evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-008-R001",
+      "spec_id": "SPEC-008",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/tier2/pillar_c.go:VerifyAttestationTokenExtWithCatalog",
+        "phase4-coordinator/internal/tier2/pillar_c.go:observeSignedModelHashAgainstCatalog",
+        "phase4-coordinator/internal/tier2/pillar_c.go:logAttestationModelHashMismatch",
+        "phase4-coordinator/internal/ws/server.go:handleV2Conn"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/tier2/pillar_c_se_test.go::TestSEAttestationSignedModelHashMismatchWarnsButAttests",
+        "phase4-coordinator/internal/tier2/pillar_c_se_test.go::TestSEAttestationSignedModelHashMatchDoesNotWarn",
+        "phase4-coordinator/internal/tier2/pillar_c_se_test.go::TestSEAttestationInvalidSignedModelHashWarnsButAttests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "A7 logs signed attestation model-hash mismatches against the active catalog in observe mode, but SPEC-008 remains pending reconciliation until signed physical journey evidence proves the production coordinator receives and records the diagnostic on live providers."
+      }
+    },
+    {
+      "requirement_id": "SPEC-017-R001",
+      "spec_id": "SPEC-017",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/stats/handlers.go:type overviewCapacityEstimateSources struct",
+        "phase4-coordinator/internal/stats/handlers.go:overviewCapacityEstimateSources"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/stats/handlers_integration_test.go::TestAC1_OverviewJSONShape"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The stats overview now labels aggregate capacity fields as estimates in code and integration tests, but SPEC-017 remains pending reconciliation until the wider stats API is tied to a signed production verification record."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R001",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let snapshotManifestV1",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:verifiedModelArtifactSHA256",
+        "phase4-coordinator/internal/modelidentity/identity.go:SnapshotManifestV1"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
+        "phase4-coordinator/internal/pool/provider_test.go::TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Issue #609 implements and unit-tests the canonical Air artifact identity; conformance remains pending until the signed physical provider-to-buyer journey records the exact admitted artifact."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R002",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:authInitialMessage",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
+        "phase4-coordinator/internal/ws/messages.go:parseModelIdentityMetadata"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCanonicalModelIdentityIsNamedAcrossAdmissionAndHeartbeat",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence",
+        "phase4-coordinator/internal/ws/model_identity_test.go::TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Issue #609 implements typed admission and heartbeat semantics; the signed physical journey must still prove the production coordinator receives and preserves the named identity."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R003",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
+        "phase4-coordinator/internal/pool/provider.go:WeightsManifestSHA256 string"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
+        "phase4-coordinator/internal/pool/provider_test.go::TestAirLlamaHeartbeatKeepsCatalogArtifactAndWeightsIdentitiesSeparate"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Issue #609 separates weights diagnostics from catalog authority in code and tests; physical evidence remains required before promotion."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R004",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/server.go:expectedAdmissionModelHash",
+        "phase4-coordinator/internal/ws/server.go:expectedProviderModelHash",
+        "phase4-coordinator/internal/ws/server.go:verifyProviderModelIdentity",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:recordRouteSnapshot",
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value()"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_identity_test.go::TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback",
+        "phase4-coordinator/internal/ws/model_identity_test.go::TestCompatiblePreviousAdmissionKeepsExactSelectedRowIdentity",
+        "phase4-coordinator/internal/billing/route_snapshot_test.go::TestRouteSnapshotStrictKeysAndDigestSensitivity",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go::TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row; a signed physical buyer request must still verify the production route and receipt chain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R005",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/modelidentity/identity.go:LegacyMissingAlgorithmAllowed",
+        "phase4-coordinator/internal/ws/server.go:verifyProviderModelIdentity",
+        "phase4-coordinator/dist/check-deploy-config.sh:legacy_until = g_section"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/model_identity_test.go::TestCanonicalModelIdentityUsesSignedAutotuneRowWithoutTier2Fallback",
+        "phase4-coordinator/internal/config/config_test.go::TestModelHashLegacyDeadlineEnvResolutionFailsClosed",
+        "phase4-coordinator/dist/test/check_deploy_config_test.sh:test_model_hash_legacy_deadline"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Issue #609 implements the finite bridge and deploy preflight; rollout evidence must count legacy providers, upgrade them, and prove the bridge can be removed without buyer-serving regression."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R006",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapInvalidatesSameModelIDWhenArtifactHashChanges",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift::testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row; a signed physical swap journey remains required before enabling the path in production."
+      }
+    },
+    {
+      "requirement_id": "SPEC-018-R001",
+      "spec_id": "SPEC-018",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/HarmonyResponseParser.swift:enum HarmonyResponseParser",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func speculativeRoute",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func parseGeneratedOutput"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/HarmonyResponseParserTests.swift:final class HarmonyResponseParserTests",
+        "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
+        "phase3-binary/Tests/macprovider-cliTests/Spec028PlumbingTests.swift:testRuntimeSpeculativeRouteUsesGreedyGateAndDraftAvailability"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-018 v0.2.5 defines the #743 Harmony token-ID response parsing contract; conformance remains pending until the implementation and regression evidence are reconciled against AC-57 through AC-61."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R001",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleCoordinatorRecommendation",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:handleSignedReleaseDiscovery",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runSignedRecoveryDiscoveryIfDue",
+        "phase3-binary/Sources/macprovider-cli/SignedReleaseDiscovery.swift:SignedReleaseDiscoveryHead"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack",
+        "scripts/test-release-discovery-transport.sh:versioned immutable transport fails closed",
+        "scripts/test-acceptance-promotion.sh:exact accepted-byte promotion fails closed",
+        "scripts/test-renew-release-discovery-head.sh:protected renewal workflow fails closed",
+        "scripts/verify-v1855-discovery-bridge.sh:anonymous v1.8.55 bridge proof"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:c5500f25a9549853a640c4c70fc563d81e9c1da128c670641daf895383cad7d8",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        }
+      ],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Append-only signed discovery, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama readiness, Air5/Qwen fail-closed rollback, and the original Pearl/Air5 blockers. The supplemental Air5 convergence artifact records Pearl advertising v1.8.61, M3 hardware-trust approval/verifier success, signed v1.8.61 package/catalog verification, Air5 ready/routing-eligible v1.8.61 admission, and target_not_newer coordinator observation. The remaining blocker is governance packaging: a signed journey-result contract and explicit conformance promotion, not the earlier Air5 operational blocker."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R002",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct UpdateCommand",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:discoverSignedReleaseHead",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:acceptanceDiscoveryHeadIfPresent"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testCoordinatorCompatibilityAdmissionRequiresFreshExactCurrentAndTargetSets",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testAppendOnlyDiscoveryTransportRequiresTagSequenceToMatchSignedHead",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack",
+        "scripts/test-release-discovery-transport.sh:versioned immutable transport fails closed",
+        "scripts/test-release-security-posture.sh:release security posture regression checks passed",
+        "scripts/test-renew-release-discovery-head.sh:protected renewal workflow fails closed",
+        "scripts/verify-v1855-discovery-bridge.sh:anonymous v1.8.55 bridge proof"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:c5500f25a9549853a640c4c70fc563d81e9c1da128c670641daf895383cad7d8",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        }
+      ],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Manual signed-release recovery, append-only transport, protected renewal, anonymous v1.8.55 bridge verification, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama manual update no-op at v1.8.61 and Air5/Qwen fail-closed behavior for the v1.8.56 updater plus installer rollback when SSH Keychain access is unavailable. The supplemental Air5 convergence artifact records successful GUI manual recovery to v1.8.61 after coordinator hardware trust was unblocked. Disconnected or coordinator-rejected recovery still needs signed journey-result packaging before promotion."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R003",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:writeSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:readSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:localSignedSetRecoveryAllowed",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:commitPendingAutoupdateAfterServingProof",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runStartupAutoupdateRecovery"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReadinessFailureRollsBackReplacement",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testSuccessCleanupIsIdempotentAcrossCrashSteps",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testPreStagedSuccessSentinelMismatchDoesNotCleanupPendingOrBackup"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:c5500f25a9549853a640c4c70fc563d81e9c1da128c670641daf895383cad7d8",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        }
+      ],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Local signed-set health, exact-set success binding, startup recovery, rollback policy, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records 8GB Llama local binary/discovery/update-lock state and Air5/Qwen rollback after required hardware-evidence admission returned HTTP 429 before service start. The supplemental Air5 convergence artifact records that the blocker was removed and that Air5 committed v1.8.61 bytes, exact CLI SHA-256, launchd activation, local model readiness, and Pearl ready admission. A controlled committed-target rollback fault and signed journey-result packaging remain open before promotion."
+      }
+    },
+    {
+      "requirement_id": "SPEC-020-R004",
+      "spec_id": "SPEC-020",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:acquireUpdateLockAndFenceReloadJobs",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdater.swift:rollbackCommittedSwapAfterRestartFailure",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:updateSignedPolicy",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:fenceAutoupdateReloadHelpers",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:waitForStableLocalAutoupdateHealth",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:fenceAuthorizedSelfUpdateReloadJobsAtStartup",
+        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:recoverAdoptedStartupHandoff",
+        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:launchdServiceProcessID",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:fenceProviderReloadLaunchdJobs",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:launchctlServiceLoadedOrThrow",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:runLaunchctlCommand",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
+        "ops/macprovider-watchdog/watchdog.sh:def fence_reload_helpers",
+        "phase3-binary/dist/install.sh:def fence_reload_helpers"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testAutoUpdaterOwnsMutationLockBeforeFencingReloadJobs",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testAutoUpdaterServiceLoadedProbeFailsClosedOnTimeoutAndUnknownStatus",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testActivationFailureRefencesBeforeRestoringUnderMutationLock",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testPostSwapPolicyPersistFailureUsesHeldMutationLockAndRefencesBeforeRestore",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testPreLockSignedPolicyPersistFailureNeverRestoresPendingReleaseBytes",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testRestartFailureRollbackDoesNotRestoreBeforeReloadJobsAreFenced",
+        "phase3-binary/Tests/macprovider-cliTests/AutoUpdateTests.swift::testTrustLossRollbackAndCleanupRemainUnderMutationLock",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryFailsClosedWhenReloadHelperFenceFails",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryFencesReloadHelpersBeforeRestoringBinary",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testExpiredOrphanRecoveryDoesNotRestoreBinaryWhenReloadHelperFenceTimesOut",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testSignedStartupRecoveryKeepsRollbackArmedWhenLocallyUnhealthy",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testSignedStartupRecoveryCommitsStableLocalIdentityBeforeModelIsLoaded",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testLocalAutoupdateHealthRequiresExactListenerEnvelope",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testAuthorizedAdoptedHandoffRecoversAcrossRestartBeforeCommit",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testPendingUpdateRetainsStartupHandoffUntilCommitMarkerClears",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testAdoptedRestartBeforeCommitFencesAfterOriginalHandoffExpires",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testAdoptedRestartBeforeCommitFencesAfterReboot",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCoordinatorStartIsScheduledByListeningCallback",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCoordinatorOwnedRecommendationFirstHopFencesExactLaunchdTarget",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCoordinatorOwnedSignedReleaseFirstHopFencesExactLaunchdTarget",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testManualServeProcessCannotUseUpdateHandoffToFenceLaunchdHelper",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testManualProcessCannotUseRetainedRollbackMarker",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testRestoredPreviousStartupFencesWithoutRecoveringFailedTargetHandoff",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testRestoredPreviousStartupRejectsWrongVersionAndBinary",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testV1853FirstHopFencesAfterRecurringHelperKilledFirstAdoptedTarget",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testV1853FirstHopFencesRecurringReloadHelperBeforeStartupWork",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadReloadsWatchdogBeforeProvider",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesLegacyJobsBeforeValidatingCanonicalPlists",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceFailsClosedWhenServiceInspectionFails",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFenceTreatsDisabledLoadedHelperAsPresent",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadCleansPartiallyBootstrappedHelperOnFailure",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testCompatibilityReloadFencesOnlyExactLegacyUUIDLabels",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testBoundedLaunchctlRunnerDrainsOutputWithoutPipeBackpressure",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testBoundedLaunchctlRunnerReportsTimeoutDistinctly",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLaunchctlServiceLoadedThrowsOnTimeoutForRestartPath",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLaunchctlTimeoutFailsFenceBeforeUnlinkingHelperPlist",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testLocalHealthRequiresStableHealthyTargetInstance",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperFailsBoundedlyWithoutBootstrapWhenCanonicalNeverDisappears",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperFailsClosedOnUnknownServiceInspectionError",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootoutWithoutBootstrappingOrRemovingProviderPlist",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungBootstrapWithoutRemovingProviderPlist",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperTimesOutHungPrintWithoutBootstrappingOrRemovingProviderPlist",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReloadHelperWaitsForCanonicalAbsenceThenBootstrapsExactlyOnce",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDFailsClosedWhenBoundedLaunchctlTimesOut",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderLifecycleLeaseTests.swift::testLaunchdServiceProcessIDParsesOnlySuccessfulPositivePID",
+        "ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh:TEST_RELOAD_HELPER_INSPECTION_ERROR",
+        "scripts/test-watchdog-inline-drift.sh:WATCHDOG_EOF"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:c5500f25a9549853a640c4c70fc563d81e9c1da128c670641daf895383cad7d8",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.partial.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        },
+        {
+          "artifact": "sha256:5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb",
+          "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-25"
+        }
+      ],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Mutation-lock ownership, launchd helper fencing, listener-bound commit gates, rollback-entry fencing, legacy first-hop bridge regressions, and the physical autoupdate journey contract are mapped. The 2026-07-27 partial artifact records Air5/Qwen launchd PID change across installer rollback, restored provider/watchdog/manifest/service state, and empty update locks after the run. The supplemental Air5 convergence artifact records successful launchd service activation at v1.8.61, Pearl ready/routing-eligible admission, encrypted leg and hash verification, model_loaded telemetry, and an HTTP 200 buyer request routed to Air5. Signed journey-result packaging still needs to bind lock/fence/listener/cleanup evidence into a promotable conformance record."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R001",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func isEligible(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func advisoryBenchmarkWarnings(",
+        "phase4-coordinator/internal/autotune/gate.go:func benchmarkPassesGate("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTPSBelowSignedCatalogGateWarnsWithoutBlockingRecommendation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTTFTAboveSignedCatalogGateWarnsWithoutBlockingRecommendation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTPSAndTTFTSignedCatalogGateMissesWarnWithoutBlockingRecommendation",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testThermalThrottleStillHardBlocksEligibility",
+        "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateTreatsTPSAndTTFTMissesAsAdvisory",
+        "phase4-coordinator/internal/autotune/gate_test.go::TestEvaluateHelloGateRejectsThermalThrottle"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired here, but the requirement remains pending until a signed candidate completes the physical referral/X acceptance journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R002",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func donorModeApplyWarning",
+        "phase3-binary/dist/install.sh:run_autotune_recommend_apply"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendationJSONCarriesBenchGateProvenanceAndDrift",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptCountsBenchmarkedRowsNotRenderedEligibleRows",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testTranscriptSanitizesBenchGateProvenanceControlCharacters",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift::testDonorModeApplyWarningMatchesSpec"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests; SPEC-023 remains pending until a signed physical installer/autotune journey proves the operator-visible transcript in production."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R001",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionCeilingExcluded",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) applyAdmissionCeilingRouteExclusion",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) admissionCeilingRouteVerdict"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestAdmissionCeilingExclusionRemovesProviderFromRouting",
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestSetAdmissionCeilingExcludedReportsTransitionsOnly",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatModelChangeRecordsAdmissionCeilingDrift",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatUncataloguedModelIsRouteExcluded",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestPreviousCatalogTransitionRequiresActiveRowEquivalence",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatInCeilingModelClearsRouteExclusion",
+        "phase4-coordinator/internal/ws/warmup_internal_test.go:TestWarmupGateSkipsAdmissionCeilingExcludedProvider"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. Gate-off production posture remains observe-only, and Pearl deploy evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R002",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionEvidenceStale",
+        "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) runAdmissionEvidenceRevalidationSweep",
+        "phase4-coordinator/internal/ws/trust_revalidation.go:func (s *Server) admissionEvidenceStaleVerdict",
+        "phase4-coordinator/internal/ws/trust_revalidation.go:func verifiedEvidenceMatchesAdmittedTuple"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestAdmissionEvidenceStaleRemovesProviderFromRouting",
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestSetAdmissionEvidenceStaleReportsTransitionsOnly",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRouteExcludesExpiredEvidence",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRejectsTupleMismatch",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionEvidenceRevalidationRejectsMissingAdmittedTuple",
+        "phase4-coordinator/internal/ws/warmup_internal_test.go:TestWarmupGateSkipsStaleAdmissionEvidenceProvider"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. Proactive refresh and production deploy evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R003",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionSandboxed",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) QuarantineForProofOfWeightsReload",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) SetProofOfWeightsConfig",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) revalidateProofOfWeightsAdmissions",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) checkAutotuneHelloGate",
+        "phase4-coordinator/cmd/coordinator/main.go:func reloadCoordinatorConfig",
+        "phase4-coordinator/cmd/coordinator/main.go:func telemetryDriftEvaluatorForReload"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestAdmissionSandboxedRemovesProviderFromRouting",
+        "phase4-coordinator/internal/pool/benchmark_quarantine_test.go:TestSetAdmissionSandboxedReportsTransitionsOnly",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateSandboxesMissingEvidence",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestProofOfWeightsReloadSandboxesExistingUnverifiedSession",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateRechecksEvidenceAfterChallenge",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. Pearl deploy evidence and FR-HG5 below-two alert remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-033-R001",
+      "spec_id": "SPEC-033",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/onboarding/hardware_evidence.go:InsertHardwareVerificationJob",
+        "phase4-coordinator/internal/onboarding/store_pg.go:UpsertProviderHardwareProfile"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/onboarding/store_pg_attempt_integration_test.go::TestProviderHardwareUpsertsRespectColumnLimitedGrants"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The signed 42efce21 acceptance candidate proved that both authenticated provider hardware-profile UPSERT paths failed under the intended provider_onboarding column-limited grants. This PR repairs the SQL without widening authority; conformance remains pending until a replacement signed candidate completes the physical referral journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-034-R001",
+      "spec_id": "SPEC-034",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
+        "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:referral_fragment_links_v1",
+        "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:hasTrustedReferralBoundary"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/referralapi/xapi_test.go:TestNewXAPIClientRejectsUnsafeJoinBase",
+        "phase4-coordinator/internal/referralapi/validate_test.go:TestValidationHandlerAllowsOnlyExactMalibuBrowserOrigin",
+        "phase3-binary/Tests/macprovider-cliTests/ReferralCoordinatorClientTests.swift::testXPostURLValidationMatchesCoordinatorBoundary",
+        "phase3-binary/app/Tests/MalibuTests/ReferralProjectionTests.swift::testReferralBoundaryNegotiatesByCapabilityNotMarketingVersion"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested; conformance remains pending until the signed production deployment completes the real-X dwell reward and the missing fresh referred-provider journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R001",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) Record",
+        "phase4-coordinator/internal/ws/connection_events.go:func (s *Server) recordConnectionEvent",
+        "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) handleAdminProviders"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRecordRetentionAndPerProviderCap",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRedactDiagnosticStripsSecretsAndBounds",
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersRequireOperatorAuth",
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersOfflineLastKnownAndEvents"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Durable redacted connection events: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R002",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/providerevents/taxonomy.go:func NormalizeFailureReason"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/providerevents/store_test.go:TestNormalizeFailureReasonTaxonomy"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Closed failure taxonomy: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R003",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) handleAdminProviders",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) authorizedOperator"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersRequireOperatorAuth"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Operator-only admin GETs: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R004",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/admin_providers.go:func (s *Server) writeAdminProviderDetail",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) UpsertLastKnown",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) handleDiagnosticStatus"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersOfflineLastKnownAndEvents",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestLastKnownOfflineRepresentation",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestLastKnownStoresRedactedDiagnosticStatus"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Offline last-known representation: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R005",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) Prune",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) enforceProviderCap",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) ReconcileBounds"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/providerevents/store_test.go:TestRecordRetentionAndPerProviderCap",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestAnonymousBucketCapped"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Retention bound: coordinator Partial implemented under unit tests; production Pearl deploy and remaining #535 stages are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R006",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:struct StatusCommand",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:static func statusResponse",
+        "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift:actor ProviderStatus"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/StatusCommandTests.swift:testLocalStatusJSONIncludesCredentialPresenceBooleans"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Provider local JSON diagnostic status is implemented under CLI/unit tests; production Mac/provider deploy and operator collection journey are pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R007",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func diagnosticStatusPayloadForTest",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func sendDiagnosticStatus",
+        "phase4-coordinator/internal/ws/messages.go:func ParseDiagnosticStatus",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) handleDiagnosticStatus",
+        "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) UpsertLastKnown",
+        "phase4-coordinator/internal/ws/admin_providers.go:func adminViewFromLastKnown"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot",
+        "phase4-coordinator/internal/ws/messages_test.go:TestParseDiagnosticStatusBoundsAndIdentity",
+        "phase4-coordinator/internal/providerevents/store_test.go:TestLastKnownStoresRedactedDiagnosticStatus",
+        "phase4-coordinator/internal/ws/admin_providers_test.go:TestAdminProvidersOfflineLastKnownAndEvents"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Authenticated provider WSS diagnostic snapshots are implemented under Swift and coordinator unit tests; production WSS provider journey and Pearl deploy remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R008",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/dist/monitor/macprovider-monitor.py:KIND_PROVIDER_DIAGNOSTICS",
+        "phase4-coordinator/dist/monitor/macprovider-monitor.py:def provider_diagnostic_alerts",
+        "phase4-coordinator/dist/monitor/macprovider-monitor.py:def main("
+      ],
+      "tests": [
+        "phase4-coordinator/dist/test/check_monitor_email_mute_test.sh:PASS: #535 provider diagnostics alert rules are bounded and deduped"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Pearl monitor diagnostic alerts are implemented under contract tests; production Pearl deployment and operating-window evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-035-R009",
+      "spec_id": "SPEC-035",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) observeAdmissionCeilingDrift",
+        "phase4-coordinator/internal/ws/server.go:func (s *Server) recordAdmissionCeilingEvent",
+        "phase4-coordinator/internal/providerevents/taxonomy.go:func KnownKind"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatModelChangeRecordsAdmissionCeilingDrift",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatModelChangeWithoutCapRecordsMissingAdmissionCap",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatModelCeilingDriftIsCoalesced",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestHeartbeatModelCeilingDriftCoalescesAcrossReconnect",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestAdmissionCeilingEventClockRegressionResetsWindow",
+        "phase4-coordinator/internal/ws/admission_ceiling_drift_test.go:TestGateOffAutotuneObservationTimeoutAdmits",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled",
+        "phase4-coordinator/internal/ws/autotune_hello_gate_test.go:TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/535",
+        "rationale": "Admission-ceiling drift diagnostics are implemented under coordinator unit tests; production Pearl deploy and operating-window alert evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R001",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP1 (residency only, no observable-contract change): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R002",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP2 (hot-tier semantics preserved exactly): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R003",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the \u00a75a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R004",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per \u00a75a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R005",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP5 (fail safe to miss): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R006",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP6 (encryption, index hiding, key lifecycle): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R007",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP7 (per-provider namespace and quota): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R008",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP8 (purge primitive and tombstones (ship-blocker)): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R009",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP9 (bounded streaming promotion): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R010",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP10 (lifecycle: TTL is an eligibility deadline): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R011",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP11 (configuration and default-off rollout): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R012",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP12 (telemetry and probe boundary): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-037-R013",
+      "spec_id": "SPEC-037",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-KVP13 (KVS gates, production fence, stop condition): normative in SPEC-037 v0.1.0; gate evidence requires a non-production host or maintenance window."
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R001",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R002",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R003",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R004",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R005",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R006",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R007",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R008",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R009",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R010",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R011",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R012",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R013",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R014",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R015",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R016",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-036-R017",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R001",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R002",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R003",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R004",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R005",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R006",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R007",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R008",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R009",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R010",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R011",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R012",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R013",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R014",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R015",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R016",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+      }
+    },
+    {
+      "requirement_id": "SPEC-038-R017",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-CB17 (paged-pool pressure handled by admission back-pressure + deterministic request-local failure, not true preemption at Entry-110 depths <= 4): normative in SPEC-038 v0.2; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R001",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV1 (public KVCache injection seam): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R002",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV2 (paged storage and block allocator): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R003",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV3 (paged-attention kernel modes): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R004",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV4 (fp16 exactness invariant): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R005",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV5 (KV dtype scope and quantized-KV boundary): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R006",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV6 (provider-local default-off invariants): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R007",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV7 (fail-safe fallback and observability): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R008",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV8 (metallib packaging invariant): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R009",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV9 (SPEC-037 and SPEC-038 composition): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R010",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV10 (cache-extraction / same-conversation retention primitive, preserving SPEC-024 token-granular LCP/trim): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R011",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV11 (machine-readable capability descriptor handshake consumed by the SPEC-038 activation predicate): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R012",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV12 (cache-class allowlist + attach-time admission gate; non-allowlisted classes fail safe to stock contiguous, mirroring SPEC-037 AC-10): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R013",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV13 (servability / sizing obligation against the 32 GB live-30B envelope + paged-attention overhead ceiling IMPL gate): normative define-and-record obligation in SPEC-039 v0.1; values and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R014",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "FR-PKV14 (operator configuration surface mirroring SPEC-037 FR-KVP11: triple-source precedence, default-off, block size, pool capacity, fallback policy): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    }
+  ]
+}

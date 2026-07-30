@@ -1,0 +1,28 @@
+[Unit]
+Description=MacProvider stats hardware evidence verifier
+Documentation=https://github.com/augstar/macprovider-poc
+After=network-online.target postgresql.service
+Wants=network-online.target
+ConditionPathExists=/etc/macprovider-stats/stats-hardware-verifier.env
+
+[Service]
+Type=oneshot
+User=macprovider-stats
+Group=macprovider-stats
+EnvironmentFile=/etc/macprovider-stats/stats-hardware-verifier.env
+ExecStart=/opt/macprovider-stats/stats-hardware-verifier
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+InaccessiblePaths=/etc/macprovider
+InaccessiblePaths=-/opt/macprovider/coordinator.yaml
+InaccessiblePaths=-/var/lib/macprovider/coordinator.db
+
+[Install]
+WantedBy=multi-user.target

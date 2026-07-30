@@ -9,7 +9,61 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded CI runs on the same ref. A second push to a PR (or to
+# main) supersedes the first, so let the in-flight run stop instead of
+# burning macOS minutes on a diff that is already stale. Keyed by ref so
+# concurrent PRs never cancel each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      swift: ${{ steps.filter.outputs.swift }}
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Self-test the path detector
+        # Runs the detector's regression suite here so a broken detector fails
+        # THIS job; ci-required requires `changes` to succeed, so a regression
+        # blocks merge instead of silently mis-gating the macOS jobs.
+        shell: bash
+        run: bash scripts/tests/test-ci-detect-changed-paths.sh
+
+      - name: Detect changed paths
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Resolve base/head per event; the detector fails open on anything
+          # it cannot resolve. All logic (rename-safe, NUL-safe, fixture
+          # coverage) lives in the script so it is unit-testable above.
+          base=""
+          head=""
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA"; head="$PR_HEAD_SHA" ;;
+            push) base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+          esac
+          echo "event=$EVENT_NAME base=$base head=$head"
+          bash scripts/ci-detect-changed-paths.sh "$base" "$head"
+
   coordinator:
     name: phase4-coordinator (go vet + test)
     runs-on: ubuntu-latest
@@ -21,18 +75,35 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        # Pinned to actions/setup-go v6.5.0. Re-resolve deliberately.
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g root -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:root /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: make vet-coordinator
         run: make vet-coordinator
 
       - name: make test-coordinator
         run: make test-coordinator
+
+      - name: make test-dist
+        run: make test-dist
 
   gateway:
     name: phase5-gateway (go vet + test)
@@ -47,7 +118,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: phase5-gateway/go.mod
           cache-dependency-path: phase5-gateway/go.sum
@@ -86,7 +157,7 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -117,13 +188,99 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
 
       - name: Run fixture integration test
         run: cd phase7-verify && go test -race -count=1 -tags=integration -timeout 60s .
+
+  coordinator-lint:
+    name: phase4-coordinator (golangci-lint depguard AC-16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # SPEC-017 AC-16 — import-graph lint. Runs depguard + forbidigo
+    # on every PR. Step 1 adds a fixture under
+    # internal/stats/testdata/forbidden_import_fixture/ that
+    # imports internal/billing from internal/stats; the test
+    # `TestAC16ForbiddenImportFails` invokes `go vet` on the
+    # fixture and asserts the named diagnostic. The repo-wide
+    # `golangci-lint run` invoked here MUST NOT include the
+    # fixture; the fixture lives under `testdata/` which Go's
+    # toolchain excludes by convention.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+      - name: Install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+      - name: make lint-coordinator
+        run: make lint-coordinator
+      - name: AC-16 fixture assertion (golangci-lint diagnostic fires by name)
+        # Round-1 ARCH r1 HIGH E fix: TestAC16ForbiddenImportFails
+        # + TestForbidigoOSExitRule skip when golangci-lint is
+        # absent. The default `make test-coordinator` runs before
+        # golangci-lint is installed; here, after the lint binary
+        # is on PATH, run the targeted assertions so the fixture
+        # diagnostic is actually checked in CI.
+        run: |
+          cd phase4-coordinator && go test -count=1 -run 'TestAC16ForbiddenImportFails|TestForbidigoOSExitRule' ./internal/stats/
+
+  coordinator-stats-integration:
+    name: phase4-coordinator (stats Postgres AC-9/10/19/20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # SPEC-017 Step 1 — Postgres-dependent integration tests.
+    # testcontainers-go spins ephemeral Postgres per test; the
+    # ubuntu-latest runner ships with Docker. Tests live under
+    # //go:build integration so `make test-coordinator` on a
+    # daemon-less host does not fail.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6.5.0
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+      - name: make test-coordinator-integration
+        run: make test-coordinator-integration
+
+  coordinator-nginx-integration:
+    name: phase4-coordinator (nginx Step 4.B behavior smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # SPEC-017 Step 4.B — nginx config + behavior smoke. Validates
+    # AC-8 (60+1 anonymous rate limit), AC-3 nginx-tier (Bearer
+    # garbage → 401 envelope through nginx), AC-15 nginx-tier
+    # (access-log redaction), keyed-bypass behavior, per-endpoint
+    # isolation, and proxy_no_cache write-suppression (SECURITY r5 C1).
+    #
+    # The script header claimed CI ran this job since Step 4.B
+    # landed, but no workflow invoked the script until this entry.
+    # Without it AC-8 had zero automated regression protection on
+    # main. Filed during the SPEC-017 v0.1.8 end-of-implementation
+    # 22-AC sweep.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify docker daemon
+        run: docker info >/dev/null
+      - name: Run nginx behavior smoke
+        run: bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 
   integration:
     name: integration (cross-service)
@@ -148,7 +305,7 @@ jobs:
         # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
         # when upgrading instead of trusting the mutable tag in this required
         # pairing/security gate.
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
@@ -183,7 +340,7 @@ jobs:
         # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
         # when upgrading instead of trusting the mutable tag in this required
         # pairing/security gate.
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
@@ -207,7 +364,9 @@ jobs:
     # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
     # build — so it stays a fast, isolated job. Closes the 2026-06-17
     # regression where an env:NAME-indirected operator_key false-failed the
-    # gate and pushed operators into SKIP_C2_CHECK=1.
+    # gate and pushed operators into SKIP_C2_CHECK=1. Catalog release tests now
+    # authenticate Tier-2 with the reviewed Go verifier, so install the pinned
+    # toolchain even though this job does not build a service binary.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -215,6 +374,25 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Go for the Tier-2 signature verifier
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache: false
+
+      - name: Seal the Tier-2 verifier toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g root -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:root /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
 
       - name: make test-dist
         run: make test-dist
@@ -223,6 +401,11 @@ jobs:
     name: phase3-binary (swift test)
     runs-on: macos-15
     timeout-minutes: 25
+    needs: changes
+    # Swift/xcodebuild only runs when Swift sources, build scripts, the
+    # Makefile, or this workflow change. ci-required treats a skip here as a
+    # pass; the `changes` detector fails open so an undetected diff still runs.
+    if: ${{ needs.changes.outputs.swift == 'true' }}
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
@@ -234,9 +417,15 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
+      - name: Verify one-time Malibu Sparkle generator integration
+        run: bash scripts/test-malibu-sparkle-generator-integration.sh
+
+      - name: Verify Sparkle 2.6.4 target key continuity
+        run: bash scripts/test-malibu-sparkle-validator-integration.sh
+
       - name: Cache SwiftPM
         # Pinned to actions/cache v4.2.2.
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: phase3-binary/.build
           key: spm-${{ runner.os }}-${{ hashFiles('phase3-binary/Package.resolved') }}
@@ -245,11 +434,37 @@ jobs:
         working-directory: phase3-binary
         run: swift test --parallel
 
+      - name: Install reviewed XcodeGen artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
+
+      - name: Run Malibu app tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          xcodebuild test \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Debug \
+            -destination 'platform=macOS'
+
+      - name: Verify macOS upgrade rollback and manual process recovery
+        run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
+
 
   spec-015-acceptance:
     name: spec-015-acceptance
     runs-on: macos-15
     timeout-minutes: 35
+    needs: changes
+    # Cross-service money-path acceptance. Skipped only for docs-only PRs
+    # (Markdown/docs with no specs/** or code changes); ci-required treats the
+    # skip as a pass. Any code or spec change still runs it. Fail-open.
+    if: ${{ needs.changes.outputs.code == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -257,7 +472,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
@@ -273,7 +488,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
+      - changes
       - coordinator
+      - coordinator-lint
+      - coordinator-stats-integration
+      - coordinator-nginx-integration
       - gateway
       - phase7-verify
       - phase7-verify-integration
@@ -287,7 +506,13 @@ jobs:
       - name: Require all CI jobs
         shell: bash
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          SWIFT_GATE: ${{ needs.changes.outputs.swift }}
+          CODE_GATE: ${{ needs.changes.outputs.code }}
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          COORDINATOR_LINT_RESULT: ${{ needs.coordinator-lint.result }}
+          COORDINATOR_STATS_INTEGRATION_RESULT: ${{ needs.coordinator-stats-integration.result }}
+          NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
           GATEWAY_RESULT: ${{ needs.gateway.result }}
           PHASE7_VERIFY_RESULT: ${{ needs.phase7-verify.result }}
           PHASE7_VERIFY_INTEGRATION_RESULT: ${{ needs.phase7-verify-integration.result }}
@@ -300,23 +525,52 @@ jobs:
           set -euo pipefail
 
           failed=0
-          for check in \
-            "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
-            "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
-            "phase7-verify (go vet + test):${PHASE7_VERIFY_RESULT}" \
-            "phase7-verify integration (fixtures):${PHASE7_VERIFY_INTEGRATION_RESULT}" \
-            "integration (cross-service):${INTEGRATION_RESULT}" \
-            "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
-            "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \
-            "phase3-binary (swift test):${SWIFT_TESTS_RESULT}" \
-            "spec-015-acceptance:${SPEC_015_RESULT}"
-          do
-            name="${check%%:*}"
-            result="${check#*:}"
-            if [ "$result" != "success" ]; then
-              printf '%s result=%s\n' "$name" "$result" >&2
+
+          # Jobs that must always run and pass. `changes` is included: if the
+          # path detector fails, its gated jobs skip and merge must be blocked.
+          require_success() {
+            if [ "$2" != "success" ]; then
+              printf '%s result=%s (expected success)\n' "$1" "$2" >&2
               failed=1
             fi
-          done
+          }
+          # Path-gated macOS jobs. A skip is legitimate ONLY when its detector
+          # boolean is exactly 'false'. If the gate said 'true' the job must
+          # have succeeded; a missing/malformed gate value (e.g. the detector
+          # failed) is fatal. This ties every skip to a real gate decision so
+          # an accidental `if:` or dependency change cannot drop coverage while
+          # ci-required still passes.
+          allow_skip() {
+            local name="$1" result="$2" gate="$3"
+            case "$gate" in
+              false)
+                if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+                  printf '%s result=%s gate=false (expected success or skipped)\n' "$name" "$result" >&2
+                  failed=1
+                fi ;;
+              true)
+                if [ "$result" != "success" ]; then
+                  printf '%s result=%s gate=true (expected success)\n' "$name" "$result" >&2
+                  failed=1
+                fi ;;
+              *)
+                printf '%s gate=%s malformed detector output\n' "$name" "$gate" >&2
+                failed=1 ;;
+            esac
+          }
+
+          require_success "detect changed paths" "$CHANGES_RESULT"
+          require_success "phase4-coordinator (go vet + test)" "$COORDINATOR_RESULT"
+          require_success "phase4-coordinator (golangci-lint depguard AC-16)" "$COORDINATOR_LINT_RESULT"
+          require_success "phase4-coordinator (stats Postgres AC-9/10/19/20)" "$COORDINATOR_STATS_INTEGRATION_RESULT"
+          require_success "phase4-coordinator (nginx Step 4.B behavior smoke)" "$NGINX_INTEGRATION_RESULT"
+          require_success "phase5-gateway (go vet + test)" "$GATEWAY_RESULT"
+          require_success "phase7-verify (go vet + test)" "$PHASE7_VERIFY_RESULT"
+          require_success "phase7-verify integration (fixtures)" "$PHASE7_VERIFY_INTEGRATION_RESULT"
+          require_success "integration (cross-service)" "$INTEGRATION_RESULT"
+          require_success "spec-014-v0-2-gate" "$SPEC_014_RESULT"
+          require_success "deploy tooling (check-deploy-config gate)" "$DIST_TOOLING_RESULT"
+          allow_skip "phase3-binary (swift test)" "$SWIFT_TESTS_RESULT" "$SWIFT_GATE"
+          allow_skip "spec-015-acceptance" "$SPEC_015_RESULT" "$CODE_GATE"
 
           exit "$failed"

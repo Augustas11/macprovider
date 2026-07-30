@@ -3,18 +3,22 @@ package tier2
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
 )
@@ -43,10 +47,23 @@ type ModelEntry struct {
 // (Previously named Catalog; renamed M3-8d so the per-coordinator state
 // container could take that name. The on-disk format is unchanged.)
 type ParsedCatalog struct {
-	CatalogID string
-	ExpiresAt time.Time
-	Models    map[string]ModelEntry
-	Raw       []byte
+	CatalogID                         string
+	ExpiresAt                         time.Time
+	Models                            map[string]ModelEntry
+	Raw                               []byte
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+}
+
+type RouteSnapshotMaterial struct {
+	CatalogID                         string
+	ExpectedModelHash                 string
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+	CatalogExpiresAt                  time.Time
+	HashStatus                        pool.HashStatus
 }
 
 type HashCounts struct {
@@ -178,7 +195,10 @@ func setDefaultForTest(c *Catalog) {
 //
 // Returns the newly-installed *Catalog on success for callers that want a
 // handle to it (e.g. for an immediate Active() / Configured() probe).
-func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger) (*Catalog, error) {
+func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger, guards ...func(*Catalog) error) (*Catalog, error) {
+	if len(guards) == 0 {
+		return nil, fmt.Errorf("tier2 config reload rejected: at least one post-load guard is required (#608 binding)")
+	}
 	next := NewCatalog()
 	if err := next.ConfigureStrict(cfg, logger); err != nil {
 		return nil, err
@@ -188,6 +208,14 @@ func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger) (*Cat
 			return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
 		}
 		return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires a configured catalog")
+	}
+	for _, guard := range guards {
+		if guard == nil {
+			return nil, fmt.Errorf("tier2 config reload rejected: nil post-load guard")
+		}
+		if err := guard(next); err != nil {
+			return nil, err
+		}
 	}
 	setDefault(next)
 	return next, nil
@@ -294,6 +322,33 @@ func (c *Catalog) VerifyProviderHash(modelID, reportedHash string) pool.HashStat
 	c.mu.RLock()
 	st := c.st
 	c.mu.RUnlock()
+	return hashStatusForState(st, modelID, reportedHash)
+}
+
+// VerifyProviderIdentity verifies an explicitly named hash algorithm. A
+// missing algorithm may be admitted only by the caller's bounded migration
+// policy and is never compared with the catalog value.
+func (c *Catalog) VerifyProviderIdentity(modelID, reportedHash, reportedAlgorithm string, allowMissingAlgorithm bool) pool.HashStatus {
+	algorithm := strings.TrimSpace(reportedAlgorithm)
+	if algorithm == "" {
+		if allowMissingAlgorithm {
+			return pool.HashStatusUncatalogued
+		}
+		return pool.HashStatusInvalid
+	}
+	if algorithm != modelidentity.SnapshotManifestV1 {
+		return pool.HashStatusInvalid
+	}
+	if strings.TrimSpace(reportedHash) == "" {
+		return pool.HashStatusInvalid
+	}
+	c.mu.RLock()
+	st := c.st
+	c.mu.RUnlock()
+	return hashStatusForState(st, modelID, reportedHash)
+}
+
+func hashStatusForState(st state, modelID, reportedHash string) pool.HashStatus {
 	parsed := activeParsedLocked(st)
 	if parsed == nil {
 		if catalogUnavailableLocked(st) {
@@ -316,20 +371,53 @@ func (c *Catalog) VerifyProviderHash(modelID, reportedHash string) pool.HashStat
 	return pool.HashStatusMismatch
 }
 
-// ExpectedHashPrefix returns the 8-hex-char prefix of the catalog hash for
-// modelID, or "" when not catalogued. Used in audit-log enrichment.
-func (c *Catalog) ExpectedHashPrefix(modelID string) string {
+// ExpectedHash returns the active catalog sha256 for modelID.
+func (c *Catalog) ExpectedHash(modelID string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	parsed := activeParsedLocked(c.st)
 	if parsed == nil {
-		return ""
+		return "", false
 	}
 	model, ok := parsed.Models[catalogModelKey(modelID)]
 	if !ok {
+		return "", false
+	}
+	hash := strings.ToLower(strings.TrimSpace(model.SHA256))
+	if hash == "" {
+		return "", false
+	}
+	return hash, true
+}
+
+// ModelIDs returns the active catalog's model_id values in sorted order.
+// Used by release-binding checks that compare Tier-2 rows against autotune.
+func (c *Catalog) ModelIDs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return nil
+	}
+	out := make([]string, 0, len(parsed.Models))
+	for _, model := range parsed.Models {
+		id := strings.TrimSpace(model.ModelID)
+		if id != "" {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ExpectedHashPrefix returns the 8-hex-char prefix of the catalog hash for
+// modelID, or "" when not catalogued. Used in audit-log enrichment.
+func (c *Catalog) ExpectedHashPrefix(modelID string) string {
+	hash, ok := c.ExpectedHash(modelID)
+	if !ok {
 		return ""
 	}
-	return hashPrefix(model.SHA256)
+	return hashPrefix(hash)
 }
 
 // CatalogID returns the active catalog's ID, or "" if no active catalog.
@@ -353,6 +441,28 @@ func (c *Catalog) CatalogSnapshot() (string, []byte, bool) {
 		return "", nil, false
 	}
 	return parsed.CatalogID, append([]byte(nil), parsed.Raw...), true
+}
+
+func (c *Catalog) RouteSnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return RouteSnapshotMaterial{HashStatus: hashStatusForState(c.st, modelID, reportedHash)}, false
+	}
+	model, ok := parsed.Models[catalogModelKey(modelID)]
+	if !ok {
+		return RouteSnapshotMaterial{HashStatus: hashStatusForState(c.st, modelID, reportedHash)}, false
+	}
+	return RouteSnapshotMaterial{
+		CatalogID:                         parsed.CatalogID,
+		ExpectedModelHash:                 model.SHA256,
+		CatalogBodyDigest:                 parsed.CatalogBodyDigest,
+		CatalogSignatureKeyID:             parsed.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint: parsed.CatalogSignaturePubkeyFingerprint,
+		CatalogExpiresAt:                  parsed.ExpiresAt,
+		HashStatus:                        hashStatusForState(c.st, modelID, reportedHash),
+	}, true
 }
 
 // CatalogBytes returns the exact signed catalog bytes accepted by signature
@@ -392,6 +502,9 @@ func ExpectedHashPrefix(modelID string) string { return Default().ExpectedHashPr
 func CatalogID() string                        { return Default().CatalogID() }
 func CatalogBytes() []byte                     { return Default().CatalogBytes() }
 func CatalogSnapshot() (string, []byte, bool)  { return Default().CatalogSnapshot() }
+func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
+	return Default().RouteSnapshotMaterial(modelID, reportedHash)
+}
 
 // ResetForTest swaps in a fresh package-singleton Catalog and restores nowUTC.
 //
@@ -530,6 +643,8 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 	if !ed25519.Verify(ed25519.PublicKey(pub), canonical, sig) {
 		return nil, signatureError("catalog signature invalid")
 	}
+	bodyDigest := sha256.Sum256(canonical)
+	pubkeyFingerprint := sha256.Sum256(pub)
 	expiresAt, err := time.Parse(time.RFC3339, file.ExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("invalid expires_at: %w", err)
@@ -570,10 +685,13 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 		models[modelID] = model
 	}
 	return &ParsedCatalog{
-		CatalogID: file.CatalogID,
-		ExpiresAt: expiresAt,
-		Models:    models,
-		Raw:       append([]byte(nil), raw...),
+		CatalogID:                         file.CatalogID,
+		ExpiresAt:                         expiresAt,
+		Models:                            models,
+		Raw:                               append([]byte(nil), raw...),
+		CatalogBodyDigest:                 hex.EncodeToString(bodyDigest[:]),
+		CatalogSignatureKeyID:             file.Signature.KeyID,
+		CatalogSignaturePubkeyFingerprint: "ed25519-sha256:" + hex.EncodeToString(pubkeyFingerprint[:]),
 	}, nil
 }
 

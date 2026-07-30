@@ -29,7 +29,8 @@ final class Tier2ProviderSessionTests: XCTestCase {
         XCTAssertEqual(try session.openRequestBody(message: request, requestID: "req-roundtrip", stream: true), "request-body")
         XCTAssertThrowsError(try session.openRequestBody(message: request, requestID: "req-roundtrip", stream: true))
 
-        let response = try session.sealResponseChunk(requestID: "req-roundtrip", stream: true, plaintext: "response-body")
+        session.enableResponseChunkPlaintextEnvelope()
+        let response = try session.sealResponseChunk(requestID: "req-roundtrip", stream: true, seq: 0, plaintext: "response-body")
         XCTAssertEqual(response["encrypted"] as? Bool, true)
         XCTAssertNil(response["data"])
         let responseEnc = try XCTUnwrap(response["enc"] as? [String: Any])
@@ -46,6 +47,37 @@ final class Tier2ProviderSessionTests: XCTestCase {
             ),
             "response-body"
         )
+    }
+
+    func testResponseChunkEnvelopeRequiresCoordinatorAcknowledgement() throws {
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x31, count: 32),
+            p2cKey: Data(repeating: 0x42, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+
+        let rawResponse = try session.sealResponseChunk(requestID: "req-raw", stream: false, seq: 7, plaintext: "raw-body")
+        XCTAssertThrowsError(try Tier2ProviderSession.openResponseChunkForTest(
+            session: session,
+            frame: rawResponse,
+            requestID: "req-raw",
+            stream: false
+        ))
+
+        session.enableResponseChunkPlaintextEnvelope()
+        let wrappedResponse = try session.sealResponseChunk(requestID: "req-wrapped", stream: false, seq: 7, plaintext: "wrapped-body")
+        XCTAssertEqual(try Tier2ProviderSession.openResponseChunkForTest(
+            session: session,
+            frame: wrappedResponse,
+            requestID: "req-wrapped",
+            stream: false,
+            seq: 1
+        ), "wrapped-body")
     }
 
     func testAADEncodingIsVersionedBinary() throws {

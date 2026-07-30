@@ -15,6 +15,7 @@ type AdmissionManager struct {
 	cfg            config.AdmissionConfig
 	now            func() time.Time
 	admissions     []time.Time
+	pending        int
 	records        map[string]*ProvisionalRecord
 	rejected       map[string]string
 	requestWindows map[string][]time.Time
@@ -81,6 +82,45 @@ func (a *AdmissionManager) Admit(hello Hello, pinned bool, connectedProvisional 
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.evaluateAdmissionLocked(hello, connectedProvisional, true)
+}
+
+func (a *AdmissionManager) CheckAdmit(hello Hello, pinned bool, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
+	if pinned {
+		return pool.TierPinned, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.evaluateAdmissionLocked(hello, connectedProvisional, false)
+}
+
+// ReserveAdmission holds in-memory pool capacity without creating durable
+// admission history. A failed referral/token transaction therefore leaves no
+// hourly admission record behind.
+func (a *AdmissionManager) ReserveAdmission(hello Hello, pinned bool, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
+	if pinned {
+		return pool.TierPinned, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tier, code, reason := a.evaluateAdmissionLocked(hello, connectedProvisional, false)
+	if code == 0 {
+		a.pending++
+	}
+	return tier, code, reason
+}
+
+func (a *AdmissionManager) CommitReservedAdmission(hello Hello, pinned bool) pool.Tier {
+	if pinned {
+		return pool.TierPinned
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.recordAdmissionLocked(hello, a.now())
+	return pool.TierProvisional
+}
+
+func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisional int, record bool) (pool.Tier, gobwas.StatusCode, string) {
 	if _, ok := a.rejected[hello.ProviderID]; ok {
 		return pool.TierRejected, CloseBanned, "banned: provider " + hello.ProviderID + " has been rejected by operator"
 	}
@@ -90,12 +130,21 @@ func (a *AdmissionManager) Admit(hello Hello, pinned bool, connectedProvisional 
 	now := a.now()
 	cutoff := now.Add(-time.Hour)
 	a.admissions = keepAfter(a.admissions, cutoff)
-	if connectedProvisional >= a.cfg.ProvisionalPoolMax {
+	if connectedProvisional+a.pending >= a.cfg.ProvisionalPoolMax {
 		return pool.TierProvisional, CloseProvisionalPoolFull, "provisional_pool_full: max " + itoa(a.cfg.ProvisionalPoolMax) + " provisional providers reached"
 	}
 	if _, known := a.records[hello.ProviderID]; !known && len(a.admissions) >= a.cfg.ProvisionalAdmissionRatePerHour {
 		return pool.TierProvisional, CloseProvisionalRateLimited, "provisional_rate_limited: max " + itoa(a.cfg.ProvisionalAdmissionRatePerHour) + " admissions per hour"
 	}
+	if !record {
+		return pool.TierProvisional, 0, ""
+	}
+	a.pending++
+	a.recordAdmissionLocked(hello, now)
+	return pool.TierProvisional, 0, ""
+}
+
+func (a *AdmissionManager) recordAdmissionLocked(hello Hello, now time.Time) {
 	rec := a.records[hello.ProviderID]
 	if rec == nil {
 		rec = &ProvisionalRecord{
@@ -111,7 +160,14 @@ func (a *AdmissionManager) Admit(hello Hello, pinned bool, connectedProvisional 
 	rec.ModelID = hello.ModelID
 	rec.BinaryVersion = hello.BinaryVersion
 	a.persistLocked()
-	return pool.TierProvisional, 0, ""
+}
+
+func (a *AdmissionManager) ReleasePendingProvisional() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending > 0 {
+		a.pending--
+	}
 }
 
 func (a *AdmissionManager) CheckQuota(provider pool.Provider) bool {
@@ -199,6 +255,25 @@ func (a *AdmissionManager) Reject(providerID, reason string) {
 	a.persistLocked()
 }
 
+// Unreject removes an operator rejection and persists the recovery so the
+// provider can reconnect after a false-positive sanction or operator review.
+// The operation is idempotent; false means there was no rejection to remove.
+func (a *AdmissionManager) Unreject(providerID string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	reason, ok := a.rejected[providerID]
+	if !ok {
+		return false, nil
+	}
+	delete(a.rejected, providerID)
+	if err := a.saveLocked(); err != nil {
+		a.rejected[providerID] = reason
+		a.reportStoreErrorLocked(err)
+		return false, err
+	}
+	return true, nil
+}
+
 func (a *AdmissionManager) Rejected(providerID string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -271,17 +346,21 @@ func (a *AdmissionManager) Prune(cutoff time.Time) (deletedRecords, deletedRejec
 }
 
 func (a *AdmissionManager) persistLocked() {
-	if a.store == nil {
-		return
+	if err := a.saveLocked(); err != nil {
+		a.reportStoreErrorLocked(err)
 	}
-	if err := a.store.SaveAdmissionState(context.Background(), AdmissionState{
+}
+
+func (a *AdmissionManager) saveLocked() error {
+	if a.store == nil {
+		return nil
+	}
+	return a.store.SaveAdmissionState(context.Background(), AdmissionState{
 		Admissions:     append([]time.Time(nil), a.admissions...),
 		Records:        cloneAdmissionRecords(a.records),
 		Rejected:       cloneStringMap(a.rejected),
 		RequestWindows: cloneTimeWindows(a.requestWindows),
-	}); err != nil {
-		a.reportStoreErrorLocked(err)
-	}
+	})
 }
 
 func (a *AdmissionManager) reportStoreErrorLocked(err error) {

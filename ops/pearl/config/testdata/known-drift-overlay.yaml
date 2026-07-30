@@ -1,0 +1,62 @@
+coordinator:
+  compatibility_set:
+    target_id: "Augustas11/macprovider:v1.8.61@example"
+    accepted_ids:
+      - "Augustas11/macprovider:v1.8.61@example"
+pool:
+  canary_enabled: false
+  canary_interval_s: 300
+  canary_timeout_s: 30
+  canary_max_tokens: 32
+  canary_failure_threshold: 3
+  canary_cold_start_grace_s: 300
+  canary_challenges:
+    - prompt: "Return nonce {nonce}"
+      expected: "{nonce}"
+  model_class_challenges:
+    qwen3-coder-30b-a3b-instruct:
+      - prompt: "Return coder nonce {nonce}"
+        expected: "{nonce}"
+        max_ttft_ms: 20000
+        min_sustained_tps: 1.5
+referrals:
+  require_for_registration: true
+  enable_public_validation: true
+  enable_join_links: true
+  enable_social_invite_bonus: true
+  campaign: prebeta
+  policy_version: v1
+  grandfather_before: "2026-07-01T00:00:00Z"
+  current_key_id: k1
+  hmac_keys:
+    k1: env:MAL_REFERRAL_HMAC_K1
+  provider_base_uses: 1
+  social_bonus_uses: 2
+  challenge_ttl_s: 900
+  social_verification_dwell_s: 1800
+  join_base_url: "https://malibu.tech/j"
+  x_api_bearer_token: env:X_API_BEARER_TOKEN
+  request_access_url: "https://malibu.tech/waitlist"
+malibu_emission:
+  enabled: true
+  max_serializable_retries: 3
+  provider_daily_cap_malibu: 100
+  tick_interval_seconds: 60
+  unlock_eval_interval_seconds: 300
+  wallet_daily_cap_malibu: 500
+  wallet_mirror_interval_seconds: 60
+  writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+proof_of_weights:
+  autotune_evidence_ttl_days: 30
+  require_autotune_hello_gate: true
+  telemetry_drift:
+    enabled: true
+    alert_cooldown_s: 900
+    hash_alert_on_artifact_drift: true
+    hash_alert_on_status:
+      - ready
+      - degraded
+    opoi_pass_rate_threshold: 0.95
+    opoi_pass_rate_window: 24
+    tps_min_absolute: 1.0
+    tps_ratio_threshold: 0.75

@@ -26,14 +26,33 @@ the change-log / rollback runbook the script's comments cross-reference.
   coordinator's first deploy (`phase4-coordinator/dist/deploy-pearl-vps.sh`).
 - `/etc/macprovider/gateway.env` with:
   - `COORDINATOR_OPERATOR_KEY`
+  - `COORDINATOR_SERVICE_TOKEN` (must match coordinator
+    `GATEWAY_SERVICE_TOKEN` and differ from operator credentials)
   - `MACPROVIDER_KEY_HASH_SECRET`
   - `MACPROVIDER_DEMO_SIGNING_SECRET`
   - `GITHUB_OAUTH_CLIENT_ID`
   - `GITHUB_OAUTH_CLIENT_SECRET`
 - `/opt/macprovider/gateway.yaml` — `coordinator.buyer_url: http://127.0.0.1:8443`,
   `quotas.reaper_interval_hours: 1`, `quotas.reservation_max_age_hours: 24`,
+  `quotas.account_concurrency: 4`,
+  `quotas.account_request_rate_per_second: 30`, and
   `quotas.demo_concurrency: 2` (M1-8). `deploy-pearl-vps.sh` does NOT
   overwrite this file.
+
+For upgrades from older gateway configs, edit `/opt/macprovider/gateway.yaml`
+before deploy and set:
+
+```yaml
+quotas:
+  account_concurrency: 4
+  account_request_rate_per_second: 30
+```
+
+Then validate the effective config and restart via the deploy script:
+
+```bash
+/opt/macprovider/gateway --config /opt/macprovider/gateway.yaml --check
+```
 
 ## Smoke checks after deploy
 

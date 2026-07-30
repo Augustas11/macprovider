@@ -39,3 +39,26 @@ func WithPragmas(path string) string {
 	}
 	return path + separator + values.Encode()
 }
+
+// ReadOnlyDSN builds a strictly read-only modernc.org/sqlite DSN.
+// Opens with mode=ro and applies PRAGMA query_only=ON at connection
+// init via a pragma — no journal_mode toggle, no synchronous toggle,
+// no writable connection. SPEC-002 v1.5.1 R-2 / issue #197 R3 code:
+// used by `coordinator migrate-indexes --check` so the read-only
+// introspection never persists journal-mode metadata or runs ALTER
+// TABLE on a legacy DB.
+func ReadOnlyDSN(path string) string {
+	values := url.Values{}
+	values.Set("mode", "ro")
+	for _, pragma := range []string{
+		"busy_timeout=5000",
+		"query_only(true)",
+	} {
+		values.Add("_pragma", pragma)
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + values.Encode()
+}

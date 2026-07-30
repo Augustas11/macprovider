@@ -1,0 +1,6 @@
+Structured output instruction for Qwen-family models:
+Return only a JSON value that conforms to the response_format json_schema.
+Do not include Markdown fences, prose before the JSON, or trailing commentary.
+Schema name: "person-v1"
+Schema description: "Return a Person object."
+Schema JSON: {"additionalProperties":false,"properties":{"age":{"type":"number"},"name":{"type":"string"}},"required":["name","age"],"type":"object"}

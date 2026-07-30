@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -233,7 +234,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState: %v", err)
 	}
-	redirectURI, action, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
+	redirectURI, action, returnTo, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState: %v", err)
 	}
@@ -243,7 +244,10 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	if action != "mint" {
 		t.Fatalf("action=%q, want %q", action, "mint")
 	}
-	if _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if returnTo != "" {
+		t.Fatalf("returnTo=%q, want empty", returnTo)
+	}
+	if _, _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState replay err=%v, want ErrNotFound", err)
 	}
 
@@ -254,7 +258,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState expired: %v", err)
 	}
-	if _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState expired err=%v, want ErrNotFound", err)
 	}
 
@@ -266,7 +270,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState plain: %v", err)
 	}
-	_, action, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
+	_, action, _, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState plain: %v", err)
 	}
@@ -301,6 +305,190 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 
 	assertSQLFails(t, store, `UPDATE signup_events SET provider = 'email' WHERE event_id = 'signup_1'`)
 	assertSQLFails(t, store, `DELETE FROM demo_session_events WHERE event_id = 'demo_1'`)
+}
+
+func TestOAuthStateCapAndPrune(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	for i := 0; i < 20; i++ {
+		hash := keyHash(fmt.Sprintf("state-%02d", i))
+		if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
+			StateHash: hash[:], SessionID: fmt.Sprintf("session_%02d", i), RedirectURI: "https://api.streamvc.live/auth/github/callback",
+			ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		}, 20, now); err != nil {
+			t.Fatalf("StoreOAuthStateWithCap %d: %v", i, err)
+		}
+	}
+	overflow := keyHash("state-overflow")
+	if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
+		StateHash: overflow[:], SessionID: "session_overflow", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}, 20, now); !errors.Is(err, storage.ErrOAuthStateCap) {
+		t.Fatalf("overflow err=%v want ErrOAuthStateCap", err)
+	}
+	deleted, err := store.PruneExpiredOAuthState(ctx, now.Add(11*time.Minute))
+	if err != nil {
+		t.Fatalf("PruneExpiredOAuthState: %v", err)
+	}
+	if deleted != 20 {
+		t.Fatalf("deleted=%d want 20", deleted)
+	}
+}
+
+func TestOAuthStateReturnToRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	stateHash := keyHash("oauth-state-returnto")
+	returnTo := "https://malibu.tech/console/auth/callback.html"
+	if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
+		StateHash: stateHash[:], SessionID: "sess_r", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ReturnTo: returnTo, ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}, 5, now); err != nil {
+		t.Fatalf("StoreOAuthStateWithCap: %v", err)
+	}
+	_, _, gotReturnTo, err := store.ConsumeOAuthState(ctx, stateHash[:], "sess_r", now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ConsumeOAuthState: %v", err)
+	}
+	if gotReturnTo != returnTo {
+		t.Fatalf("returnTo=%q want %q", gotReturnTo, returnTo)
+	}
+}
+
+func TestOAuthHandoffStoreConsumeReplay(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	tokenHash := keyHash("handoff-token")
+	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+		TokenHash: tokenHash[:], APIKey: "mp_abc123", CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthHandoff: %v", err)
+	}
+	apiKey, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ConsumeOAuthHandoff: %v", err)
+	}
+	if apiKey != "mp_abc123" {
+		t.Fatalf("apiKey=%q want mp_abc123", apiKey)
+	}
+	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("replay err=%v want ErrNotFound", err)
+	}
+}
+
+func TestOAuthHandoffExpiredReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	tokenHash := keyHash("handoff-expired")
+	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+		TokenHash: tokenHash[:], APIKey: "mp_expired", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthHandoff: %v", err)
+	}
+	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expired err=%v want ErrNotFound", err)
+	}
+}
+
+func TestPruneExpiredOAuthHandoffs(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	for i := 0; i < 3; i++ {
+		hash := keyHash(fmt.Sprintf("handoff-fresh-%d", i))
+		if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+			TokenHash: hash[:], APIKey: fmt.Sprintf("mp_fresh_%d", i), CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		}); err != nil {
+			t.Fatalf("StoreOAuthHandoff fresh %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		hash := keyHash(fmt.Sprintf("handoff-stale-%d", i))
+		if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+			TokenHash: hash[:], APIKey: fmt.Sprintf("mp_stale_%d", i), CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+		}); err != nil {
+			t.Fatalf("StoreOAuthHandoff stale %d: %v", i, err)
+		}
+	}
+	deleted, err := store.PruneExpiredOAuthHandoffs(ctx, now.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("PruneExpiredOAuthHandoffs: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted=%d want 2 (fresh rows must survive)", deleted)
+	}
+}
+
+func TestReservePublicIssuanceConcurrentCeiling(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	const limit = 1
+	const attempts = 16
+	var admitted atomic.Int64
+	var limited atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+				Surface: "signup", ClientIP: "1.2.3.4", WindowStart: now.Add(-24 * time.Hour), Limit: limit, CreatedAt: now,
+			})
+			if err == nil {
+				admitted.Add(1)
+				return
+			}
+			if errors.Is(err, storage.ErrRateLimit) {
+				limited.Add(1)
+				return
+			}
+			t.Errorf("ReservePublicIssuance unexpected err: %v", err)
+		}()
+	}
+	wg.Wait()
+	if admitted.Load() != limit {
+		t.Fatalf("admitted=%d want %d", admitted.Load(), limit)
+	}
+	if limited.Load() != attempts-limit {
+		t.Fatalf("limited=%d want %d", limited.Load(), attempts-limit)
+	}
+}
+
+func TestReservePublicIssuanceCountsLegacyWindowWithoutDoubleCountingNewEvents(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_legacy_1", AccountID: "acct_legacy_1", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent legacy 1: %v", err)
+	}
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_legacy_2", AccountID: "acct_legacy_2", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now.Add(-30 * time.Minute),
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent legacy 2: %v", err)
+	}
+	if err := store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+		Surface: "signup", ClientIP: "1.2.3.4", WindowStart: now.Add(-24 * time.Hour), Limit: 3, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("ReservePublicIssuance with legacy room: %v", err)
+	}
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_new_1", AccountID: "acct_new_1", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent new: %v", err)
+	}
+	err := store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+		Surface: "signup", ClientIP: "1.2.3.4", WindowStart: now.Add(-24 * time.Hour), Limit: 3, CreatedAt: now.Add(time.Minute),
+	})
+	if !errors.Is(err, storage.ErrRateLimit) {
+		t.Fatalf("second reservation err=%v want ErrRateLimit", err)
+	}
 }
 
 func TestQuotaReservationLedgerSemantics(t *testing.T) {
@@ -369,6 +557,26 @@ func TestQuotaReservationLedgerSemantics(t *testing.T) {
 	}
 }
 
+func TestReserveQuotaDuplicateBeatsQuotaExceeded(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_duplicate_quota")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_duplicate_quota", RequestID: "req_duplicate", WindowDate: "2026-05-29",
+		RequestedTokens: 100, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota original: %v", err)
+	}
+
+	_, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_duplicate_quota", RequestID: "req_duplicate", WindowDate: "2026-05-29",
+		RequestedTokens: 1, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if !errors.Is(err, storage.ErrReservationExists) {
+		t.Fatalf("ReserveQuota duplicate err=%v, want ErrReservationExists even when quota is exhausted", err)
+	}
+}
+
 func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -406,6 +614,212 @@ func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
 		RequestedTokens: 100, DailyQuota: 100, CreatedAt: fixedTime(),
 	}); err != nil {
 		t.Fatalf("ReserveQuota after reap: %v", err)
+	}
+}
+
+func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_clamp_expiry")
+	created := fixedTime()
+	originalExpiry := created.Add(24 * time.Hour)
+	deadline := created.Add(5 * time.Minute)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_clamp_expiry", RequestID: "req_clamp", WindowDate: "2026-05-29",
+		RequestedTokens: 40, DailyQuota: 100, CreatedAt: created, ExpiresAt: originalExpiry,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.ClampReservationExpiry(ctx, "acct_clamp_expiry", "req_clamp", deadline); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+	if err := store.ClampReservationExpiry(ctx, "acct_clamp_expiry", "req_clamp", originalExpiry); err != nil {
+		t.Fatalf("ClampReservationExpiry later: %v", err)
+	}
+	var raw string
+	if err := store.db.QueryRow(`SELECT expires_at FROM quota_reservations WHERE account_id = ? AND request_id = ?`, "acct_clamp_expiry", "req_clamp").Scan(&raw); err != nil {
+		t.Fatalf("query expires_at: %v", err)
+	}
+	expiresAt := decodeTime(raw)
+	if !expiresAt.Equal(deadline) {
+		t.Fatalf("expires_at=%s want clamped deadline %s", expiresAt, deadline)
+	}
+	held, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(held) != 1 || held[0].RequestID != "req_clamp" {
+		t.Fatalf("held reservations=%+v, want req_clamp only", held)
+	}
+	reaped, err := store.ReapExpiredReservations(ctx, deadline.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ReapExpiredReservations: %v", err)
+	}
+	if reaped != 0 {
+		t.Fatalf("reaped=%d want 0 for settlement hold", reaped)
+	}
+	_, reserved, err := store.DailyUsage(ctx, "acct_clamp_expiry", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if reserved != 40 {
+		t.Fatalf("reserved after held expiry reap=%d want 40", reserved)
+	}
+}
+
+func TestMarkReservationSettlementHoldPreservesExpiry(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_mark_hold")
+	created := fixedTime()
+	originalExpiry := created.Add(24 * time.Hour)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_mark_hold", RequestID: "req_mark_hold", WindowDate: "2026-05-29",
+		RequestedTokens: 40, DailyQuota: 100, CreatedAt: created, ExpiresAt: originalExpiry,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(ctx, "acct_mark_hold", "req_mark_hold"); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	var raw string
+	var settlementHold int
+	if err := store.db.QueryRow(`SELECT expires_at, settlement_hold FROM quota_reservations WHERE account_id = ? AND request_id = ?`, "acct_mark_hold", "req_mark_hold").Scan(&raw, &settlementHold); err != nil {
+		t.Fatalf("query reservation: %v", err)
+	}
+	if expiresAt := decodeTime(raw); !expiresAt.Equal(originalExpiry) {
+		t.Fatalf("expires_at=%s want preserved original expiry %s", expiresAt, originalExpiry)
+	}
+	if settlementHold != 1 {
+		t.Fatalf("settlement_hold=%d want 1", settlementHold)
+	}
+}
+
+func TestMarkReservationStaleHeldReleasesActiveQuotaButKeepsAuditState(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_stale_hold")
+	created := fixedTime()
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_stale_hold", RequestID: "req_stale_hold", WindowDate: "2026-05-29",
+		RequestedTokens: 40, DailyQuota: 100, CreatedAt: created, ExpiresAt: created.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(ctx, "acct_stale_hold", "req_stale_hold"); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	if err := store.MarkReservationStaleHeld(ctx, "acct_stale_hold", "req_stale_hold", created.Add(10*time.Minute)); err != nil {
+		t.Fatalf("MarkReservationStaleHeld: %v", err)
+	}
+	_, reserved, err := store.DailyUsage(ctx, "acct_stale_hold", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if reserved != 0 {
+		t.Fatalf("reserved after stale-held transition=%d want 0", reserved)
+	}
+	var status string
+	var settlementHold int
+	if err := store.db.QueryRow(`SELECT status, settlement_hold FROM quota_reservations WHERE account_id = ? AND request_id = ?`, "acct_stale_hold", "req_stale_hold").Scan(&status, &settlementHold); err != nil {
+		t.Fatalf("query stale-held reservation: %v", err)
+	}
+	if status != "stale_held" || settlementHold != 1 {
+		t.Fatalf("status/settlement_hold=%s/%d want stale_held/1", status, settlementHold)
+	}
+	held, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("active held reservations=%+v want none after stale-held transition", held)
+	}
+}
+
+func TestListSettlementHeldReservationsSkipsOrdinaryActive(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_held_only")
+	now := fixedTime()
+	for _, requestID := range []string{"req_ordinary", "req_held"} {
+		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+			AccountID: "acct_held_only", RequestID: requestID, WindowDate: "2026-05-29",
+			RequestedTokens: 10, DailyQuota: 100, CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("ReserveQuota %s: %v", requestID, err)
+		}
+	}
+	if err := store.ClampReservationExpiry(ctx, "acct_held_only", "req_held", now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+	held, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(held) != 1 || held[0].RequestID != "req_held" {
+		t.Fatalf("held reservations=%+v, want req_held only", held)
+	}
+}
+
+func TestQuotaSettlementHoldColumnMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v5-gateway.db")
+	rawDB, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, d := range []string{
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`,
+		`INSERT INTO schema_migrations VALUES (1, '2026-06-01T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (2, '2026-06-02T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (3, '2026-06-03T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (4, '2026-06-04T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (5, '2026-06-05T00:00:00Z')`,
+		`CREATE TABLE quota_reservations (
+			account_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			window_date TEXT NOT NULL,
+			reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+			settled_tokens INTEGER NOT NULL DEFAULT 0 CHECK (settled_tokens >= 0),
+			status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'refunded', 'expired')),
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			settled_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (account_id, request_id)
+		)`,
+		`INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at)
+			VALUES('acct_v5', 'req_v5', '2026-05-29', 10, 'active', '2026-05-30T00:00:00Z', '2026-05-29T00:00:00Z')`,
+	} {
+		if _, err := rawDB.ExecContext(ctx, d); err != nil {
+			t.Fatalf("v5 DDL: %v", err)
+		}
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close v5 db: %v", err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var settlementHold int
+	if err := store.db.QueryRowContext(ctx, `SELECT settlement_hold FROM quota_reservations WHERE account_id = 'acct_v5' AND request_id = 'req_v5'`).Scan(&settlementHold); err != nil {
+		t.Fatalf("query settlement_hold: %v", err)
+	}
+	if settlementHold != 0 {
+		t.Fatalf("settlement_hold=%d want default 0", settlementHold)
+	}
+	var maxVer int64
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&maxVer); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if maxVer < 7 {
+		t.Fatalf("schema_migrations max version=%d want >=7", maxVer)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, settlement_hold, expires_at, created_at)
+		VALUES('acct_v5', 'req_stale_v7', '2026-05-29', 10, 'stale_held', 1, '2026-05-30T00:00:00Z', '2026-05-29T00:00:00Z')`); err != nil {
+		t.Fatalf("insert stale_held after v7 migration: %v", err)
 	}
 }
 
@@ -704,8 +1118,35 @@ func TestReservationErrorBranches(t *testing.T) {
 		AccountID: "acct_reservation_errors", RequestID: "req_refund_then_settle", PromptTokens: 1,
 		TokenSource: "provider_reported", Outcome: "ok",
 	})
-	if err == nil {
-		t.Fatal("SettleReservation on refunded reservation unexpectedly succeeded")
+	if !errors.Is(err, storage.ErrReservationTerminal) {
+		t.Fatalf("SettleReservation on refunded reservation err=%v, want ErrReservationTerminal", err)
+	}
+}
+
+// TestSettleDemoReservationTerminalWrapsSentinel: the demo twin must classify
+// like its non-demo sibling. The #763 journal recovery ladder branches on
+// ErrReservationTerminal to fall through to the idempotent usage-event rung;
+// an unwrapped error there would make it retry an already-settled demo
+// request on every pass, forever.
+func TestSettleDemoReservationTerminalWrapsSentinel(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_demo_terminal")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_demo_terminal", RequestID: "req_demo_terminal", WindowDate: "2026-05-29",
+		RequestedTokens: 5, DailyQuota: 100,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.RefundReservation(ctx, "acct_demo_terminal", "req_demo_terminal", fixedTime().Unix()); err != nil {
+		t.Fatalf("RefundReservation: %v", err)
+	}
+	err := store.SettleDemoReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_demo_terminal", RequestID: "req_demo_terminal", PromptTokens: 1,
+		TokenSource: "provider_reported", Outcome: "ok",
+	}, storage.DemoUsageEvent{RequestID: "req_demo_terminal", ClientIP: "203.0.113.7"})
+	if !errors.Is(err, storage.ErrReservationTerminal) {
+		t.Fatalf("SettleDemoReservation on refunded reservation err=%v, want ErrReservationTerminal", err)
 	}
 }
 
@@ -882,6 +1323,52 @@ func TestFeedbackSummaryAndCapacityStores(t *testing.T) {
 	}
 	if !kill.DemoOnly || !kill.AllPublicAPI || !kill.UpdatedAt.Equal(now) {
 		t.Fatalf("kill switch = %+v", kill)
+	}
+	if kill.Version != 1 {
+		t.Fatalf("kill switch version=%d want 1", kill.Version)
+	}
+	applied, err := store.CompareAndSwapKillSwitch(ctx, 0, storage.KillSwitchState{DemoOnly: false, AllPublicAPI: true, UpdatedAt: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("CompareAndSwapKillSwitch mismatch: %v", err)
+	}
+	if applied {
+		t.Fatal("CompareAndSwapKillSwitch applied stale version")
+	}
+	kill, err = store.GetKillSwitch(ctx)
+	if err != nil {
+		t.Fatalf("GetKillSwitch after stale CAS: %v", err)
+	}
+	if !kill.DemoOnly || !kill.AllPublicAPI || kill.Version != 1 {
+		t.Fatalf("stale CAS changed kill switch = %+v", kill)
+	}
+	applied, err = store.CompareAndSwapKillSwitch(ctx, 1, storage.KillSwitchState{DemoOnly: false, AllPublicAPI: true, UpdatedAt: now.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatalf("CompareAndSwapKillSwitch match: %v", err)
+	}
+	if !applied {
+		t.Fatal("CompareAndSwapKillSwitch did not apply matching version")
+	}
+	kill, err = store.GetKillSwitch(ctx)
+	if err != nil {
+		t.Fatalf("GetKillSwitch after matching CAS: %v", err)
+	}
+	if kill.DemoOnly || !kill.AllPublicAPI || kill.Version != 2 {
+		t.Fatalf("matching CAS state = %+v", kill)
+	}
+}
+
+func TestKillSwitchCompareAndSwapReturnsErrorAfterClose(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	applied, err := store.CompareAndSwapKillSwitch(ctx, 0, storage.KillSwitchState{DemoOnly: true})
+	if err == nil {
+		t.Fatal("CompareAndSwapKillSwitch after close returned nil error")
+	}
+	if applied {
+		t.Fatal("CompareAndSwapKillSwitch after close reported applied")
 	}
 }
 

@@ -1,0 +1,27 @@
+# Malibu marketing version	CFBundle build number
+#
+# Append one strictly increasing entry for every Malibu release. The baseline
+# records the last correctly versioned release before this ledger was added;
+# releases v1.8.22-v1.8.25 reused stale app metadata and are intentionally not
+# represented as valid Malibu releases.
+1.8.21	20
+1.8.26	26
+1.8.27	27
+1.8.28	28
+1.8.29	29
+1.8.30	30
+1.8.31	31
+1.8.32	32
+1.8.33	33
+1.8.34	34
+1.8.35	35
+1.8.36	36
+1.8.37	37
+1.8.38	38
+1.8.39	39
+1.8.40	40
+1.8.41	41
+1.8.42	42
+1.8.43	43
+1.8.44	44
+1.8.45	45

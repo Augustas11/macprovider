@@ -1,0 +1,375 @@
+name: Sign private acceptance candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: "Exact candidate branch ref, for example refs/heads/fix/585-provider-lifecycle-option2"
+        required: true
+        type: string
+      candidate_sha:
+        description: "Exact 40-character lowercase commit SHA at the candidate branch tip"
+        required: true
+        type: string
+      tag:
+        description: "Candidate semantic version tag, for example v1.8.35"
+        required: true
+        type: string
+      provider_admission_policy:
+        description: "Candidate coordinator admission rollout policy"
+        required: true
+        default: strict_post_migration
+        type: choice
+        options:
+          - bridge_required
+          - strict_post_migration
+      promotion_ready:
+        description: "Bind the exact candidate assets for stable production promotion after physical acceptance"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-candidate-${{ github.event.inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build_candidate:
+    name: Build exact candidate without protected secrets
+    runs-on: macos-15
+    permissions:
+      contents: read
+    outputs:
+      candidate_ref: ${{ steps.source.outputs.candidate_ref }}
+      candidate_commit: ${{ steps.source.outputs.candidate_commit }}
+      control_commit: ${{ steps.source.outputs.control_commit }}
+      tag: ${{ steps.source.outputs.tag }}
+      provider_admission_policy: ${{ steps.source.outputs.provider_admission_policy }}
+      promotion_ready: ${{ steps.source.outputs.promotion_ready }}
+    steps:
+      - name: Checkout main-owned workflow controls
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout candidate as untrusted build data
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.inputs.candidate_sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact candidate branch and main control commit
+        id: source
+        shell: bash
+        env:
+          CANDIDATE_REF_INPUT: ${{ github.event.inputs.candidate_ref }}
+          CANDIDATE_SHA_INPUT: ${{ github.event.inputs.candidate_sha }}
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy }}
+          PROMOTION_READY_INPUT: ${{ github.event.inputs.promotion_ready || 'false' }}
+        run: |
+          set -euo pipefail
+          bash control/scripts/verify-acceptance-candidate-source.sh \
+            control candidate "https://github.com/$GITHUB_REPOSITORY" \
+            "$CANDIDATE_REF_INPUT" "$CANDIDATE_SHA_INPUT" "$TAG_INPUT"
+          case "$PROVIDER_ADMISSION_POLICY_INPUT" in
+            bridge_required|strict_post_migration) ;;
+            *) echo "::error::invalid provider admission policy" >&2; exit 1 ;;
+          esac
+          case "$PROMOTION_READY_INPUT" in
+            true|false) ;;
+            *) echo "::error::invalid promotion-ready state" >&2; exit 1 ;;
+          esac
+          printf 'candidate_ref=%s\n' "$CANDIDATE_REF_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'candidate_commit=%s\n' "$CANDIDATE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'control_commit=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$TAG_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'provider_admission_policy=%s\n' "$PROVIDER_ADMISSION_POLICY_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'promotion_ready=%s\n' "$PROMOTION_READY_INPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Select and verify main-reviewed release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash control/scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
+
+      - name: Verify candidate dependency pins
+        shell: bash
+        env:
+          CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
+        run: bash candidate/scripts/verify-app-build-inputs.sh "$CANDIDATE_COMMIT"
+
+      - name: Setup Go for candidate Pearl binaries
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: |
+            candidate/phase4-coordinator/go.sum
+            candidate/phase5-gateway/go.sum
+
+      - name: Build candidate Pearl binaries
+        shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+        run: |
+          set -euo pipefail
+          (
+            cd candidate/phase4-coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath \
+              -ldflags "-s -w -X main.version=$TAG" \
+              -o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath \
+              -ldflags "-s -w" \
+              -o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+          )
+          (
+            cd candidate/phase5-gateway
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath \
+              -ldflags "-s -w -X main.version=$TAG" \
+              -o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/gateway
+          )
+          file "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/pearl-file.txt"
+          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$RUNNER_TEMP/pearl-file.txt"
+          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$RUNNER_TEMP/pearl-file.txt"
+          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$RUNNER_TEMP/pearl-file.txt"
+          strings "$RUNNER_TEMP/coordinator-linux-amd64" > "$RUNNER_TEMP/coordinator-strings.txt"
+          strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-strings.txt"
+          grep -Fq "$TAG" "$RUNNER_TEMP/coordinator-strings.txt"
+          grep -Fq "$TAG" "$RUNNER_TEMP/gateway-strings.txt"
+
+      - name: Install main-reviewed XcodeGen artifact
+        shell: bash
+        run: bash control/scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
+
+      - name: Build candidate CLI compatibility set
+        shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+          PROVIDER_ADMISSION_POLICY: ${{ steps.source.outputs.provider_admission_policy }}
+        run: |
+          set -euo pipefail
+          cd candidate/phase3-binary/dist
+          MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY" \
+            ./package.sh "$TAG"
+
+      - name: Build candidate Malibu.app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd candidate/phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          package_resolution_args=(archive)
+          if [ -f Package.resolved ]; then
+            resolved_dir="Malibu.xcodeproj/project.xcworkspace/xcshareddata/swiftpm"
+            mkdir -p "$resolved_dir"
+            cp Package.resolved "$resolved_dir/Package.resolved"
+            package_resolution_args+=(-onlyUsePackageVersionsFromResolvedFile)
+          fi
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
+            "${package_resolution_args[@]}" \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO
+          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
+            "$RUNNER_TEMP/Malibu.app"
+
+      - name: Verify candidate release and component versions
+        shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+          CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
+          PROVIDER_ADMISSION_POLICY: ${{ steps.source.outputs.provider_admission_policy }}
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/component-version-payload"
+          mkdir "$payload"
+          tar -xzf "candidate/phase3-binary/dist/phase3-binary-m4-${TAG}.tar.gz" \
+            -C "$payload"
+          provider_version="$("$payload/macprovider-cli" --version)"
+          malibu_version="$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' \
+            "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          python3 control/scripts/compatibility-set-manifest.py validate \
+            --input "$payload/compatibility-set.json" \
+            --payload-directory "$payload" \
+            --expected-tag "$TAG" \
+            --expected-commit "$CANDIDATE_COMMIT" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
+            --expected-provider-cli-version "$provider_version" \
+            --expected-malibu-app-version "$malibu_version"
+
+      - name: Capture exact unsigned acceptance inputs
+        shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+          CANDIDATE_REF: ${{ steps.source.outputs.candidate_ref }}
+          CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
+          CONTROL_COMMIT: ${{ steps.source.outputs.control_commit }}
+          PROVIDER_ADMISSION_POLICY: ${{ steps.source.outputs.provider_admission_policy }}
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/unsigned-acceptance-inputs"
+          mkdir "$destination"
+          cp "candidate/phase3-binary/dist/phase3-binary-m4-${TAG}.tar.gz" "$destination/"
+          tar -czf "$destination/Malibu.app.tar.gz" -C "$RUNNER_TEMP" Malibu.app
+          cp "$RUNNER_TEMP/release-toolchain.json" \
+            "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" \
+            "$destination/"
+          python3 control/scripts/acceptance-candidate-metadata.py build-unsigned \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --candidate-ref "$CANDIDATE_REF" \
+            --candidate-commit "$CANDIDATE_COMMIT" \
+            --control-commit "$CONTROL_COMMIT" \
+            --provider-admission-policy "$PROVIDER_ADMISSION_POLICY" \
+            --asset "phase3-binary-m4-${TAG}.tar.gz=$destination/phase3-binary-m4-${TAG}.tar.gz" \
+            --asset "Malibu.app.tar.gz=$destination/Malibu.app.tar.gz" \
+            --asset "release-toolchain.json=$destination/release-toolchain.json" \
+            --asset "coordinator-linux-amd64=$destination/coordinator-linux-amd64" \
+            --asset "coordinator-cli-linux-amd64=$destination/coordinator-cli-linux-amd64" \
+            --asset "gateway-linux-amd64=$destination/gateway-linux-amd64" \
+            --output "$destination/unsigned-acceptance-manifest.json"
+
+      - name: Upload unsigned candidate build data
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unsigned-acceptance-${{ steps.source.outputs.candidate_commit }}
+          path: ${{ runner.temp }}/unsigned-acceptance-inputs/
+          if-no-files-found: error
+          retention-days: 1
+
+  sign_acceptance:
+    name: Main-owned protected acceptance signer
+    needs: build_candidate
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout only the main-owned signer
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download unsigned candidate build data
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-acceptance-${{ needs.build_candidate.outputs.candidate_commit }}
+          path: ${{ runner.temp }}/unsigned-acceptance-inputs
+
+      - name: Reverify main control and release toolchain
+        shell: bash
+        env:
+          CONTROL_COMMIT: ${{ needs.build_candidate.outputs.control_commit }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$CONTROL_COMMIT"
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/signer-release-toolchain.json"
+          cmp "$RUNNER_TEMP/unsigned-acceptance-inputs/release-toolchain.json" \
+            "$RUNNER_TEMP/signer-release-toolchain.json"
+
+      - name: Select OpenSSL 3 for P-256 signatures
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew install openssl@3
+          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
+          "$openssl_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'OPENSSL_BIN=%s\n' "$openssl_bin" >> "$GITHUB_ENV"
+
+      - name: Reverify candidate ref and tag after environment approval
+        shell: bash
+        env:
+          CANDIDATE_REF: ${{ needs.build_candidate.outputs.candidate_ref }}
+          CANDIDATE_COMMIT: ${{ needs.build_candidate.outputs.candidate_commit }}
+          TAG: ${{ needs.build_candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-acceptance-remote-state.sh \
+            "$CANDIDATE_REF" "$CANDIDATE_COMMIT" "$TAG"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign, notarize, and bind the private acceptance set
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          CANDIDATE_REF: ${{ needs.build_candidate.outputs.candidate_ref }}
+          CANDIDATE_COMMIT: ${{ needs.build_candidate.outputs.candidate_commit }}
+          CONTROL_COMMIT: ${{ needs.build_candidate.outputs.control_commit }}
+          TAG: ${{ needs.build_candidate.outputs.tag }}
+          PROVIDER_ADMISSION_POLICY: ${{ needs.build_candidate.outputs.provider_admission_policy }}
+          PROMOTION_READY: ${{ needs.build_candidate.outputs.promotion_ready }}
+        run: |
+          set -euo pipefail
+          bash scripts/sign-acceptance-candidate.sh \
+            "$RUNNER_TEMP/unsigned-acceptance-inputs" \
+            "$RUNNER_TEMP/acceptance-candidate" \
+            "$GITHUB_REPOSITORY" \
+            "$TAG" \
+            "$CANDIDATE_REF" \
+            "$CANDIDATE_COMMIT" \
+            "$CONTROL_COMMIT" \
+            "$GITHUB_RUN_ID" \
+            "$GITHUB_RUN_ATTEMPT" \
+            "$PROVIDER_ADMISSION_POLICY" \
+            "$PROMOTION_READY"
+
+      - name: Reverify candidate ref and tag before private export
+        shell: bash
+        env:
+          CANDIDATE_REF: ${{ needs.build_candidate.outputs.candidate_ref }}
+          CANDIDATE_COMMIT: ${{ needs.build_candidate.outputs.candidate_commit }}
+          TAG: ${{ needs.build_candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-acceptance-remote-state.sh \
+            "$CANDIDATE_REF" "$CANDIDATE_COMMIT" "$TAG"
+
+      - name: Upload short-lived private acceptance artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: acceptance-candidate-${{ needs.build_candidate.outputs.candidate_commit }}
+          path: ${{ runner.temp }}/acceptance-candidate/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1

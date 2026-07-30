@@ -1,0 +1,48 @@
+# smoke_qwen3_coder_30b_a3b.yaml — SCN-226-Qwen3-Coder live-network smoke.
+# Developer-coding-lane row from RESEARCH_227. One buyer, two streaming
+# code-generation prompts via api.streamvc.live → coordinator → provider
+# serving mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit. Measures
+# network-delivered TPS + route_distribution.
+
+name: smoke_qwen3_coder_30b_a3b
+description: |
+  Live-network smoke for SCN-226-Qwen3-Coder. One buyer, two streaming
+  code-generation completions against
+  mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit. Confirms coordinator
+  routes coder requests to a provider that has it warm-loaded
+  (augustass-macbook-air per current bench setup), and measures
+  network-delivered metrics for the developer-coding lane.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Both requests should return HTTP 200.
+   - Route should hit a provider with qwen3-coder-30b-a3b-instruct warm-loaded.
+   - I1 should reconcile cleanly (2 requests on both sides, matching tokens).
+   - Network-delivered TPS expected 25-35 tok/s (lower than localhost-direct
+     34 tok/s due to gateway/coord overhead).
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 180s
+request_timeout: 90s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+    user: "Write a Python function that returns the nth Fibonacci number iteratively."
+    max_tokens: 128
+  - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+    user: "Write a SQL query that returns the top 5 customers by total order value."
+    max_tokens: 128

@@ -1,0 +1,65 @@
+# The service refuses --apply until this is explicitly changed to 1.
+PEARL_UPDATER_ENABLED=0
+
+# Policy floor for candidate selection. The installed coordinator/gateway pair
+# and durable updater state are inspected independently; this value never
+# substitutes for an unknown installed version.
+PEARL_UPDATER_MINIMUM_VERSION=1.8.26
+
+# Default fail-closed guard. Change to 1 only after every connected provider is
+# known to implement graceful coordinator drain/reconnect. The updater still
+# stops the gateway, waits for buyer reservations to reach zero, then stops the
+# coordinator gracefully.
+PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=0
+
+# Private signed acceptance candidates may intentionally carry independently
+# versioned provider and server components. Keep this disabled outside a
+# bounded private acceptance window; public production metadata remains
+# release-tag coupled even when this opt-in is enabled.
+PEARL_UPDATER_ALLOW_PRIVATE_ACCEPTANCE=0
+
+PEARL_UPDATER_DOWNLOAD_ATTEMPTS=3
+PEARL_UPDATER_RETRY_BACKOFF_S=3
+PEARL_UPDATER_REQUEST_TIMEOUT_S=30
+PEARL_UPDATER_DOWNLOAD_TIMEOUT_S=300
+PEARL_UPDATER_GATEWAY_DRAIN_TIMEOUT_S=90
+PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S=5
+PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900
+PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
+PEARL_UPDATER_CANARY_TIMEOUT_S=720
+# Defaults to required. Use disabled only during an explicitly sealed production
+# window where both canary enable gates are absent, the root-owned empty 0644
+# DISABLED sentinel is present, and canary-buyer.timer/service are quiescent.
+# Disabled mode preserves the public identity, stable protected-fleet, exact
+# catalog-admission, and exact physical provider-canary rollout gates.
+PEARL_UPDATER_BUYER_CANARY_MODE=required
+PEARL_UPDATER_REVOKED_VERSIONS_FILE=/etc/macprovider/pearl-updater.revoked
+
+# Required rollout admission contract. Use bridge_required while migrating the
+# fleet; strict_post_migration is only for releases after the 15-minute
+# zero-legacy evidence gate has closed the bridge. The ready-provider floor is
+# operator-approved from the protected preflight inventory and must be at least
+# 2 for bridge_required. Its remaining window must exceed provider recovery +
+# service-health timeouts so rollback can complete before the deadline.
+PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required
+PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=2
+PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=1200
+
+# Required for plan/apply. This is the Better Stack heartbeat API resource ID,
+# not the secret ping URL used by canary-buyer.service.
+PEARL_UPDATER_DEADMAN_HEARTBEAT_ID=
+# Root-owned 0600 file containing a Better Stack Uptime API bearer token with
+# permission to read/update the heartbeat resource above.
+PEARL_UPDATER_DEADMAN_API_TOKEN_FILE=/etc/macprovider/pearl-updater.betterstack-token
+
+# Required exact provider admission and independent on-Mac proof. The bearer
+# token is the coordinator operator key for operator-only details=deployment;
+# service tokens are rejected. Both secret files are root-owned 0600; the SSH
+# host key must already be present in root's known_hosts.
+PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID=
+PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE=/etc/macprovider/pearl-updater.catalog-canary-token
+PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET=
+PEARL_UPDATER_CATALOG_CANARY_SSH_PORT=22
+PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE=/etc/macprovider/pearl-updater.catalog-canary-ssh-key
+PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE=/etc/macprovider/pearl-updater.catalog-canary-known-hosts
+PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR=macprovider/catalog-release

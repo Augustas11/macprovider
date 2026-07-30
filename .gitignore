@@ -27,6 +27,8 @@ state/
 phase4-coordinator/coordinator
 phase4-coordinator/coordinator-cli
 phase4-coordinator/mockprovider
+phase4-coordinator/stats-inventory-sync
+phase4-coordinator/stats-hardware-verifier
 phase4-coordinator/*.db
 phase4-coordinator/*.db-shm
 phase4-coordinator/*.db-wal
@@ -36,15 +38,48 @@ default.profraw
 # Phase 4 dist artifacts that are rebuilt locally
 phase4-coordinator/dist/coordinator-linux-amd64
 phase4-coordinator/dist/coordinator-cli-linux-amd64
+phase4-coordinator/dist/stats-inventory-sync-linux-amd64
+phase4-coordinator/dist/stats-billing-mirror-linux-amd64
 phase4-coordinator/dist/*.bak
 
 # Phase 5 gateway build artifacts
 phase5-gateway/dist/gateway-linux-amd64
 
-# Phase 4 production config contains the operator API key in plaintext.
-# Use coordinator.yaml.example as a template; keep real config local.
-phase4-coordinator/dist/coordinator.yaml
+# Phase 4 production config was previously gitignored to keep an inline
+# operator API key local. All secret-shaped fields are now env-indirected
+# (`env:NAME` resolved at runtime from /etc/macprovider/*.env), so the
+# file itself carries no secrets and becomes the tracked authoritative
+# source of truth for what runs on Pearl. This closes the drift loop:
+# tree ↔ Pearl live are audited by dist/deploy-pearl-vps.sh step 1b.
+# NEVER commit an inline secret to this file — enforce env: indirection
+# for every *_key / *_secret / *_token / *_password / *_dsn value.
+#
+# phase4-coordinator/dist/coordinator.yaml is now tracked.
+
+# Phase 5 production config: local snapshot of what's running on Pearl,
+# consumed by dist/deploy-pearl-vps.sh's C2 drift-check gate. Use
+# gateway.yaml.example as a template; keep real config local. Without
+# this rule the file shows as untracked in phase5-gateway/dist/, which
+# trips build-linux.sh's dirty guard and forces FORCE_DIRTY=1 on every
+# rebuild — producing -dirty-forced binaries when none is actually
+# warranted. Mirrors the coordinator.yaml convention above.
+phase5-gateway/dist/gateway.yaml
 
 # Phase 1 experiment artifacts (removed from tracking in M3-5; DEVE-8)
 /logs/
 /results/
+phase4-coordinator/stats.test
+
+# Internal harness — secrets and artifacts (never committed)
+.env.harness
+.deepsec-local/
+test/network-harness/artifacts/
+test/network-harness/harness
+test/network-harness/out-soak-30b/
+test/e2e/aead-rekey-oneshot/artifacts/
+# RESEARCH_235 thermal soak: raw device telemetry + correlation output.
+test/e2e/thermal-soak/out/
+test/e2e/thermal-soak/*.ndjson
+
+# Local #615 audit artifacts (reports/diffs; keep out of PRs)
+scratchpad/615-audit/

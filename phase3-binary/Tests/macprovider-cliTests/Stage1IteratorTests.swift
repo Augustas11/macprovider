@@ -241,6 +241,105 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertEqual(nErr, 1)
     }
 
+    // MARK: - v1.7.7 Track A3 — prewarm before TTFT measurement
+
+    /// Prewarm swallows the first POST to the subprocess so measured TTFT
+    /// reflects warm-service latency, not model-load + prefill cold-start.
+    /// This mock returns HTTP 500 to its FIRST /v1/chat/completions request
+    /// and 200 SSE thereafter. Pre-v1.7.7 the real probe hit the 500 and
+    /// returned `.infeasible`. Post-v1.7.7 the prewarm eats the 500 via
+    /// `try?` and the real probe runs against the warm state.
+    func testStage1ProberPrewarmAbsorbsFirstColdStartFailure() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try firstRequestFailsSSEScript().path,
+            logDirectory: try temporaryDirectory(name: "stage1-prewarm-absorb-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(let medianTPS, _) = result else {
+            return XCTFail("expected feasible after prewarm absorbed cold-start failure, got \(result)")
+        }
+        XCTAssertGreaterThan(medianTPS, 0)
+    }
+
+    /// If the subprocess dies BETWEEN prewarm and real probe, the prober
+    /// must classify the run infeasible with a prewarm-scoped reason string
+    /// instead of pretending prewarm never happened.
+    func testStage1ProberDetectsProcessExitBetweenPrewarmAndProbe() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try firstRequestExitsSubprocessScript().path,
+            logDirectory: try temporaryDirectory(name: "stage1-prewarm-exit-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .infeasible(let reason, _) = result else {
+            return XCTFail("expected infeasible on subprocess exit during prewarm, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("prewarm") || reason.contains("exit"), reason)
+    }
+
+    // MARK: - v1.7.8 Track A4 — token-count + generation-only elapsed
+
+    /// Pre-v1.7.8 code counted whitespace-separated words and divided by
+    /// TOTAL elapsed (including TTFT). This test uses a mock that emits
+    /// 10 single-token deltas fast (each ~1ms apart) after a deliberately
+    /// long 0.4s TTFT. Post-v1.7.8 TPS = 10 / (~10ms) = 1000+ tok/s.
+    /// Pre-v1.7.8 TPS would have been ~25 tok/s (10 words / 0.4s) —
+    /// well under the asserted 40 tok/s floor.
+    ///
+    /// Real-world win: pre-v1.7.8, M-Base measured 3-4 TPS on 30B MoE
+    /// candidates that actually stream 25-40 tok/s in warm generation.
+    /// The measurement bug drove every candidate under the catalog's
+    /// `min_sustained_tps` gate and caused install drop-out.
+    func testStage1ProberTPSCountsDeltasAndDividesByGenerationTime() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try slowTTFTFastDeltasScript(ttftSeconds: 0.4, deltaCount: 10).path,
+            logDirectory: try temporaryDirectory(name: "stage1-tps-math-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 10, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(let medianTPS, let p95TTFTMS) = result else {
+            return XCTFail("expected feasible, got \(result)")
+        }
+        // Generation elapsed for 10 fast-emitted deltas is ~10ms
+        // (Python for-loop + socket sendall). Expected TPS ≈ 10 /
+        // 0.010 = 1000. Even under CI jitter → 100ms elapsed → TPS =
+        // 100. Assert > 40 to rule out the pre-v1.7.8 total-elapsed
+        // math which would produce ~25 TPS (10 deltas / 0.4s).
+        XCTAssertGreaterThan(medianTPS, 40,
+            "post-v1.7.8 TPS must exclude TTFT from elapsed; got \(medianTPS)")
+        // TTFT measurement itself should reflect the ~400ms wait
+        // (v1.7.5 contract, unaffected by A4).
+        XCTAssertGreaterThan(p95TTFTMS, 200)
+    }
+
     func testStage1ProberDetectsTTFTGateMiss() async throws {
         let port = try unusedPort()
         let runner = try CandidateProviderRunner(
@@ -571,6 +670,212 @@ final class Stage1IteratorTests: XCTestCase {
             maxBatch: intOrNil(15),
             replicatesN: intOrNil(16)
         )
+    }
+
+    /// v1.7.8 Track A4 test helper: emits `deltaCount` SSE deltas fast after
+    /// a deliberate `ttftSeconds` delay. Used to verify that the prober
+    /// measures generation-only elapsed and counts deltas (not words).
+    private func slowTTFTFastDeltasScript(ttftSeconds: Double, deltaCount: Int) throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-slow-ttft-provider")
+        let scriptURL = directory.appendingPathComponent("slow-ttft-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys, time
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 slow-ttft provider ready", flush=True)
+
+        ttft = \(ttftSeconds)
+        delta_count = \(deltaCount)
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                time.sleep(ttft)
+                for i in range(delta_count):
+                    chunk = json.dumps({"choices":[{"delta":{"content":"tok"}}]})
+                    client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// v1.7.7 Track A3 test helper: first POST returns HTTP 500 (simulates
+    /// cold-start failure like model-load OOM retry), subsequent POSTs
+    /// return valid SSE. Prewarm should absorb the 500; the real probe
+    /// should measure warm-service latency.
+    private func firstRequestFailsSSEScript() throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-first-fails-provider")
+        let scriptURL = directory.appendingPathComponent("first-fails-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 first-fails provider ready", flush=True)
+
+        post_count = 0
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                post_count += 1
+                if post_count == 1:
+                    body = "cold start"
+                    client.sendall((
+                        "HTTP/1.1 500 Internal Server Error\\r\\n"
+                        f"Content-Length: {len(body)}\\r\\n"
+                        "Connection: close\\r\\n"
+                        "\\r\\n"
+                        f"{body}"
+                    ).encode())
+                    client.close()
+                    continue
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                chunk = json.dumps({"choices":[{"delta":{"content":"hello"}}]})
+                client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// v1.7.7 Track A3 test helper: subprocess exits(1) after handling the
+    /// first POST, so the real probe attempt cannot connect. Prewarm
+    /// completes successfully but the post-prewarm waitForReady(0.05)
+    /// detects `.processExited` and returns infeasible.
+    private func firstRequestExitsSubprocessScript() throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-first-exits-provider")
+        let scriptURL = directory.appendingPathComponent("first-exits-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 first-exits provider ready", flush=True)
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                chunk = json.dumps({"choices":[{"delta":{"content":"prewarm-ok"}}]})
+                client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                sys.exit(1)
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
     }
 
     private func sseProviderScript(responseText: String, delayBeforeFirstToken: Double) throws -> URL {

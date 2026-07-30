@@ -1,7 +1,68 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.3.3 (2026-06-24, model-hash binding — LOCKED)
-**Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3
+**Version:** 0.4.2 (2026-06-30, LOCKED settlement-capable receipt profile for SPEC-022; adds v0.4 request-attempt binding, route-snapshot binding, terminal-state binding, usage binding, streaming receipt delivery/storage, settlement-verifier outcome mapping, and redaction/retention rules)
+**Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.2 (2026-06-30):**
+- Round-2 code audit fix pass: pins v0.4 non-streaming and streaming
+  `output_hash` to the same `settlement_output_v1` JCS object, and
+  aligns `attempt_n` with the existing zero-based SPEC-002/SPEC-005
+  request-attempt identity.
+
+**Change log v0.4.1-draft (2026-06-30):**
+- Round-1 SPEC audit fix pass: pins canonical `usage` schema,
+  canonical route-snapshot object/digest input, receipt-key fingerprint
+  algorithm, streaming output-prefix hashing/range rules, deterministic
+  terminal-state chargeability, exact terminal timestamp authority, and
+  v0.4 redaction compatibility for receipt-key rotation audit rows.
+
+**Change log v0.4.0-draft (2026-06-30):**
+- Adds §N, a settlement-capable receipt profile with
+  `receipt_version: "4"`. v0.4 is the first SPEC-015 profile
+  eligible to unblock SPEC-022 enforce mode.
+- Extends the signed tuple from v0.3's nine-field model-hash
+  tuple to a strict settlement tuple that binds account scope,
+  request id, monotonic route-attempt id, provider id,
+  provider receipt-key identity, non-null model hash, terminal
+  state, terminal-state timestamp, route-time verification
+  snapshot, catalog identity/body digest, expected catalog hash,
+  prompt/output hashes, and canonical usage.
+- Defines streaming receipt issuance through coordinator-internal
+  channels that preserve OpenAI-compatible SSE framing: no extra
+  non-standard `data:` receipt event is required for clients.
+- Defines terminal states and chargeability mapping for
+  `normal_done`, `provider_error`, `buyer_cancel`,
+  `gateway_timeout`, and `upstream_transport_disconnect`.
+- Adds settlement-verifier outcome mapping into SPEC-022
+  `pending`, `verified`, `quarantined`, and `zero_settled`.
+- Adds coordinator ingestion/storage rules for raw receipt
+  segregation, audit redaction, idempotency, replay rejection,
+  first-terminal selection, late receipt quarantine, and internal
+  verification APIs.
+- Keeps v0.1/v0.2/v0.3 verification semantics unchanged for
+  historical receipts. v0.3 verifiers continue to classify
+  `receipt_version: "4"` as `inconclusive:
+  unknown_receipt_version`.
+
+**Lock state v0.4:** Round-3 code audit returned `READY` on
+2026-06-30 after round-2 closure fixes. Security round 2, architect
+round 1, Claude adversarial round 1, and Claude product round 1 were
+already `READY`. The required SPEC-015 v0.4 audit loop reached
+0 CRITICAL / 0 HIGH / 0 MEDIUM across all required lanes; see
+`specs/SPEC-015-v0-4-audit.md`. SPEC-022 enforce-mode buyer debit and
+provider-positive settlement MUST NOT be wired against SPEC-015 v0.3
+receipts.
+
+**Change log v0.3.4 (2026-06-26, additive — issue #128):**
+- §10.4.2 `warnings[]` enum gains `non_default_tls_trust` kind with
+  `ca_file_path` (string) field. Verifiers MUST emit this warning
+  when the `MACPROVIDER_VERIFY_TLS_CA_FILE` env var is honored and
+  successfully augments the TLS trust pool — surfaces silent trust
+  widening that previously produced a `valid` result with no
+  visible indicator. Schema enum updated at
+  `phase7-verify/schemas/output.schema.json` (all three result
+  contexts). Preserves wire shape: pre-v0.3.4 consumers that ignore
+  unknown `kind` values are unaffected; this is strictly additive.
 
 **Lock state v0.3:** Round-3 codex audit returned `READY TO LOCK` across all three lenses (code, security, architect) on 2026-06-24 — see `specs/SPEC-015-v0-3-audit.md`. Three-round audit history captured 3 CRITICAL + 11 MAJOR + 4 MINOR + 1 QUESTION findings; all CRITICAL / MAJOR resolved across v0.3.1 (round-1 fix pass) and v0.3.2 (round-2 fix pass). One round-3 MINOR (stale "four new flags" wording in staged IMPL prompt) fixed in v0.3.3. v0.3 changes the wire shape (7-field tuple → 9-field tuple, adding `model_hash` and `receipt_version`) and per [[feedback-bundle-spec-impl-one-pr]] EXCEPTION rule ships SPEC-only (no bundled IMPL) because it is a major version bump with a downstream implementer; the BUILD prompt for IMPL is staged at `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md` for the next session.
 
@@ -843,7 +904,9 @@ SPEC-015 v0.1.x does NOT specify:
   made. v0.1 says nothing about it.
 - **Request-id binding for replay-style verification.** Whether the
   receipt commits to a `request_id` and where the buyer would obtain
-  its expected `request_id` is unresolved. See §15 Q2.
+  its expected `request_id` is unresolved in v0.1.x through v0.3.
+  v0.4 resolves settlement replay binding in §N.1 and §N.3. See
+  §15 Q2.
 - **Multi-segment route binding.** Once Cluster F sharding lands a
   single response may have multiple provider segments; receipt-per-
   segment vs receipt-per-response with embedded route list is
@@ -1397,12 +1460,13 @@ v0.1.x receipts cover non-streaming responses only (§6.3). The
 canonical output object defined in §5.1–§5.3 is therefore exercised
 only by non-streaming output.
 
-For forward compatibility with v0.2+ streaming receipts: when a
-v0.2+ design adds streaming receipts, identical output bytes
+For forward compatibility with successor streaming receipts: when a
+successor design adds streaming receipts, identical output bytes
 emitted in streaming and non-streaming modes MUST hash to the same
 `output_hash`. v0.1.x §5.2's "concatenated output" guidance is
-preserved to support that future invariant; in v0.1.x it has no
-testable consequence and is informative.
+preserved to support that invariant; in v0.1.x it has no testable
+consequence and is informative. v0.4's §N.5 makes this invariant
+settlement-binding for the delivered streaming prefix.
 
 ---
 
@@ -1458,17 +1522,19 @@ audit C1 and round-2 audit C1/C3. Both rounds established that:
   chat-completion chunk is unverified across SDK versions and
   needs its own SDK-compatibility study.
 
-v0.2+ will design a streaming receipt transport with an
-SDK-compatibility ACs. Until then, README and operator-facing copy
+v0.4 §N.5 defines the settlement streaming receipt transport through
+SDK-safe internal channels. Before v0.4 implementation, README and
+operator-facing copy
 MUST disclose that v0.1.x receipts cover non-streaming responses
 only. A buyer who needs receipts for streaming traffic in v0.1.x
 has two options:
 
 1. Issue the same request non-streaming and verify against a
    pinned `seed` (idempotent if the model is deterministic).
-2. Wait for v0.2+ streaming receipt body delivery.
+2. Wait for v0.4 settlement-capable streaming receipt delivery.
 
-§15 Q5 is the open design question for streaming receipts.
+§15 Q5 records the historical open design question and its v0.4
+resolution.
 
 ### 6.4 Omission cases
 
@@ -2231,6 +2297,7 @@ v0.2-known values for v0.2-mapped cases.
 | `explicit_vs_live_divergence` | `live_pubkey` (string), `coordinator_host` (string) | Explicit `--pubkey` was used AND a live `/v1/receipt-keys` fetch succeeded AND returned a different pubkey for the same `provider_id`. |
 | `live_check_skipped` | `reason` (one of `offline_flag`, `network_unreachable`, `provider_id_unresolvable`) | The live divergence check did not run. `offline_flag`: `--offline` was passed. `network_unreachable`: live fetch failed (network down, 5xx, timeout, 429). `provider_id_unresolvable`: explicit `--pubkey` was supplied AND no `provider_id` was recoverable from CLI, bundle, or cache (the verifier had nothing to address the resolver with). |
 | `non_default_coordinator` | `coordinator_host` (string) | A non-default coordinator (i.e. not `coordinator.streamvc.live`) was used as the trust-root source. |
+| `non_default_tls_trust` | `ca_file_path` (string) | The `MACPROVIDER_VERIFY_TLS_CA_FILE` env var was honored and successfully augmented the TLS trust pool used to reach the coordinator. Surfaces silent trust widening so a buyer running under a wrapper script (CI helper, devcontainer setup, ~/.profile modification by malware) where the env var has been set to point at an attacker-controlled CA chain sees a visible indicator. Added in SPEC-015 v0.3.4 (issue #128). |
 | `clock_skew` | `unix_ts` (int), `system_time` (int), `delta_seconds` (int) | Receipt `unix_ts` differs from the verifier's system clock by more than 24 hours. Informational only — does NOT downgrade `result` per §10.6. |
 
 A verifier MUST emit `warnings[]` entries regardless of `--quiet`
@@ -2477,6 +2544,14 @@ provided the coordinator returns the exact shape.
   `10 req/sec` per source IP, with a `429` response on overage.
   This protects the coordinator against amplification attacks
   while leaving headroom for batch buyer-side verification.
+  **Source-IP derivation (issue #125).** Per-source bucket keying
+  goes through the operator-configured `proxy.trusted_proxies`
+  CIDR set (see SPEC-002 v1.4.x `proxy.trusted_proxies` block):
+  when the immediate peer is in the trusted set the coordinator
+  parses `X-Forwarded-For` rightmost-untrusted-hop first, falling
+  back to `X-Real-IP`; for untrusted peers the forwarded headers
+  are ignored and the peer's own IP is the bucket key (spoof
+  rejection).
 - **Caching headers:** Response MUST include `Cache-Control: public,
   max-age=300` (5 minutes). Verifiers SHOULD NOT bypass this cache
   via `Cache-Control: no-cache` request headers — staleness up to
@@ -3333,7 +3408,8 @@ covered by the "effectively active catalog" condition above.
 - **Authentication:** None (public).
 - **Rate limiting:** Operator-configurable; recommended floor
   10 req/sec per source IP, mirroring §10.7's
-  `/v1/receipt-keys` posture.
+  `/v1/receipt-keys` posture. Source-IP derivation goes through
+  `proxy.trusted_proxies` (issue #125; see §10.7 and SPEC-002 v1.4.x).
 - **Cache-Control:** `public, max-age=300` (5 minutes; same as
   §10.7).
 - **Response:** the literal signed catalog bytes accepted by the
@@ -3669,17 +3745,16 @@ item names the future SPEC that may revisit it.
    revision.
 
 2. **Streaming receipts.** v0.1.3 §15 Q5 (streaming receipt
-   delivery mechanism) remains v0.4+ scope. v0.3's §M.2.2
-   one-model-per-response rule preserves the streaming-design
-   space: v0.4+ may model multi-hash receipts when SDK
-   compatibility permits.
+   delivery mechanism) was deferred by v0.3 and is resolved for
+   settlement by v0.4 §N.5. v0.3's §M.2.2 one-model-per-response
+   rule remains the input to v0.4's request-start model-hash rule.
 
 3. **Mid-response model swaps producing a multi-hash receipt.**
-   v0.3 §M.2.2 NORMATIVELY REFUSES the shape. v0.4+ may
-   introduce a multi-hash receipt shape, particularly for
-   streaming responses where a swap genuinely spans a long
-   response. The new §15 Q7 captures this question for future
-   audit cycles.
+   v0.3 §M.2.2 NORMATIVELY REFUSES the shape. v0.4 continues to
+   use one request-start `model_hash` per request attempt. A later
+   profile may introduce a multi-hash receipt shape, particularly
+   for streaming responses where a swap genuinely spans a long
+   response. §15 Q7 captures the future question.
 
 4. **Cross-catalog federation.** A coordinator serves ONE signed
    catalog. v0.3 is single-catalog-per-coordinator; federation
@@ -3714,6 +3789,497 @@ item names the future SPEC that may revisit it.
 
 ---
 
+## §N. Settlement-capable receipts (v0.4 NORMATIVE)
+
+v0.4 defines the first SPEC-015 profile that can be used by
+SPEC-022 verified-model settlement. v0.1/v0.2/v0.3 receipts remain
+valid for their historical verifier purposes, but they are NOT
+settlement-capable under SPEC-022 enforce mode because they do not
+bind request attempt, terminal state, route-time verification
+snapshot, canonical usage, or streaming delivery/storage.
+
+### §N.0 Relationship to earlier profiles
+
+v0.4 is a new receipt profile, identified by
+`receipt_version: "4"`. A v0.4 settlement receipt MUST NOT be
+encoded as a v0.3 tuple with optional fields. The v0.4 field set is
+strict and version-discriminated.
+
+A v0.4 verifier MUST:
+
+1. Continue to verify v0.1/v0.2/v0.3 receipts under their existing
+   semantics.
+2. Classify v0.1/v0.2/v0.3 receipts as
+   `not_settlement_capable` for SPEC-022 money movement, even when
+   their historical signature/prompt/output checks are `valid`.
+3. Treat unknown future `receipt_version` values as
+   `inconclusive: unknown_receipt_version`, not `valid`, not
+   `invalid` solely by field count, and not payable.
+
+A v0.3 verifier reading a v0.4 receipt follows §M.1.4 and reports
+`inconclusive: unknown_receipt_version`.
+
+### §N.1 v0.4 signed tuple
+
+A v0.4 receipt is a JCS-canonicalized JSON object with EXACTLY the
+fields in this section and no others. The tuple is signed using the
+same envelope form as §3.4:
+
+`<base64(JCS(T))>.<base64(SIG)>`
+
+`SIG = ed25519_sign(provider_receipt_private_key, UTF-8(JCS(T)))`.
+
+The signed tuple fields are:
+
+| Field | Type | Definition |
+|---|---|---|
+| `account_scope` | string | Privacy-preserving account scope for the buyer account or tenant whose ledger row will consume the receipt. It MAY be a digest. It MUST be stable for settlement of the exact request attempt and MUST NOT expose bearer tokens. |
+| `catalog_body_digest` | string | SHA-256 digest, 64 lowercase hex, over the signed catalog body that was route-valid for this attempt. |
+| `catalog_id` | string | Catalog id from the route-time snapshot. |
+| `expected_catalog_model_hash` | string | Non-null 64 lowercase hex expected hash for `model_id` from the route-time catalog snapshot. |
+| `issued_at_unix_ms` | int64 | Provider receipt issuance timestamp in Unix milliseconds. |
+| `model_hash` | string | Non-null 64 lowercase hex of the request-start loaded model hash. JSON null is not settlement-capable in v0.4. |
+| `model_id` | string | Requested model id, verbatim as routed. |
+| `output_hash` | string | SHA-256 digest, 64 lowercase hex, of the canonical delivered output material defined by §N.5. |
+| `output_prefix_end_byte` | int64 | Exclusive byte offset of this attempt's buyer-visible canonical output prefix in the request-level delivered-output byte stream. Non-negative. |
+| `output_prefix_start_byte` | int64 | Inclusive byte offset of this attempt's buyer-visible canonical output prefix in the request-level delivered-output byte stream. Non-negative and `<= output_prefix_end_byte`. |
+| `prompt_hash` | string | SHA-256 digest, 64 lowercase hex, of the canonical request material as normalized by the coordinator/gateway. |
+| `provider_id` | string | Provider identity selected for this route attempt. |
+| `provider_receipt_key_id` | string | `ed25519-sha256:<64 lowercase hex>`, where the digest is SHA-256 over the raw 32-byte Ed25519 receipt public key pinned in the route-time snapshot. The raw public key is resolved out of band and MUST NOT be copied into audit rows. |
+| `receipt_version` | string | MUST be exactly `"4"` for this profile. |
+| `request_id` | string | Buyer-visible or coordinator-internal request id bound to the ledger row. |
+| `route_snapshot_digest` | string | SHA-256 digest, 64 lowercase hex, of the immutable route-time verification snapshot. |
+| `route_snapshot_mode` | string | Effective SPEC-022 policy mode at route time, e.g. `observe` or `enforce`. |
+| `route_snapshot_policy_version` | string | Effective SPEC-022 policy version at route time. |
+| `signature_key_alg` | string | MUST be `"Ed25519"`. |
+| `terminal_state` | string | One of the §N.4 terminal states. |
+| `terminal_state_ts_unix_ms` | int64 | Coordinator/gateway-recorded terminal-state timestamp in Unix milliseconds, echoed in the receipt. The coordinator ledger timestamp is authoritative and anchors pending-deadline calculation. |
+| `attempt_n` | int64 | Zero-based monotonic route-attempt number for the request. The first attempt is `0`; each retry or failover increments by exactly `1`, matching the SPEC-002/SPEC-005 ledger identity. |
+| `usage` | object | Canonical usage object defined by §N.6. |
+
+The tuple MUST use JCS canonicalization. Field order in the table is
+explanatory; JCS key ordering is authoritative for signed bytes.
+
+The signed wire envelope necessarily contains a signature and may be
+verifiable with public-key material. Audit, telemetry, verifier-result
+rows, settlement verdict rows, operator surfaces, and buyer-facing
+status rows MUST NOT contain raw receipt signatures, raw receipt
+public keys, raw receipt envelopes, raw prompts, raw outputs, bearer
+tokens, receipt private keys, or provider-private state. Such rows MAY
+carry digests, fingerprints, reason codes, and parsed scalar fields
+needed for settlement.
+
+### §N.2 Route-time snapshot binding
+
+For every v0.4-settled request attempt, the coordinator MUST create
+and persist an immutable route-time verification snapshot before
+forwarding work to the provider. The snapshot MUST be retrievable by
+settlement verification. The digest is the binding anchor, not the
+only retained material.
+
+A route snapshot digest is computed as:
+
+`sha256(UTF-8(JCS(route_snapshot_v1)))`
+
+where `route_snapshot_v1` is a strict JCS object with EXACTLY these
+fields:
+
+- `account_scope`;
+- `request_id`;
+- `attempt_n`;
+- `provider_id`;
+- `provider_session_id`: string or JSON null when not available;
+- `provider_generation_id`: string or JSON null when not available;
+- `paid_entrypoint`: string identifying the paid entrypoint that admitted
+  the request;
+- `provider_receipt_key_id`: the `ed25519-sha256:<hex>` value defined by
+  §N.1;
+- `provider_receipt_key_source`: enum string, one of `auth_session`,
+  `rotation_grace`, or `operator_pin`;
+- `model_id`;
+- `provider_reported_model_hash`;
+- `expected_catalog_model_hash`;
+- `catalog_id`;
+- `catalog_body_digest`;
+- `catalog_signature_key_id`;
+- `catalog_signature_pubkey_fingerprint`: `ed25519-sha256:<64 lowercase
+  hex>` over the raw 32-byte catalog public key;
+- `catalog_expires_at_unix_ms`;
+- `spec008_hash_status`: string, one of the SPEC-008 §5.5 hash-status enum
+  values observed at route time;
+- `route_snapshot_policy_version`;
+- `route_snapshot_mode`;
+- `route_decision_ts_unix_ms`;
+- `request_start_ts_unix_ms`;
+- `pending_deadline_seconds`;
+- `prompt_hash_basis`: enum string naming the coordinator/gateway
+  canonical request normalizer version;
+- `prompt_hash`.
+
+No other fields are allowed in `route_snapshot_v1`. If a deployment needs
+additional route-validity fields for settlement, it MUST define
+`route_snapshot_v2` and a corresponding policy version rather than silently
+changing the digest input.
+
+Settlement verification MUST prove the SPEC-022 three-way equality:
+
+`receipt.model_hash == route_snapshot.provider_reported_model_hash == route_snapshot.expected_catalog_model_hash`.
+
+Catalog rotation, catalog rollback, provider reconnect, warm-swap, or
+delayed receipt arrival MUST NOT change the snapshot used for this
+attempt.
+
+### §N.3 Timestamp and replay policy
+
+v0.4 timestamp checks are settlement-critical. Clock-skew warnings
+alone are not sufficient for positive settlement.
+
+A v0.4 settlement verifier MUST reject or quarantine positive money
+movement unless all of the following hold:
+
+1. `issued_at_unix_ms` and `terminal_state_ts_unix_ms` are within the
+   exact account/request/attempt settlement window.
+2. `terminal_state_ts_unix_ms` equals the coordinator/gateway-recorded
+   terminal-state timestamp on the ledger row. The receipt echoes this
+   timestamp; it is not authoritative for deadline calculation.
+3. `issued_at_unix_ms` is greater than or equal to
+   `route_snapshot.request_start_ts_unix_ms - 60000` and less than or
+   equal to the coordinator receipt-received timestamp plus 60000 ms.
+   The maximum v0.4 skew allowance is 60000 ms. A deployment MAY choose a
+   smaller skew, but not a larger one, without a successor profile.
+4. Receipt arrival before/after deadline is decided by the
+   coordinator-recorded receipt-received timestamp compared with
+   `terminal_state_ts_unix_ms + pending_deadline_seconds * 1000`.
+   Provider `issued_at_unix_ms` cannot extend this deadline.
+5. The receipt is for the exact `(account_scope, request_id,
+   attempt_n, provider_id, provider_receipt_key_id)` ledger row.
+6. A replay of a valid receipt onto a different account, request,
+   attempt, provider, receipt key, route snapshot, or terminal state
+   maps to `quarantined`.
+7. A receipt that arrives after the ledger row has terminally
+   quarantined by deadline is an idempotent no-op or rejected audit
+   event. It MUST NOT resurrect the row, re-debit the buyer, create
+   provider credit, or create payout readiness.
+
+### §N.4 Terminal states
+
+v0.4 defines the following terminal states:
+
+- `normal_done`;
+- `provider_error`;
+- `buyer_cancel`;
+- `gateway_timeout`;
+- `upstream_transport_disconnect`.
+
+The terminal state in the receipt MUST match the terminal state stored
+on the ledger row for the same request attempt. A mismatch maps to
+`quarantined`.
+
+The provider/issuer-facing contract MUST expose the receipt submission
+deadline or `pending_deadline_seconds` basis. It MUST disclose that a
+late receipt is non-settling once its row has deadline-quarantined.
+
+### §N.5 Output canonicalization for streaming and non-streaming
+
+v0.4 does not use the historical §5 three-key canonical output object as
+the settlement `output_hash` input. Historical v0.1/v0.2/v0.3 receipt
+hashing remains unchanged. A v0.4 implementation instead reconstructs
+the §5 content, tool-call, and finish-reason material, then wraps it in
+the `settlement_output_v1` object defined below so streaming and
+non-streaming attempts share one hash profile.
+
+For streaming requests, the client-facing SSE stream MUST remain
+OpenAI-compatible:
+
+- no non-standard `event: receipt` block is required;
+- no non-standard receipt-only `data:` payload is required;
+- a stock OpenAI-compatible client MUST be able to read through
+  `[DONE]` or the terminal stream condition without receipt-parser
+  changes.
+
+Streaming receipts are delivered through a coordinator-ingested
+provider terminal frame, a post-stream internal receipt submission, or
+another SDK-safe internal channel. Buyer receipt retrieval MAY exist,
+but internal settlement verification MUST NOT depend on buyer action.
+
+The delivered output for every v0.4 attempt is canonicalized as a JCS
+object named `settlement_output_v1` with EXACTLY these fields:
+
+| Field | Type | Definition |
+|---|---|---|
+| `content` | string | Buyer-visible UTF-8 content for this provider attempt. For streaming, concatenate `choices[].delta.content` fragments in delivery order and ignore missing content fragments. For non-streaming, use the same content string that §5 would place in the canonical output object. |
+| `finish_reason` | string or JSON null | Final OpenAI finish reason if observed for this attempt; otherwise null. For non-streaming, use the same finish reason that §5 would place in the canonical output object. |
+| `output_prefix_end_byte` | int64 | Exclusive byte offset of this attempt's canonical output bytes in the request-level delivered-output byte stream. |
+| `output_prefix_start_byte` | int64 | Inclusive byte offset of this attempt's canonical output bytes in the request-level delivered-output byte stream. |
+| `terminal_state` | string | One of §N.4. |
+| `tool_calls` | array or JSON null | Final reconstructed tool-call array using the same field order and argument byte-preservation rules as §5.2 and §5.3; null when no tool calls were delivered. For non-streaming, use the same tool-call material that §5 would place in the canonical output object. |
+
+`output_hash` MUST equal
+`sha256(UTF-8(JCS(settlement_output_v1)))` for both streaming and
+non-streaming attempts.
+
+For non-streaming `normal_done`, `output_prefix_start_byte` MUST be `0`
+and `output_prefix_end_byte` MUST equal the UTF-8 byte length of the
+canonical buyer-visible output reconstructed from the complete response.
+For non-streaming non-creditable terminal states, the same
+`settlement_output_v1` object is used with the observed delivered prefix
+or an empty prefix under §N.7. Implementations MUST NOT substitute the
+legacy §5 three-key object itself as the v0.4 settlement hash input.
+
+The coordinator/gateway MUST persist `(request_id, attempt_n,
+provider_id, output_prefix_start_byte, output_prefix_end_byte,
+output_hash)` for every attempt. Half-open byte ranges
+`[output_prefix_start_byte, output_prefix_end_byte)` are the overlap
+authority. Two attempts overlap when these ranges intersect. Overlap
+or duplicate ranges MUST be excluded from buyer final debit and
+provider positive settlement unless a later SPEC defines an explicit
+deduplication transform.
+
+If transparent failover delivers output from multiple provider
+attempts, each provider attempt MUST have its own v0.4 receipt binding
+the prefix attributed to that attempt. Overlapping or duplicate output
+across attempts MUST be detectable. A duplicate prefix MUST NOT be
+charged to the buyer or credited to any provider twice.
+
+If delivered-prefix hash material needed for buyer debit or provider
+positive settlement is unavailable, the row remains `pending` until
+deadline, then maps to `quarantined` with buyer reservation released
+and provider credit zero.
+
+### §N.6 Usage object
+
+The v0.4 `usage` field is a strict JCS object with EXACTLY these
+integer fields and no others:
+
+| Field | Type | Definition |
+|---|---|---|
+| `billable_input_tokens` | int64 | Input tokens eligible for buyer debit/provider settlement for this attempt. Non-negative. |
+| `billable_output_tokens` | int64 | Output tokens eligible for buyer debit/provider settlement for this attempt. Non-negative. |
+| `delivered_output_bytes` | int64 | Length in bytes of this attempt's canonical buyer-visible output prefix. MUST equal `output_prefix_end_byte - output_prefix_start_byte`. |
+| `observed_input_tokens` | int64 | Coordinator/gateway-observed or cross-checked input token count for this attempt. Non-negative. |
+| `observed_output_tokens` | int64 | Coordinator/gateway-observed or cross-checked output token count for this attempt. Non-negative. |
+
+Null values are not allowed in `usage`. Non-creditable terminal states
+MUST set `billable_input_tokens` and `billable_output_tokens` to `0`.
+If a future billing profile needs non-token units, it MUST define a
+successor receipt profile rather than adding optional fields to v0.4.
+
+Provider-signed usage alone is not authority. Usage used for buyer
+final debit or provider positive settlement MUST be derived from or
+cross-checked against coordinator/gateway-observed canonical request
+and delivered-output state under the applicable SPEC-005 rules. A
+provider-only usage value maps to `quarantined` for positive money
+movement.
+
+### §N.7 Chargeability table
+
+The v0.4 profile defines the settlement relationship for every §N.4
+terminal state. These rows are deterministic for the v0.4 profile.
+SPEC-005 may later absorb or replace them in a successor settlement
+profile, but SPEC-022 enforce mode MUST NOT activate against v0.4
+unless these exact rows or a locked successor table is implemented.
+
+| Terminal state | Buyer final debit | Provider positive settlement | `zero_settled` possible | Required output hash material | Required usage material | Missing receipt or insufficient binding |
+|---|---:|---:|---:|---|---|---|
+| `normal_done` | yes, if verified | yes, if verified | no | complete delivered output | `billable_input_tokens == observed_input_tokens`; `billable_output_tokens == observed_output_tokens` | pending until deadline, then quarantined |
+| `provider_error` | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes when `delivered_output_bytes == 0` and verified | delivered prefix or empty prefix | billable output tokens MUST be `0` when `delivered_output_bytes == 0`; otherwise billable output tokens MUST be `<= observed_output_tokens` | pending until deadline, then quarantined |
+| `buyer_cancel` | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes when `delivered_output_bytes == 0` and verified | delivered prefix or empty prefix | billable output tokens MUST be `0` when `delivered_output_bytes == 0`; otherwise billable output tokens MUST be `<= observed_output_tokens` | pending until deadline, then quarantined |
+| `gateway_timeout` | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes when `delivered_output_bytes == 0` and verified | delivered prefix or empty prefix | billable output tokens MUST be `0` when `delivered_output_bytes == 0`; otherwise billable output tokens MUST be `<= observed_output_tokens` | pending until deadline, then quarantined |
+| `upstream_transport_disconnect` | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes only for the verified delivered prefix when `delivered_output_bytes > 0`; otherwise no | yes when `delivered_output_bytes == 0` and verified | delivered prefix or empty prefix | billable output tokens MUST be `0` when `delivered_output_bytes == 0`; otherwise billable output tokens MUST be `<= observed_output_tokens` | pending until deadline, then quarantined |
+
+`zero_settled` is only for verified non-creditable terminal states
+allowed by this table or a successor SPEC-005 settlement profile. A
+missing, invalid, legacy, hashless, wrong-key, wrong-attempt,
+wrong-snapshot, wrong-terminal-state, or insufficient-binding receipt
+MUST NOT map to `zero_settled`.
+
+### §N.8 Settlement-verifier outcome mapping
+
+The historical verifier tri-state (`valid`, `invalid`,
+`inconclusive`) is necessary but not sufficient for settlement. v0.4
+adds settlement outcomes consumed by SPEC-022:
+
+- `pending`;
+- `verified`;
+- `quarantined`;
+- `zero_settled`.
+
+Mapping rules:
+
+1. `valid` with a chargeable terminal-state row maps to `verified`
+   only after every route snapshot, request attempt, model-hash,
+   prompt-hash, output-hash, usage, timestamp, terminal-state, and
+   receipt-key check succeeds.
+2. `valid` with a non-creditable terminal-state row maps to
+   `zero_settled` only when §N.7 or a successor SPEC-005 profile
+   explicitly allows zero settlement for that terminal state.
+3. `invalid`, mismatched, legacy, hashless, wrong-key,
+   wrong-attempt, wrong-account, wrong-provider, wrong-snapshot,
+   wrong-terminal-state, replayed, or insufficient-binding receipts
+   map to `quarantined`.
+4. Missing receipts and receipt trust-root `inconclusive` results
+   remain `pending` until the configured deadline, then map to
+   `quarantined`.
+5. Unknown future receipt versions are `inconclusive` and not
+   payable. They MUST NOT map to `verified` or `zero_settled`.
+
+First terminal receipt selection closes the settlement row for this
+attempt. Later receipts for the same attempt are idempotent no-ops or
+rejected audit events and cannot change buyer debit, provider credit,
+payout readiness, or settlement outcome.
+
+### §N.9 Coordinator ingestion and storage
+
+v0.4 requires a coordinator receipt-ingestion path that supports
+settlement verification without requiring buyer action.
+
+The coordinator MUST store parsed receipt records keyed by:
+
+`(account_scope, request_id, attempt_n, provider_id)`.
+
+The stored record MUST include:
+
+- parsed verifier-safe v0.4 fields needed by SPEC-022;
+- receipt verification outcome and reason;
+- terminal-state timestamp and pending-deadline basis;
+- route-snapshot digest and policy version/mode;
+- provider receipt-key fingerprint or digest;
+- catalog id/body digest and expected catalog model hash;
+- prompt/output hash verification result;
+- usage verification result;
+- idempotency/replay status.
+
+Raw receipt retention is allowed only where a retention/security policy
+explicitly permits it. Raw receipt retention MUST be segregated from
+audit, telemetry, verdict, and operator rows. Implementations MUST
+never copy receipt signatures, receipt public keys, raw receipt
+envelopes, raw prompts, raw outputs, bearer tokens, receipt private
+keys, or provider-private state into audit, telemetry, verdict, or
+operator rows.
+
+The coordinator MUST expose internal verification APIs for SPEC-022
+settlement code. This v0.4 SPEC does not itself add provider-positive
+credit, buyer final debit, payout-ready insertion, or SPEC-022 enforce
+activation.
+
+### §N.10 Trust boundary
+
+A v0.4 settlement `verified` outcome means:
+
+- the receipt signature verified against the route-snapshot-pinned
+  provider receipt-key identity;
+- the receipt bound the exact account/request/attempt/provider row;
+- the receipt bound the same model id and non-null model hash as the
+  route-time catalog snapshot;
+- the receipt proved
+  `receipt.model_hash == route_snapshot.provider_reported_model_hash ==
+  route_snapshot.expected_catalog_model_hash`;
+- prompt/output hashes matched the persisted canonical material;
+- usage was derived from or cross-checked against coordinator/gateway
+  observation;
+- timestamp/window checks passed;
+- terminal-state and chargeability checks passed.
+
+v0.4 does NOT prove that a malicious provider cannot falsify its own
+local model-hash measurement before reporting it. That boundary remains
+outside SPEC-015 without hardware/runtime attestation. Product and
+buyer-facing language MUST NOT claim more than this.
+
+### §N.11 Acceptance criteria
+
+The v0.4 implementation MUST satisfy these acceptance criteria before
+SPEC-022 can consume the profile:
+
+- **AC-43:** A v0.4 receipt with missing or extra tuple fields is
+  rejected before settlement.
+- **AC-44:** `receipt_version` MUST be exactly `"4"` for the v0.4
+  profile. A v0.3 verifier reports it as
+  `inconclusive: unknown_receipt_version`.
+- **AC-45:** `model_hash: null` is not settlement-capable and maps to
+  `quarantined` for SPEC-022 positive money movement.
+- **AC-46:** A receipt whose `request_id`, `attempt_n`,
+  `account_scope`, `provider_id`, or `provider_receipt_key_id` differs
+  from the ledger row maps to `quarantined`.
+- **AC-47:** A receipt whose route snapshot digest or route-time
+  policy version/mode differs from the ledger row maps to
+  `quarantined`; the test fixture computes
+  `sha256(UTF-8(JCS(route_snapshot_v1)))` and mutates each
+  route-validity field in §N.2 at least once.
+- **AC-48:** A receipt verifies the three-way model-hash equality and
+  quarantines on any mismatch.
+- **AC-49:** Prompt/output hash mismatch maps to `quarantined`.
+- **AC-50:** Prompt/output canonical hash unavailable maps to
+  `quarantined`; entrypoints that cannot persist canonical hashes are
+  excluded from paid SPEC-022 traffic.
+- **AC-51:** Provider-signed usage without coordinator/gateway
+  cross-check cannot produce buyer final debit or provider positive
+  settlement; fixtures cover missing usage fields, extra usage fields,
+  null usage values, negative usage values, and mismatched
+  `delivered_output_bytes`.
+- **AC-52:** Non-streaming `normal_done` with a settlement-capable,
+  catalog-matching v0.4 receipt can map to `verified`.
+- **AC-53:** Streaming `normal_done` produces an internally
+  verifiable v0.4 receipt without breaking OpenAI-compatible clients;
+  the test hashes `settlement_output_v1` and verifies the
+  half-open prefix byte range.
+- **AC-54:** Streaming `provider_error` binds terminal state, output
+  hash material, and usage material required by its chargeability row.
+- **AC-55:** Streaming `buyer_cancel` binds terminal state, delivered
+  prefix, and partial usage when any partial money movement is allowed.
+- **AC-56:** Streaming `gateway_timeout` binds terminal state,
+  delivered prefix, and partial usage when any partial money movement
+  is allowed.
+- **AC-57:** Streaming `upstream_transport_disconnect` binds terminal
+  state, delivered prefix, and partial usage when any partial money
+  movement is allowed.
+- **AC-58:** Partial-output binding unavailable remains pending until
+  deadline, then quarantines with buyer reservation released and no
+  provider credit.
+- **AC-59:** Transparent failover emits one receipt per
+  provider-attempt prefix and prevents duplicate/overlapping prefix
+  double charge or double credit; fixtures include adjacent ranges,
+  overlapping ranges, duplicate ranges, and an out-of-order retry.
+- **AC-60:** Replaying a valid receipt onto a different account,
+  request, attempt, provider, key, snapshot, or terminal state cannot
+  produce positive money movement.
+- **AC-61:** Resubmitting a receipt after a terminal outcome is
+  idempotent and cannot create a second buyer debit, provider credit,
+  or payout-ready row.
+- **AC-62:** A valid receipt arriving after deadline quarantine does
+  not resurrect the row; fixtures prove the receipt
+  `terminal_state_ts_unix_ms` must exactly equal the
+  coordinator/gateway ledger timestamp and that `issued_at_unix_ms`
+  cannot extend the deadline.
+- **AC-63:** Unknown future receipt versions are inconclusive and not
+  payable.
+- **AC-64:** Legacy v0.1/v0.2/v0.3 receipts are not settlement-capable
+  for SPEC-022 enforce mode.
+- **AC-65:** Audit/telemetry/verdict rows redact raw receipt
+  signatures, raw receipt public keys, raw receipt envelopes, raw
+  prompts, raw outputs, bearer tokens, receipt private keys, and
+  provider-private state.
+- **AC-66:** Raw receipt retention, if enabled, is segregated from
+  audit/telemetry/verdict/operator rows and is covered by an explicit
+  retention/access policy.
+- **AC-67:** Provider/issuer docs or API surfaces expose the receipt
+  submission deadline or `pending_deadline_seconds` basis and disclose
+  late receipt non-settlement.
+- **AC-68:** Buyer/product disclosures state that v0.4 verifies the
+  provider-reported request-start model hash against the route-time
+  catalog snapshot and does not detect a provider that falsifies its
+  own measurement.
+- **AC-69:** A receipt whose `signature_key_alg` is absent or present
+  with any value other than `"Ed25519"` is rejected before settlement.
+- **AC-70:** `provider_receipt_key_id` is exactly
+  `ed25519-sha256:<64 lowercase hex>` over the raw 32-byte Ed25519
+  public key pinned in the route snapshot; a receipt signed by any
+  other key or carrying any other fingerprint maps to `quarantined`.
+- **AC-71:** Each §N.7 terminal-state row is exercised for
+  `delivered_output_bytes == 0` and `delivered_output_bytes > 0`,
+  proving the deterministic `verified` vs `zero_settled` mapping.
+
+---
+
 ## 11. Audit categories
 
 The following audit categories are added (SPEC-006 v0.9 candidate
@@ -3745,11 +4311,36 @@ absorption; tracked locally for now):
 - `receipt_rotation_detected`: emitted by the coordinator when a
   reconnecting provider's `auth_request.provider_receipt_public_key`
   differs from the previously-known pubkey for that `provider_id`.
-  Fields: `provider_id`, `old_pubkey`, `new_pubkey`, `rotated_at`.
+  Historical v0.1 through v0.3 fields: `provider_id`, `old_pubkey`,
+  `new_pubkey`, `rotated_at`.
   This event replaces the v0.1/v0.1.1 `receipt_rotate_request` and
   `receipt_rotate_invalid` events, which are no longer emitted
   because v0.1.2 rotation is reconnect-based, not control-frame
   based.
+  **v0.4 redaction update:** settlement-capable deployments MUST emit
+  `old_pubkey_fingerprint` and `new_pubkey_fingerprint` using the
+  §N.1 `ed25519-sha256:<hex>` form instead of raw `old_pubkey` /
+  `new_pubkey` in audit, telemetry, verdict, or operator rows. Raw
+  public keys remain available only from the key-resolution surface
+  that verifies signatures, not from audit rows.
+- `settlement_receipt_ingested` (v0.4): emitted by the coordinator
+  when a v0.4 receipt is ingested through an internal settlement
+  channel. Fields: `account_scope`, `request_id`, `attempt_n`,
+  `provider_id`, `receipt_version`, `terminal_state`,
+  `route_snapshot_digest`, `route_snapshot_policy_version`,
+  `route_snapshot_mode`, `catalog_id`, `catalog_body_digest`,
+  `provider_receipt_key_fingerprint`, `model_id`, `model_hash`,
+  `expected_catalog_model_hash`, `prompt_hash`, `output_hash`,
+  `usage_digest`, `received_at_unix_ms`. MUST NOT include raw receipt
+  signatures, raw receipt public keys, raw receipt envelopes, raw
+  prompts, raw outputs, bearer tokens, receipt private keys, or
+  provider-private state.
+- `settlement_receipt_verdict` (v0.4): emitted when a v0.4 settlement
+  verifier maps a receipt or missing receipt to `pending`, `verified`,
+  `quarantined`, or `zero_settled`. Fields: all
+  `settlement_receipt_ingested` scalar fields plus `settlement_outcome`,
+  `reason`, `deadline_unix_ms`, and redacted verifier diagnostics. Raw
+  receipt material remains prohibited.
 
 `receipt_issued` is a high-cardinality event (one per response). Its
 audit destination is the existing SPEC-005 v0.3 §6 billing audit
@@ -3761,8 +4352,14 @@ audit envelope are the complete v0.1.3 audit shape.
 
 ## 12. Failure modes summary
 
-All rows below describe **non-streaming** `POST /v1/chat/completions`
-behavior. Streaming requests carry no receipt regardless of outcome.
+Rows below preserve v0.1.x through v0.3 behavior. v0.4 supersedes the
+streaming and settlement-capable rows through §N. Streaming requests can
+produce v0.4 receipts through coordinator-internal channels, while
+v0.1.x through v0.3 streaming requests carry no receipt regardless of
+outcome.
+
+All historical rows below describe **non-streaming**
+`POST /v1/chat/completions` behavior unless explicitly noted.
 
 | Condition | Receipt? | Header value | finish_reason | tokens_out |
 |---|---|---|---|---|
@@ -3808,6 +4405,12 @@ future v0.2+ streaming-receipt design that needs server-side
 storage MUST name its own retention contract and re-establish the
 buyer-held-proof posture or accept the v0.1.x divergence
 explicitly.
+
+v0.4 accepts that divergence for settlement-capable receipts. The
+coordinator MUST ingest and store parsed verifier-safe receipt fields
+for internal settlement. Raw receipt retention, if enabled, is governed
+by §N.9 and MUST be segregated from audit, telemetry, verdict, and
+operator rows.
 
 ---
 
@@ -4037,14 +4640,20 @@ or anchor on top. The §10.7 endpoint is the natural foundation
 for the v0.3+ work — TUF / on-chain anchoring would sign the
 response shape pinned in §10.7. v0.3+ candidate.
 
-**Q2: Replay-resistance and request-id binding.** The receipt does
+**Q2: Replay-resistance and request-id binding. RESOLVED in v0.4.**
+§N.1 and §N.3 require `account_scope`, `request_id`, monotonic
+`attempt_n`, `provider_id`, `provider_receipt_key_id`, and
+`route_snapshot_digest` binding. Replay onto a different account,
+request, attempt, provider, key, route snapshot, or terminal state
+maps to `quarantined`.
+
+Historical note: before v0.4 the receipt did
 NOT bind `request_id`. A malicious replay of the response body to a
 different buyer would yield the same `output_hash` for the same
 prompt. Should the receipt commit to `request_id` or a buyer-supplied
 nonce? If so, where does the buyer obtain its expected `request_id`?
-v0.2 §10.6 (trust boundary) names replay-resistance as explicitly
-NOT proven by a `valid` result; full normative replay-binding is
-deferred to v0.3+ pending operator decision and audit input.
+v0.2 §10.6 (trust boundary) named replay-resistance as explicitly
+NOT proven by a `valid` result.
 
 **Q3: Cross-provider routing.** Once Cluster F sharding lands, a
 single response may span multiple provider segments. Receipt-per-
@@ -4052,17 +4661,30 @@ segment with a buyer-side concatenation rule, or receipt-per-response
 with an embedded route list signed by an aggregating coordinator?
 v0.4+ candidate.
 
-**Q4: Timestamp trust.** `unix_ts` is provider-reported. Should the
+**Q4: Timestamp trust. RESOLVED for settlement in v0.4.** §N.3 defines
+the settlement timestamp/window policy. Provider `issued_at_unix_ms`
+and terminal-state timestamps are checked against the exact
+account/request/attempt settlement window; skew must be explicit and
+fail closed for positive settlement.
+
+Historical note: `unix_ts` is provider-reported. Should the
 buyer cross-check against the coordinator's response timestamp, and
 what skew window is acceptable? **Partially addressed in v0.2:**
 §10.6 names timestamp honesty as explicitly NOT proven by a `valid`
 result; §10.0 step 9 removes the v0.1-sketch optional skew check
 to avoid implying timestamp attestation. Full normative skew-check
 (buyer-recorded received-at vs `unix_ts` with operator-set window)
-remains v0.3+ candidate pending coordinator-side timestamp surface
-and operator skew-policy decision.
+remained open before v0.4.
 
-**Q5: Streaming receipt delivery mechanism.** v0.1's terminal
+**Q5: Streaming receipt delivery mechanism. RESOLVED for settlement in
+v0.4.** §N.5 chooses coordinator-internal streaming receipt delivery:
+provider terminal frame, post-stream internal receipt submission, or
+another SDK-safe internal channel. Buyer retrieval is optional and not
+a settlement dependency. The client-facing SSE stream remains
+OpenAI-compatible and does not require receipt-only non-standard
+`data:` events.
+
+Historical note: v0.1's terminal
 `event: receipt` SSE block was rejected in the round-1 audit (C1)
 because the OpenAI Python and JavaScript SDKs JSON-parse every
 non-`[DONE]` `data:` payload and would raise on a base64 receipt
@@ -4072,7 +4694,7 @@ buyer-visible `X-MacProvider-*` response header outside the single
 SPEC-006 v0.9 candidate allowlist annotation. v0.1.2 therefore drops
 streaming receipt delivery entirely.
 
-v0.2+ MUST choose one of:
+Earlier candidates were:
 
 (a) An OpenAI-shape extra field on the final chat-completion chunk
     (e.g. `x_macprovider_receipt` on the last `data: {...}` payload).
@@ -4086,10 +4708,8 @@ v0.2+ MUST choose one of:
 (d) Acceptance that streaming requests never carry receipts — the
     buyer who needs a receipt issues a non-streaming equivalent.
 
-v0.1.2 makes NO choice. The wire format §3.4 of the receipt body
-itself MUST remain unchanged across (a)/(b)/(c)/(d). The §6 wire
-contract for non-streaming responses is locked in v0.1.2 and v0.2+
-MUST NOT change it.
+v0.4 leaves the envelope format §3.4 unchanged but moves streaming
+delivery to the internal settlement channel described by §N.5.
 
 **Q6: Model-hash binding (SPEC-011 cross-cut). RESOLVED in v0.3.**
 Folding `heartbeat.model_hash` (SPEC-011 v0.5 §3.3.1) into the
@@ -4107,17 +4727,19 @@ pipeline ergonomics, buyer demand) still gate that flip;
 v0.3 receipts are usable by buyers who want catalog-match
 attestation REGARDLESS of how the operator routes.
 
-**Q7: Multi-hash receipts for swap-spanning streaming responses.**
+**Q7: Multi-hash receipts for swap-spanning streaming responses. CLOSED
+AS OUT OF SCOPE for v0.4 settlement.**
 v0.3 §M.2.2 NORMATIVELY REFUSES the shape of a single receipt
 binding two `model_hash` values for one response. v0.4+ may
 introduce a multi-hash receipt to represent legitimately
 swap-spanning streaming responses (Q5 streaming + a swap mid-
-stream). Design questions for v0.4: should the receipt commit
+stream). v0.4 settlement continues the one-request-attempt,
+request-start model-hash rule from §N.2 and SPEC-022. Future design
+questions remain: should a later receipt profile commit
 to (`first_hash`, `last_hash`) or to (`hash_per_chunk_range`)?
 How does the verifier compose multiple catalog lookups under
 a single tuple? Is the wire-shape extension a new
-`receipt_version: "4"` per §M.0 or a new optional field on the
-existing v0.3 tuple? v0.3 leaves these open. v0.4+ candidate.
+`receipt_version: "5"` or a separate multi-segment profile?
 
 ---
 

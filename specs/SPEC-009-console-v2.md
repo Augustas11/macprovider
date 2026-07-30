@@ -1,7 +1,7 @@
 # SPEC-009 — MacProvider Console v2
 
 **Version:** 0.1  
-**Status:** Implementation  
+**Status:** Implemented & shipped — live at console.streamvc.live for weeks. Later iterations added a real gateway GitHub OAuth sign-in and "Get API key" flow that exceed this spec's localStorage-only placeholder scope (buyer-auth surface not yet specced here).  
 **Replaces:** `frontdoor/console/index.html` (the current v1 single-panel demo page)
 
 ---

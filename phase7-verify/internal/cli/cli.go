@@ -21,6 +21,7 @@ import (
 
 	"github.com/augstar/macprovider/phase7-verify/internal/cache"
 	"github.com/augstar/macprovider/phase7-verify/internal/receipt"
+	"github.com/augstar/macprovider/phase7-verify/internal/resolver"
 	"github.com/augstar/macprovider/phase7-verify/internal/verify"
 	"github.com/augstar/macprovider/phase7-verify/internal/version"
 )
@@ -499,6 +500,14 @@ func exitForError(err error) int {
 	var cliFormat *cliInputFormatError
 	switch {
 	case errors.As(err, &usageErr), errors.As(err, &cliUsage):
+		return exitUsage
+	// Issue #126: --coordinator pointing at a loopback / RFC1918 /
+	// link-local host without MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1
+	// is a CLI invocation policy violation, not an internal software
+	// error. Map to exit 64 (EX_USAGE) per SPEC-015 §10.4.3 so scripts
+	// and CI pipelines can distinguish "operator pointed at a bad host"
+	// from "verifier crashed".
+	case errors.Is(err, resolver.ErrPrivateCoordinatorDenied):
 		return exitUsage
 	case errors.As(err, &formatErr), errors.As(err, &cliFormat):
 		return exitDataErr

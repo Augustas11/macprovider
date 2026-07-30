@@ -1,0 +1,1 @@
+{"mutation":{"operation":"sha_evidence_without_source"},"expected":"sha256 evidence requires a non-empty source path"}

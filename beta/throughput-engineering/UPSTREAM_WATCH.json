@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "last_checked_at": "2026-07-22T19:29:44Z",
+  "last_changed_at": "2026-07-22T19:29:44Z",
+  "macprovider_pins": {
+    "mlx_swift_lm": "3.31.4",
+    "mlx_swift": "0.31.6"
+  },
+  "blockers": {
+    "mlx_swift_lm_406_compile_kv_offset": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "issue",
+      "number": 406,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/406",
+      "state": "OPEN",
+      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode",
+      "runbook_tasks": ["T2-01", "TG2"],
+      "updated_at": "2026-07-07T16:53:26Z"
+    },
+    "mlx_swift_lm_364_gemma_moe": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 364,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/364",
+      "state": "MERGED",
+      "title": "MLXLLM Gemma4Text: add MoE block (router + experts) for the text path",
+      "runbook_tasks": ["T1-02", "TG1"],
+      "updated_at": "2026-07-22T19:29:44Z",
+      "merged_at": "2026-07-21T19:43:49Z",
+      "status": "awaiting_release_tag"
+    }
+  },
+  "releases": {
+    "mlx_swift_lm_latest": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "tag": "3.31.4",
+      "published_at": "2026-06-30T16:31:18Z"
+    },
+    "mlx_swift_latest": {
+      "repo": "ml-explore/mlx-swift",
+      "tag": "0.31.6",
+      "published_at": "2026-07-02T01:30:21Z"
+    }
+  },
+  "implementation_signals": {
+    "kvcache_offset_graph_traceable": false,
+    "note": "Heuristic: KVCache.swift on upstream main still uses Swift Int offset in KVCacheSimple.update (checked 2026-07-07)."
+  },
+  "watchlist": {
+    "omlx": {
+      "repo": "jundot/omlx",
+      "homepage": "https://omlx.ai",
+      "benchmark_page_url": "https://omlx.ai/benchmarks",
+      "latest_release_tag": "v0.5.3",
+      "latest_release_published_at": "2026-07-22",
+      "previous_tracked_release_tag": "v0.5.0.dev3",
+      "benchmark_page_schema_version": "2026-07-09",
+      "benchmark_page_reachable_at": "2026-07-22T11:49:28Z",
+      "community_benchmark_rows_approx": 339980,
+      "submission_min_app_version": "v0.2.6",
+      "runbook_tasks": ["RESEARCH_231", "catalog-calibration"],
+      "engine_delta_to_macprovider": 0.85,
+      "refresh_2026-07-22": {
+        "checked_via": "in-app browser UA (server-side fetch 403s on Cloudflare, per RESEARCH_231 §methodology)",
+        "release_drift": "tracked tag was the v0.5.0.dev3 PRERELEASE; upstream is now v0.5.3 stable (v0.5.0/0.5.1/0.5.2/0.5.3 shipped 2026-07-21..22). v0.5.3 notes GLM MTP quantization changes — MTP = multi-token prediction, spec-decode-adjacent; may shift board TG numbers, so engine_delta=0.85 should be re-derived against a v0.5.x-stable snapshot before any gate change.",
+        "board_growth": "rows 321280 -> ~339980 (+~18.7k / +5.8% in ~2wk); board live and current (today-dated rows).",
+        "new_signal_for_blocked_p1_row": "qwen3.6-35b-a3b now HAS direct oMLX rows (was extrapolated ~35 TG in the memo): 'Qwen3.6-35B-A3B-4bit-MTP...' on M3 Max 40c 64GB -> TG 90.6 @8k, 95.7 @4k. CAVEAT: MTP build includes built-in speculative acceleration macprovider's plain decode path would NOT get, so do not apply 0.85 naively; treat as upper bound. Residency/VLM-pin/rate-card blockers (E1/E3 + RESEARCH_227) are UNCHANGED — throughput was never the 35b blocker.",
+        "schema_version_unconfirmed": "no explicit schema stamp on the page; column layout unchanged vs 2026-07-09."
+      },
+      "notes": "Community board uses mlx-lm Python; macprovider mlx-swift-lm 3.31.4. Calibration source only — not a runtime dependency. See docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md."
+    }
+  }
+}

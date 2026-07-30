@@ -2,6 +2,154 @@ import CryptoKit
 import Foundation
 import Security
 
+// MARK: - SecureEnclaveAttestationGenerator
+
+#if arch(arm64)
+
+/// Produces `macprovider-se-p256-v1` attestation tokens at auth proof time
+/// using a persistent Secure Enclave P-256 key (runbook §1.1.A).
+///
+/// Returns nil (with a WARN log) when:
+/// - SE hardware is unavailable
+/// - The binary lacks the `keychain-access-groups` entitlement
+/// - Any other SE initialization error
+///
+/// This generator does NOT fake attestation on non-SE hardware; it lets the
+/// caller fall back to ManagedDeviceAttestationGenerator or return nil.
+struct SecureEnclaveAttestationGenerator: Tier2AttestationTokenGenerating {
+    static let format = "macprovider-se-p256-v1"
+
+    private let signer: SEBlobSigner
+    private let builder: SEAttestationBuilder
+    private let now: @Sendable () -> Date
+
+    init(
+        signer: SEBlobSigner,
+        builder: SEAttestationBuilder = SEAttestationBuilder(),
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.signer = signer
+        self.builder = builder
+        self.now = now
+    }
+
+    /// Load (or create) the persistent SE key and return a generator, or nil
+    /// if SE is unavailable or the entitlement is missing.
+    static func loadIfAvailable(
+        accessGroup: String? = nil,
+        label: String? = nil
+    ) -> SecureEnclaveAttestationGenerator? {
+        guard SecureEnclaveIdentity.isAvailable else { return nil }
+        do {
+            let identity = try SecureEnclaveIdentity.loadOrCreate(
+                accessGroup: accessGroup,
+                label: label
+            )
+            return SecureEnclaveAttestationGenerator(signer: identity)
+        } catch {
+            print("WARN se_attestation unavailable reason=se_identity_load_failed error=\(error)")
+            return nil
+        }
+    }
+
+    func makeAttestationToken(
+        challengeBase64URL: String?,
+        authAttemptID: String,
+        providerID: String,
+        binaryVersion: String,
+        snapshot: ProviderSnapshot,
+        providerECDHPublicKey: String
+    ) async -> [String: Any]? {
+        guard let challengeBase64URL, !challengeBase64URL.isEmpty else {
+            print("WARN se_attestation unsupported reason=missing_attestation_challenge")
+            return nil
+        }
+
+        let attestation: SignedSEAttestation
+        do {
+            attestation = try builder.build(
+                signer: signer,
+                providerECDHPublicKey: providerECDHPublicKey
+            )
+        } catch {
+            print("WARN se_attestation unsupported reason=blob_build_failed error=\(error)")
+            return nil
+        }
+
+        let tokenBase64URL: String
+        do {
+            tokenBase64URL = try attestation.tokenBase64URL()
+        } catch {
+            print("WARN se_attestation unsupported reason=token_serialization_failed error=\(error)")
+            return nil
+        }
+
+        let issuedAt = now()
+        var claimed: [String: Any] = [
+            "hardware_family": "apple_silicon",
+            "ram_gb": snapshot.capacity.ramGB,
+            "model_id": snapshot.modelID ?? "",
+        ]
+        if let modelHash = snapshot.modelHash {
+            claimed["model_hash"] = modelHash
+            if let algorithm = snapshot.modelHashAlgorithm {
+                claimed["model_hash_algorithm"] = algorithm
+            }
+        }
+        if let weights = snapshot.weightsManifestSHA256 {
+            claimed["weights_manifest_sha256"] = weights
+            claimed["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
+        }
+
+        var envelope: [String: Any] = [
+            "format": Self.format,
+            "token": tokenBase64URL,
+            "challenge": challengeBase64URL,
+            "issued_at": ManagedDeviceAttestationGenerator.iso8601(issuedAt),
+            "expires_at": ManagedDeviceAttestationGenerator.iso8601(issuedAt.addingTimeInterval(600)),
+            "provider_id": providerID,
+            "binary_version": binaryVersion,
+            "claimed": claimed,
+            "key_binding": [
+                "provider_ecdh_public_key": providerECDHPublicKey,
+            ],
+        ]
+
+        do {
+            envelope["signature"] = try seBindingSignature(
+                envelope: envelope,
+                authAttemptID: authAttemptID,
+                signer: signer
+            )
+        } catch {
+            print("WARN se_attestation unsupported reason=binding_signature_failed error=\(error)")
+            return nil
+        }
+
+        return envelope
+    }
+
+    private func seBindingSignature(
+        envelope: [String: Any],
+        authAttemptID: String,
+        signer: SEBlobSigner
+    ) throws -> [String: Any] {
+        let payload = try ManagedDeviceAttestationGenerator.buildBindingPayload(
+            envelope: envelope,
+            authAttemptID: authAttemptID
+        )
+        let sigDER = try signer.sign(payload)
+        return [
+            "alg": "ES256",
+            "signature": sigDER.base64URLUnpadded(),
+        ]
+    }
+}
+
+#endif
+
+// MARK: - Tier2AttestationTokenGenerating
+
 protocol Tier2AttestationTokenGenerating: Sendable {
     func makeAttestationToken(
         challengeBase64URL: String?,
@@ -153,13 +301,20 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         ]
         if let modelHash = snapshot.modelHash {
             claimed["model_hash"] = modelHash
+            if let algorithm = snapshot.modelHashAlgorithm {
+                claimed["model_hash_algorithm"] = algorithm
+            }
+        }
+        if let weights = snapshot.weightsManifestSHA256 {
+            claimed["weights_manifest_sha256"] = weights
+            claimed["weights_manifest_algorithm"] = ModelArtifactIdentity.safetensorsManifestV1
         }
         return [
             "format": format,
             "token": tokenBase64URL,
             "challenge": challengeBase64URL,
-            "issued_at": iso8601String(issuedAt),
-            "expires_at": iso8601String(issuedAt.addingTimeInterval(600)),
+            "issued_at": iso8601(issuedAt),
+            "expires_at": iso8601(issuedAt.addingTimeInterval(600)),
             "provider_id": providerID,
             "binary_version": binaryVersion,
             "claimed": claimed,
@@ -177,7 +332,7 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         #endif
     }
 
-    private static func iso8601String(_ date: Date) -> String {
+    static func iso8601(_ date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -185,7 +340,7 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
     }
 
     private static func bindingSignature(envelope: [String: Any], authAttemptID: String, privateKeyData: Data) throws -> [String: Any] {
-        let payload = try bindingPayload(envelope: envelope, authAttemptID: authAttemptID)
+        let payload = try buildBindingPayload(envelope: envelope, authAttemptID: authAttemptID)
         let key = try secKey(privateKeyData: privateKeyData)
         var error: Unmanaged<CFError>?
         guard let signature = SecKeyCreateSignature(
@@ -202,7 +357,7 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         ]
     }
 
-    private static func bindingPayload(envelope: [String: Any], authAttemptID: String) throws -> Data {
+    static func buildBindingPayload(envelope: [String: Any], authAttemptID: String) throws -> Data {
         guard let providerID = envelope["provider_id"] as? String,
               let binaryVersion = envelope["binary_version"] as? String,
               let challenge = envelope["challenge"] as? String,

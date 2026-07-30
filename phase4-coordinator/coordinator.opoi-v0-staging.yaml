@@ -1,0 +1,61 @@
+# coordinator.opoi-v0-staging.yaml — OPoI v0 canary staging overlay
+#
+# Purpose: Enable OPoI v0 liveness (pool canaries) on a lab/staging coordinator
+# with 1-2 provider machines before promoting to Pearl production.
+#
+# Usage (coordinator supports --config-overlay since OPoI Phase A):
+#   macprovider-coordinator \
+#     --config /etc/macprovider/coordinator.yaml \
+#     --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml \
+#     --validate-config
+# Overlay keys override base; production base stays unchanged until promotion.
+#
+# DO NOT use on Pearl production without completing §2.4-2.6 validation steps
+# in ops/runbooks/opoi-challenge-implementation.md.
+#
+# Rollback: set canary_enabled: false and restart coordinator.
+
+pool:
+  # OPoI v0 liveness — canary challenges embed a random nonce in the prompt and
+  # check the provider echoes it exactly. This is a LIVENESS / instruction-following
+  # signal only; it does NOT prove the provider runs the declared model (a cheaper
+  # model can echo the plaintext nonce) — see SPEC-032 FR-PW1. Not a weight proof.
+  canary_enabled: true
+  canary_interval_s: 300        # 5 min for staging observation
+  canary_timeout_s: 120
+  # Leave room for a short model preamble before the nonce response. A 16-token
+  # cap intermittently truncated the 30B canary and was reported as incomplete.
+  canary_max_tokens: 32
+  canary_failure_threshold: 3   # 3 consecutive fails → provisional ban
+  # Waive the wall-time latency gates (max_ttft_ms + min_sustained_tps; canary
+  # probes are non-streaming) for the first 300s after a provider connects: a
+  # cold large-model load (observed ~8s TTFT for a cold 30B) must not false-fail
+  # on reconnect. Nonce-correctness is still enforced, a graced probe is neutral
+  # and forces the next probe to be enforced. The real fix for the 3500→7000
+  # cold-30B false-fail (see proof-of-weights-implementation.md §5).
+  canary_cold_start_grace_s: 300
+  # Wall-time latency gates (max_ttft_ms / min_sustained_tps) are observe-only by
+  # default: the canary is non-streaming so those metrics are unreliable (real
+  # warm canary TTFT sits ~6s, TPS reads noisy). observe logs breaches without
+  # sanctioning; nonce-correctness always enforces. Flip to enforce ONLY after
+  # validating metric stability for the target providers (and keep max_ttft_ms
+  # generous — >= 7000 — to fit the non-streaming round-trip). See
+  # proof-of-weights-implementation.md §5.
+  canary_latency_enforcement: observe
+  # Challenge bank — both entries embed {nonce} (hex, 4 bytes, upper-case).
+  # Rotate periodically; keep this file deployment-specific.
+  canary_challenges:
+    - prompt: "Reply with exactly: CANARY-{nonce}"
+      expected: "CANARY-{nonce}"
+    - prompt: "What is the code {nonce}? Reply with only the code."
+      expected: "{nonce}"
+  # W3 — per-model-class probes with latency gates (Session B).
+  # Keys match provider hello model_id / catalog row key.
+  model_class_challenges:
+    qwen3-coder-30b-a3b-instruct:
+      - prompt: "Reply with exactly: CANARY-{nonce}"
+        expected: "CANARY-{nonce}"
+        # Non-streaming canary round-trip for a warm 30B measures ~6s, so keep
+        # max_ttft_ms >= 7000 even in observe mode to avoid noisy breach logs.
+        max_ttft_ms: 7000
+        min_sustained_tps: 20

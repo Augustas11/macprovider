@@ -3,8 +3,11 @@ package ws_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,12 +21,18 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/modelidentity"
+	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )
 
@@ -44,6 +53,36 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+type recordedIdlePrewarmEvent struct {
+	providerID string
+	event      string
+	reason     string
+}
+
+type recordingIdlePrewarm struct {
+	mu      sync.Mutex
+	records []recordedIdlePrewarmEvent
+}
+
+func (r *recordingIdlePrewarm) RecordIdlePrewarmEvent(_ context.Context, providerID, event, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, recordedIdlePrewarmEvent{
+		providerID: providerID,
+		event:      event,
+		reason:     reason,
+	})
+	return nil
+}
+
+func (r *recordingIdlePrewarm) snapshot() []recordedIdlePrewarmEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]recordedIdlePrewarmEvent, len(r.records))
+	copy(out, r.records)
+	return out
+}
+
 func TestProviderHelloReceivesAck(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -55,6 +94,149 @@ func TestProviderHelloReceivesAck(t *testing.T) {
 	defer conn.Close()
 
 	assertHelloAck(t, conn)
+}
+
+func TestIdlePrewarmEventRecordsProviderBoundTelemetry(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_skipped","reason":"not_idle_yet"}`)); err != nil {
+		t.Fatalf("write idle prewarm event: %v", err)
+	}
+
+	eventually(t, func() bool {
+		records := recorder.snapshot()
+		return len(records) == 1 &&
+			records[0].providerID == "m4-anon" &&
+			records[0].event == "idle_prewarm_skipped" &&
+			records[0].reason == "not_idle_yet"
+	})
+}
+
+func TestIdlePrewarmEventIncrementsAcceptedEventMetric(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	reg := prometheus.NewRegistry()
+	metrics := statsmetrics.New(reg)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+		providerws.WithIdlePrewarmMetrics(metrics),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_skipped","reason":"not_idle_yet"}`)); err != nil {
+		t.Fatalf("write idle prewarm event: %v", err)
+	}
+
+	eventually(t, func() bool {
+		return idlePrewarmMetricValue(t, reg, "idle_prewarm_skipped", "not_idle_yet") == 1
+	})
+}
+
+func TestIdlePrewarmEventWritesAreRateLimited(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	for i := 0; i < 12; i++ {
+		if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_fired"}`)); err != nil {
+			t.Fatalf("write idle prewarm event %d: %v", i, err)
+		}
+	}
+	eventually(t, func() bool {
+		return len(recorder.snapshot()) == 10
+	})
+	time.Sleep(100 * time.Millisecond)
+	if got := len(recorder.snapshot()); got != 10 {
+		t.Fatalf("recorded idle prewarm events = %d, want burst cap 10", got)
+	}
+}
+
+func TestIdlePrewarmRateLimitSurvivesImmediateReconnect(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial first connection: %v", err)
+	}
+	assertHelloAck(t, conn)
+	for i := 0; i < 10; i++ {
+		if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_fired"}`)); err != nil {
+			t.Fatalf("write idle prewarm event %d: %v", i, err)
+		}
+	}
+	eventually(t, func() bool {
+		return len(recorder.snapshot()) == 10
+	})
+	_ = conn.Close()
+
+	conn2, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial second connection: %v", err)
+	}
+	defer conn2.Close()
+	assertHelloAck(t, conn2)
+	if err := wsutil.WriteClientText(conn2, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_fired"}`)); err != nil {
+		t.Fatalf("write idle prewarm event after reconnect: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := len(recorder.snapshot()); got != 10 {
+		t.Fatalf("recorded idle prewarm events after reconnect = %d, want original burst cap 10", got)
+	}
+}
+
+func idlePrewarmMetricValue(t *testing.T, reg *prometheus.Registry, event, reason string) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "stats_idle_prewarm_event_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			var gotEvent, gotReason string
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
+				case "event":
+					gotEvent = label.GetValue()
+				case "reason":
+					gotReason = label.GetValue()
+				}
+			}
+			if gotEvent == event && gotReason == reason {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
@@ -101,20 +283,164 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth_response = %+v", response)
 	}
-	if response.Tier2Session == nil || !response.Tier2Session.EncryptedLeg.Enabled || response.Tier2Session.EncryptedLeg.KID != challenge.KeyID || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusUnsupported) {
+	if response.Tier2Session == nil || !response.Tier2Session.EncryptedLeg.Enabled || response.Tier2Session.EncryptedLeg.KID != challenge.KeyID || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusNotRequired) {
 		t.Fatalf("tier2 auth_response session = %+v", response.Tier2Session)
+	}
+	if !response.Tier2Session.EncryptedLeg.ResponseChunkPlaintextEnvelope {
+		t.Fatal("auth_response did not select response_chunk_plaintext_envelope")
+	}
+	if !response.Tier2Session.EncryptedLeg.InBandAEADRekeyV1 {
+		t.Fatal("auth_response did not select in_band_aead_rekey_v1")
 	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok &&
 			provider.EncryptedLeg &&
-			provider.AttestationStatus == pool.AttestationStatusUnsupported &&
+			provider.AttestationStatus == pool.AttestationStatusNotRequired &&
 			provider.ModelLoadTimeMs == 1234 &&
 			provider.Tier2Session != nil &&
+			provider.Tier2Session.ResponseChunkPlaintextEnvelope &&
+			provider.Tier2Session.InBandAEADRekeyV1 &&
 			provider.Tier2Session.KeyID == challenge.KeyID &&
 			len(provider.Tier2Session.C2PKey) == 32 &&
 			provider.InferencePath == pool.InferencePathWSTunneled
 	})
+}
+
+func TestBuyerHTTPMaintainsOneProviderContinuityAcrossRequestThresholdRekey(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.EncryptedLegRekeyAfterRequests = 1
+		cfg.Tier2.EncryptedLegRekeyAfterSeconds = 0
+	})
+	defer h.HTTP.Close()
+	conn, assignedID, epoch := authenticateBuyerRekeyProvider(t, h)
+	defer conn.Close()
+
+	rekeyStarted := make(chan struct{})
+	allowCommit := make(chan struct{})
+	providerDone := make(chan error, 1)
+	go func() {
+		if err := serveBuyerInferenceOverEpoch(conn, "m4-anon", assignedID, epoch, 0); err != nil {
+			providerDone <- err
+			return
+		}
+		next, err := completeBuyerTestRekey(conn, "m4-anon", assignedID, rekeyStarted, allowCommit)
+		if err != nil {
+			providerDone <- err
+			return
+		}
+		providerDone <- serveBuyerInferenceOverEpoch(conn, "m4-anon", assignedID, next, 1)
+	}()
+
+	relayEntered := make(chan struct{}, 2)
+	buyerServer := buyer.NewServer(
+		h.Registry,
+		zerolog.Nop(),
+		time.Now(),
+		buyer.WithRelay(signalingBuyerRekeyRelay(h.Provider.DispatchInference, relayEntered), 3*time.Second),
+	)
+	first := postBuyerRekeyChat(buyerServer)
+	assertBuyerRekeySuccess(t, first, assignedID)
+	<-relayEntered
+	select {
+	case <-rekeyStarted:
+	case err := <-providerDone:
+		t.Fatalf("provider before request-threshold rekey: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("request-threshold rekey did not start")
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+
+	secondResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() { secondResult <- postBuyerRekeyChat(buyerServer) }()
+	select {
+	case <-relayEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second buyer request did not enter DispatchInference")
+	}
+	select {
+	case early := <-secondResult:
+		t.Fatalf("buyer request returned before rekey commit: status=%d body=%s", early.Code, early.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowCommit)
+	select {
+	case second := <-secondResult:
+		assertBuyerRekeySuccess(t, second, assignedID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("buyer request did not resume after request-threshold rekey")
+	}
+	if err := <-providerDone; err != nil {
+		t.Fatal(err)
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+	assertProviderEpochChanged(t, h.Registry, assignedID, epoch.KeyID)
+}
+
+func TestBuyerHTTPMaintainsOneProviderContinuityAcrossAgeThresholdRekey(t *testing.T) {
+	clock := newLockedTime(time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC))
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithNow(clock.Now)}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.EncryptedLegRekeyAfterRequests = 0
+		cfg.Tier2.EncryptedLegRekeyAfterSeconds = 1
+	})
+	defer h.HTTP.Close()
+	conn, assignedID, epoch := authenticateBuyerRekeyProvider(t, h)
+	defer conn.Close()
+	clock.Set(clock.Now().Add(2 * time.Second))
+
+	rekeyStarted := make(chan struct{})
+	allowCommit := make(chan struct{})
+	providerDone := make(chan error, 1)
+	go func() {
+		next, err := completeBuyerTestRekey(conn, "m4-anon", assignedID, rekeyStarted, allowCommit)
+		if err != nil {
+			providerDone <- err
+			return
+		}
+		providerDone <- serveBuyerInferenceOverEpoch(conn, "m4-anon", assignedID, next, 1)
+	}()
+
+	relayEntered := make(chan struct{}, 1)
+	buyerServer := buyer.NewServer(
+		h.Registry,
+		zerolog.Nop(),
+		clock.Now(),
+		buyer.WithRelay(signalingBuyerRekeyRelay(h.Provider.DispatchInference, relayEntered), 3*time.Second),
+	)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() { result <- postBuyerRekeyChat(buyerServer) }()
+	select {
+	case <-rekeyStarted:
+	case err := <-providerDone:
+		t.Fatalf("provider before age-threshold rekey: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("age-threshold rekey did not start")
+	}
+	select {
+	case <-relayEntered:
+	case <-time.After(time.Second):
+		t.Fatal("age-threshold buyer request did not enter DispatchInference")
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+	select {
+	case early := <-result:
+		t.Fatalf("buyer request returned before age rekey commit: status=%d body=%s", early.Code, early.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(allowCommit)
+	select {
+	case response := <-result:
+		assertBuyerRekeySuccess(t, response, assignedID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("buyer request did not resume after age-threshold rekey")
+	}
+	if err := <-providerDone; err != nil {
+		t.Fatal(err)
+	}
+	assertProviderRemainsReadyDuringRekey(t, h.Registry, assignedID)
+	assertProviderEpochChanged(t, h.Registry, assignedID, epoch.KeyID)
 }
 
 func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
@@ -154,6 +480,222 @@ func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok && provider.EncryptedLeg && provider.AttestationStatus == pool.AttestationStatusAttested
 	})
+}
+
+func TestProviderAuthV2IdentitySignatureRequiredWithoutPolicyExemption(t *testing.T) {
+	pub, _, providerID := testIdentityKey(t)
+	store := &fakeIdentitySignatureStore{identityPubkey: pub, identityOK: true}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseIdentitySignatureRequired || reason != "identity_signature_required" {
+		t.Fatalf("close = %d %q", code, reason)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureRejectDoesNotConsumeProvisionalAdmission(t *testing.T) {
+	pub, _, providerID := testIdentityKey(t)
+	store := &fakeIdentitySignatureStore{identityPubkey: pub, identityOK: true}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithIdentitySignatureStore(store)}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Admission.ProvisionalAdmissionRatePerHour = 1
+	})
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if records := h.Provider.Admission().Records(nil); len(records) != 0 {
+		t.Fatalf("provisional records after rejected proof = %+v, want none", records)
+	}
+}
+
+func TestProviderAuthV2IdentitySignaturePolicyExemptionAcceptsBearerOnly(t *testing.T) {
+	_, _, providerID := testIdentityKey(t)
+	exemptUntil := time.Now().Add(time.Hour)
+	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
+	h := newIdentitySignatureHarness(t, providerID, store, func(cfg *config.Config) {
+		cfg.AutotuneFeeds.EnforceProviderAdmission = false
+		cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	})
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.IdentityAdmissionMode != "exemption" {
+		t.Fatalf("identity_admission_mode=%q, want exemption", response.IdentityAdmissionMode)
+	}
+}
+
+func TestProviderAuthV2StrictAdmissionRefusesActivePolicyExemption(t *testing.T) {
+	_, _, providerID := testIdentityKey(t)
+	exemptUntil := time.Now().Add(time.Hour)
+	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("strict auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureValidAppTrackProofAccepts(t *testing.T) {
+	pub, priv, providerID := testIdentityKey(t)
+	store := &fakeIdentitySignatureStore{identityPubkey: pub, identityOK: true}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, initial := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	fields := signedIdentityProofFields(t, priv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.IdentityAdmissionMode != "signature" || response.IdentityGeneration != 1 {
+		t.Fatalf("identity admission=(%q, %d), want signature generation 1", response.IdentityAdmissionMode, response.IdentityGeneration)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureValidCLIReceiptProofAccepts(t *testing.T) {
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt key: %v", err)
+	}
+	providerID := "m4-anon"
+	store := &fakeIdentitySignatureStore{}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	h.Registry.Register(&pool.Provider{
+		ProviderID:    providerID,
+		AssignedID:    "existing-cli",
+		ReceiptPubkey: receiptPub,
+		ReceiptPubkeyPrev: &pool.ReceiptPubkeyPrevious{
+			Pubkey:    bytes.Repeat([]byte{0x77}, 32),
+			RotatedAt: time.Now().Add(-time.Hour),
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}, nil)
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	fields := signedIdentityProofFields(t, receiptPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureRejectsSelfDeclaredCLIReceiptProof(t *testing.T) {
+	storedReceiptPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("stored receipt key: %v", err)
+	}
+	attackerPub, attackerPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("attacker receipt key: %v", err)
+	}
+	providerID := "m4-anon"
+	store := &fakeIdentitySignatureStore{}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	h.Registry.Register(&pool.Provider{
+		ProviderID:    providerID,
+		AssignedID:    "existing-cli",
+		ReceiptPubkey: storedReceiptPub,
+	}, nil)
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(attackerPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	fields := signedIdentityProofFields(t, attackerPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureRejectsCLIWithoutStoredReceiptKey(t *testing.T) {
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt key: %v", err)
+	}
+	providerID := "m4-anon"
+	store := &fakeIdentitySignatureStore{}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	fields := signedIdentityProofFields(t, receiptPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
 }
 
 func TestProviderAuthV2L1NoRetentionEntry(t *testing.T) {
@@ -401,6 +943,31 @@ func TestProviderAuthV2InitialEmptyCatalogRejectedOnTheWire(t *testing.T) {
 	initial["supported_models"] = []string{}
 
 	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models cannot be empty")
+}
+
+func TestProviderFirstAuthMissingVersionLogsBoundedMessageType(t *testing.T) {
+	var logBuffer lockedBuffer
+	h := newProviderHarnessWithServerOptionsAndLogger(t, nil, nil, zerolog.New(&logBuffer), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	delete(initial, "version")
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, initial)
+	if code != providerws.CloseUnrecognizedAuthMessage {
+		t.Fatalf("close code = %d, want %d", code, providerws.CloseUnrecognizedAuthMessage)
+	}
+	if reason != "unrecognized auth message" {
+		t.Fatalf("close reason = %q, want %q", reason, "unrecognized auth message")
+	}
+
+	logText := logBuffer.String()
+	if !strings.Contains(logText, `"bad_field":"missing version"`) ||
+		!strings.Contains(logText, `"message_type":"auth_request"`) {
+		t.Fatalf("missing bounded first-auth rejection log fields: %s", logText)
+	}
 }
 
 // TestProviderAuthV2ProofStageFirstWithMalformedCatalogTakesEnvelopePath
@@ -1207,22 +1774,38 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close()
-	assertHelloAck(t, conn)
+	assignedID := assertHelloAck(t, conn)
 
 	hb := heartbeat()
 	hb["slots_free"] = 0
 	hb["status"] = "busy"
+	hb["model_hash"] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	hb["model_hash_algorithm"] = modelidentity.SnapshotManifestV1
+	hb["safety_telemetry"] = map[string]any{
+		"schema_version": 2, "provider_id": "m4-anon", "model_id": hb["model_id"], "model_loaded": true,
+		"runtime_state": "busy", "hardware_tier": "16GB", "requests_in_flight": 1, "requests_queued": 0,
+		"memory_rss_mb": 2048, "memory_capacity_mb": 16384, "memory_pressure": "normal",
+		"thermal_state": "nominal", "thermally_throttled": false, "restart_count": 1, "uptime_s": 120,
+		"coordinator_connected": true, "coordinator_session_id": assignedID,
+		"cpu_utilization_pct": 12.5, "gpu_utilization_pct": 18.0, "gpu_utilization_scope": "host", "power_source": "external",
+		"binary_version": "1.8.33", "compatibility_set_id": "set-a",
+		"model_hash":           "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"model_hash_algorithm": modelidentity.SnapshotManifestV1,
+		"observation_id":       "observation-a",
+		"observed_at":          "2000-01-01T00:00:00Z", "valid_for_ms": 90000,
+	}
 	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
 		t.Fatalf("write heartbeat: %v", err)
 	}
 
 	var got struct {
 		Pool []struct {
-			ProviderID string `json:"provider_id"`
-			State      string `json:"state"`
-			SlotsFree  int    `json:"slots_free"`
-			SlotsTotal int    `json:"slots_total"`
-			Endpoint   string `json:"endpoint_url"`
+			ProviderID      string                        `json:"provider_id"`
+			State           string                        `json:"state"`
+			SlotsFree       int                           `json:"slots_free"`
+			SlotsTotal      int                           `json:"slots_total"`
+			Endpoint        string                        `json:"endpoint_url"`
+			SafetyTelemetry *pool.ProviderSafetyTelemetry `json:"safety_telemetry"`
 		} `json:"pool"`
 		Summary struct {
 			TotalProviders int `json:"total_providers"`
@@ -1247,11 +1830,12 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 		}
 		got = struct {
 			Pool []struct {
-				ProviderID string `json:"provider_id"`
-				State      string `json:"state"`
-				SlotsFree  int    `json:"slots_free"`
-				SlotsTotal int    `json:"slots_total"`
-				Endpoint   string `json:"endpoint_url"`
+				ProviderID      string                        `json:"provider_id"`
+				State           string                        `json:"state"`
+				SlotsFree       int                           `json:"slots_free"`
+				SlotsTotal      int                           `json:"slots_total"`
+				Endpoint        string                        `json:"endpoint_url"`
+				SafetyTelemetry *pool.ProviderSafetyTelemetry `json:"safety_telemetry"`
 			} `json:"pool"`
 			Summary struct {
 				TotalProviders int `json:"total_providers"`
@@ -1270,9 +1854,69 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 	if got.Pool[0].Endpoint != "https://m4.streamvc.live" {
 		t.Fatalf("endpoint = %q", got.Pool[0].Endpoint)
 	}
+	if telemetry := got.Pool[0].SafetyTelemetry; telemetry == nil || telemetry.ObservationID != "observation-a" || telemetry.ObservedAt == "2000-01-01T00:00:00Z" {
+		t.Fatalf("safety_telemetry = %+v, want coordinator-stamped observation", telemetry)
+	}
 	if got.Summary.TotalProviders != 1 || got.Summary.Ready != 0 || got.Summary.FreeSlots != 0 {
 		t.Fatalf("summary = %+v", got.Summary)
 	}
+}
+
+func TestHeartbeatRejectsMismatchedSafetyTelemetrySession(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	hb := heartbeat()
+	hb["slots_free"] = 0
+	hb["status"] = "busy"
+	hb["model_hash"] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	hb["model_hash_algorithm"] = modelidentity.SnapshotManifestV1
+	hb["safety_telemetry"] = map[string]any{
+		"schema_version": 2, "provider_id": "m4-anon", "model_id": hb["model_id"], "model_loaded": true,
+		"runtime_state": "busy", "hardware_tier": "16GB", "requests_in_flight": 1, "requests_queued": 0,
+		"memory_rss_mb": 2048, "memory_capacity_mb": 16384, "memory_pressure": "normal",
+		"thermal_state": "nominal", "thermally_throttled": false, "restart_count": 1, "uptime_s": 120,
+		"coordinator_connected": true, "coordinator_session_id": assignedID + "-wrong",
+		"cpu_utilization_pct": 12.5, "gpu_utilization_pct": nil, "gpu_utilization_scope": "host", "power_source": "external",
+		"binary_version": "1.8.33", "compatibility_set_id": "set-a",
+		"model_hash":           "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"model_hash_algorithm": modelidentity.SnapshotManifestV1,
+		"observation_id":       "observation-a", "observed_at": "2000-01-01T00:00:00Z", "valid_for_ms": 90000,
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+
+	eventually(t, func() bool {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/poolz", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer test-operator-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("poolz: %v", err)
+		}
+		defer resp.Body.Close()
+		var got struct {
+			Pool []struct {
+				State           string                        `json:"state"`
+				SlotsFree       int                           `json:"slots_free"`
+				SafetyTelemetry *pool.ProviderSafetyTelemetry `json:"safety_telemetry"`
+			} `json:"pool"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("poolz json: %v", err)
+		}
+		return len(got.Pool) == 1 && got.Pool[0].State == "ready" && got.Pool[0].SlotsFree == 1 && got.Pool[0].SafetyTelemetry == nil
+	})
 }
 
 func TestPoolzDefaultOmitsTier2HashFieldsAfterWSAdmission(t *testing.T) {
@@ -1344,6 +1988,40 @@ func TestHeartbeatLegacyPathPreservesV134Behavior(t *testing.T) {
 	})
 }
 
+func TestHeartbeatSpecDecodeOptInFieldsPreserveStatePath(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2Provider(t, h)
+	defer conn.Close()
+
+	hb := heartbeat()
+	hb["spec_decode_enabled"] = true
+	hb["spec_decode_draft_model_id"] = "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit"
+	hb["spec_decode_num_draft_tokens"] = 3
+	hb["spec_decode_drafted_tokens_since_last"] = 30
+	hb["spec_decode_accepted_tokens_since_last"] = 18
+	hb["spec_decode_acceptance_rate"] = 0.6
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write spec decode heartbeat: %v", err)
+	}
+
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok &&
+			provider.AssignedID == assignedID &&
+			provider.InferencePath == pool.InferencePathWSTunneled &&
+			provider.State == pool.StateReady &&
+			provider.ModelID == hb["model_id"] &&
+			provider.SlotsFree == 1 &&
+			provider.SlotsTotal == 1 &&
+			provider.ThroughputTPSEstimate == 19.8 &&
+			!provider.LastLoadingState &&
+			provider.LoadingStartedAt.IsZero()
+	})
+}
+
 func TestHeartbeatSPEC011PathInvokesVerifier(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
@@ -1366,6 +2044,34 @@ func TestHeartbeatSPEC011PathInvokesVerifier(t *testing.T) {
 			provider.HashStatus == pool.HashStatusUncatalogued &&
 			provider.LastLoadingState
 	})
+}
+
+func TestHeartbeatUnknownModelHashAlgorithmFencesSession(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2Provider(t, h)
+	defer conn.Close()
+
+	hb := heartbeat()
+	hb["model_hash"] = strings.Repeat("a", 64)
+	hb["model_hash_algorithm"] = "sha256"
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write invalid identity heartbeat: %v", err)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidHello || reason != "invalid_model_hash_identity" {
+		t.Fatalf("close = (%d, %q)", code, reason)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+	if ok && provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("connected provider HashStatus=%q, want invalid", provider.HashStatus)
+	}
 }
 
 func TestHeartbeatSwapCompletionFiresInjectedEmitter(t *testing.T) {
@@ -2449,6 +3155,8 @@ func TestPoolzDeniesWhenOperatorKeyEmpty(t *testing.T) {
 func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	harness := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithVersion("v1.3.0-7-gabcdef0"),
+	}, func(cfg *config.Config) {
+		cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.26"
 	})
 	defer harness.HTTP.Close()
 
@@ -2461,8 +3169,9 @@ func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 		t.Fatalf("healthz status = %d", resp.StatusCode)
 	}
 	var body struct {
-		Status  string `json:"status"`
-		Version string `json:"version"`
+		Status                   string `json:"status"`
+		Version                  string `json:"version"`
+		RecommendedBinaryVersion string `json:"recommended_binary_version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -2472,6 +3181,31 @@ func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	}
 	if body.Version != "v1.3.0-7-gabcdef0" {
 		t.Fatalf("version = %q, want %q", body.Version, "v1.3.0-7-gabcdef0")
+	}
+	if body.RecommendedBinaryVersion != "1.8.26" {
+		t.Fatalf("recommended_binary_version = %q, want %q", body.RecommendedBinaryVersion, "1.8.26")
+	}
+}
+
+func TestProviderHealthzAcceptsHEAD(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodHead, ts.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("healthz HEAD: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /healthz status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Fatalf("HEAD /healthz must return no body; got %q", body)
 	}
 }
 
@@ -2492,6 +3226,38 @@ func TestProviderHealthzDefaultVersion(t *testing.T) {
 	}
 	if body.Version != "dev" {
 		t.Fatalf("default version = %q, want \"dev\"", body.Version)
+	}
+}
+
+func TestProviderHealthzAndPoolzExcludeSelfMintedFromPublishedCapacity(t *testing.T) {
+	harness := newProviderHarness(t)
+	defer harness.HTTP.Close()
+	now := time.Now().UTC()
+	harness.Registry.Register(&pool.Provider{
+		ProviderID:       "m4-anon",
+		AssignedID:       "self-minted-session",
+		Hostname:         "self-minted.local",
+		ModelID:          "model-a",
+		MaxContextTokens: 20000,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		EndpointURL:      "https://m4.streamvc.live",
+		Tier:             pool.TierPinned,
+		State:            pool.StateReady,
+		LastHeartbeatAt:  now,
+		LastActivityAt:   now,
+		ConnectedAt:      now,
+		BinaryVersion:    "0.1.0",
+		AuthState:        pool.AuthSelfMinted,
+	}, nil)
+
+	healthz := fetchProviderHealthz(t, harness.HTTP.URL)
+	if healthz.PoolSize != 1 || healthz.PoolReady != 0 || healthz.PoolPolicyReady != 0 {
+		t.Fatalf("self-minted healthz = %+v, want visible but not ready/policy-ready", healthz)
+	}
+	poolz := fetchPoolz(t, harness.HTTP.URL)
+	if poolz.Summary.TotalProviders != 1 || poolz.Summary.Ready != 0 || poolz.Summary.FreeSlots != 0 {
+		t.Fatalf("self-minted poolz summary = %+v, want visible but not ready/free capacity", poolz.Summary)
 	}
 }
 
@@ -3102,6 +3868,9 @@ func newProviderHarnessWithOptionsAndLogger(t *testing.T, validator providerws.T
 		if issuer, ok := validator.(providerws.TokenIssuer); ok {
 			allServerOpts = append(allServerOpts, providerws.WithTokenIssuer(issuer))
 		}
+		if bootstrapStore, ok := validator.(providerws.BootstrapTokenStore); ok {
+			allServerOpts = append(allServerOpts, providerws.WithBootstrapTokenStore(bootstrapStore))
+		}
 	}
 	server := providerws.NewServer(cfg, registry, logger, allServerOpts...)
 	return providerHarness{
@@ -3170,9 +3939,11 @@ func validAuthInitial(providerID, providerPublic string) map[string]any {
 	delete(h, "attestation")
 	h["provider_ecdh_public_key"] = providerPublic
 	h["tier2_capabilities"] = map[string]any{
-		"encrypted_leg": true,
-		"attestation":   true,
-		"aead_suites":   []string{tier2.PillarBAEADA256GCM},
+		"encrypted_leg":                     true,
+		"attestation":                       true,
+		"aead_suites":                       []string{tier2.PillarBAEADA256GCM},
+		"response_chunk_plaintext_envelope": true,
+		"in_band_aead_rekey_v1":             true,
 	}
 	return h
 }
@@ -3184,6 +3955,146 @@ func validAuthInitialWithFreshKey(t *testing.T, providerID string) map[string]an
 		t.Fatalf("provider keypair: %v", err)
 	}
 	return validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+}
+
+func testIdentityKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("identity key: %v", err)
+	}
+	return pub, priv, onboarding.ProviderIDForIdentityPubkey(pub)
+}
+
+func newIdentitySignatureHarness(t *testing.T, providerID string, store providerws.IdentitySignatureStore, opts ...func(*config.Config)) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithIdentitySignatureStore(store)}, func(cfg *config.Config) {
+		cfg.Providers[0].ProviderID = providerID
+		cfg.Providers[0].EndpointURL = ""
+		for _, opt := range opts {
+			opt(cfg)
+		}
+	})
+}
+
+func writeIdentityInitial(t *testing.T, serverURL, providerID string) (net.Conn, providerws.AuthChallenge, map[string]any) {
+	t.Helper()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(serverURL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	return conn, readAuthChallenge(t, conn), initial
+}
+
+func signedIdentityProofFields(t *testing.T, priv ed25519.PrivateKey, providerID, authAttemptID string, initial map[string]any) map[string]any {
+	t.Helper()
+	normalizedInitial := normalizeForJCS(t, initial)
+	canonicalInitial, err := billing.CanonicalJSON(normalizedInitial)
+	if err != nil {
+		t.Fatalf("canonical initial: %v", err)
+	}
+	transcriptHash := sha256.Sum256(canonicalInitial)
+	transcriptB64 := base64.StdEncoding.EncodeToString(transcriptHash[:])
+	tuple := map[string]any{
+		"auth_attempt_id":          authAttemptID,
+		"provider_id":              providerID,
+		"binary_version":           normalizedInitial["binary_version"],
+		"provider_ecdh_public_key": normalizedInitial["provider_ecdh_public_key"],
+		"transcript_sha256":        transcriptB64,
+	}
+	canonicalTuple, err := billing.CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatalf("canonical tuple: %v", err)
+	}
+	return map[string]any{
+		"identity_signature":                   base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canonicalTuple)),
+		"identity_signature_transcript_sha256": transcriptB64,
+	}
+}
+
+func signedCredentialBootstrapProofFields(
+	t *testing.T,
+	priv ed25519.PrivateKey,
+	providerID string,
+	challenge providerws.AuthChallenge,
+	initial map[string]any,
+) map[string]any {
+	t.Helper()
+	normalizedInitial := normalizeForJCS(t, initial)
+	canonicalInitial, err := billing.CanonicalJSON(normalizedInitial)
+	if err != nil {
+		t.Fatalf("canonical bootstrap initial: %v", err)
+	}
+	transcriptHash := sha256.Sum256(canonicalInitial)
+	transcriptB64 := base64.StdEncoding.EncodeToString(transcriptHash[:])
+	challengeRaw, err := json.Marshal(challenge)
+	if err != nil {
+		t.Fatalf("marshal bootstrap challenge: %v", err)
+	}
+	var challengeWire map[string]any
+	dec := json.NewDecoder(bytes.NewReader(challengeRaw))
+	dec.UseNumber()
+	if err := dec.Decode(&challengeWire); err != nil {
+		t.Fatalf("normalize bootstrap challenge: %v", err)
+	}
+	tuple := map[string]any{
+		"challenge":                challengeWire,
+		"auth_attempt_id":          challenge.AuthAttemptID,
+		"provider_id":              providerID,
+		"binary_version":           normalizedInitial["binary_version"],
+		"provider_ecdh_public_key": normalizedInitial["provider_ecdh_public_key"],
+		"transcript_sha256":        transcriptB64,
+		"credential_bootstrap":     true,
+	}
+	canonicalTuple, err := billing.CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatalf("canonical bootstrap tuple: %v", err)
+	}
+	return map[string]any{
+		"credential_bootstrap":                 true,
+		"identity_signature":                   base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canonicalTuple)),
+		"identity_signature_transcript_sha256": transcriptB64,
+	}
+}
+
+func normalizeForJCS(t *testing.T, in map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal normalize: %v", err)
+	}
+	var out map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("decode normalize: %v", err)
+	}
+	return out
+}
+
+type fakeIdentitySignatureStore struct {
+	policyOK       bool
+	exemptUntil    *time.Time
+	grantedBy      string
+	identityPubkey []byte
+	identityOK     bool
+}
+
+func (f *fakeIdentitySignatureStore) LookupProviderAuthPolicy(ctx context.Context, providerID string) (*time.Time, string, bool, error) {
+	return f.exemptUntil, f.grantedBy, f.policyOK, nil
+}
+
+func (f *fakeIdentitySignatureStore) LookupProviderIdentityPubkey(ctx context.Context, providerID string) ([]byte, bool, error) {
+	return append([]byte(nil), f.identityPubkey...), f.identityOK, nil
 }
 
 func assertInitialCatalogRejectedWithLockedSubstring(t *testing.T, initial map[string]any, substring string) {
@@ -3301,6 +4212,258 @@ func authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t *testing.T,
 		writeStateUpdate(t, conn, "ready")
 	}
 	return conn, response
+}
+
+type buyerRekeyEncryptedCarrier struct {
+	Type      string                 `json:"type"`
+	RequestID string                 `json:"request_id"`
+	Stream    bool                   `json:"stream"`
+	Encrypted bool                   `json:"encrypted"`
+	Enc       tier2.AEADEnvelopeBody `json:"enc"`
+}
+
+func authenticateBuyerRekeyProvider(t *testing.T, h providerHarness) (net.Conn, string, tier2.PillarBKeyMaterial) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial provider: %v", err)
+	}
+	providerPrivate, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		conn.Close()
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	coordinatorPublic, coordinatorPublicRaw, err := tier2.ParseX25519PublicKey(challenge.CoordinatorECDHPublicKey)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("parse coordinator public key: %v", err)
+	}
+	shared, err := providerPrivate.ECDH(coordinatorPublic)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("provider ECDH: %v", err)
+	}
+	epoch, err := tier2.DerivePillarBKeysFromSharedSecret(shared, "m4-anon", challenge.AssignedID, providerPublicRaw, coordinatorPublicRaw, challenge.SelectedAEADSuite)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("derive provider epoch: %v", err)
+	}
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		conn.Close()
+		t.Fatalf("auth response = %+v", response)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(heartbeat())); err != nil {
+		conn.Close()
+		t.Fatalf("write ready heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok && provider.State == pool.StateReady && provider.SlotsFree == 1 && provider.Tier2Session != nil
+	})
+	return conn, challenge.AssignedID, epoch
+}
+
+func serveBuyerInferenceOverEpoch(conn net.Conn, providerID, assignedID string, epoch tier2.PillarBKeyMaterial, expectedC2PSeq uint64) error {
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		return fmt.Errorf("read inference request: %w", err)
+	}
+	if op != gobwas.OpText {
+		return fmt.Errorf("inference request opcode = %v", op)
+	}
+	var request buyerRekeyEncryptedCarrier
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return fmt.Errorf("decode inference request: %w", err)
+	}
+	if request.Type != "inference_request" || request.RequestID == "" || !request.Encrypted || request.Stream {
+		return fmt.Errorf("invalid inference request carrier: %+v", request)
+	}
+	aad, _, err := tier2.DecodeAEADAAD(request.Enc.AAD)
+	if err != nil {
+		return fmt.Errorf("decode inference request aad: %w", err)
+	}
+	if aad.Seq != expectedC2PSeq || aad.RequestID != request.RequestID || aad.AssignedID != assignedID {
+		return fmt.Errorf("inference request aad = %+v, want seq=%d assigned=%s", aad, expectedC2PSeq, assignedID)
+	}
+	if _, err := tier2.OpenPillarBFrame(epoch.C2PKey, epoch.C2PNonceBase, epoch.KeyID, expectedC2PSeq, aad, tier2.AEADEnvelope{Encrypted: true, Enc: request.Enc}); err != nil {
+		return fmt.Errorf("open inference request: %w", err)
+	}
+
+	completion := `{"id":"chatcmpl-rekey","object":"chat.completion","created":1,"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	chunkPlaintext, err := json.Marshal(map[string]any{
+		"type": "inference_response_chunk_plaintext",
+		"seq":  0,
+		"data": completion,
+	})
+	if err != nil {
+		return err
+	}
+	chunkAAD := tier2.AEADFrameAAD{
+		Type: "inference_response_chunk", Direction: "p2c", RequestID: request.RequestID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: expectedC2PSeq,
+	}
+	chunkEnvelope, err := tier2.SealPillarBFrame(epoch.P2CKey, epoch.P2CNonceBase, epoch.KeyID, expectedC2PSeq, chunkAAD, chunkPlaintext)
+	if err != nil {
+		return fmt.Errorf("seal inference chunk: %w", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type": "inference_response_chunk", "request_id": request.RequestID,
+		"encrypted": true, "enc": chunkEnvelope.Enc,
+	})); err != nil {
+		return fmt.Errorf("write inference chunk: %w", err)
+	}
+
+	endSeq := expectedC2PSeq + 1
+	end := providerws.InferenceResponseEnd{
+		Type: "inference_response_end", RequestID: request.RequestID, Status: "complete", ChunksSent: 1,
+		Usage: json.RawMessage(`{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}`),
+	}
+	endAAD := tier2.AEADFrameAAD{
+		Type: "inference_response_end", Direction: "p2c", RequestID: request.RequestID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: endSeq,
+	}
+	endEnvelope, err := tier2.SealPillarBFrame(epoch.P2CKey, epoch.P2CNonceBase, epoch.KeyID, endSeq, endAAD, mustJSON(end))
+	if err != nil {
+		return fmt.Errorf("seal inference end: %w", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type": "inference_response_end", "request_id": request.RequestID,
+		"encrypted": true, "enc": endEnvelope.Enc,
+	})); err != nil {
+		return fmt.Errorf("write inference end: %w", err)
+	}
+	return nil
+}
+
+func completeBuyerTestRekey(conn net.Conn, providerID, assignedID string, started chan<- struct{}, allow <-chan struct{}) (tier2.PillarBKeyMaterial, error) {
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("read rekey request: %w", err)
+	}
+	if op != gobwas.OpText {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("rekey request opcode = %v", op)
+	}
+	var request providerws.AEADRekeyRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("decode rekey request: %w", err)
+	}
+	if request.Type != "aead_rekey_request" || request.AssignedID != assignedID || request.OldKID == "" {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("invalid rekey request: %+v", request)
+	}
+	close(started)
+	<-allow
+	coordinatorPublic, coordinatorPublicRaw, err := tier2.ParseX25519PublicKey(request.CoordinatorECDHPublicKey)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("parse rekey coordinator key: %w", err)
+	}
+	providerPrivate, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("generate rekey provider key: %w", err)
+	}
+	shared, err := providerPrivate.ECDH(coordinatorPublic)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("derive rekey shared secret: %w", err)
+	}
+	next, err := tier2.DerivePillarBKeysFromSharedSecret(shared, providerID, assignedID, providerPublicRaw, coordinatorPublicRaw, request.SelectedAEAD)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("derive rekey epoch: %w", err)
+	}
+	response := providerws.AEADRekeyResponse{
+		Type: "aead_rekey_response", Version: 1, RekeyID: request.RekeyID,
+		AssignedID: assignedID, OldKID: request.OldKID, NewKID: next.KeyID,
+		ProviderECDHPublicKey: base64.RawURLEncoding.EncodeToString(providerPublicRaw),
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(response)); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("write rekey response: %w", err)
+	}
+	commitPayload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("read rekey commit: %w", err)
+	}
+	var commit providerws.AEADRekeyConfirmation
+	if err := json.Unmarshal(commitPayload, &commit); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("decode rekey commit: %w", err)
+	}
+	commitAAD := tier2.AEADFrameAAD{
+		Type: "aead_rekey_commit", Direction: "c2p", RequestID: request.RekeyID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: 0,
+	}
+	proof, err := tier2.OpenPillarBFrame(next.C2PKey, next.C2PNonceBase, next.KeyID, 0, commitAAD, tier2.AEADEnvelope{Encrypted: true, Enc: commit.Enc})
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("open rekey commit: %w", err)
+	}
+	committedAAD := tier2.AEADFrameAAD{
+		Type: "aead_rekey_committed", Direction: "p2c", RequestID: request.RekeyID,
+		ProviderID: providerID, AssignedID: assignedID, Seq: 0,
+	}
+	committedEnvelope, err := tier2.SealPillarBFrame(next.P2CKey, next.P2CNonceBase, next.KeyID, 0, committedAAD, proof)
+	if err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("seal rekey committed: %w", err)
+	}
+	committed := providerws.AEADRekeyConfirmation{
+		Type: "aead_rekey_committed", Version: 1, RekeyID: request.RekeyID,
+		AssignedID: assignedID, OldKID: request.OldKID, NewKID: next.KeyID,
+		Encrypted: true, Enc: committedEnvelope.Enc,
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(committed)); err != nil {
+		return tier2.PillarBKeyMaterial{}, fmt.Errorf("write rekey committed: %w", err)
+	}
+	return next, nil
+}
+
+func postBuyerRekeyChat(server *buyer.Server) *httptest.ResponseRecorder {
+	body := `{"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+func signalingBuyerRekeyRelay(relay buyer.RelayFunc, entered chan<- struct{}) buyer.RelayFunc {
+	return func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+		entered <- struct{}{}
+		return relay(ctx, provider, requestID, body, stream)
+	}
+}
+
+func assertBuyerRekeySuccess(t *testing.T, response *httptest.ResponseRecorder, assignedID string) {
+	t.Helper()
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"content":"ok"`)) {
+		t.Fatalf("buyer response status=%d body=%s, want successful completion", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("X-MacProvider-Provider"); got != "m4-anon" {
+		t.Fatalf("buyer provider header = %q, want m4-anon", got)
+	}
+	if got := response.Header().Get("X-MacProvider-Route"); got != assignedID {
+		t.Fatalf("buyer route header = %q, want %q", got, assignedID)
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte("no_provider_available")) {
+		t.Fatalf("buyer response crossed a no-provider gap: %s", response.Body.String())
+	}
+}
+
+func assertProviderEpochChanged(t *testing.T, registry *pool.Registry, assignedID, oldKID string) {
+	t.Helper()
+	provider, ok := registry.Resolve("m4-anon", assignedID)
+	if !ok || provider.Tier2Session == nil || provider.Tier2Session.KeyID == "" || provider.Tier2Session.KeyID == oldKID {
+		t.Fatalf("provider epoch after rekey = %#v ok=%v, want a new KID", provider.Tier2Session, ok)
+	}
+}
+
+func assertProviderRemainsReadyDuringRekey(t *testing.T, registry *pool.Registry, assignedID string) {
+	t.Helper()
+	provider, ok := registry.Resolve("m4-anon", assignedID)
+	if !ok || provider.AssignedID != assignedID || provider.State != pool.StateReady {
+		t.Fatalf("sole provider during rekey = %#v ok=%v, want same assigned ready provider", provider, ok)
+	}
 }
 
 type lockedTime struct {

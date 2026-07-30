@@ -1,0 +1,79 @@
+# 07_sustained_throughput.yaml — benchmark scenario, phase B.
+#
+# Goal: characterize steady-state network performance under a constant
+# 2-buyer load for 5 minutes. Establishes the v0.1 baselines for B1
+# (TTFT p50), B2 (streaming TPS p50), B3 (tail ratio p99/p50), B4
+# (error rate /1000), B5 (slot util %).
+#
+# Pacing math (2026-06-29 e2e measurement):
+#   B=2 buyers, wall_p50=5.6s, wall_p95=11.8s, wall_p99=12.4s.
+#   Pearl AccountConcurrency N=3, margin 0.5 → effective cap N_eff=2.5.
+#   The 2026-06-28 retune used wall_p50 → interval=5000ms → mean_active
+#   at p95 spiked to 4.7 → 42% non-2xx (issue #227 production trip).
+#
+# Harness interval semantics: each buyer sleeps interval_ms after a
+# request finishes. The interval is a floor between completions and the
+# next dispatch, not a fixed start-to-start cadence. Use wall_p95 as
+# the input so tail-spike concurrency stays under N_eff even before the
+# floor sleep applies:
+#   start-to-start floor ≈ wall_time + interval_ms
+#   p95 floor = 11.8s + 10s = 21.8s
+#   mean_active at p95 floor: 2 × 11.8 / 21.8 = 1.08 < N_eff ✓
+#   p50 floor = 5.6s + 10s = 15.6s
+#   mean_active at p50 floor: 2 × 5.6 / 15.6 = 0.72
+#
+# requests_per_buyer = 30 gives roughly 30 × (wall_time + 10s) per
+# buyer; duration=360s is intentionally a cap, so the run records as
+# many floor-paced samples as fit instead of enforcing a fixed count.
+#
+# Not a chaos test — providers should stay up the whole window. Any
+# 5xx in the error_taxonomy is real signal worth investigating.
+#
+# Cost estimate (~60 requests × 64 max_tokens): order of $0.03-0.06.
+#
+# See docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md for thresholds + invariants.
+name: sustained_throughput
+description: |
+  2 concurrent buyers, streaming, max_tokens=64, 5-min steady window.
+  Measures TTFT distribution, streaming TPS, wall-time, and provider-side
+  slot utilization. Benchmark scenario — pass/warn/fail via B1-B5.
+
+expected_shape: |
+  Phase B benchmark (descriptive, B-invariants asserted):
+   - ~60 requests over 6 min, all 200 (pacing uses wall_p95, not wall_p50).
+   - 2 providers should both serve roughly half each.
+   - TTFT p50 ≤ 800ms (target), ≤ 2000ms (bare-min).
+   - Streaming TPS p50 ≥ 30 tok/s (target), ≥ 15 tok/s (bare-min).
+   - Error rate ≤ 5/1000 under nominal load.
+   - Slot util ≥ 40% (target), ≥ 15% (bare-min) over the window.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 2
+  stream: true
+  pattern: interval
+  interval_ms: 10000
+  requests_per_buyer: 30
+
+duration: 360s
+request_timeout: 30s
+silent_hang_threshold: 15s
+
+benchmark:
+  enabled: true
+  invariants: [B1, B2, B3, B4, B5]
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 64
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 64

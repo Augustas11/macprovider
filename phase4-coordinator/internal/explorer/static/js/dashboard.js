@@ -112,11 +112,12 @@ function cell(k, v, row) {
 
 function linkFor(k, v, _row) {
   if (!v) return null;
-  if (k === "request_id") return action("sessions",    `/admin/explorer/sessions/${encodeURIComponent(v)}`, v);
+  // SPEC-007 §5.6 v0.5 (#245): coordinator-internal request_id MUST be emitted with the `int_` prefix.
+  if (k === "request_id") return action("sessions",    `/admin/explorer/sessions/int_${encodeURIComponent(v)}`, v);
   if (k === "account_id") return action("buyers",      `/admin/explorer/buyers/${encodeURIComponent(v)}`, v);
   if (k === "provider_id") return action("providers",  `/admin/explorer/providers/${encodeURIComponent(v)}`, v);
   if (k === "settlement_id") return action("settlements", `/admin/explorer/settlements/${encodeURIComponent(v)}`, v);
-  if (k === "link_target" && v.startsWith("session:")) return action("sessions", `/admin/explorer/sessions/${encodeURIComponent(v.slice(8))}`, v);
+  if (k === "link_target" && v.startsWith("session:")) return action("sessions", `/admin/explorer/sessions/int_${encodeURIComponent(v.slice(8))}`, v);
   if (k === "link_target" && v.startsWith("buyer:"))   return action("buyers",   `/admin/explorer/buyers/${encodeURIComponent(v.slice(6))}`, v);
   return null;
 }

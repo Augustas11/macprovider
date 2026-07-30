@@ -1,7 +1,7 @@
 [Unit]
 Description=Mac Provider observability monitor (Phase 7 P2)
 After=network-online.target macprovider-coordinator.service
-Documentation=https://github.com/Augustas11/macprovider/blob/main/specs/PHASE7_HARDENING_PLAN.md
+Documentation=https://github.com/Augustas11/macprovider/blob/main/docs/reports/PHASE7_HARDENING_PLAN.md
 
 [Service]
 Type=oneshot
@@ -11,16 +11,15 @@ Type=oneshot
 User=macprovider
 Group=macprovider
 Nice=10
-# Sandbox (codex PR #73 HIGH-2). De-rooting alone (User=macprovider)
-# does NOT take away write access to /opt/macprovider or
-# /var/lib/macprovider (incl. coordinator.db), because the macprovider
-# user owns those paths so it can read them. ProtectSystem=strict makes
-# the entire filesystem read-only except for what's explicitly listed
-# below, and ReadOnlyPaths=/opt/macprovider closes the last vector that
-# could let monitor.py overwrite the coordinator binary or dist files
-# even by accident. StateDirectory carves out a writable subpath under
-# /var/lib that systemd creates (mode 0700, owned by macprovider) so
-# the monitor can persist its own state without needing /var/lib/macprovider.
+# Sandbox (codex PR #73 HIGH-2). Issue #244 R4+R5 tightened
+# /opt/macprovider to `root:macprovider 0750` with files inside as
+# `root:macprovider 0640/0750` — the macprovider user no longer has
+# write access there. ProtectSystem=strict + ReadOnlyPaths=/opt/macprovider
+# remain as defense in depth (catches any future loosening of the
+# deploy-script ownership posture). /var/lib/macprovider is still
+# macprovider-owned so the daemon can write coordinator.db; the
+# monitor's separate state lives under StateDirectory (mode 0700
+# under /var/lib/macprovider-monitor, also macprovider-owned).
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

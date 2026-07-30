@@ -1,0 +1,226 @@
+# Proof of Weights — Session B implementation runbook
+
+> **⚠️ SUPERSEDED (2026-07-11) by `specs/SPEC-032-proof-of-weights-hello-gate.md`.**
+> SPEC-032 is the normative source. Where this runbook disagrees, SPEC-032 governs —
+> notably the **shipped close-reason names** (`autotune_gate_unavailable`,
+> `autotune_evidence_required`, `autotune_evidence_invalid`, `autotune_model_uncatalogued`,
+> `autotune_model_cap_exceeded`; SPEC-032 FR-HG4) supersede any stale reason strings
+> listed here (e.g. `autotune_evidence_missing`/`_stale`/`_thermal_throttle`), and per
+> FR-PW1 the plaintext-nonce OPoI check is liveness-only, **not** an anti-downgrade or
+> weight-identity proof.
+
+**Track:** Session B (Proof of Weights)  
+**Out of scope:** Session A OPoI explicit WS frames, Session C MALIBU emission, Session D mining policy  
+**Pearl overlay:** `/etc/macprovider/coordinator.pearl-overlays.yaml` (merged with `/opt/macprovider/coordinator.yaml`)
+
+---
+
+## Phase map
+
+| Phase | Deliverable | Config gate | Routing impact |
+|-------|-------------|-------------|----------------|
+| **W1** | Catalog artifact bind inventory | — (audit) | Existing tier2 hash exclude |
+| **W2** | Autotune hello capacity ceiling | `proof_of_weights.require_autotune_hello_gate` | Rejects over-tier hello |
+| **W3** | Model-class canary probes | `pool.model_class_challenges` | Reuses canary degrade/ban |
+| **W4** | Telemetry drift alerts (observe-only) | `proof_of_weights.telemetry_drift.enabled` | **None** — logs only |
+| **W5** | PoM audit endpoint (non-gating) | TBD | **None** — research track |
+
+Inventory: [`docs/research/proof-of-weights-w1-inventory.md`](../../docs/research/proof-of-weights-w1-inventory.md)
+
+---
+
+## §3 — W1 catalog artifact bind
+
+**Status:** Audit complete. Routing exclude + settlement quarantine already enforced.
+
+Optional metric (LOW): `model_hash_mismatch_total` Prometheus counter on coordinator when a provider transitions to `hash_mismatch`.
+
+Operator catalog pin workflow:
+
+1. Edit signed tier-2 catalog + rate-card rows (operator PR).
+2. Deploy coordinator catalog path / SIGHUP reload.
+3. Providers run `macprovider-cli autotune --recommend --apply` so manifest hash matches pinned row.
+4. Hello carries `model_hash`; coordinator verifies via `tier2.VerifyProviderHash`.
+5. Mismatch → no buyer traffic; settlement quarantine if hash diverges at payout.
+
+---
+
+## §4 — W2 autotune hello gate
+
+**Package:** `phase4-coordinator/internal/autotune/` (`catalog.go`, `gate.go`, `evidence.go`)
+
+```yaml
+proof_of_weights:
+  require_autotune_hello_gate: true
+  autotune_evidence_ttl_days: 30
+```
+
+**Requires:** signed autotune-candidates feed + onboarding Postgres (`hardware_verification_jobs` verified evidence).
+
+**Reject reasons:** `autotune_model_cap_exceeded`, `autotune_evidence_missing`, `autotune_evidence_stale`, `autotune_bench_gate_failed`, `autotune_thermal_throttle`.
+
+**Pearl smoke (2026-07-08):**
+
+- Lab provider `mac`: verified 30B bench evidence; `/poolz` shows `max_admitted_model_class: qwen3-coder-30b-a3b-instruct`.
+- Unit gate: 8B evidence allows 8B hello, rejects 30B with `autotune_model_cap_exceeded` (`internal/autotune/gate_test.go`).
+
+---
+
+## §5 — W3 model-class OPoI probes
+
+Extends Session A canaries with per-model banks and optional latency gates. See also [`opoi-challenge-implementation.md`](./opoi-challenge-implementation.md) §2.3.
+
+```yaml
+pool:
+  canary_enabled: true
+  model_class_challenges:
+    qwen3-coder-30b-a3b-instruct:
+      - prompt: "Reply with exactly: CANARY-{nonce}"
+        expected: "CANARY-{nonce}"
+        max_ttft_ms: 7000        # non-streaming round-trip; keep generous
+        min_sustained_tps: 20
+  canary_latency_enforcement: observe   # observe (default) | enforce
+```
+
+Keep `canary_max_tokens` at 32 or higher for this bank. A lower cap can
+truncate a model preamble before the nonce and report an `incomplete` canary
+failure even when the model identity is correct.
+
+**Export:** `model_class_opoi_pass` on `/poolz` when a model-class bank was used.
+
+**Pearl smoke (2026-07-08):**
+
+- Normal gates: `provider canary passed`, `model_class_opoi_pass: true`.
+- Induced-fail smoke exercises the latency SANCTION path only under
+  `canary_latency_enforcement: enforce`: temporarily set `enforce` +
+  `max_ttft_ms: 1` → `provider canary failed` with `canary_fail_reason:
+  ttft_breach`. Under the default `observe`, the same breach logs `provider
+  canary latency breach observed (not enforced)` and does NOT increment the
+  sanction counter. Restore `observe` (and `max_ttft_ms: 7000`) after.
+- **Restart-required:** `pool.canary_latency_enforcement` (and every `pool.*`
+  canary setting) is read at startup. SIGHUP reloads tier2 / billing config
+  only — flipping observe↔enforce needs a coordinator restart.
+
+A full downgrade-cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights. **The nonce gate does NOT detect this** (per SPEC-032 FR-PW1): the challenge exposes the nonce in plaintext, so an 8B model can echo it correctly and pass the always-enforced nonce gate. The nonce gate exercises the sanction path only when a provider returns the *wrong text* (dead / garbled / instruction-not-followed), not when a cheaper model returns the *right* echo. A real downgrade smoke must therefore verify against a weight-bound signal (SPEC-032 FR-PW3), not the nonce echo.
+
+**Cold-start grace (2026-07-09):** a cold 30B load produces ~8s TTFT on
+reconnect, which false-fails a static `max_ttft_ms` (the reason the live tune
+had bumped 3500→7000). The fix is `pool.canary_cold_start_grace_s` (default 0):
+for that many seconds after a provider connects, the wall-time latency gates
+(`max_ttft_ms` AND `min_sustained_tps` — canary probes are non-streaming, so
+both are measured over wall time and cold-contaminated) are waived. The
+nonce-correctness gate is NEVER relaxed, so the liveness / instruction-following
+signal is unchanged. (Note per SPEC-032 FR-PW1: the plaintext-nonce echo is a
+liveness/instruction-following check, NOT an anti-downgrade or weight-integrity
+proof — a cheaper/substituted model can echo the visible nonce.) Staging overlay
+sets `300`, so `max_ttft_ms` can stay at the real production target (3500) instead
+of a padded value.
+
+The grace is sanction-safe (three codex audit rounds hardened it): a graced
+probe is NEUTRAL for the failure counter (it neither counts as a fail nor clears
+enforced-window fails), and it FORCES the next probe to be enforced (the
+`enforce-next` flag is cleared only after a *current, recorded* enforced probe,
+so a reconnect mid-probe cannot re-open grace). A chronically-slow provider
+therefore still fails the interleaved enforced probes and is sanctioned. A waived
+probe logs `provider canary TTFT gate waived during cold-start grace window` with
+`canary_ttft_ms` + `connected_age`. Grace only applies when
+`canary_latency_enforcement: enforce` (see below).
+
+**Latency enforcement mode (2026-07-09):** the wall-time latency gates
+(`max_ttft_ms` / `min_sustained_tps`) are **unreliable** on a non-streaming
+canary. The probe sends `stream:false`, so the coordinator has no real
+first-token boundary: measured `canary_ttft_ms` swings from ~125ms to ~7000ms and
+`canary_sustained_tps` from ~7 to ~27000 for the *same healthy provider*. During
+the W3 rollout, tightening Pearl `max_ttft_ms` to 3500 (matching the *streaming*
+buyer-probe TTFT of ~1200ms) made a warm provider fail the gate 3-in-a-row →
+sanctioned → intermittent buyer 503s. The buyer path is streaming and shows the
+true numbers; the non-streaming canary does not.
+
+`pool.canary_latency_enforcement` (default **`observe`**) governs whether a
+latency breach SANCTIONS:
+
+- **`observe`** (default): a nonce-correct probe that breaches a latency gate is
+  **not** failed; it logs `provider canary latency breach observed (not enforced)`
+  with `canary_latency_reason` + `canary_ttft_ms`/`canary_sustained_tps`. TPS is
+  also tracked by `proof_of_weights.telemetry_drift`. The nonce gate still
+  enforces (the liveness / instruction-following signal is unchanged; it is not an
+  anti-downgrade proof — SPEC-032 FR-PW1).
+- **`enforce`**: latency breaches fail the probe (subject to
+  `canary_cold_start_grace_s`). Use ONLY after validating metric stability; keep
+  `max_ttft_ms >= 7000` to fit the non-streaming round-trip.
+
+The `provider canary failed` log now carries `canary_fail_reason`
+(`nonce_mismatch` | `ttft_breach` | `tps_breach` | `incomplete` | `relay_error`)
+so a prod failure is diagnosable.
+
+---
+
+## §6 — W4 telemetry drift alerts
+
+**Package:** `phase4-coordinator/internal/pow/drift.go`  
+**Event:** `pow_telemetry_drift_detected` (structured warn log, per-signal cooldown)
+
+```yaml
+proof_of_weights:
+  telemetry_drift:
+    enabled: true
+    tps_ratio_threshold: 0.70
+    tps_min_absolute: 5.0
+    hash_alert_on_status: [hash_mismatch, hash_invalid]
+    hash_alert_on_artifact_drift: true
+    opoi_pass_rate_window: 10
+    opoi_pass_rate_threshold: 0.80
+    alert_cooldown_s: 900
+```
+
+**Signals:** `tps`, `hash_status`, `hash_artifact`, `opoi_pass_rate`
+
+**Pearl smoke (2026-07-08):**
+
+- Startup: `proof-of-weights telemetry drift alerts enabled`
+- Live alerts on idle lab provider (expected under low idle TPS + uncatalogued hash vs verified artifact):
+  - `signal: tps` — live ~0.09 vs baseline ~45.9
+  - `signal: hash_artifact` — live manifest prefix ≠ verified artifact sha256
+
+Staging overlay example: `phase4-coordinator/coordinator.pow-w4-staging.yaml`
+
+---
+
+## §7 — W5 PoM audit endpoint (future)
+
+Non-gating audit export for Proof-of-Model research. **Do not gate routing on Mac** per microbench findings. Not started.
+
+---
+
+## Pearl deploy procedure
+
+1. Build: `cd phase4-coordinator && bash scripts/build-linux.sh`
+2. Backup + install binary:
+   ```bash
+   scp -i ~/.ssh/pearl_operator_ed25519 dist/coordinator-linux-amd64 root@159.223.165.194:/tmp/
+   ssh pearl 'cp /opt/macprovider/coordinator /opt/macprovider/coordinator.prev-$(date +%Y%m%d%H%M)
+     install -o root -g macprovider -m 0750 /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator'
+   ```
+3. Merge overlay keys into `/etc/macprovider/coordinator.pearl-overlays.yaml` (preserve W2/W3/W4 blocks).
+4. Validate:
+   ```bash
+   ssh pearl 'set -a; source /etc/macprovider/coordinator.env; set +a
+     /opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml \
+       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml --validate-config'
+   ```
+5. Restart: `systemctl restart macprovider-coordinator`
+6. Verify: `curl -sf https://coordinator.streamvc.live/healthz`, `/poolz` on WS port 8444 with operator bearer.
+
+**Rollback:** restore backup binary; remove overlay keys; restart.
+
+---
+
+## Operator verification checklist
+
+- [x] W2 hello gate enabled; `max_admitted_model_*` populated on connected providers
+- [x] W3 model-class canaries pass under production gates
+- [x] W3 latency gate fails under induced strict TTFT (smoke)
+- [x] W4 drift alerts emit on Pearl (observe-only)
+- [ ] W5 PoM audit endpoint
+- [x] Optional `model_hash_mismatch_total` metric (#497)
+- [ ] `beta/DECISION_CRITERIA.md` Session B closure entry

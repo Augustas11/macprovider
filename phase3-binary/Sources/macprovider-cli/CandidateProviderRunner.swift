@@ -289,6 +289,7 @@ final class CandidateProviderRunner {
         var arguments = [
             "serve",
             "--no-join",
+            "--autotune-candidate",
             "--model", model,
             "--port", String(port),
         ]

@@ -1,11 +1,18 @@
 import Foundation
 
 enum ToolCallParser {
+    static let SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP = 1_048_576
+    static let SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP = 2_097_152
+    static let SPEC018_ARGUMENTS_MAX_JSON_DEPTH = 32
+
     static func parseToolCalls(
         rawOutput: String,
         modelID: String,
         allowedFunctionNames: Set<String>? = nil
     ) -> (cleanedContent: String?, toolCalls: [ToolCall]) {
+        guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nilIfBlank(rawOutput), [])
+        }
         let format = ToolCallFormat.detect(modelID: modelID, rawOutput: rawOutput)
         guard let format else {
             return (nilIfBlank(rawOutput), [])
@@ -13,11 +20,26 @@ enum ToolCallParser {
 
         do {
             let parsed = try parseDelimited(rawOutput, format: format)
-            if let allowedFunctionNames,
-               parsed.toolCalls.contains(where: { !allowedFunctionNames.contains($0.functionName) })
-            {
-                fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
-                return (nilIfBlank(rawOutput), [])
+            if !parsed.toolCalls.isEmpty {
+                if let allowedFunctionNames,
+                   parsed.toolCalls.contains(where: { !allowedFunctionNames.contains($0.functionName) })
+                {
+                    fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
+                    return (nilIfBlank(rawOutput), [])
+                }
+                return parsed
+            }
+            if rawOutput.contains("<function=") {
+                let bare = try parseBareNemotronCalls(rawOutput)
+                if !bare.toolCalls.isEmpty {
+                    if let allowedFunctionNames,
+                       bare.toolCalls.contains(where: { !allowedFunctionNames.contains($0.functionName) })
+                    {
+                        fputs("warning: tool-call output contains undeclared function for \(modelID)\n", stderr)
+                        return (nilIfBlank(rawOutput), [])
+                    }
+                    return bare
+                }
             }
             return parsed
         } catch {
@@ -30,6 +52,7 @@ enum ToolCallParser {
         var searchStart = rawOutput.startIndex
         var cleaned = ""
         var calls: [ToolCall] = []
+        var responseArgumentBytes = 0
 
         while let startRange = rawOutput.range(of: format.startDelimiter, range: searchStart..<rawOutput.endIndex) {
             cleaned += rawOutput[searchStart..<startRange.lowerBound]
@@ -38,7 +61,16 @@ enum ToolCallParser {
                 throw ParseError.missingEndDelimiter
             }
             let body = String(rawOutput[bodyStart..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            calls.append(try parseCall(body, argumentKey: format.argumentKey))
+            let call = try parseCall(body, argumentKey: format.argumentKey)
+            let argumentBytes = call.arguments.utf8.count
+            guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+                throw ParseError.byteCapExceeded
+            }
+            responseArgumentBytes += argumentBytes
+            guard responseArgumentBytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                throw ParseError.responseByteCapExceeded
+            }
+            calls.append(call)
             searchStart = endRange.upperBound
         }
 
@@ -49,11 +81,173 @@ enum ToolCallParser {
         return (nilIfBlank(cleaned), calls)
     }
 
+    private static func parseBareNemotronCalls(_ rawOutput: String) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
+        var searchStart = rawOutput.startIndex
+        var cleaned = ""
+        var calls: [ToolCall] = []
+        var responseArgumentBytes = 0
+
+        while let open = rawOutput.range(of: "<function=", range: searchStart..<rawOutput.endIndex) {
+            cleaned += rawOutput[searchStart..<open.lowerBound]
+            let blockEnd = rawOutput.range(of: "</function>", range: open.lowerBound..<rawOutput.endIndex)?.upperBound ?? rawOutput.endIndex
+            let block = String(rawOutput[open.lowerBound..<blockEnd])
+            let call = try parseNemotronXMLCall(block)
+            let argumentBytes = call.arguments.utf8.count
+            guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+                throw ParseError.byteCapExceeded
+            }
+            responseArgumentBytes += argumentBytes
+            guard responseArgumentBytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                throw ParseError.responseByteCapExceeded
+            }
+            calls.append(call)
+            searchStart = blockEnd
+        }
+
+        cleaned += rawOutput[searchStart..<rawOutput.endIndex]
+        guard !calls.isEmpty else {
+            return (nilIfBlank(rawOutput), [])
+        }
+        return (nilIfBlank(cleaned), calls)
+    }
+
     private static func parseCall(_ rawCall: String, argumentKey: String) throws -> ToolCall {
-        if rawCall.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {
+        let trimmed = rawCall.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("{") {
             return try parseJSONCall(rawCall, argumentKey: argumentKey)
         }
+        if trimmed.contains("<function=") {
+            return try parseNemotronXMLCall(rawCall)
+        }
         return try parsePythonStyleCall(rawCall)
+    }
+
+    private static func parseNemotronXMLCall(_ rawCall: String) throws -> ToolCall {
+        guard let functionName = nemotronFunctionName(in: rawCall) else {
+            throw ParseError.invalidShape
+        }
+        let argumentsObject = try nemotronParameterObject(in: rawCall, includeIncomplete: true)
+        guard JSONSerialization.isValidJSONObject(argumentsObject) else {
+            throw ParseError.invalidArguments
+        }
+        let data = try JSONSerialization.data(withJSONObject: argumentsObject, options: [.sortedKeys, .withoutEscapingSlashes])
+        let arguments = String(decoding: data, as: UTF8.self)
+        try validateNoDuplicateJSONKeys(arguments)
+        return ToolCall(
+            id: "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())",
+            functionName: functionName,
+            arguments: arguments
+        )
+    }
+
+    static func nemotronFunctionName(in raw: String) -> String? {
+        guard let open = raw.range(of: "<function=") else {
+            return nil
+        }
+        let nameStart = open.upperBound
+        guard let close = raw.range(of: ">", range: nameStart..<raw.endIndex) else {
+            return nil
+        }
+        let name = String(raw[nameStart..<close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isPythonIdentifier(name) else {
+            return nil
+        }
+        return name
+    }
+
+    static func nemotronArgumentsJSON(in raw: String, includeIncomplete: Bool) -> String? {
+        guard let object = try? nemotronParameterObject(in: raw, includeIncomplete: includeIncomplete),
+              JSONSerialization.isValidJSONObject(object)
+        else {
+            return nil
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else {
+            return nil
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func nemotronParameterObject(in raw: String, includeIncomplete: Bool) throws -> [String: Any] {
+        var object: [String: Any] = [:]
+        var searchStart = raw.startIndex
+
+        while let paramOpen = raw.range(of: "<parameter=", range: searchStart..<raw.endIndex) {
+            let nameStart = paramOpen.upperBound
+            guard let nameEnd = raw.range(of: ">", range: nameStart..<raw.endIndex) else {
+                throw ParseError.invalidShape
+            }
+            let name = String(raw[nameStart..<nameEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isPythonIdentifier(name) else {
+                throw ParseError.invalidArguments
+            }
+            guard object[name] == nil else {
+                throw ParseError.invalidArguments
+            }
+
+            let valueStart = nameEnd.upperBound
+            let valueEnd = nemotronParameterValueEnd(in: raw, from: valueStart)
+            let hasClosingTag = raw[valueStart..<raw.endIndex].contains("</parameter>")
+                && raw.range(of: "</parameter>", range: valueStart..<valueEnd) != nil
+            let hasSuccessor = raw.range(of: "<parameter=", range: valueStart..<valueEnd) != nil
+                || raw.range(of: "</function>", range: valueStart..<valueEnd) != nil
+            guard includeIncomplete || hasClosingTag || hasSuccessor else {
+                break
+            }
+
+            let rawValue = String(raw[valueStart..<valueEnd])
+            object[name] = try nemotronParameterValue(rawValue)
+
+            if let closeTag = raw.range(of: "</parameter>", range: valueStart..<raw.endIndex),
+               closeTag.lowerBound == valueEnd
+            {
+                searchStart = closeTag.upperBound
+            } else if let nextParam = raw.range(of: "<parameter=", range: valueStart..<raw.endIndex),
+                      nextParam.lowerBound == valueEnd
+            {
+                searchStart = nextParam.lowerBound
+            } else if let closeFunction = raw.range(of: "</function>", range: valueStart..<raw.endIndex),
+                      closeFunction.lowerBound == valueEnd
+            {
+                searchStart = closeFunction.upperBound
+            } else {
+                searchStart = valueEnd
+                break
+            }
+        }
+
+        return object
+    }
+
+    private static func nemotronParameterValueEnd(in raw: String, from valueStart: String.Index) -> String.Index {
+        if let close = raw.range(of: "</parameter>", range: valueStart..<raw.endIndex) {
+            return close.lowerBound
+        }
+        if let next = raw.range(of: "<parameter=", range: valueStart..<raw.endIndex) {
+            return next.lowerBound
+        }
+        if let closeFunction = raw.range(of: "</function>", range: valueStart..<raw.endIndex) {
+            return closeFunction.lowerBound
+        }
+        return raw.endIndex
+    }
+
+    private static func nemotronParameterValue(_ rawValue: String) throws -> Any {
+        var trimmed = rawValue
+        if trimmed.hasPrefix("\n") {
+            trimmed.removeFirst()
+        }
+        if trimmed.hasSuffix("\n") {
+            trimmed.removeLast()
+        }
+        trimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return ""
+        }
+        do {
+            return try parsePythonLiteral(trimmed)
+        } catch {
+            return trimmed
+        }
     }
 
     private static func parseJSONCall(_ rawJSON: String, argumentKey: String) throws -> ToolCall {
@@ -119,7 +313,9 @@ enum ToolCallParser {
             throw ParseError.invalidArguments
         }
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
-        return String(decoding: data, as: UTF8.self)
+        let arguments = String(decoding: data, as: UTF8.self)
+        try validateNoDuplicateJSONKeys(arguments)
+        return arguments
     }
 
     private static func splitPythonArguments(_ rawArguments: String) throws -> [String] {
@@ -264,6 +460,9 @@ enum ToolCallParser {
     }
 
     private static func validateNoDuplicateJSONKeys(_ rawJSON: String) throws {
+        guard rawJSON.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            throw ParseError.invalidArguments
+        }
         var validator = JSONDuplicateKeyValidator(rawJSON)
         try validator.validate()
     }
@@ -278,6 +477,8 @@ enum ToolCallParser {
         case invalidUTF8
         case invalidShape
         case invalidArguments
+        case byteCapExceeded
+        case responseByteCapExceeded
     }
 
     private struct JSONDuplicateKeyValidator {
@@ -291,14 +492,14 @@ enum ToolCallParser {
 
         mutating func validate() throws {
             skipWhitespace()
-            try parseValue()
+            try parseValue(depth: 0)
             skipWhitespace()
             guard index == rawJSON.endIndex else {
                 throw ParseError.invalidArguments
             }
         }
 
-        private mutating func parseValue() throws {
+        private mutating func parseValue(depth: Int) throws {
             skipWhitespace()
             guard index < rawJSON.endIndex else {
                 throw ParseError.invalidArguments
@@ -306,9 +507,9 @@ enum ToolCallParser {
 
             switch rawJSON[index] {
             case "{":
-                try parseObject()
+                try parseObject(depth: depth + 1)
             case "[":
-                try parseArray()
+                try parseArray(depth: depth + 1)
             case "\"":
                 _ = try parseString()
             case "t":
@@ -324,7 +525,10 @@ enum ToolCallParser {
             }
         }
 
-        private mutating func parseObject() throws {
+        private mutating func parseObject(depth: Int) throws {
+            guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else {
+                throw ParseError.invalidArguments
+            }
             advance()
             skipWhitespace()
             var keys = Set<String>()
@@ -346,7 +550,7 @@ enum ToolCallParser {
                 guard consume(":") else {
                     throw ParseError.invalidArguments
                 }
-                try parseValue()
+                try parseValue(depth: depth)
                 skipWhitespace()
                 if consume("}") {
                     return
@@ -357,7 +561,10 @@ enum ToolCallParser {
             }
         }
 
-        private mutating func parseArray() throws {
+        private mutating func parseArray(depth: Int) throws {
+            guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else {
+                throw ParseError.invalidArguments
+            }
             advance()
             skipWhitespace()
 
@@ -366,7 +573,7 @@ enum ToolCallParser {
             }
 
             while true {
-                try parseValue()
+                try parseValue(depth: depth)
                 skipWhitespace()
                 if consume("]") {
                     return
@@ -479,12 +686,14 @@ private enum ToolCallFormat {
         }
     }
 
-    static func detect(modelID: String, rawOutput: String) -> ToolCallFormat? {
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") || rawOutput.contains("<|python_tag|>") {
-            return .llama33
-        }
-        if modelID.localizedCaseInsensitiveContains("qwen2.5") || rawOutput.contains("<tool_call>") {
+    static func detect(modelID: String, rawOutput _: String) -> ToolCallFormat? {
+        if modelID.localizedCaseInsensitiveContains("qwen2.5") ||
+            modelID.localizedCaseInsensitiveContains("qwen3")
+        {
             return .qwen25
+        }
+        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
+            return .llama33
         }
         return nil
     }

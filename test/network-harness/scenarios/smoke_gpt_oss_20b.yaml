@@ -1,0 +1,48 @@
+# smoke_gpt_oss_20b.yaml — SCN-226-01 live-network smoke for gpt-oss-20b.
+# Two streaming requests via api.streamvc.live → coordinator → provider
+# serving mlx-community/gpt-oss-20b-MXFP4-Q8. Measures network-delivered
+# TPS, TTFT, and route_distribution (confirms coordinator routes to the
+# correct provider).
+
+name: smoke_gpt_oss_20b
+description: |
+  Live-network smoke for SCN-226-01. One buyer, two streaming chat
+  completions against mlx-community/gpt-oss-20b-MXFP4-Q8. Confirms
+  coordinator routes gpt-oss-20b requests to a provider that has it
+  warm-loaded, and measures network-delivered metrics.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Both requests should return HTTP 200.
+   - Route should hit a provider with gpt-oss-20b warm-loaded
+     (augustass-macbook-air per current bench setup).
+   - I1 should reconcile cleanly (2 requests on both sides, matching tokens).
+   - No silent hangs, no orphan 5xx.
+   - Network-delivered TPS expected 20-30 tok/s (lower than localhost-direct
+     35 tok/s due to gateway/coord overhead).
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 180s
+request_timeout: 90s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/gpt-oss-20b-MXFP4-Q8
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 128
+  - model: mlx-community/gpt-oss-20b-MXFP4-Q8
+    user: "Describe a unique kind of weather in two sentences."
+    max_tokens: 128

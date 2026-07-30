@@ -1,0 +1,360 @@
+{
+  "$schema": "./production-exceptions.schema.json",
+  "schema_version": "macprovider-production-exceptions-v1",
+  "updated_at": "2026-07-23T23:40:33Z",
+  "updated_by": "fix/609-clear-hash-containment",
+  "environment": "pearl-production",
+  "exceptions": [
+    {
+      "id": "exc-onboarding-autotune-hello-gate",
+      "status": "active",
+      "environment": "pearl-production",
+      "component": "coordinator",
+      "policy_delta": "Pearl may temporarily admit or recover providers while `proof_of_weights.require_autotune_hello_gate` is disabled or relaxed from the strict production expectation that verified in-window hardware/autotune evidence gates admission.",
+      "authority_surface": "Pearl coordinator overlay key `proof_of_weights.require_autotune_hello_gate`; coordinator config struct `ProofOfWeightsConfig.RequireAutotuneHelloGate`.",
+      "reason": "#582 records the 2026-07-13 onboarding deadlock where verified hardware evidence, trust inventory, catalog, and benchmark gates prevented the Air from joining until the hello gate was temporarily disabled.",
+      "owner": "ops/provider-onboarding",
+      "issue": "https://github.com/Augustas11/macprovider/issues/582",
+      "created_at": "2026-07-13T00:00:00Z",
+      "expires_at": null,
+      "expiry_unknown_reason": "Live Pearl overlay still has proof_of_weights.require_autotune_hello_gate=false (verified 2026-07-22T10:38Z). No finite flip deadline until #582 stranger / no-exception onboarding physical proof lands; do not invent an expiry.",
+      "scope": "Pearl production provider onboarding while overlay keeps require_autotune_hello_gate=false; fleet includes known providers mac / augustass-macbook-air / air5 and referral cohort. Must not be read as a global permanent disable outside Pearl production.",
+      "removal_condition": "Pearl admits fresh/restored providers through durable hardware-trust approval and strict hello-gate evidence without global gate disabling.",
+      "rollback_command": "ssh pearl 'sudo grep -A20 \"^proof_of_weights:\" /opt/macprovider/coordinator.yaml; sudo grep -A20 \"^proof_of_weights:\" /etc/macprovider/coordinator.pearl-overlays.yaml'; then restore the reviewed overlay value with `require_autotune_hello_gate: true` through the existing coordinator deploy/restart procedure.",
+      "post_removal_validation": "Confirm `/poolz` and coordinator logs show the provider admitted with verified in-window autotune evidence and no `autotune_evidence_required` bypass or relaxed hello-gate setting.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/582",
+        "specs/SPEC-032-proof-of-weights-hello-gate.md",
+        "phase4-coordinator/internal/config/config.go",
+        "ops/runbooks/pearl-exception-clearance-20260722.md"
+      ],
+      "partial_progress": [
+        "2026-07-22 Pearl read-only: /etc/macprovider/coordinator.pearl-overlays.yaml sets require_autotune_hello_gate: false."
+      ],
+      "still_blocked_for_clearance": [
+        "Flip overlay to require_autotune_hello_gate: true requires reviewed deploy + #582 stranger/fresh onboarding physical PASS without gate bypass."
+      ]
+    },
+    {
+      "id": "exc-cli-identity-signature-exemption",
+      "status": "expired",
+      "environment": "pearl-production",
+      "component": "coordinator",
+      "policy_delta": "Legacy CLI providers may be admitted through `provider_auth_policy.signature_exempt_until` instead of strict challenge-bound durable admission signatures.",
+      "authority_surface": "Postgres table `provider_auth_policy` fields `signature_exempt_until` and `granted_by`; coordinator path `verifyIdentitySignature` generic exemption branch.",
+      "reason": "#582/#585 recovery depended on a time-bounded CLI auth-policy exemption while durable CLI-owned admission identity migration and physical reboot/reconnect evidence remained incomplete.",
+      "owner": "provider-lifecycle/coordinator-auth",
+      "issue": "https://github.com/Augustas11/macprovider/issues/585",
+      "created_at": "2026-07-13T00:00:00Z",
+      "expires_at": "2026-07-20T09:16:08Z",
+      "scope": "Pearl macprovider_stats.provider_auth_policy rows for providers air5, air8gb, augustass-macbook-air, mac, and two app providers; all signature_exempt_until values were already <= now as of 2026-07-22 (latest historical deadline 2026-07-20T09:16:08Z).",
+      "removal_condition": "All production providers reconnect after restart/reboot using durable admission signatures, and `provider_auth_policy` contains no unexpired signature exemption rows.",
+      "rollback_command": "ssh pearl 'sudo -u postgres psql <DB_NAME> -c \"select provider_id, kind, signature_exempt_until, granted_by from provider_auth_policy where signature_exempt_until is not null order by signature_exempt_until;\"' # placeholder DB name only; do not print secrets.",
+      "post_removal_validation": "Coordinator logs show `identityAdmissionSignature`/signature admission, no `provider_auth_policy_exempt_used` events, and both physical Macs buyer-serve without manual DB or Keychain edits.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/582",
+        "https://github.com/Augustas11/macprovider/issues/585",
+        "beta/DECISION_CRITERIA.md Entry 142",
+        "phase4-coordinator/internal/ws/identity_signature.go",
+        "phase4-coordinator/internal/stats/migrations/006_spec_026_identity.up.sql",
+        "ops/runbooks/pearl-exception-clearance-20260722.md#cli-identity-signature-exemption"
+      ],
+      "partial_progress": [
+        "2026-07-22 Pearl: unexpired exemption count=0 before mutation; 6 historical expired rows present.",
+        "2026-07-22 Pearl: UPDATE cleared signature_exempt_until to NULL for those 6 rows; remaining_exempt=0.",
+        "2026-07-22 Pearl: 48h coordinator journal count of provider_auth_policy_exempt_used=0."
+      ],
+      "still_blocked_for_clearance": [
+        "Mark removed only after physical restart/reboot reconnect proves durable admission signatures on both Macs (#585/#613) with no exempt_used events."
+      ]
+    },
+    {
+      "id": "exc-tokenless-recovery",
+      "status": "active",
+      "environment": "pearl-production",
+      "component": "coordinator",
+      "policy_delta": "Recovery may mint or restore provider access without the ordinary restart-safe token path after Malibu/Keychain/import left a launchd provider bearerless.",
+      "authority_surface": "Coordinator bootstrap/recovery token paths and operator recovery commands; no bearer or secret values are stored in this register.",
+      "reason": "#582 records that tokenless recovery was needed to mint a fresh provider token after the running process had stale in-memory token state and the restarted launchd provider had no usable token.",
+      "owner": "provider-lifecycle/coordinator-auth",
+      "issue": "https://github.com/Augustas11/macprovider/issues/582",
+      "created_at": "2026-07-13T00:00:00Z",
+      "expires_at": null,
+      "expiry_unknown_reason": "No active admission_identity_recovery_authorizations on Pearl (count=0 at 2026-07-22). Base coordinator.yaml still has auth.allow_tokenless_provisional_bootstrap=true; treat that config surface as the remaining exception until a reviewed flip + restart-safe custody proof.",
+      "scope": "Pearl legacy provider recovery for affected provider IDs; exact live rows/authorizations require read-only Pearl verification.",
+      "removal_condition": "Provider credential custody is restart-safe and no tokenless/manual recovery path is needed for fresh install, import, restart, logout/login, or reboot.",
+      "rollback_command": "Use only the reviewed recovery command's dry-run/status mode for the specific provider ID; revoke or let expire recovery authorization through the coordinator's documented operator path before enforcing ordinary token custody.",
+      "post_removal_validation": "A restarted launchd provider authenticates without GUI prompts or tokenless recovery; coordinator audit logs show no recovery-token fallback for the validation window.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/582",
+        "https://github.com/Augustas11/macprovider/issues/585",
+        "beta/DECISION_CRITERIA.md Entry 142",
+        "ops/runbooks/pearl-exception-clearance-20260722.md#tokenless-recovery"
+      ],
+      "partial_progress": [
+        "2026-07-22 Pearl: admission_identity_recovery_authorizations=0; recovery audit=0.",
+        "2026-07-22 Pearl: auth.require_provider_tokens=true; allow_tokenless_provisional_bootstrap=true in live coordinator.yaml."
+      ],
+      "still_blocked_for_clearance": [
+        "Reviewed config flip of allow_tokenless_provisional_bootstrap to false plus restart-safe token custody physical proof."
+      ]
+    },
+    {
+      "id": "exc-tier2-hash-mismatch-containment",
+      "status": "removed",
+      "environment": "pearl-production",
+      "component": "tier2",
+      "policy_delta": "Tier-2 model-hash mismatch enforcement remains contained or bridged for legacy/missing `model_hash_algorithm` providers instead of strictly rejecting every untyped or mismatched model hash.",
+      "authority_surface": "Pearl keys `tier2.require_hash_verified` and `tier2.model_hash_legacy_until` / env `MODEL_HASH_LEGACY_UNTIL`; event `model_hash_algorithm_legacy_bridge`.",
+      "reason": "#609 Step E is sealed on Pearl: the reviewed rollback-armed transaction enabled fail-closed Tier-2 hash verification on the already-running v1.8.60 coordinator, both physical providers reported canonical snapshot-manifest identity and remained buyer-serving, three pre- and three post-enforcement journeys passed, and the stop-condition scan was empty.",
+      "owner": "model-catalog identity/provider admission",
+      "issue": "https://github.com/Augustas11/macprovider/issues/609",
+      "created_at": "2026-07-16T00:00:00Z",
+      "expires_at": "2026-07-23T23:40:33Z",
+      "scope": "Pearl production Tier-2 hash enforcement on coordinator v1.8.60. The signed release-bound Tier-2 authority remains singular and every buyer-routable physical provider must remain hash-verified with `macprovider.snapshot-manifest.v1` identity.",
+      "removal_condition": "Observed legacy provider count reaches zero, a physical provider reports canonical `macprovider.snapshot-manifest.v1` identity and buyer-serves, and the Tier-2 bridge field is removed so missing algorithms fail closed.",
+      "rollback_command": "Do not directly edit `tier2.require_hash_verified`, restore a legacy algorithm bridge, or recreate this exception ID. During an armed transaction the reviewed remote watchdog restores enforcement=false automatically. After durable commit, any rollback requires a new reviewed rollback-armed recovery Partial and a new exception ID while preserving the signed release-bound Tier-2 authority.",
+      "post_removal_validation": "2026-07-23 Pearl evidence proves require_hash_verified=true, no algorithm bridge in config or process environment, two of two physical providers reporting `macprovider.snapshot-manifest.v1` with `hash_verified`, three pre- and three post-enforcement buyer-serving journeys, active coordinator/gateway, hard-disabled canary, cleared transaction state, and zero hash/catalog stop-condition journal matches.",
+      "blocks_stable_promotion": false,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/609",
+        "https://github.com/Augustas11/macprovider/issues/608",
+        "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
+        "https://github.com/Augustas11/macprovider/pull/732",
+        "https://github.com/Augustas11/macprovider/pull/733",
+        "beta/DECISION_CRITERIA.md Entry 170",
+        "beta/DECISION_CRITERIA.md Entry 191",
+        "beta/DECISION_CRITERIA.md Entry 192",
+        "phase4-coordinator/dist/coordinator.yaml",
+        "phase4-coordinator/internal/ws/server.go",
+        "scripts/enforce-tier2-hash.sh",
+        "scripts/verify-tier2-live.sh",
+        "specs/SPEC-010-model-catalog.md",
+        "ops/runbooks/pearl-exception-clearance-20260722.md#tier2-hash-mismatch-containment"
+      ]
+    },
+    {
+      "id": "exc-canary-disabled-enable-gate",
+      "status": "active",
+      "environment": "pearl-production",
+      "component": "pearl-canary",
+      "policy_delta": "Production rollout cannot rely on the canary as a stable gate: `canary-buyer.timer` remains disabled while an unexpected reviewed-enable gate file may exist and must be reconciled.",
+      "authority_surface": "systemd units canary-buyer.timer / canary-buyer.service; Pearl overlay pool.canary_enabled; legacy empty enable gates historically at /etc/macprovider-canary-buyer/enabled and /etc/macprovider/canary-buyer.enabled; emergency sentinel /var/lib/macprovider-canary-buyer/DISABLED.",
+      "reason": "#584 records the canary-induced provider degradation incident and a 2026-07-16 checkpoint that the timer is disabled/inactive while an unexpected enable-gate file exists.",
+      "owner": "ops/production-canary",
+      "issue": "https://github.com/Augustas11/macprovider/issues/584",
+      "created_at": "2026-07-13T00:00:00Z",
+      "expires_at": null,
+      "expiry_unknown_reason": "Canary remains intentionally disabled under #584 until physical baselines and approved re-enable. Unexpected empty enable-gate files were removed 2026-07-22; DISABLED sentinel installed. No finite re-enable expiry until #584 evidence passes.",
+      "scope": "Pearl production canary/liveness and rollout-gate use.",
+      "removal_condition": "#584 re-enable gate passes with reviewed physical evidence; the unexpected gate file is either removed while disabled or recreated only after approval.",
+      "rollback_command": "ssh pearl 'sudo systemctl disable --now canary-buyer.timer; sudo systemctl stop canary-buyer.service; sudo rm -f /etc/macprovider-canary-buyer/enabled; sudo install -d -o root -g root -m 0755 /var/lib/macprovider-canary-buyer; sudo touch /var/lib/macprovider-canary-buyer/DISABLED'",
+      "post_removal_validation": "`systemctl is-enabled/is-active` show the approved state, gate-file presence matches the approval record, and canary evidence includes post-probe pool safety with the expected production fleet.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/584",
+        "beta/DECISION_CRITERIA.md Entry 145",
+        "test/e2e/canary-buyer/README.md",
+        "test/e2e/canary-buyer/canary-buyer.timer",
+        "ops/runbooks/pearl-exception-clearance-20260722.md#canary-disabled-enable-gate",
+        "phase4-coordinator/internal/canarycorr/epoch.go",
+        "ops/runbooks/584-emergency-disable-drill.md",
+        "ops/runbooks/584-physical-baseline-matrix.md",
+        "audits/2026-07-23/FR-CAN23-CORRELATION-EPOCH-DESIGN.md",
+        "phase4-coordinator/internal/ws/canary_correlation.go"
+      ],
+      "partial_progress": [
+        "2026-07-22 Pearl: pool.canary_enabled=false; canary-buyer.timer disabled/inactive.",
+        "2026-07-22 Pearl: removed empty /etc/macprovider-canary-buyer/enabled and /etc/macprovider/canary-buyer.enabled; installed /var/lib/macprovider-canary-buyer/DISABLED.",
+        "Partial #584 hermetically proves the scheduled liveness/explicit qualification split, hard request/token/time budgets, adaptive abort and recovery-soak invariants, fail-closed qualification baselines, no automatic retry/load amplification, and the FR-CAN22 sole-provider sanction floor.",
+        "2026-07-23 Partial: FR-CAN23 pure correlation-epoch package (phase4-coordinator/internal/canarycorr) + hermetic Sybil-safety tests; ops papers ops/runbooks/584-emergency-disable-drill.md and 584-physical-baseline-matrix.md. Not wired into live canary dispatch; Pearl timer/enable gates untouched; pool.canary_enabled remains false.",
+        "2026-07-23 Partial: FR-CAN23 live wiring into ws canary path (canary_correlation.go + LastBuyerSuccessAt). Canary remains disabled; no timer/enable-gate/pool.canary_enabled change. #584 still open for physical baselines, emergency-disable drill, go/no-go, timer flip."
+      ],
+      "still_blocked_for_clearance": [
+        "Approved per-model/per-tier physical baselines and isolated cold/warm, thermal, memory-pressure, AC/battery, sustained-load, and fault-injection qualification evidence on M1 8 GB and higher-memory M-series providers.",
+        "A normal-operating-day liveness cadence with stable heartbeats, no disconnect/restart/drain, and the expected Ready pool after every post-probe soak.",
+        "A Pearl emergency-disable drill plus independent signed go/no-go approval for a later timer flip; until then keep the timer disabled, both enable gates absent, DISABLED present, and pool.canary_enabled=false."
+      ]
+    },
+    {
+      "id": "exc-catalog-compatibility-bridges",
+      "status": "removed",
+      "environment": "pearl-production",
+      "component": "catalog",
+      "policy_delta": "Model/catalog authority may temporarily tolerate current-plus-previous or bridge compatibility instead of one strict signed release-bound model identity authority consumed uniformly by autotune and Tier-2.",
+      "authority_surface": "Autotune current/previous catalog activation, `tier2.catalog_path`, `tier2.model_hash_legacy_until`, and catalog admission compatibility surfaces.",
+      "reason": "#608 Step D is sealed on Pearl: the signed Tier-2 feed is a member of the active release ledger, the coordinator consumes only the release-bound Tier-2 path, the independent legacy file is absent, three exact physical-provider buyer-serving journeys passed, and the post-cutover stop-condition scan was empty.",
+      "owner": "catalog release/provider upgrade",
+      "issue": "https://github.com/Augustas11/macprovider/issues/608",
+      "created_at": "2026-07-16T00:00:00Z",
+      "expires_at": "2026-07-23T20:05:45Z",
+      "scope": "Pearl catalog/admission consumers across coordinator, provider CLI, and Tier-2 during migration.",
+      "removal_condition": "Autotune and Tier-2 consume the same signed model identity rows from one release-bound file/authority, rollback restores one complete release (including Tier-2 bytes in the ledger/compatibility-set), and production emits no model-hash uncatalogued events for active signed release rows.",
+      "rollback_command": "Use the catalog-release/provider-upgrade runbook to restore one complete signed catalog release set; do not edit Tier-2 identity separately from the network release. Before upload, `catalog-release.py check-tier2-binding` must pass against the autotune release being activated. `activate-tier2-observe.sh --apply` is retired for all live hosts; production Tier-2 mutation requires `deploy-pearl-vps.sh`.",
+      "post_removal_validation": "2026-07-23 Pearl evidence proves the active release pointer and Tier-2 digest, release-bound coordinator path, absent legacy file, CONFLICT=0 and AGREE=9, three immutable physical-provider buyer-serving cycles, active coordinator/gateway, hard-disabled buyer canary, and zero catalog stop-condition journal matches since cutover.",
+      "blocks_stable_promotion": false,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/608",
+        "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5062822871",
+        "https://github.com/Augustas11/macprovider/issues/609",
+        "https://github.com/Augustas11/macprovider/pull/721",
+        "https://github.com/Augustas11/macprovider/pull/727",
+        "https://github.com/Augustas11/macprovider/pull/730",
+        "ops/runbooks/catalog-release-provider-upgrade.md",
+        "beta/DECISION_CRITERIA.md Entry 170",
+        "specs/CONFORMANCE.json",
+        "phase4-coordinator/internal/catalogbind/",
+        "phase3-binary/catalog/autotune/tier2-identity-binding.json",
+        "ops/runbooks/pearl-exception-clearance-20260722.md#catalog-compatibility-bridges"
+      ]
+    },
+    {
+      "id": "exc-v1840-coordinator-admission-bridge",
+      "status": "active",
+      "environment": "pearl-production",
+      "component": "coordinator",
+      "policy_delta": "Metadata-free legacy providers may be kept buyer-serving under `catalog_admission_mode: legacy_bridge` while the bridge-capable coordinator and v1.8.40 recovery lineage complete, instead of enforcing strict provider catalog admission for every session.",
+      "authority_surface": "Coordinator keys `autotune.enforce_provider_admission=false` and `autotune.provider_admission_bridge_deadline`; pool field `catalog_admission_mode=legacy_bridge`; compatibility-set `admission_rollout.mode=bridge_required`.",
+      "reason": "#585 recovery lineage used a bridge-capable coordinator to preserve healthy v1.8.30 providers while recovering the v1.8.40 compatibility set. #615 lists the v1.8.40 coordinator admission bridge as a current production exception inventory item.",
+      "owner": "release security/provider lifecycle",
+      "issue": "https://github.com/Augustas11/macprovider/issues/585",
+      "created_at": "2026-07-15T00:00:00Z",
+      "expires_at": null,
+      "expiry_unknown_reason": "Live Pearl /opt/macprovider/coordinator.yaml autotune block has catalog paths/public keys only; no enforce_provider_admission / provider_admission_bridge_deadline keys present in the deployed file. Coordinator binary remains v1.8.49 / latest_binary_version=1.8.49. Operator poolz legacy_bridge count could not be scraped in this lane without a non-canary operator token; keep active until pool evidence proves zero legacy_bridge.",
+      "scope": "Known v1.8.40 recovery cohort and any remaining metadata-free Pearl providers; must not widen to arbitrary providers.",
+      "removal_condition": "Every production provider emits direct final-version catalog/admission telemetry and buyer-serves without `legacy_bridge`; strict provider admission is re-enabled.",
+      "rollback_command": "ssh pearl 'sudo grep -A20 \"^autotune:\" /opt/macprovider/coordinator.yaml; sudo grep -A20 \"^autotune:\" /etc/macprovider/coordinator.pearl-overlays.yaml; curl -fsS --header \"Authorization: Bearer <OPERATOR_TOKEN>\" http://127.0.0.1:8444/poolz' # placeholders only; then restore strict admission through reviewed deploy.",
+      "post_removal_validation": "`/poolz` reports zero `legacy_bridge` sessions, `autotune.enforce_provider_admission` is true, and physical upgrade/reboot evidence under #613/#585 remains buyer-serving.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/585",
+        "beta/DECISION_CRITERIA.md Entry 147",
+        "beta/DECISION_CRITERIA.md Entry 160",
+        "beta/DECISION_CRITERIA.md Entry 162",
+        "phase4-coordinator/internal/ws/server.go",
+        "phase3-binary/Sources/macprovider-cli/CompatibilitySetManifest.swift",
+        "ops/runbooks/pearl-exception-clearance-20260722.md#v1840-coordinator-admission-bridge"
+      ],
+      "partial_progress": [
+        "2026-07-22 Pearl: deployed autotune YAML lacks enforce_provider_admission / bridge_deadline keys.",
+        "2026-07-22 Pearl: coordinator binary reports v1.8.49; advertised latest_binary_version=1.8.49."
+      ],
+      "still_blocked_for_clearance": [
+        "Authenticated /poolz legacy_bridge count == 0 and reviewed strict admission re-enable."
+      ]
+    },
+    {
+      "id": "exc-v1848-first-hop-update-bridge",
+      "status": "planned",
+      "environment": "pearl-production",
+      "component": "coordinator",
+      "policy_delta": "Exact public pre-fix compatibility set `Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8` may be listed in `coordinator.compatibility_set.first_hop_bridge_ids` so rejected 1.8.48 providers can open an update-only session, receive `recommended_compatibility_set_id=target_id`, and complete ordinary `macprovider-cli update`. Bridge-only sessions use `catalog_admission_mode=update_bridge` and are never buyer-routable.",
+      "authority_surface": "Pearl overlay `coordinator.compatibility_set.first_hop_bridge_ids` plus `target_id` / `accepted_ids` / `coordinator_advertised_version.latest_binary_version` alignment; runtime `catalog_admission_mode=update_bridge`.",
+      "reason": "#610 remains open because public 1.8.48 cannot use #631 signed discovery; the first hop was proven only against an isolated acceptance coordinator. Production needs this temporary server bridge (or the install.sh fallback) before the ordinary user update journey is complete.",
+      "owner": "provider lifecycle/release recovery",
+      "issue": "https://github.com/Augustas11/macprovider/issues/610",
+      "created_at": "2026-07-21T00:00:00Z",
+      "expires_at": null,
+      "expiry_unknown_reason": "Pending Pearl enablement and physical first-hop evidence; activate with a finite bridge window once the overlay is live.",
+      "scope": "Exact public v1.8.48 set only; must not overlap accepted_ids or equal target_id; must not widen arbitrary unaccepted sets.",
+      "removal_condition": "Zero production providers remain on the v1.8.48 set, physical #610 journeys pass, and `first_hop_bridge_ids` is emptied through reviewed deploy.",
+      "rollback_command": "ssh pearl 'sudo grep -A30 \"compatibility_set:\" /opt/macprovider/coordinator.yaml; sudo grep -A30 \"compatibility_set:\" /etc/macprovider/coordinator.pearl-overlays.yaml' # read-only; remove first_hop_bridge_ids via reviewed overlay deploy/restart.",
+      "post_removal_validation": "No `compatibility_set_first_hop_bridge` events, no `update_bridge` pool rows, and provider recovery uses signed discovery on CLI \u22651.8.49 without the bridge list.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "https://github.com/Augustas11/macprovider/issues/610",
+        "ops/runbooks/entry-610-first-hop-recovery.md",
+        "beta/DECISION_CRITERIA.md Entry 176",
+        "phase4-coordinator/internal/config/config.go",
+        "phase4-coordinator/internal/ws/server.go"
+      ]
+    },
+    {
+      "id": "exc-entry172-air-referral-activation",
+      "status": "expired",
+      "environment": "pearl-production",
+      "component": "edge",
+      "policy_delta": "Entry 172 allowed one controlled private-prebeta referral activation while the Air exception was not #613-complete; the first fresh referred-provider invite-earn journey has now PASSed, so the exception expiry condition is met while Pearl referral flags still need operator roll-off cleanup.",
+      "authority_surface": "Pearl referral overlay keys `referrals.require_for_registration`, `referrals.enable_public_validation`, `referrals.enable_join_links`, `referrals.enable_social_invite_bonus`, `referrals.campaign`, `referrals.current_key_id`, and Vercel product-origin `/j` landing page.",
+      "reason": "Decision Entry 172 and SPEC-034 \u00a78 define a one-time limited Air / fragment-link activation exception for private-prebeta referrals, with strict order, rollback, and expiry on terminal success/failure of the first fresh referred-provider journey.",
+      "owner": "referral activation/security",
+      "issue": "https://github.com/Augustas11/macprovider/issues/615",
+      "created_at": "2026-07-19T00:00:00Z",
+      "expires_at": "2026-07-26T23:59:59Z",
+      "scope": "Entry 172 private-prebeta referral campaign only; Air5 fresh referred journey PASS for `mp-90542c0bcf7c4d303795cd10bda3830d` closed invite-earn under campaign `prebeta_20260719` with issuer `tn6skbiu4cfeiffs`. No broad stable release and no claim of complete #613 two-Mac conformance.",
+      "removal_condition": "Terminal success of the first fresh referred-provider journey is recorded; mark `removed` only after Pearl referral flags are rolled back to recorded prior/off values and `post_removal_validation` passes. Keeping or re-enabling flags afterward requires complete #613 evidence or a new reviewed decision.",
+      "rollback_command": "Restore the prior recorded Pearl referral flag values for `require_for_registration`, `enable_public_validation`, `enable_join_links`, and `enable_social_invite_bonus`; do not print HMAC secrets or referral codes.",
+      "post_removal_validation": "Pearl flags match the recorded prior/off values, Vercel `/j` remains fragment-only/static, coordinator validation rejects disallowed origins, and no server logs contain invite code or challenge material.",
+      "blocks_stable_promotion": true,
+      "evidence": [
+        "beta/DECISION_CRITERIA.md Entry 172",
+        "specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance",
+        "ops/runbooks/entry-172-referral-activation.md",
+        "ops/runbooks/entry-172-activation-evidence-20260721.md",
+        "ops/runbooks/entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21",
+        "https://github.com/Augustas11/macprovider/issues/615"
+      ]
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "oq-live-signature-exemptions",
+      "question": "Which `provider_auth_policy.signature_exempt_until` rows are currently unexpired on Pearl, and what provider IDs/scopes do they cover?",
+      "owner": "provider-lifecycle/coordinator-auth",
+      "status": "answered",
+      "evidence_target": "2026-07-22 Pearl: 0 unexpired signature_exempt_until rows (6 historical expired). Cleared to NULL; exc-cli-identity-signature-exemption marked expired expires_at=2026-07-20T09:16:08Z. Evidence: ops/runbooks/pearl-exception-clearance-20260722.md#cli-identity-signature-exemption"
+    },
+    {
+      "id": "oq-live-hello-gate",
+      "question": "Is Pearl currently running with `proof_of_weights.require_autotune_hello_gate` true or false, and is any temporary override documented outside git?",
+      "owner": "ops/provider-onboarding",
+      "status": "answered",
+      "evidence_target": "2026-07-22 Pearl overlay proof_of_weights.require_autotune_hello_gate=false. Exception remains active. Evidence: ops/runbooks/pearl-exception-clearance-20260722.md#onboarding-autotune-hello-gate"
+    },
+    {
+      "id": "oq-tokenless-recovery-state",
+      "question": "Are any tokenless recovery authorizations, recovery tokens, or manual recovery windows still valid on Pearl?",
+      "owner": "provider-lifecycle/coordinator-auth",
+      "status": "answered",
+      "evidence_target": "2026-07-22 Pearl: admission_identity_recovery_authorizations=0. Remaining surface is auth.allow_tokenless_provisional_bootstrap=true in live coordinator.yaml. Evidence: ops/runbooks/pearl-exception-clearance-20260722.md#tokenless-recovery"
+    },
+    {
+      "id": "oq-tier2-hash-bridge-deadline",
+      "question": "What is the live `MODEL_HASH_LEGACY_UNTIL` / `tier2.model_hash_legacy_until` deadline, and how many legacy bridge providers remain?",
+      "owner": "model-catalog identity/provider admission",
+      "status": "answered",
+      "evidence_target": "2026-07-22 Pearl: MODEL_HASH_LEGACY_UNTIL absent; containment is tier2.require_hash_verified=false on coordinator v1.8.49. Settlement n=1109 all hash_verified; 7d mismatches=0; Qwen hashes match canonical 10adb5da\u2026. Do not flip enforcement yet. Evidence: ops/runbooks/pearl-exception-clearance-20260722.md#tier2-hash-mismatch-containment"
+    },
+    {
+      "id": "oq-canary-gate-file",
+      "question": "Does `/etc/macprovider-canary-buyer/enabled` currently exist while `canary-buyer.timer` remains disabled, and has the stale gate been removed or approved?",
+      "owner": "ops/production-canary",
+      "status": "answered",
+      "evidence_target": "2026-07-22 Pearl: canary-buyer.timer disabled/inactive; empty enable gates at /etc/macprovider-canary-buyer/enabled and /etc/macprovider/canary-buyer.enabled were removed; /var/lib/macprovider-canary-buyer/DISABLED installed. Canary stays disabled under #584. Evidence: ops/runbooks/pearl-exception-clearance-20260722.md#canary-disabled-enable-gate"
+    },
+    {
+      "id": "oq-catalog-admission-bridge",
+      "question": "What are the live values of `autotune.enforce_provider_admission`, `autotune.provider_admission_bridge_deadline`, current/previous catalog pointers, and `/poolz` `legacy_bridge` count?",
+      "owner": "catalog release/provider upgrade",
+      "status": "answered",
+      "evidence_target": "2026-07-22 Pearl: dual catalogs still on disk; Qwen hash agrees; deployed autotune YAML lacks enforce_provider_admission/bridge_deadline keys; coordinator v1.8.49. Authenticated legacy_bridge pool count still outstanding. Evidence: ops/runbooks/pearl-exception-clearance-20260722.md"
+    },
+    {
+      "id": "oq-entry172-live-flags",
+      "question": "If Entry 172 activation has started, what exact prior/live referral flag values and campaign metadata were recorded without exposing HMAC secrets or referral codes?",
+      "owner": "referral activation/security",
+      "status": "answered",
+      "evidence_target": "`ops/runbooks/entry-172-activation-evidence-20260721.md` records redacted PASS LIVE activation plus Air5 fresh invite-earn PASS; `exc-entry172-air-referral-activation` is `expired` on terminal journey success and stays `expired` until flag roll-off + `post_removal_validation` allow `removed`."
+    }
+  ]
+}

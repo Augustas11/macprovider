@@ -5,6 +5,22 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelRuntimeSwapTests: XCTestCase {
+    func testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence() async {
+        let hash = String(repeating: "a", count: 64)
+        let legacy = makeRuntime(modelID: "model-a", modelHash: hash, warmSwapEnabled: false)
+        let canonical = makeRuntime(
+            modelID: "model-a",
+            modelHash: hash,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            warmSwapEnabled: false
+        )
+
+        let legacySnapshot = await legacy.currentSnapshot()
+        let canonicalSnapshot = await canonical.currentSnapshot()
+        XCTAssertNil(legacySnapshot.modelHashAlgorithm)
+        XCTAssertEqual(canonicalSnapshot.modelHashAlgorithm, ModelArtifactIdentity.snapshotManifestV1)
+    }
+
     func testDisabledModeRejectsSwap() async throws {
         let runtime = try await ModelRuntime(modelID: nil, warmSwapEnabled: false)
 
@@ -31,6 +47,46 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(snapshot.modelHash, "new-hash")
     }
 
+    func testProviderStatusIdentityFollowsSuccessfulWarmSwap() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+
+        let runtimeSnapshot = await runtime.currentSnapshot()
+        let statusSnapshot = await providerStatus.snapshot()
+        XCTAssertEqual(runtimeSnapshot.modelID, "new-model")
+        XCTAssertEqual(statusSnapshot.modelID, "new-model")
+        XCTAssertEqual(statusSnapshot.modelHash, "new-hash")
+        XCTAssertFalse(statusSnapshot.specDecodeEnabled)
+        XCTAssertEqual(statusSnapshot.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(statusSnapshot.specDecodeAcceptedTokensSinceLast, 0)
+    }
+
+    func testProviderStatusBecomesLoadedAfterSuccessfulWarmSwapFromIdle() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: nil,
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 1024, maxConcurrencyOverride: 1)
+        )
+        let runtime = makeRuntime(modelID: nil, warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+
+        let statusSnapshot = await providerStatus.snapshot()
+        XCTAssertEqual(statusSnapshot.status, .ready)
+        XCTAssertEqual(statusSnapshot.modelID, "new-model")
+        XCTAssertTrue(statusSnapshot.modelLoaded)
+    }
+
     func testInFlightInferenceUsesOldSnapshot() async throws {
         let probe = InFlightProbe()
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
@@ -54,15 +110,58 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
 
         let swapTask = try await runtime.beginSwap(targetModelID: "new-model")
+        await probe.allowFinish()
         try await swapTask.value
         let postSwap = await runtime.currentSnapshot()
-        await probe.allowFinish()
         let completion = try await completionTask.value
         let startedModelID = await probe.startedModelID
 
         XCTAssertEqual(startedModelID, "old-model")
         XCTAssertEqual(postSwap.modelID, "new-model")
         XCTAssertEqual(completion.content, "old-model")
+    }
+
+    func testInFlightInferenceUsesOldSnapshotAndDraftPair() async throws {
+        let probe = InFlightProbe()
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            draftModelID: "old-draft",
+            warmSwapEnabled: true,
+            loader: { target in
+                try await Task.sleep(nanoseconds: 50_000_000)
+                return (target, "new-hash")
+            },
+            completion: { snapshot, _ in
+                await probe.markStarted(modelID: snapshot.modelID, draftModelID: snapshot.draftModelID)
+                while await !probe.canFinish {
+                    try await Task.sleep(nanoseconds: 5_000_000)
+                }
+                return CompletionResult(content: "\(snapshot.modelID ?? "<nil>"):\(snapshot.draftModelID ?? "<nil>")", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+
+        let request = try makeRequest(model: "old-model")
+        let completionTask = Task {
+            try await runtime.complete(request)
+        }
+        try await waitUntil {
+            await probe.startedModelID != nil
+        }
+        let swapTask = try await runtime.beginSwap(targetModelID: "new-model")
+        try await swapTask.value
+        let postSwap = await runtime.currentSnapshot()
+        await probe.allowFinish()
+        let completion = try await completionTask.value
+        let startedModelID = await probe.startedModelID
+        let startedDraftModelID = await probe.startedDraftModelID
+
+        XCTAssertEqual(startedModelID, "old-model")
+        XCTAssertEqual(startedDraftModelID, "old-draft")
+        XCTAssertEqual(postSwap.modelID, "new-model")
+        XCTAssertEqual(postSwap.draftModelID, "old-draft")
+        XCTAssertEqual(postSwap.draftTargetModelID, "new-model")
+        XCTAssertEqual(completion.content, "old-model:old-draft")
     }
 
     func testLoadFailureRollsBack() async throws {
@@ -333,24 +432,101 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
     }
 
-    func testHandleAcquiredInLoadingStateFails() async throws {
-        let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
-            try await Task.sleep(nanoseconds: 100_000_000)
-            return (target, "new-hash")
-        }
+    func testHandleAcquiredInLoadingStateUsesOldTargetWithoutDraft() async throws {
+        let speculativeCalls = LockedCounter()
+        let fallbackCalls = LockedCounter()
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            draftModelID: "old-draft",
+            warmSwapEnabled: true,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in
+                try await Task.sleep(nanoseconds: target == "new-model" ? 100_000_000 : 0)
+                return (target, "new-hash")
+            },
+            testCompletion: { snapshot, _ in
+                fallbackCalls.increment()
+                return CompletionResult(content: "\(snapshot.modelID ?? "<nil>"):\(snapshot.draftModelID ?? "<nil>")", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            },
+            testSpeculativeCompletion: { _, _ in
+                speculativeCalls.increment()
+                return CompletionResult(content: "speculative", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
         let swapTask = try await runtime.beginSwap(targetModelID: "new-model")
         let loadingSnapshot = await runtime.currentSnapshot()
         XCTAssertEqual(loadingSnapshot.state, .loading)
 
+        let request = try makeRequest(model: "old-model")
+        let handle = try await runtime.acquireRequestHandle(request)
         do {
-            _ = try await runtime.acquireRequestHandle(try makeRequest(model: "old-model"))
-            XCTFail("Expected provider_loading")
-        } catch let error as APIError {
-            XCTAssertEqual(error.status, 503)
-            XCTAssertEqual(error.code, "provider_loading")
+            let completion = try await runtime.stream(request, with: handle) { _ in }
+            await runtime.unregisterInFlight(handle.registrationID)
+            XCTAssertEqual(completion.content, "old-model:<nil>")
+        } catch {
+            await runtime.unregisterInFlight(handle.registrationID)
+            throw error
         }
+        XCTAssertEqual(fallbackCalls.value, 1)
+        XCTAssertEqual(speculativeCalls.value, 0)
 
         try await swapTask.value
+    }
+
+    func testDraftLoadFailureDuringTargetSwapDoesNotRollBackTarget() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            draftModelID: "failing-draft",
+            warmSwapEnabled: true,
+            loader: { target in
+                if target == "failing-draft" {
+                    throw TestError.loadFailed
+                }
+                return (target, "new-hash")
+            }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+        let runtimeSnapshot = await runtime.currentSnapshot()
+        let statusSnapshot = await providerStatus.snapshot()
+
+        XCTAssertEqual(runtimeSnapshot.state, .ready)
+        XCTAssertEqual(runtimeSnapshot.modelID, "new-model")
+        XCTAssertEqual(runtimeSnapshot.modelHash, "new-hash")
+        XCTAssertNil(runtimeSnapshot.draftModelID)
+        XCTAssertNil(runtimeSnapshot.draftTargetModelID)
+        XCTAssertFalse(statusSnapshot.specDecodeEnabled)
+        XCTAssertNil(statusSnapshot.specDecodeDraftModelID)
+        XCTAssertNil(statusSnapshot.specDecodeNumDraftTokens)
+    }
+
+    func testSuccessfulTargetSwapEnablesVerifiedDraftForNewTarget() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            draftModelID: "mlx-community/configured-draft",
+            warmSwapEnabled: true,
+            loader: { target in (target, target == "mlx-community/configured-draft" ? "draft-hash" : "new-hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+        let runtimeSnapshot = await runtime.currentSnapshot()
+        let statusSnapshot = await providerStatus.snapshot()
+
+        XCTAssertEqual(runtimeSnapshot.modelID, "new-model")
+        XCTAssertEqual(runtimeSnapshot.draftModelID, "mlx-community/configured-draft")
+        XCTAssertEqual(runtimeSnapshot.draftTargetModelID, "new-model")
+        XCTAssertTrue(statusSnapshot.specDecodeEnabled)
+        XCTAssertEqual(statusSnapshot.specDecodeDraftModelID, "mlx-community/configured-draft")
+        XCTAssertEqual(statusSnapshot.specDecodeNumDraftTokens, 3)
     }
 
     func testHandleDrainCancellationStillFiresEvenIfStateAlreadyChanged() async throws {
@@ -466,19 +642,25 @@ final class ModelRuntimeSwapTests: XCTestCase {
     private func makeRuntime(
         modelID: String?,
         modelHash: String? = nil,
+        modelHashAlgorithm: String? = nil,
+        draftModelID: String? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         loader: @escaping @Sendable (String) async throws -> (String, String?) = { target in (target, nil) },
-        completion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
+        completion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
+        speculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) -> ModelRuntime {
         ModelRuntime(
             modelID: modelID,
             modelHash: modelHash,
+            modelHashAlgorithm: modelHashAlgorithm,
+            draftModelID: draftModelID,
             warmSwapEnabled: warmSwapEnabled,
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
             loader: { _ in throw TestError.unexpectedContainerLoader },
             testLoader: loader,
-            testCompletion: completion
+            testCompletion: completion,
+            testSpeculativeCompletion: speculativeCompletion
         )
     }
 
@@ -491,6 +673,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
                     "content": "hello",
                 ]
             ],
+            "temperature": 0,
+            "top_p": 1.0,
         ]
         let data = try JSONSerialization.data(withJSONObject: body)
         return try ChatCompletionRequest.parse(data: data)
@@ -508,13 +692,16 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
 private actor InFlightProbe {
     private var _startedModelID: String?
+    private var _startedDraftModelID: String?
     private var _canFinish = false
 
     var startedModelID: String? { _startedModelID }
+    var startedDraftModelID: String? { _startedDraftModelID }
     var canFinish: Bool { _canFinish }
 
-    func markStarted(modelID: String?) {
+    func markStarted(modelID: String?, draftModelID: String? = nil) {
         _startedModelID = modelID
+        _startedDraftModelID = draftModelID
     }
 
     func allowFinish() {
@@ -525,6 +712,23 @@ private actor InFlightProbe {
 private enum TestError: Error {
     case unexpectedContainerLoader
     case loadFailed
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
 }
 
 private func waitUntil(

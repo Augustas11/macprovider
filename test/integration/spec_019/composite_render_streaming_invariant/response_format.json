@@ -1,0 +1,23 @@
+{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "person_tool_result",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "age": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "age"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

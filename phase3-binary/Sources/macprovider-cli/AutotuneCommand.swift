@@ -4,9 +4,12 @@ import Foundation
 import MacProviderCore
 
 struct AutotuneCommand: AsyncParsableCommand {
+    static let spec023RecommendationProbeContext = 4_000
+
     static let configuration = CommandConfiguration(
         commandName: "autotune",
-        abstract: "Find the biggest feasible model for this Mac and recommend serve knobs."
+        abstract: "Find the biggest feasible model for this Mac and recommend serve knobs.",
+        subcommands: [AutotuneRecommendSimulateCommand.self, AutotuneDumpBakedSnapshotCommand.self]
     )
 
     @Option(help: "Target context in tokens.")
@@ -36,8 +39,16 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Option(help: "Stage 2 replicates per knob cell.")
     var stage2Replicates = 3
 
-    @Option(name: .customLong("gate-ttft-ms"), help: "Maximum p95 TTFT in milliseconds for feasibility.")
-    var gateTTFTMS = 60_000
+    /// Path-dependent default (#742 / AC-3):
+    /// - classic Stage 1/2 (SPEC-013): omitted → 60_000 ms
+    /// - paid `--recommend` (SPEC-023): omitted → disabled (0); no 60s default
+    /// Explicit `0` disables the ceiling on either path. Buyer-facing paid
+    /// selection has a separate post-measurement ceiling below.
+    @Option(name: .customLong("gate-ttft-ms"), help: "Maximum p95 TTFT in milliseconds for Stage 1/2 feasibility. 0 disables the ceiling. Classic autotune defaults to 60000 when omitted; --recommend has no TTFT default.")
+    var gateTTFTMS: Int?
+
+    @Option(name: .customLong("buyer-ttft-ceiling-ms"), help: "With --recommend, maximum measured p95 TTFT in milliseconds allowed for paid recommendation selection. 0 disables the paid selection ceiling.")
+    var buyerTTFTCeilingMS = 0
 
     @Option(help: "Relative throughput tie band for TTFT tiebreak.")
     var tpsTieEpsilon = 0.02
@@ -62,6 +73,33 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     @Flag(name: .customLong("json"), help: "Emit recommendation as JSON.")
     var emitJSON = false
+
+    @Flag(help: "Recommend the best paid-yield model for this Mac from the signed/static market inputs.")
+    var recommend = false
+
+    @Flag(name: .customLong("submit-hardware-evidence"), inversion: .prefixedNo, help: "With --recommend, submit local autotune hardware evidence for stats verification when provider credentials are configured.")
+    var submitHardwareEvidence = true
+
+    @Flag(name: .customLong("require-hardware-evidence"), help: "With --recommend, fail before applying configuration when hardware evidence cannot be submitted.")
+    var requireHardwareEvidence = false
+
+    @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
+    var freshnessCheck = false
+
+    @Flag(
+        name: .customLong("recover-hardware-admission"),
+        help: "With --recommend, run corrective stranger recovery: drain the running provider, recommend/apply with required evidence submission, and restore the provider. Pending-trust resubmit uses --freshness-check --require-hardware-evidence instead."
+    )
+    var recoverHardwareAdmission = false
+
+    @Flag(help: "With --recommend and --candidate-models, download and verify the exact signed model artifacts without loading or benchmarking them.")
+    var prefetch = false
+
+    @Option(help: "Private receipt path written by --prefetch and required by a cache-only constrained --apply.")
+    var prefetchReceipt: String?
+
+    @Flag(help: "Allow local donor-mode configuration for non-paid-yield rows.")
+    var donorMode = false
 
     @Flag(help: "Write the final recommendation to config.yaml.")
     var apply = false
@@ -109,6 +147,23 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     func run(dependencies: AutotuneRunDependencies) async throws {
+        if recommend {
+            if recoverHardwareAdmission {
+                try await runHardwareAdmissionRecovery()
+                return
+            }
+            if freshnessCheck {
+                try await runRecommendationFreshnessCheck()
+                return
+            }
+            if prefetch {
+                try await runRecommendationPrefetch()
+                return
+            }
+            try await runAutotuneRecommend()
+            return
+        }
+
         let plan = try candidatePlan()
 
         if dryRun {
@@ -191,7 +246,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             candidateModelsJSON: candidatesJSON,
             stage1Replicates: stage1Replicates,
             stage2Replicates: stage2Replicates,
-            gateTTFTMS: gateTTFTMS,
+            gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
             tpsTieEpsilon: tpsTieEpsilon,
             recommendationJSON: nil,
             recipeHash: nil,
@@ -267,7 +322,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     candidates: plan.candidates,
                     candidatesBySize: Self.candidatesBySize(for: plan),
                     targetContext: targetContext,
-                    gateTTFTMS: gateTTFTMS,
+                    gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
                     stage1Replicates: stage1Replicates,
                     port: port,
                     drainGrace: drainGrace,
@@ -341,7 +396,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     maxBatchAxis: try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis"),
                     maxContextAxis: try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext),
                     targetContext: targetContext,
-                    gateTTFTMS: gateTTFTMS,
+                    gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
                     stage2Replicates: stage2Replicates,
                     tpsTieEpsilon: tpsTieEpsilon,
                     port: port,
@@ -486,6 +541,17 @@ struct AutotuneCommand: AsyncParsableCommand {
         return AutotunePlan(candidates: filtered.map(\.modelID), source: .defaultList, warning: nil)
     }
 
+    /// When `--candidate-models` is set, `--recommend` probes only catalog rows
+    /// whose HuggingFace `model_id` appears in the operator list.
+    private func recommendCandidateModelFilter() throws -> Set<String>? {
+        guard let candidateModels,
+              !candidateModels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return Set(try Self.parseCSVStrict(candidateModels, flag: "--candidate-models"))
+    }
+
     static let specVersion = "SPEC-013 v0.3"
 
     static func candidatesBySize(for plan: AutotunePlan) -> [String]? {
@@ -527,12 +593,21 @@ struct AutotuneCommand: AsyncParsableCommand {
             candidateModels: plan.candidates,
             stage1Replicates: stage1Replicates,
             stage2Replicates: stage2Replicates,
-            gateTTFTMS: gateTTFTMS,
+            gateTTFTMS: resolvedGateTTFTMS(forRecommend: false),
             tpsTieEpsilon: tpsTieEpsilon,
             recommendation: recommendation,
             infeasible: infeasible,
             dbPath: dbPath
         )
+    }
+
+    /// Resolve the TTFT feasibility ceiling.
+    /// - `0` means disabled (explicit or paid-path default).
+    /// - Classic Stage 1/2 keeps SPEC-013's 60s default when the flag is omitted.
+    /// - Paid `--recommend` never inherits that 60s default (#742 AC-3).
+    private func resolvedGateTTFTMS(forRecommend: Bool) -> Int {
+        if let gateTTFTMS { return gateTTFTMS }
+        return forRecommend ? 0 : 60_000
     }
 
     private static func recommendation(
@@ -620,7 +695,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             lines.append("  \(index + 1). \(model)")
         }
         lines.append("autotune: stage1_replicates=\(stage1Replicates) stage2_replicates=\(stage2Replicates)")
-        lines.append("autotune: gate_ttft_ms=\(gateTTFTMS) tps_tie_epsilon=\(tpsTieEpsilon)")
+        let classicGate = resolvedGateTTFTMS(forRecommend: false)
+        lines.append("autotune: gate_ttft_ms=\(classicGate == 0 ? "disabled" : String(classicGate)) tps_tie_epsilon=\(tpsTieEpsilon)")
         lines.append("autotune: kv_bits_axis=\(kvBitsAxis) max_batch_axis=\(maxBatchAxis) max_context_axis=\(maxContextAxis.isEmpty ? "<target-context>" : maxContextAxis)")
         lines.append("autotune: port=\(port) db_path=\(dbPath) retain_runs=\(retainRuns)")
         lines.append("[dry-run] would evaluate Stage 1 candidates in this order and then hill-climb knobs only within the first feasible model.")
@@ -637,11 +713,65 @@ struct AutotuneCommand: AsyncParsableCommand {
         guard stage2Replicates >= 1 else {
             throw ValidationError("--stage2-replicates must be >= 1")
         }
-        guard gateTTFTMS > 0 else {
-            throw ValidationError("--gate-ttft-ms must be > 0")
+        if let gateTTFTMS, gateTTFTMS < 0 {
+            throw ValidationError("--gate-ttft-ms must be >= 0 (0 disables the TTFT feasibility ceiling)")
+        }
+        guard buyerTTFTCeilingMS >= 0 else {
+            throw ValidationError("--buyer-ttft-ceiling-ms must be >= 0 (0 disables the paid selection ceiling)")
+        }
+        if buyerTTFTCeilingMS > 0 && !recommend {
+            throw ValidationError("--buyer-ttft-ceiling-ms requires --recommend")
         }
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
+        }
+        if freshnessCheck && !recommend {
+            throw ValidationError("--freshness-check requires --recommend")
+        }
+        if recoverHardwareAdmission && !recommend {
+            throw ValidationError("--recover-hardware-admission requires --recommend")
+        }
+        if recoverHardwareAdmission && freshnessCheck {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --freshness-check")
+        }
+        if recoverHardwareAdmission && prefetch {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --prefetch")
+        }
+        if recoverHardwareAdmission && !submitHardwareEvidence {
+            throw ValidationError("--recover-hardware-admission cannot be combined with --no-submit-hardware-evidence")
+        }
+        if prefetch && !recommend {
+            throw ValidationError("--prefetch requires --recommend")
+        }
+        if prefetch && freshnessCheck {
+            throw ValidationError("--prefetch cannot be combined with --freshness-check")
+        }
+        if prefetch && apply {
+            throw ValidationError("--prefetch cannot be combined with --apply")
+        }
+        if prefetch && donorMode {
+            throw ValidationError("--prefetch cannot be combined with --donor-mode")
+        }
+        if prefetch && candidateModels == nil {
+            throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
+        }
+        if prefetch && prefetchReceipt == nil {
+            throw ValidationError("--prefetch requires --prefetch-receipt")
+        }
+        if prefetchReceipt != nil && !prefetch && !apply {
+            throw ValidationError("--prefetch-receipt requires --prefetch or --apply")
+        }
+        if prefetchReceipt != nil && !recommend {
+            throw ValidationError("--prefetch-receipt requires --recommend")
+        }
+        if prefetchReceipt != nil && apply && candidateModels == nil {
+            throw ValidationError("cache-only --apply requires an explicit --candidate-models allowlist")
+        }
+        if requireHardwareEvidence && !recommend {
+            throw ValidationError("--require-hardware-evidence requires --recommend")
+        }
+        if requireHardwareEvidence && !submitHardwareEvidence {
+            throw ValidationError("--require-hardware-evidence cannot be combined with --no-submit-hardware-evidence")
         }
         guard maxDuration > 0 else {
             throw ValidationError("--max-duration must be > 0")
@@ -658,6 +788,470 @@ struct AutotuneCommand: AsyncParsableCommand {
         _ = try Self.parseKvBitsAxis(kvBitsAxis)
         _ = try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis")
         _ = try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext)
+    }
+
+    private func runAutotuneRecommend() async throws {
+        // ARCH-M-1 orphan-child fix: become process-group leader BEFORE
+        // spawning any CandidateProviderRunner subprocess. Combined with the
+        // cascading signal handler below, this lets the caller (App) send
+        // one `killpg(cliPid, SIGTERM)` and cleanly tear down every
+        // `serve --no-join` grandchild alongside this process.
+        _ = autotuneBecomeProcessGroupLeader()
+        let interruptFlag = AutotuneInterruptFlag()
+        let signalSources = AutotuneSignalSources(flag: interruptFlag, cascadeToProcessGroup: true)
+        defer { _ = signalSources }
+
+        let staticInputs = AutotuneStaticInputs()
+        let inputs = await staticInputs.loadRecommendationInputs()
+        let demand = inputs.demand
+        let catalog = inputs.candidate
+        let rateCard = inputs.rateCard
+
+        let fingerprint = MachineFingerprinter().sample()
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
+        let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
+        let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        let candidateModelFilter = try recommendCandidateModelFilter()
+        let prefetchedArtifacts: [String: PrefetchedModelArtifact]?
+        if let prefetchReceipt {
+            let receiptURL = URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt))
+            let receipt = try AutotuneArtifactPrefetchReceipt.load(from: receiptURL)
+            let validated = try receipt.validatedArtifacts(
+                candidateCatalog: catalog.value,
+                candidateCatalogSHA256: catalogSHA
+            )
+            let receiptModelIDs = Set(validated.values.map(\.modelID))
+            guard candidateModelFilter == receiptModelIDs else {
+                throw ValidationError("--candidate-models must exactly match the prefetch receipt")
+            }
+            prefetchedArtifacts = validated
+        } else {
+            prefetchedArtifacts = nil
+        }
+        let now = Date()
+        var warnings = Set<AutotuneRecommendWarning>()
+        warnings.formUnion(demand.warnings)
+        warnings.formUnion(catalog.warnings)
+        warnings.formUnion(rateCard.warnings)
+
+        if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
+        }
+        // #582: baked-catalog / network-submission blocks are known before
+        // Stage-1 probes. Fail closed immediately when apply/submit is enabled
+        // so strangers do not wait hours for an already-rejected evidence class.
+        // Offline diagnostics remain available with --no-submit-hardware-evidence
+        // (and without --apply / --require-hardware-evidence).
+        if AutotuneRecommendEngine.shouldFailClosedBeforeBenchmarks(
+            warnings,
+            apply: apply,
+            submitHardwareEvidence: submitHardwareEvidence,
+            requireHardwareEvidence: requireHardwareEvidence
+        ) {
+            throw ValidationError(AutotuneRecommendEngine.networkSubmissionBlockMessage(warnings))
+        }
+        if AutotuneRecommendEngine.networkSubmissionBlocks(warnings) {
+            let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(warnings)
+            FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
+        }
+
+        var request = AutotuneRecommendRequest(
+            hardware: hardware,
+            demandRank: demand.value,
+            candidateCatalog: catalog.value,
+            candidateCatalogSHA256: catalogSHA,
+            rateCard: rateCard.value,
+            benchmarks: [:],
+            warnings: warnings,
+            generatedAt: now,
+            donorMode: donorMode,
+            buyerTTFTCeilingMS: buyerTTFTCeilingMS
+        )
+        let outcomes = try await AutotuneRecommendationBenchmarker().benchmarks(
+            request: request,
+            targetContext: Self.spec023RecommendationProbeContext,
+            gateTTFTMS: resolvedGateTTFTMS(forRecommend: true),
+            replicates: stage1Replicates,
+            port: port,
+            interruptFlag: interruptFlag,
+            candidateModelIDs: candidateModelFilter,
+            prefetchedArtifacts: prefetchedArtifacts
+        )
+        if interruptFlag.isSet() {
+            FileHandle.standardError.write(Data("autotune --recommend interrupted; exiting after subtree cleanup\n".utf8))
+            throw ExitCode(130)
+        }
+        request.benchmarks = outcomes.benchmarks
+        for modelKey in outcomes.diagnostics.keys.sorted() {
+            let reason = outcomes.diagnostics[modelKey]!
+            FileHandle.standardError.write(Data("[warn] Model readiness check: \(modelKey): \(reason)\n".utf8))
+        }
+        var result = AutotuneRecommendEngine().recommend(request)
+        result.probeDiagnostics = outcomes.diagnostics
+        try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
+        if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
+            let message = AutotuneRecommendEngine.networkSubmissionBlockMessage(Set(result.warnings))
+            if apply || submitHardwareEvidence || requireHardwareEvidence {
+                throw ValidationError(message)
+            }
+            FileHandle.standardError.write(Data("[warn] \(message)\n".utf8))
+        }
+        if submitHardwareEvidence {
+            let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(
+                result: result,
+                benchmarks: request.benchmarks
+            )
+            if let reason = Self.requiredHardwareEvidenceBlockReason(
+                submission: submission,
+                required: requireHardwareEvidence
+            ) {
+                FileHandle.standardError.write(Data("hardware_evidence_unavailable: \(reason)\n".utf8))
+                throw ExitCode(11)
+            }
+            switch submission {
+            case .submitted:
+                FileHandle.standardError.write(Data("hardware evidence submitted for stats verification\n".utf8))
+            case .skipped:
+                break
+            case .failed(let reason):
+                FileHandle.standardError.write(Data("[warn] hardware evidence submission failed: \(reason)\n".utf8))
+            }
+        }
+        let paidSelected = result.recommendedModel.flatMap { recommendedModel in
+            result.selectedCandidate.flatMap { $0.model == recommendedModel ? $0 : nil }
+        }
+        if apply, result.recommendedModel != nil, paidSelected == nil, !donorMode {
+            throw ValidationError("selected paid recommendation was not available for config apply")
+        }
+        let donorSelected = donorMode ? result.donorFallbackCandidate : nil
+        if apply, donorMode, result.donorFallbackModel != nil, donorSelected == nil {
+            throw ValidationError("selected donor recommendation was not available for config apply")
+        }
+        let selectedForConfig = paidSelected ?? donorSelected
+        let applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
+        let serveConfig: RecommendationCore?
+        var configurationApplied = false
+        if let selected = selectedForConfig,
+           let selectedBenchmark = request.benchmarks[selected.catalogKey],
+           let selectedRow = catalog.value.rows[selected.catalogKey] {
+            serveConfig = Self.recommendationCoreForConfig(
+                selected: selected,
+                selectedBenchmark: selectedBenchmark,
+                selectedRow: selectedRow,
+                catalogVersion: catalog.value.version,
+                catalogHash: catalogSHA,
+                hardware: hardware
+            )
+        } else {
+            serveConfig = nil
+        }
+        if apply, let selected = selectedForConfig {
+            guard request.benchmarks[selected.catalogKey] != nil else {
+                throw ValidationError("selected recommendation lacks verified benchmark artifact")
+            }
+            guard catalog.value.rows[selected.catalogKey] != nil else {
+                throw ValidationError("selected recommendation lacks signed catalog row")
+            }
+            if applyingDonorFallback {
+                FileHandle.standardError.write(Data("\(Self.donorModeApplyWarning(for: selected.model))\n".utf8))
+            }
+            let rawPath = config ?? AppConfig.defaultConfigPath
+            let expanded = ConfigLoader.expandTilde(rawPath)
+            guard let core = serveConfig else {
+                throw ValidationError("selected recommendation lacks serve config")
+            }
+            let applied = try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
+                recommendation: core,
+                now: now,
+                donorMode: applyingDonorFallback
+            )
+            configurationApplied = true
+            if emitJSON {
+                FileHandle.standardError.write(Data("\(applied.summary)\n".utf8))
+            } else {
+                print(applied.summary)
+            }
+        }
+        if emitJSON {
+            print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
+        } else {
+            print(result.humanTranscript(configurationApplied: configurationApplied))
+        }
+        for warning in result.warnings {
+            FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
+        }
+    }
+
+    private func runRecommendationPrefetch() async throws {
+        let staticInputs = AutotuneStaticInputs()
+        let inputs = await staticInputs.loadRecommendationInputs()
+        let catalog = inputs.candidate
+        let fingerprint = MachineFingerprinter().sample()
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
+        let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
+        let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
+        let warnings = Self.recommendationPrefetchTrustWarnings(
+            demand: inputs.demand,
+            catalog: catalog,
+            rateCard: inputs.rateCard
+        )
+
+        if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
+            throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
+        }
+
+        guard let requestedModelIDs = try recommendCandidateModelFilter(), !requestedModelIDs.isEmpty else {
+            throw ValidationError("--prefetch requires an explicit --candidate-models allowlist")
+        }
+        let outcome = try await AutotuneRecommendationBenchmarker().prefetchArtifacts(
+            candidateCatalog: catalog.value,
+            hardware: hardware,
+            candidateModelIDs: requestedModelIDs
+        )
+        let missingRows = requestedModelIDs.subtracting(outcome.matchedModelIDs).sorted()
+        guard missingRows.isEmpty else {
+            throw ValidationError("prefetch models are absent from the signed catalog: \(missingRows.joined(separator: ", "))")
+        }
+        let failed = requestedModelIDs.subtracting(outcome.prefetchedModelIDs).sorted()
+        guard failed.isEmpty else {
+            let details = outcome.diagnostics
+                .filter { failed.contains($0.modelID) }
+                .sorted { $0.modelID < $1.modelID }
+                .map { "\($0.modelID): \($0.reason)" }
+                .joined(separator: "; ")
+            throw ValidationError("signed model artifact prefetch failed: \(details)")
+        }
+        guard outcome.artifacts.count == requestedModelIDs.count else {
+            throw ValidationError("each prefetch model must match exactly one signed catalog row")
+        }
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        let receipt = AutotuneArtifactPrefetchReceipt(
+            schemaVersion: AutotuneArtifactPrefetchReceipt.currentSchemaVersion,
+            candidateCatalogSHA256: catalogSHA,
+            candidateCatalogVersion: catalog.value.version,
+            candidateCatalogPolicyVersion: catalog.value.policyVersion,
+            artifacts: outcome.artifacts.sorted { $0.modelKey < $1.modelKey }
+        )
+        guard let prefetchReceipt else {
+            throw ValidationError("--prefetch requires --prefetch-receipt")
+        }
+        try receipt.write(to: URL(fileURLWithPath: ConfigLoader.expandTilde(prefetchReceipt)))
+        for artifact in outcome.artifacts.sorted(by: { $0.modelID < $1.modelID }) {
+            print("prefetch_verified model=\(artifact.modelID) path=\(artifact.path) sha256=\(artifact.sha256)")
+        }
+    }
+
+    static func recommendationPrefetchTrustWarnings(
+        demand: AutotuneStaticSelection<DemandRank>,
+        catalog: AutotuneStaticSelection<CandidateCatalog>,
+        rateCard: AutotuneStaticSelection<RateCardProjection>
+    ) -> Set<AutotuneRecommendWarning> {
+        demand.warnings.union(catalog.warnings).union(rateCard.warnings)
+    }
+
+    static func recommendationCoreForConfig(
+        selected: AutotuneCandidateScore,
+        selectedBenchmark: CandidateBenchmark,
+        selectedRow: CandidateCatalog.Row,
+        catalogVersion: String,
+        catalogHash: String,
+        hardware: AutotuneRecommendHardware
+    ) -> RecommendationCore {
+        RecommendationCore(
+            model: selected.model,
+            targetContext: Self.spec023RecommendationProbeContext,
+            knobs: WinningKnobs(
+                kvBits: nil,
+                maxBatch: hardware.recommendedMaxBatch,
+                maxContext: Self.spec023RecommendationProbeContext
+            ),
+            tpsMedian: selected.tokensPerSecond,
+            ttftP95MS: 0,
+            replicates: 0,
+            modelArtifactPath: selectedBenchmark.modelArtifactPath,
+            modelArtifactSHA256: selectedBenchmark.artifactSHA256,
+            modelCatalogKey: selected.catalogKey,
+            modelCatalogModelID: selectedRow.modelID,
+            modelCatalogRevision: selectedRow.modelRevision,
+            modelCatalogSHA256: selectedRow.modelSHA256,
+            modelCatalogVersion: catalogVersion,
+            modelCatalogHash: catalogHash
+        )
+    }
+
+    /// Corrective #582 recovery owned by the CLI:
+    /// drain (bootout) → recommend/apply with required evidence → restore.
+    /// Pending-trust resubmit is a separate freshness-check path so rejected /
+    /// cap / uncatalogued models cannot false-complete via stored evidence.
+    private func runHardwareAdmissionRecovery() async throws {
+        // Own the process group and cooperative cancellation before mutating
+        // launchd so SIGTERM can restore instead of stranding a bootout.
+        _ = autotuneBecomeProcessGroupLeader()
+        let interruptFlag = AutotuneInterruptFlag()
+        let signalSources = AutotuneSignalSources(flag: interruptFlag, cascadeToProcessGroup: true)
+        defer { _ = signalSources }
+
+        let conflict = try ProviderConflictDetector().detect()
+        let shouldRestore: Bool
+        switch conflict {
+        case .none:
+            shouldRestore = false
+        case .launchdManaged, .foreground:
+            shouldRestore = true
+        }
+
+        let drainResult = try ProviderDrainer().drain(
+            conflict,
+            port: port,
+            graceSeconds: TimeInterval(drainGrace)
+        )
+
+        var recoveryError: Error?
+        if case .portStillOpen(let openPort) = drainResult {
+            recoveryError = ValidationError(
+                "provider port \(openPort) still open after drain; cannot recover hardware admission safely"
+            )
+        } else if interruptFlag.isSet() {
+            recoveryError = ExitCode(130)
+        } else {
+            do {
+                var recovery = self
+                recovery.apply = true
+                recovery.requireHardwareEvidence = true
+                recovery.submitHardwareEvidence = true
+                try await recovery.runAutotuneRecommend()
+            } catch {
+                recoveryError = error
+            }
+        }
+
+        var restoreError: Error?
+        if shouldRestore {
+            do {
+                _ = try ProviderDrainer().restore(conflict, restartForeground: true)
+            } catch {
+                restoreError = error
+            }
+        }
+
+        if let restoreError {
+            if let recoveryError {
+                FileHandle.standardError.write(
+                    Data("hardware_admission_recovery_failed: \(recoveryError)\n".utf8)
+                )
+            }
+            throw restoreError
+        }
+        if let recoveryError {
+            throw recoveryError
+        }
+    }
+
+    private func runRecommendationFreshnessCheck() async throws {
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
+        switch status {
+        case .fresh:
+            let storedEvidence = try? RecommendationStateStore.read().hardwareEvidence
+            let evidenceOutcome = await Self.freshRecommendationEvidenceOutcome(
+                storedEvidence: storedEvidence,
+                submitEnabled: submitHardwareEvidence,
+                submit: { evidence in
+                    await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(snapshot: evidence)
+                }
+            )
+            switch evidenceOutcome {
+            case .ready(let submitted):
+                if submitted {
+                    FileHandle.standardError.write(Data("hardware evidence resubmitted for stats verification\n".utf8))
+                }
+                print("recommendation_fresh")
+            case .rerunRecommendation(let reason):
+                FileHandle.standardError.write(Data("recommendation_stale: \(reason)\n".utf8))
+                throw ExitCode(10)
+            case .blocked(let reason):
+                FileHandle.standardError.write(Data("hardware_evidence_unavailable: \(reason)\n".utf8))
+                throw ExitCode(11)
+            }
+        case .missing, .stale, .trustBlocked:
+            guard let failure = Self.recommendationFreshnessFailure(for: status) else {
+                preconditionFailure("non-fresh recommendation status must have a failure mapping")
+            }
+            FileHandle.standardError.write(Data(failure.diagnostic.utf8))
+            throw failure.exitCode
+        }
+    }
+
+    struct RecommendationFreshnessFailure: Equatable {
+        let diagnostic: String
+        let exitCode: ExitCode
+    }
+
+    static func recommendationFreshnessFailure(
+        for status: RecommendationFreshnessChecker.Status
+    ) -> RecommendationFreshnessFailure? {
+        switch status {
+        case .fresh:
+            return nil
+        case .missing:
+            return RecommendationFreshnessFailure(
+                diagnostic: "recommendation_stale: missing stored recommendation\n",
+                exitCode: ExitCode(10)
+            )
+        case .stale(let generatedAt):
+            return RecommendationFreshnessFailure(
+                diagnostic: "recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n",
+                exitCode: ExitCode(10)
+            )
+        case .trustBlocked(_, let warnings):
+            let failures = warnings
+                .intersection(AutotuneRecommendEngine.networkSubmissionBlockingWarnings)
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ", ")
+            return RecommendationFreshnessFailure(
+                diagnostic: "catalog_trust_blocked: \(failures)\n",
+                exitCode: ExitCode(12)
+            )
+        }
+    }
+
+    static func freshRecommendationEvidenceOutcome(
+        storedEvidence: AutotuneHardwareEvidenceSnapshot?,
+        submitEnabled: Bool,
+        submit: (AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission
+    ) async -> FreshRecommendationEvidenceOutcome {
+        guard submitEnabled else { return .ready(submitted: false) }
+        guard let storedEvidence else {
+            // Legacy state did not retain enough benchmark detail to recreate
+            // verifier evidence safely. Exit 10 makes the installer run the
+            // normal recommendation once and seed reusable evidence.
+            return .rerunRecommendation("stored hardware evidence is missing")
+        }
+        switch await submit(storedEvidence) {
+        case .submitted:
+            return .ready(submitted: true)
+        case .skipped(let reason):
+            return .blocked(reason)
+        case .failed(let reason):
+            return .blocked(reason)
+        }
+    }
+
+    static func requiredHardwareEvidenceBlockReason(
+        submission: AutotuneHardwareEvidenceSubmission,
+        required: Bool
+    ) -> String? {
+        guard required else { return nil }
+        switch submission {
+        case .submitted:
+            return nil
+        case .skipped(let reason), .failed(let reason):
+            return reason
+        }
     }
 
     /// Tolerant CSV split: trims each token and DROPS empty tokens.
@@ -752,6 +1346,10 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         return values
     }
+
+    static func donorModeApplyWarning(for selectedModel: String) -> String {
+        "DONOR MODE: \(selectedModel) does not meet rate-card or hardware requirements on this Mac."
+    }
 }
 
 struct AutotuneCandidate: Equatable {
@@ -806,6 +1404,12 @@ struct AutotuneStage2Request {
     var port: Int
     var drainGrace: Int
     var cancellationReason: () -> AutotuneCancellationReason?
+}
+
+enum FreshRecommendationEvidenceOutcome: Equatable {
+    case ready(submitted: Bool)
+    case rerunRecommendation(String)
+    case blocked(String)
 }
 
 struct AutotuneRunDependencies {

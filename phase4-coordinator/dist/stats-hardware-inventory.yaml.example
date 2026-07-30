@@ -1,0 +1,45 @@
+# Operator-owned hardware inventory for stats capacity enrichment.
+#
+# Copy to /etc/macprovider-stats/stats-hardware-inventory.yaml on Pearl and keep
+# provider IDs aligned with /poolz. Values here are trusted capacity constants:
+# do not derive them from provider-submitted claims.
+
+chips:
+  operator fixture chip:
+    display_chip: "Operator Fixture"
+    memory_bandwidth_gb_per_s: 120
+    network_power_kw: 0.035
+    gpu_cores: 10
+    cpu_cores: 10
+
+providers:
+  mac:
+    chip_normalized: operator fixture chip
+    chip: "Operator Fixture"
+    unified_memory_gb: 32
+    macos_version: ""
+    app_version: ""
+    # The sidecar is allowed to write verified rows, so source must remain
+    # operator; provider-reported sources are intentionally rejected.
+    source: operator
+    verified: true
+
+# Optional trust-root inventory for provider hardware evidence. Presence is
+# significant (issue #582):
+#   - OMIT the section entirely  -> no-op: every hardware_verification_trust root
+#     is left untouched (this is the default; operator_api roots created via the
+#     admin approval API are always preserved regardless).
+#   - trusted_hardware: {}       -> revoke-all: reconciles against an empty set,
+#     deleting every source='inventory' root. operator_api roots survive.
+#   - trusted_hardware: <entries> -> authoritative for all source='inventory'
+#     rows: upserts the listed roots and deletes any inventory root not listed.
+# Any present form (including {}) requires STATS_TRUST_INVENTORY_DSN.
+# Uncomment only when this file contains the complete live trust inventory.
+# trusted_hardware:
+#   mac:
+#     - hardware_identity_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#       chip_normalized: operator fixture chip
+#       unified_memory_gb: 32
+#       trusted_by: operator
+#       expires_at: ""
+#       notes: "Fictional 64-hex example row; replace with operator-verified provider evidence."

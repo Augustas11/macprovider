@@ -1,0 +1,21 @@
+{
+  "schema_version": "macprovider-removed-exception-tombstones-v1",
+  "updated_at": "2026-07-23T23:40:33Z",
+  "updated_by": "fix/609-clear-hash-containment",
+  "environment": "pearl-production",
+  "tombstones": [
+    {
+      "id": "exc-catalog-compatibility-bridges",
+      "removed_at": "2026-07-23T20:05:45Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5062822871",
+      "authority_surface": "Autotune current/previous catalog activation, tier2.catalog_path, tier2.model_hash_legacy_until, and catalog admission compatibility surfaces."
+    },
+    {
+      "id": "exc-tier2-hash-mismatch-containment",
+      "removed_at": "2026-07-23T23:40:33Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
+      "authority_surface": "Pearl tier2.require_hash_verified, tier2.model_hash_legacy_until / MODEL_HASH_LEGACY_UNTIL, and model_hash_algorithm_legacy_bridge compatibility authority."
+    }
+  ],
+  "notes": "IDs listed here were removed from production authority. Config sync, overlay merge, rollback restore, or register edits must not recreate them as active/planned/expired without a new reviewed exception ID."
+}

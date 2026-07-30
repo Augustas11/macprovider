@@ -1,8 +1,9 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.22 (2026-06-29, draft — IMPL follow-up #165, converged across 3 codex audit rounds. R1 returned 0/3/1/1; R2 returned 0/3/2/1; R3 absorbed the unbounded-scan + SPKI-drain-event findings. Normative §7.1 gains three events (`payout_stale_outbox_backlog`, `payout_rpc_chronic_outage`, `payout_spki_drain_skipped_unsupported_client`); §4.7 step 5 producer migrated to keyset-paginated bounded-memory scan with defensive `staleOutboxScanCeiling=20000` runner-cycle row cap; §4.4 two-RPC discipline gap closed via `TrackingRPCClient` wrapper + `ChronicOutageTracker` ticking independently of `payout.tuning.run_interval`.) PRIOR: 0.1.21 (2026-06-25, draft — codex round-21 fix pass on v0.1.20. Round 21 returned NEEDS FIX PASS 0/1/1/1 against v0.1.20: MAJOR-1 stale `[2, 50]` confirmation_blocks bound at §4.3 step 7 + BUILD prompt; MEDIUM-1 ambiguous IMPL test (4) wording in §4.8b; LOW-1 two-RPC re-poll budget undercounted RPC calls in §4.7. All three absorbed. Pending codex round-22 confirmation. Full r20 findings: `specs/SPEC-016-r20-audit.md`; r21 closure narrative: `specs/SPEC-016-r21-audit.md`.)
-**Status:** Draft (design-only — no IMPL until operator funds hot
-wallet and discharges the eight §9 prerequisites).
+**Version:** 0.1.23 (2026-07-30, draft — lineage reconciliation per issue #586. Merges the two divergent `v0.1.2x` lineages: the `main` v0.1.20 Wave-2 provider-token custody gate (2026-07-04 — payout attempts require provider-token trust: pinned/operator-issued, bearer-validated, or explicit `self_minted_verified` proof; tokenless self-minted sessions are not payout eligible) AND the `impl/spec-016` v0.1.22 IMPL follow-up (2026-06-29 — §7.1 gains `payout_stale_outbox_backlog`, `payout_rpc_chronic_outage`, `payout_spki_drain_skipped_unsupported_client`; §4.7 step 5 keyset-paginated bounded-memory scan with `staleOutboxScanCeiling=20000`; §4.4 two-RPC discipline via `TrackingRPCClient` + `ChronicOutageTracker`). Both lineages' normative content is retained in full; see the v0.1.23 change-log entry for the drop-nothing cross-check.)
+**Status:** Draft (IMPL merged via PR #164, default-off — `payout.enabled=false`
+everywhere until the operator funds the hot wallet and discharges the eight
+§9 prerequisites; flipping the flag is an operator decision gated on §9).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
 mode + synchronous=FULL requirement; §11.4 earnings endpoint;
 §2.1 D1 donation-only / no-custodial framing),
@@ -23,6 +24,29 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.23 (2026-07-30, draft — lineage reconciliation, issue #586):**
+Merges the forked `main` and `impl/spec-016` spec lineages when PR #164
+landed. The fork: `main` advanced v0.1.20 → Wave-2 provider-token custody
+(2026-07-04, entry below) while the IMPL branch had already advanced
+v0.1.20 → v0.1.21 → v0.1.22 (2026-06-29), so the version numbers are
+non-monotonic versus date. This entry records the drop-nothing
+cross-check: (a) the Wave-2 custody gate survives — §"payout selection"
+normative text requiring `pinned`/`operator_issued`, `bearer_validated`,
+or explicit `self_minted_verified` trust, plus its change-log entry;
+(b) all v0.1.21/v0.1.22 IMPL-follow-up normative deltas survive — the
+three §7.1 events, the §4.7 bounded keyset scan + `staleOutboxScanCeiling`,
+and the §4.4 `TrackingRPCClient`/`ChronicOutageTracker` discipline.
+No new normative requirements; Status line updated to reflect that
+`internal/payout/` is now on `main`, default-off pending §9.
+
+**v0.1.20 (2026-07-04, draft — Wave 2 provider-token custody,
+`main`-lineage entry; see also the 2026-06-25 v0.1.20 entry from the
+IMPL-branch lineage below):**
+Payout attempts require provider-token trust: pinned/operator-issued,
+bearer-validated, or explicit `self_minted_verified` proof. A
+tokenless `self_minted` provider session remains visible but MUST NOT
+enter payout selection.
 
 **v0.1.22 (2026-06-29, draft — issue #165 IMPL follow-up, 3-round
 codex audit converged):**
@@ -891,8 +915,13 @@ could fall back to (first-ever registration during
 cooling-off), OR with `registered_against_hot_wallet !=
 payout.security.hot_wallet_address` (row registered against
 a prior hot wallet pre-§6.4 rotation, awaiting
-re-registration per §6.4 step 5), MUST NOT have any payout
-attempt initiated on their behalf. Their
+re-registration per §6.4 step 5), OR whose provider-token
+trust state is only tokenless `self_minted` / unverified,
+MUST NOT have any payout attempt initiated on their behalf.
+Eligible trust states are pinned/operator-issued provider
+configuration, a WebSocket session admitted with
+`bearer_validated`, or an explicit `self_minted_verified`
+proof-of-custody state. Their
 `ledger_payout_ready` rows remain in `status='ready'`.
 
 If a rotation is `pending_until_utc > now()` AND

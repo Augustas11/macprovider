@@ -1,6 +1,6 @@
 [Unit]
 Description=Run the Mac Provider monitor every 3 minutes
-Documentation=https://github.com/Augustas11/macprovider/blob/main/specs/PHASE7_HARDENING_PLAN.md
+Documentation=https://github.com/Augustas11/macprovider/blob/main/docs/reports/PHASE7_HARDENING_PLAN.md
 
 [Timer]
 OnBootSec=2min

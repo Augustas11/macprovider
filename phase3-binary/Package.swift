@@ -18,12 +18,23 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/ml-explore/mlx-swift-examples.git",
-            exact: "2.29.1"
+            url: "https://github.com/ml-explore/mlx-swift-lm.git",
+            exact: "3.31.4"
+        ),
+        .package(
+            url: "https://github.com/huggingface/swift-transformers.git",
+            exact: "1.0.0"
+        ),
+        // swift-transformers 1.0.0 resolves swift-jinja 2.3.6 transitively; pin
+        // it directly so `import Jinja` (native null tool-schema rendering,
+        // issue #718) binds to the same reviewed version.
+        .package(
+            url: "https://github.com/huggingface/swift-jinja.git",
+            exact: "2.3.6"
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.101.0"
+            exact: "2.101.2"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",
@@ -31,7 +42,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/jpsim/Yams.git",
-            exact: "5.1.0"
+            exact: "6.2.2"
         )
     ],
     targets: [
@@ -49,14 +60,20 @@ let package = Package(
             name: "macprovider-cli",
             dependencies: [
                 "MacProviderCore",
-                .product(name: "MLXLLM", package: "mlx-swift-examples"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "swift-jinja"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams", package: "Yams")
             ],
             path: "Sources/macprovider-cli",
+            resources: [
+                .copy("Resources/spec028")
+            ],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]
@@ -67,7 +84,31 @@ let package = Package(
                 "MacProviderCore",
                 "macprovider-cli",
             ],
-            path: "Tests/macprovider-cliTests"
+            path: "Tests/macprovider-cliTests",
+            resources: [
+                .copy("Fixtures/SPEC015_v03_jcs/null_hash.json"),
+                .copy("Fixtures/SPEC015_v03_jcs/non_null_hash.json"),
+                .copy("Fixtures/SPEC015_v03_jcs/README.md"),
+                .copy("Fixtures/SPEC019"),
+            ]
+        ),
+        .testTarget(
+            name: "MacProviderCoreTests",
+            dependencies: [
+                "MacProviderCore",
+            ],
+            path: "Tests/MacProviderCoreTests"
+        ),
+        .testTarget(
+            name: "mlx-stage-spikeTests",
+            dependencies: [
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
+            ],
+            path: "Tests/mlx-stage-spikeTests",
+            exclude: ["README.md"]
         )
     ]
 )

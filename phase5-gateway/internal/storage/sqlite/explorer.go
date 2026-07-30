@@ -15,6 +15,12 @@ var _ storage.ExplorerStore = (*Store)(nil)
 type listCursor struct {
 	TS string `json:"ts,omitempty"`
 	ID string `json:"id"`
+	// AccountID was added in issue #196 to break ties when two
+	// accounts share both created_at AND request_id under the new
+	// composite PK. Optional for backward compatibility — pre-#196
+	// cursors lacking AccountID fall through the (?='') predicate
+	// branch and behave as before.
+	AccountID string `json:"acct,omitempty"`
 }
 
 type activityCursor struct {
@@ -216,16 +222,26 @@ func (s *Store) ExplorerListSessions(ctx context.Context, q storage.ExplorerSess
 	if err != nil {
 		return storage.ExplorerSessionList{}, err
 	}
+	// Cursor predicate is lexicographic over (created_at, request_id,
+	// account_id). The account_id tiebreaker is load-bearing post-
+	// #196 because (created_at, request_id) is no longer unique
+	// across accounts. ISS-196 R2 codex CODE MEDIUM.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at
 		FROM usage_events
 		WHERE created_at >= ? AND created_at < ?
 		  AND (? = '' OR account_id = ?)
-		  AND (? = '' OR created_at < ? OR (created_at = ? AND request_id < ?))
-		ORDER BY created_at DESC, request_id DESC
+		  AND (? = '' OR created_at < ?
+		       OR (created_at = ? AND request_id < ?)
+		       OR (created_at = ? AND request_id = ? AND account_id < ?))
+		ORDER BY created_at DESC, request_id DESC, account_id DESC
 		LIMIT ?`,
 		encodeTime(q.From), encodeTime(q.To), q.AccountID, q.AccountID,
-		cursor.TS, cursor.TS, cursor.TS, cursor.ID, q.Limit+1)
+		cursor.TS,
+		cursor.TS,
+		cursor.TS, cursor.ID,
+		cursor.TS, cursor.ID, cursor.AccountID,
+		q.Limit+1)
 	if err != nil {
 		return storage.ExplorerSessionList{}, err
 	}
@@ -243,41 +259,105 @@ func (s *Store) ExplorerListSessions(ctx context.Context, q storage.ExplorerSess
 	}
 	if len(out.Items) > q.Limit {
 		last := out.Items[q.Limit-1]
-		next := encodeListCursor(last.CreatedAt, last.RequestID)
+		next := encodeListCursorWithAccount(last.CreatedAt, last.RequestID, last.AccountID)
 		out.NextCursor = &next
 		out.Items = out.Items[:q.Limit]
 	}
 	return out, nil
 }
 
-func (s *Store) ExplorerSessionDetail(ctx context.Context, requestID string) (storage.ExplorerSessionDetail, error) {
-	out := storage.ExplorerSessionDetail{RequestID: requestID, Partial: false, Error: nil}
-	usage, err := s.explorerUsageEvents(ctx, "", requestID, time.Time{}, time.Time{}, 1)
+// ExplorerSessionDetail looks up the session row trail for a
+// (accountID, requestID). The legacy single-arg call site passed
+// accountID="" — that path still works for backward compatibility,
+// but issue #196 made `usage_events` PK composite, so a request_id
+// can now legitimately match rows in multiple accounts. Pre-fix,
+// the unscoped lookup silently returned one arbitrary row; now it
+// detects ambiguity and returns ErrExplorerAmbiguousRequestID with
+// `MatchedAccountIDs` populated so the caller can re-issue a
+// scoped lookup. The HTTP handler surfaces this as a 409 with the
+// account list.
+func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID string) (storage.ExplorerSessionDetail, error) {
+	out := storage.ExplorerSessionDetail{RequestID: requestID, AccountID: accountID, Partial: false, Error: nil}
+	// Ambiguity check fires only on the unscoped path. Probe with
+	// limit=2 so we can detect "more than one" without paging the
+	// whole result set.
+	if accountID == "" {
+		// Ambiguity probe spans all five session-detail tables that
+		// share (account_id, request_id) keys. Quota and concurrency
+		// already had composite PKs pre-#196 and could carry
+		// cross-account collisions before usage_events ever has a
+		// row (e.g., reservation reserved but not yet settled).
+		// Caught by ISS-196 R2 codex ARCHITECT HIGH; extended to
+		// feedback/audit by ISS-212 R2 security MEDIUM.
+		//
+		// #231 v0.4: the inner SELECT carries LIMIT cap+1 so the
+		// handler can detect overflow without inflating the result
+		// set. When >cap distinct ids are observed the response cap
+		// is applied + truncation flag set; a BOUNDED forensic sample
+		// (cap ExplorerForensicMatchedAccountIDsCap+1) is preserved
+		// for the audit_events emit.
+		accountIDs, err := s.explorerAccountIDsForRequest(ctx, requestID)
+		if err != nil {
+			return storage.ExplorerSessionDetail{}, err
+		}
+		if len(accountIDs) > 1 {
+			cap := storage.ExplorerMatchedAccountIDsCap
+			if len(accountIDs) > cap {
+				// #231 SPEC-007 v0.4 + R1 SEC HIGH closure: the
+				// bounded probe returned cap+1 entries — enough to
+				// flag truncation. Re-issue a BOUNDED forensic scan
+				// (capped at ExplorerForensicMatchedAccountIDsCap+1)
+				// so the unbounded collision-flood DoS class can't
+				// hit the request path. Cap+1 lets the handler
+				// detect "more than the forensic cap" and set the
+				// payload's forensic_truncated_at flag.
+				full, ferr := s.explorerAccountIDsForRequestForensic(ctx, requestID, storage.ExplorerForensicMatchedAccountIDsCap)
+				if ferr != nil {
+					// Forensic emit is best-effort — degrade
+					// gracefully to the bounded probe rather than
+					// failing the 409 response. #231 R2 CODE
+					// MEDIUM closure: surface the degradation via
+					// the audit payload so operators can tell a
+					// partial sample apart from a real
+					// "exactly cap+1 accounts" result.
+					full = accountIDs
+					out.MatchedAccountIDsForensicDegraded = true
+				}
+				out.MatchedAccountIDsForensicSample = full
+				out.MatchedAccountIDs = accountIDs[:cap]
+				out.MatchedAccountIDsTruncated = true
+			} else {
+				out.MatchedAccountIDs = accountIDs
+			}
+			return out, storage.ErrExplorerAmbiguousRequestID
+		}
+	}
+	usage, err := s.explorerUsageEvents(ctx, accountID, requestID, time.Time{}, time.Time{}, 1)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
 	if len(usage) > 0 {
 		out.UsageEvent = &usage[0]
 	}
-	quota, err := s.explorerQuotaReservations(ctx, "", requestID, time.Time{}, time.Time{}, 1)
+	quota, err := s.explorerQuotaReservations(ctx, accountID, requestID, time.Time{}, time.Time{}, 1)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
 	if len(quota) > 0 {
 		out.QuotaReservation = &quota[0]
 	}
-	concurrency, err := s.explorerConcurrencyReservations(ctx, "", requestID, time.Time{}, time.Time{}, 1)
+	concurrency, err := s.explorerConcurrencyReservations(ctx, accountID, requestID, time.Time{}, time.Time{}, 1)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
 	if len(concurrency) > 0 {
 		out.ConcurrencyReservation = &concurrency[0]
 	}
-	out.FeedbackEvents, err = s.explorerFeedbackEvents(ctx, "", requestID, time.Time{}, time.Time{}, 50)
+	out.FeedbackEvents, err = s.explorerFeedbackEvents(ctx, accountID, requestID, time.Time{}, time.Time{}, 50)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
-	out.AuditEvents, err = s.explorerAuditEvents(ctx, "", requestID, time.Time{}, time.Time{}, 50)
+	out.AuditEvents, err = s.explorerAuditEvents(ctx, accountID, requestID, time.Time{}, time.Time{}, 50)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
@@ -285,6 +365,100 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, requestID string) (st
 		return storage.ExplorerSessionDetail{}, storage.ErrNotFound
 	}
 	return out, nil
+}
+
+// explorerAccountIDsForRequest returns the distinct account_id set
+// for a given request_id across ALL five account-keyed session-detail
+// tables (usage_events, quota_reservations, concurrency_reservations,
+// feedback_events, audit_events). All five are keyed by
+// (account_id, request_id) and can independently carry rows for
+// cross-account collisions, so the ambiguity check must union them.
+// ISS-196 R2 architect HIGH originally identified the first three;
+// ISS-212 R2 security MEDIUM extended the union to feedback_events
+// and audit_events — buyer-attachable feedback can otherwise
+// cross-pollinate a 200 response on the unscoped path without
+// triggering 409.
+// explorerAccountIDsForRequestForensic returns a BOUNDED forensic
+// account_id sample — used by #231 SPEC-007 v0.4 §6.4 audit_events
+// emit on the truncation path. The cap is the runtime
+// ExplorerForensicMatchedAccountIDsCap +1 (passed in to keep this
+// storage helper independent of the router package) so the caller
+// can detect "more rows than the forensic cap" and flag the
+// payload accordingly. Bounding the SELECT here closes the R1 SEC
+// HIGH collision-flood DoS: an attacker who creates N>>cap
+// collisions can no longer drive an unbounded scan/materialization
+// in the request path.
+func (s *Store) explorerAccountIDsForRequestForensic(ctx context.Context, requestID string, forensicCap int) ([]string, error) {
+	limit := forensicCap + 1
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT account_id FROM (
+			SELECT account_id FROM usage_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM quota_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM concurrency_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM feedback_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM audit_events WHERE request_id = ? AND account_id != ''
+		) ORDER BY account_id LIMIT ?`, requestID, requestID, requestID, requestID, requestID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID string) ([]string, error) {
+	// Filter empty-string account_id from every branch:
+	// - audit_events.account_id is `TEXT NOT NULL DEFAULT ''`; many
+	//   gateway audit insert paths (OAuth callbacks, admin actions,
+	//   etc.) write rows without an account_id, which would otherwise
+	//   appear here as a bogus matched account `""`.
+	// - usage_events / quota_reservations / concurrency_reservations /
+	//   feedback_events all carry account_id NOT NULL but in
+	//   practice always non-empty; the filter is defensive against
+	//   future writers that might fall back to empty string.
+	// ISS-212 R3 code MEDIUM.
+	//
+	// #231 v0.4: outer SELECT is bounded by
+	// ExplorerMatchedAccountIDsCap+1 so the handler detects overflow
+	// without inflating the row set. ORDER BY runs before LIMIT in
+	// SQLite so the truncation is deterministic (lexicographic).
+	probe := storage.ExplorerMatchedAccountIDsCap + 1
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT account_id FROM (
+			SELECT account_id FROM usage_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM quota_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM concurrency_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM feedback_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM audit_events WHERE request_id = ? AND account_id != ''
+		) ORDER BY account_id LIMIT ?`, requestID, requestID, requestID, requestID, requestID, probe)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ExplorerActivity(ctx context.Context, q storage.ExplorerActivityQuery) (storage.ExplorerActivityList, error) {
@@ -528,15 +702,14 @@ func (s *Store) explorerBuyerRollup(ctx context.Context, from, to time.Time) (st
 }
 
 func (s *Store) explorerUsageEvents(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerUsageEvent, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at
 		FROM usage_events
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, request_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -553,15 +726,14 @@ func (s *Store) explorerUsageEvents(ctx context.Context, accountID, requestID st
 }
 
 func (s *Store) explorerQuotaReservations(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerQuotaReservation, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT account_id, request_id, window_date, reserved_tokens, settled_tokens, status, expires_at, created_at, settled_at
 		FROM quota_reservations
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, request_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -582,15 +754,14 @@ func (s *Store) explorerQuotaReservations(ctx context.Context, accountID, reques
 }
 
 func (s *Store) explorerConcurrencyReservations(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerConcurrencyReservation, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT account_id, request_id, status, expires_at, created_at, released_at
 		FROM concurrency_reservations
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, request_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -611,15 +782,14 @@ func (s *Store) explorerConcurrencyReservations(ctx context.Context, accountID, 
 }
 
 func (s *Store) explorerFeedbackEvents(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerFeedbackEvent, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, request_id, account_id, scope, rating, comment, created_at
 		FROM feedback_events
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, event_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -638,15 +808,14 @@ func (s *Store) explorerFeedbackEvents(ctx context.Context, accountID, requestID
 }
 
 func (s *Store) explorerAuditEvents(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerAuditEvent, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, request_id, account_id, actor, event_type, payload_json, created_at
 		FROM audit_events
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, event_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -703,11 +872,52 @@ func nullableTime(v string) *time.Time {
 	return &t
 }
 
-func timeParam(t time.Time) string {
-	if t.IsZero() {
-		return ""
+// explorerDetailWhere builds the WHERE clause + arg slice for the
+// five session-detail helpers (usage_events, quota_reservations,
+// concurrency_reservations, feedback_events, audit_events). Issue
+// #246: the pre-#246 shape used `(? = '' OR col = ?)` predicates
+// so a single prepared statement could serve both scoped and
+// unscoped paths. SQLite cannot use a normal index plan against
+// such compound `OR` predicates and `EXPLAIN QUERY PLAN` reported
+// `SCAN` even with `idx_*_request` indexes in place. Branching
+// on parameter presence at the helper level produces concrete
+// `WHERE col = ?` predicates that SQLite can plan against the
+// available indexes:
+//   - account_id != ""  AND request_id != ""  → composite PK
+//   - account_id == ""  AND request_id != ""  → idx_*_request
+//   - account_id != ""  AND request_id == ""  → varies by table:
+//     usage_events / quota_reservations / concurrency_reservations
+//     have account-leading indexes (idx_usage_account_date,
+//     idx_quota_active_account_date, idx_concurrency_account_*);
+//     feedback_events / audit_events plan through
+//     idx_*_created_at with an account filter (the bounded
+//     created_at window is what keeps this path tractable for
+//     buyer-detail; measure first before adding an account-leading
+//     index on those two tables).
+//   - both empty (rare) → no WHERE clause (LIMIT-bounded)
+func explorerDetailWhere(accountID, requestID string, from, to time.Time) (string, []any) {
+	var clauses []string
+	var args []any
+	if accountID != "" {
+		clauses = append(clauses, "account_id = ?")
+		args = append(args, accountID)
 	}
-	return encodeTime(t)
+	if requestID != "" {
+		clauses = append(clauses, "request_id = ?")
+		args = append(args, requestID)
+	}
+	if !from.IsZero() {
+		clauses = append(clauses, "created_at >= ?")
+		args = append(args, encodeTime(from))
+	}
+	if !to.IsZero() {
+		clauses = append(clauses, "created_at < ?")
+		args = append(args, encodeTime(to))
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
 }
 
 func encodeListID(id string) string {
@@ -727,6 +937,14 @@ func decodeListID(raw string) (string, error) {
 
 func encodeListCursor(ts time.Time, id string) string {
 	b, _ := json.Marshal(listCursor{TS: encodeTime(ts), ID: id})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// encodeListCursorWithAccount is the post-issue-#196 cursor encoder.
+// AccountID is the third tiebreaker so pagination over usage_events
+// is total across the composite (account_id, request_id) PK.
+func encodeListCursorWithAccount(ts time.Time, id, accountID string) string {
+	b, _ := json.Marshal(listCursor{TS: encodeTime(ts), ID: id, AccountID: accountID})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 

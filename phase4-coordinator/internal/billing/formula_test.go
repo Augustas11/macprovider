@@ -2,6 +2,113 @@ package billing
 
 import "testing"
 
+func TestRateFor_ExactMatch_Wins(t *testing.T) {
+	rateA := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	rateD := RateCardEntry{PromptCreditsPerMtok: 300, CompletionCreditsPerMtok: 400}
+	got := RateFor(map[string]RateCardEntry{"qwen3-32b": rateA, "default": rateD}, "qwen3-32b")
+	if got != rateA {
+		t.Fatalf("RateFor exact = %+v, want %+v", got, rateA)
+	}
+}
+
+func TestRateFor_VerbatimWinsOverNormalized(t *testing.T) {
+	rateExact := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	rateNorm := RateCardEntry{PromptCreditsPerMtok: 300, CompletionCreditsPerMtok: 400}
+	got := RateFor(map[string]RateCardEntry{"mlx-community/Qwen3-32B-4bit": rateExact, "qwen3-32b": rateNorm}, "mlx-community/Qwen3-32B-4bit")
+	if got != rateExact {
+		t.Fatalf("RateFor verbatim = %+v, want %+v", got, rateExact)
+	}
+}
+
+func TestRateFor_NormalizesMLXCommunityNamespace(t *testing.T) {
+	rateA := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	got := RateFor(map[string]RateCardEntry{"qwen3-32b": rateA}, "mlx-community/Qwen3-32B-4bit")
+	if got != rateA {
+		t.Fatalf("RateFor normalized = %+v, want %+v", got, rateA)
+	}
+}
+
+func TestRateFor_NormalizesQuantizationSuffix(t *testing.T) {
+	rateL := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	got := RateFor(map[string]RateCardEntry{"meta-llama/llama-3.1-8b-instruct": rateL}, "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit")
+	if got != rateL {
+		t.Fatalf("RateFor llama normalized = %+v, want %+v", got, rateL)
+	}
+}
+
+func TestRateFor_NormalizesCanonicalMetaLlamaNamespace(t *testing.T) {
+	rateL := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	got := RateFor(map[string]RateCardEntry{"meta-llama/llama-3.1-8b-instruct": rateL}, "meta-llama/Llama-3.1-8B-Instruct-4bit")
+	if got != rateL {
+		t.Fatalf("RateFor canonical llama normalized = %+v, want %+v", got, rateL)
+	}
+}
+
+func TestRateFor_NormalizesMXFP4Suffix(t *testing.T) {
+	rateOss := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	got := RateFor(map[string]RateCardEntry{"openai/gpt-oss-20b": rateOss}, "mlx-community/gpt-oss-20b-MXFP4-Q8")
+	if got != rateOss {
+		t.Fatalf("RateFor gpt-oss normalized = %+v, want %+v", got, rateOss)
+	}
+}
+
+func TestRateFor_NormalizesNemotronAliases(t *testing.T) {
+	rateNemotron := RateCardEntry{PromptCreditsPerMtok: 117500, PromptCacheHitCreditsPerMtok: 29375, CompletionCreditsPerMtok: 235000}
+	card := map[string]RateCardEntry{
+		"nemotron-3-nano-30b-a3b": rateNemotron,
+		"default":                 {PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000},
+	}
+	for _, model := range []string{
+		"nemotron-3-nano-30b-a3b",
+		"nvidia/nemotron-3-nano-30b-a3b",
+		"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+	} {
+		got := RateFor(card, model)
+		if got != rateNemotron {
+			t.Fatalf("RateFor(%q) = %+v, want %+v", model, got, rateNemotron)
+		}
+	}
+}
+
+func TestRateFor_FallsBackToDefault(t *testing.T) {
+	rateD := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	got := RateFor(map[string]RateCardEntry{"default": rateD}, "something-not-in-card")
+	if got != rateD {
+		t.Fatalf("RateFor default = %+v, want %+v", got, rateD)
+	}
+}
+
+func TestRateFor_UnknownNamespaceDoesNotNormalizeToKnownModel(t *testing.T) {
+	rateA := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	rateD := RateCardEntry{PromptCreditsPerMtok: 300, CompletionCreditsPerMtok: 400}
+	got := RateFor(map[string]RateCardEntry{"qwen3-32b": rateA, "default": rateD}, "other/Qwen3-32B-4bit")
+	if got != rateD {
+		t.Fatalf("RateFor unknown namespace = %+v, want default %+v", got, rateD)
+	}
+}
+
+func TestRateFor_NoDefault_ReturnsZero(t *testing.T) {
+	rateA := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
+	got := RateFor(map[string]RateCardEntry{"qwen3-32b": rateA}, "something-else")
+	if got != (RateCardEntry{}) {
+		t.Fatalf("RateFor no default = %+v, want zero", got)
+	}
+}
+
+func TestRateFor_EmptyCard_ReturnsZero(t *testing.T) {
+	got := RateFor(map[string]RateCardEntry{}, "anything")
+	if got != (RateCardEntry{}) {
+		t.Fatalf("RateFor empty = %+v, want zero", got)
+	}
+}
+
+func TestRateFor_NilCard_ReturnsZero(t *testing.T) {
+	got := RateFor(nil, "anything")
+	if got != (RateCardEntry{}) {
+		t.Fatalf("RateFor nil = %+v, want zero", got)
+	}
+}
+
 func TestComputeCredits_WorkedExamples(t *testing.T) {
 	rate7B := RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000}
 	defaultRate := RateCardEntry{PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000}
@@ -25,6 +132,31 @@ func TestComputeCredits_WorkedExamples(t *testing.T) {
 	row = ComputeCredits(&p1000, &c500, nil, UsageProviderReported, FaultNone, defaultRate, 1000000, 9000)
 	if row.GrossCredits != 1000 || row.ProviderCredits != 900 || row.OperatorCredits != 100 {
 		t.Fatalf("default-rate credits = %+v", row)
+	}
+}
+
+func TestComputeCreditsWithCachePricesOnlyCachedPromptAtCacheRate(t *testing.T) {
+	rate := RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     2000000,
+	}
+	prompt, cached, completion := int64(1000), int64(400), int64(100)
+	row := ComputeCreditsWithCache(&prompt, &cached, &completion, nil, UsageProviderReported, FaultNone, rate, 1000000, 9000)
+	if row.GrossCredits != 900 || row.ProviderCredits != 810 || row.OperatorCredits != 90 {
+		t.Fatalf("cache-priced row = %+v, want gross/provider/operator 900/810/90", row)
+	}
+	if row.CachedPromptTokens == nil || *row.CachedPromptTokens != cached || row.PromptCacheHitRatePerMtok != 250000 {
+		t.Fatalf("cache fields = %+v, want cached tokens and rate preserved", row)
+	}
+}
+
+func TestComputeCreditsWithCacheRejectsCachedPromptAbovePrompt(t *testing.T) {
+	rate := RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000}
+	prompt, cached, completion := int64(100), int64(101), int64(1)
+	row := ComputeCreditsWithCache(&prompt, &cached, &completion, nil, UsageProviderReported, FaultNone, rate, 1000000, 9000)
+	if row.GrossCredits != 0 || row.ProviderCredits != 0 || row.OperatorCredits != 0 || row.FaultFlag != FaultNullUsageError || row.CachedPromptTokens != nil {
+		t.Fatalf("invalid cached row = %+v, want null-error zero row", row)
 	}
 }
 

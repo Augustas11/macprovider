@@ -1,0 +1,87 @@
+# macprovider canary buyer probe — systemd oneshot (Linux/always-on host).
+#
+# Companion to com.streamvc.canary-buyer.plist (the lab-Mac launchd variant).
+# Prefer this on an always-on host (VPS) so a sleeping Mac can't create blind
+# spots. Triggered by canary-buyer.timer.
+#
+# Install (Pearl):
+#   apt-get install -y nodejs            # >= 18 (ships probe-compatible ESM)
+#   install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
+#   install -o root -g root -m 0755 probe.mjs safety.mjs run-canary.sh emergency-disable.sh /opt/macprovider-canary-buyer/
+#   # Credentials remain root-only at rest and are exposed by systemd only to
+#   # this service's isolated dynamic identity:
+#   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.token
+#   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.heartbeat
+#   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.operator-token
+#   #   install -o root -g root -m 0600 ./expected-fleet.json /etc/macprovider/canary-buyer.expected-fleet.json
+#   #   printf '%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.token
+#   #   printf '%s\n' "$HEARTBEAT_URL" > /etc/macprovider/canary-buyer.heartbeat
+#   #   rm -f /etc/macprovider/canary-buyer.env  # rotate both copied secrets first
+#   #   test ! -e /etc/macprovider/canary-buyer.env
+#   cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   # STOP: #584 does not authorize enabling the timer or creating an enable
+#   # gate. The separate signed production re-enable change owns those actions.
+[Unit]
+Description=macprovider low-impact scheduled buyer liveness probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=true
+LoadCredential=buyer_token:/etc/macprovider/canary-buyer.token
+LoadCredential=heartbeat_url:/etc/macprovider/canary-buyer.heartbeat
+LoadCredential=operator_token:/etc/macprovider/canary-buyer.operator-token
+LoadCredential=expected_fleet:/etc/macprovider/canary-buyer.expected-fleet.json
+Environment=CANARY_BASE=https://api.streamvc.live
+Environment=CANARY_POOLZ_URL=https://coordinator.streamvc.live/poolz
+Environment=CANARY_MODELS=mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit,mlx-community/Llama-3.2-3B-Instruct-4bit
+Environment=CANARY_MIN_READY_PROVIDERS=2
+Environment=CANARY_NODE_BIN=/usr/bin/node
+Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
+Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts
+# The shipped schedule remains inert until reviewed approval creates this gate.
+# Keep the root-owned rollout authorization outside the root:macprovider 0750
+# credential directory. DynamicUser can traverse this dedicated 0755 control
+# directory but cannot create, replace, or remove the root-owned gate.
+Environment=CANARY_ENABLE_FILE=/etc/macprovider-canary-buyer/enabled
+Environment=CANARY_DISABLE_FILE=/var/lib/macprovider-canary-buyer/DISABLED
+# During the bounded backend-first bridge only, missing direct v2 provider
+# telemetry may be substituted by an exact protected /poolz row that the new
+# coordinator explicitly classifies legacy_bridge. All fleet, routing,
+# connection, and heartbeat invariants remain mandatory.
+Environment=CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS=1
+# A short-lived, exact-fleet root authorization may exist only while the Pearl
+# updater proves restoration of a pre-contract backend. Absence is the default.
+Environment=CANARY_LEGACY_ROLLBACK_AUTHORIZATION_FILE=/run/macprovider-canary-buyer/legacy-rollback.json
+# Production must never silently degrade back to journal-only monitoring.
+Environment=CANARY_REQUIRE_HEARTBEAT=1
+# Scheduled liveness is one 8-token request/model with a worst-case global cap;
+# all traffic could route to one provider, so these are true per-provider caps.
+Environment=CANARY_MAX_REQUESTS_PER_PROVIDER=4
+Environment=CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER=32
+Environment=CANARY_MAX_RUN_DURATION_MS=90000
+Environment=CANARY_RECOVERY_SOAK_SECONDS=45
+Environment=CANARY_PROBE_TIMEOUT_SECONDS=120
+Environment=CANARY_TIMEOUT_BIN=/usr/bin/timeout
+# This unit is never a performance or rollout qualification surface.
+ExecStart=/bin/bash /opt/macprovider-canary-buyer/run-canary.sh --mode liveness --fail-on-degraded
+# Preserve the fail-closed wrapper classifications in ExecMainStatus while
+# allowing operators to distinguish a deliberate no-load state from a crash.
+# Rollout tooling must require ExecMainStatus=0; 20/21 are never serving proof.
+SuccessExitStatus=20 21
+TimeoutStartSec=3min
+# Hardening — the probe only needs outbound https + its own state dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+StateDirectory=macprovider-canary-buyer
+StateDirectoryMode=0750
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=canary-buyer

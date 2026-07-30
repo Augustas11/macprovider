@@ -46,6 +46,7 @@ package integration
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -58,19 +59,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 	_ "modernc.org/sqlite"
 )
@@ -83,6 +90,16 @@ var (
 	coordinatorCLIBin string
 	gatewayBin        string
 	binBuildErr       error
+)
+
+const (
+	snapshotManifestV1            = "macprovider.snapshot-manifest.v1"
+	defaultFakeModelID            = "llama-3.2-3b-instruct"
+	settlementFixtureModelID      = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	staticLlama32CandidateKey     = "meta-llama/llama-3.2-3b-instruct"
+	staticLlama32CandidateRowID   = "c17e31e3bb1e1b64809e0157b32f91d03c1f6db716f03a2eee3fe589e8fbe9e2"
+	staticAutotuneSignerKeyID     = "streamvc-autotune-static-v4"
+	staticAutotunePublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
 )
 
 func TestMain(m *testing.M) {
@@ -204,6 +221,7 @@ type scenario struct {
 	cancelAll   context.CancelFunc
 	fakeProv    *fakeProvider
 	procWG      sync.WaitGroup
+	modelHash   string
 }
 
 type scenarioOpts struct {
@@ -245,6 +263,34 @@ type scenarioOpts struct {
 	// SPEC-015-shaped non-streaming receipt header so the gateway and
 	// coordinator boundary can be tested without mocking either service.
 	receiptEnabledProvider bool
+	// settlementReceiptProvider, when true, makes the fake provider
+	// advertise a catalog-verified model hash and emit signed SPEC-015
+	// v0.4 settlement receipts on both non-streaming and streaming
+	// requests.
+	settlementReceiptProvider bool
+	// settlementEnforceMode, when true, runs the coordinator with
+	// settlement.verified_model_settlement_mode=enforce so gateway
+	// money movement must be driven by coordinator finality rather than
+	// legacy/provider-reported accounting.
+	settlementEnforceMode bool
+	// settlementReconcileIntervalSeconds overrides the gateway SPEC-022
+	// background reconciler cadence. Zero keeps the gateway default.
+	settlementReconcileIntervalSeconds int
+}
+
+type settlementCatalogFixture struct {
+	path                   string
+	publicKey              string
+	modelHash              string
+	rateCardPath           string
+	rateCardSigPath        string
+	demandRankPath         string
+	demandRankSigPath      string
+	autotuneCatalogPath    string
+	autotuneCatalogSigPath string
+	autotuneCatalogSHA256  string
+	autotuneCatalogVersion string
+	autotunePolicyVersion  string
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -327,13 +373,18 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			"display_name": fmt.Sprintf("fake-integration-%d", i),
 		}
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs)
+	var settlementCatalog settlementCatalogFixture
+	if opts.settlementReceiptProvider {
+		settlementCatalog = s.writeSettlementCatalogFixture()
+		s.modelHash = settlementCatalog.modelHash
+	}
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
 		gwServiceTok = *opts.gatewayServiceToken
 	}
-	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok)
+	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds)
 
 	if opts.seedAccount {
 		s.apiKey = s.seedGatewayAccountAndKey()
@@ -370,6 +421,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			fp := newFakeProvider(t, slot.ID, slot.Port, s.coordProvURL, providerTokens[i])
 			if opts.receiptEnabledProvider {
 				fp.enableReceipts()
+			}
+			if opts.settlementReceiptProvider {
+				fp.enableSettlementReceipts(settlementCatalog)
 			}
 			fp.start(ctx)
 			s.fakeProvs = append(s.fakeProvs, fp)
@@ -410,8 +464,32 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool) {
 	s.t.Helper()
+	tier2Cfg := map[string]any{
+		"observe_enabled":                    false,
+		"require_hash_verified":              false,
+		"require_encrypted_leg":              false,
+		"encrypted_leg_aead":                 "A256GCM",
+		"encrypted_leg_rekey_after_requests": 10000,
+		"encrypted_leg_rekey_after_seconds":  3600,
+		"require_attestation":                false,
+		"attestation_max_age_s":              600,
+		"behavioral_safety_enabled":          false,
+		"output_size_cap_bytes":              0,
+		"output_bytes_per_token_ceiling":     16,
+		"default_output_size_cap_bytes":      1048576,
+		"encoding_validation_enabled":        false,
+		"response_time_anomaly_enabled":      false,
+		"response_time_anomaly_factor":       5.0,
+		"response_time_anomaly_min_ms":       10000,
+	}
+	if settlementCatalog.path != "" {
+		tier2Cfg["observe_enabled"] = true
+		tier2Cfg["require_hash_verified"] = true
+		tier2Cfg["catalog_path"] = settlementCatalog.path
+		tier2Cfg["catalog_public_key"] = settlementCatalog.publicKey
+	}
 	cfg := map[string]any{
 		"listen": map[string]any{
 			"buyer_port":    buyerPort,
@@ -465,24 +543,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"provisional_tier_weight":             0.3,
 			"provisional_retention_days":          30,
 		},
-		"tier2": map[string]any{
-			"observe_enabled":                    false,
-			"require_hash_verified":              false,
-			"require_encrypted_leg":              false,
-			"encrypted_leg_aead":                 "A256GCM",
-			"encrypted_leg_rekey_after_requests": 10000,
-			"encrypted_leg_rekey_after_seconds":  3600,
-			"require_attestation":                false,
-			"attestation_max_age_s":              600,
-			"behavioral_safety_enabled":          false,
-			"output_size_cap_bytes":              0,
-			"output_bytes_per_token_ceiling":     16,
-			"default_output_size_cap_bytes":      1048576,
-			"encoding_validation_enabled":        false,
-			"response_time_anomaly_enabled":      false,
-			"response_time_anomaly_factor":       5.0,
-			"response_time_anomaly_min_ms":       10000,
-		},
+		"tier2": tier2Cfg,
 		"auth": map[string]any{
 			"operator_key":            s.operatorKey,
 			"gateway_service_token":   gatewayServiceToken,
@@ -514,6 +575,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"startup_reconcile_window_hours": 24,
 			"nightly_reconcile_window_days":  7,
 			"recovery_grace_seconds":         30,
+			"verified_model_settlement_mode": verifiedModelSettlementMode(settlementEnforceMode),
 			"job_enabled":                    false,
 		},
 		"endpoints": map[string]any{
@@ -533,6 +595,20 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 		// production has the provider in their providers: list.
 		"providers": providers,
 	}
+	if settlementCatalog.autotuneCatalogPath != "" {
+		cfg["autotune"] = map[string]any{
+			"rate_card_path":               settlementCatalog.rateCardPath,
+			"rate_card_sig_path":           settlementCatalog.rateCardSigPath,
+			"demand_rank_path":             settlementCatalog.demandRankPath,
+			"demand_rank_sig_path":         settlementCatalog.demandRankSigPath,
+			"autotune_candidates_path":     settlementCatalog.autotuneCatalogPath,
+			"autotune_candidates_sig_path": settlementCatalog.autotuneCatalogSigPath,
+			"enforce_provider_admission":   true,
+			"public_keys": map[string]string{
+				staticAutotuneSignerKeyID: staticAutotunePublicKeyBase64,
+			},
+		}
+	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
 		s.t.Fatalf("marshal coordinator yaml: %v", err)
@@ -542,7 +618,154 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	}
 }
 
-func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string) {
+func verifiedModelSettlementMode(enforce bool) string {
+	if enforce {
+		return "enforce"
+	}
+	return "observe"
+}
+
+func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
+	s.t.Helper()
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		s.t.Fatalf("find repo root for autotune fixture: %v", err)
+	}
+	autotuneCatalogPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "autotune-candidates.json")
+	autotuneCatalogSigPath := autotuneCatalogPath + ".sig"
+	rateCardPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "rate-card.json")
+	rateCardSigPath := rateCardPath + ".sig"
+	demandRankPath := filepath.Join(repoRoot, "phase3-binary", "dist", "static", "demand-rank.json")
+	demandRankSigPath := demandRankPath + ".sig"
+	autotuneCatalogJSON, err := os.ReadFile(autotuneCatalogPath)
+	if err != nil {
+		s.t.Fatalf("read signed autotune fixture: %v", err)
+	}
+	for label, path := range map[string]string{
+		"rate-card fixture":     rateCardPath,
+		"rate-card signature":   rateCardSigPath,
+		"demand-rank fixture":   demandRankPath,
+		"demand-rank signature": demandRankSigPath,
+		"autotune signature":    autotuneCatalogSigPath,
+	} {
+		if _, err := os.Stat(path); err != nil {
+			s.t.Fatalf("read %s: %v", label, err)
+		}
+	}
+	var autotuneCatalog struct {
+		Version       string `json:"version"`
+		PolicyVersion string `json:"policy_version"`
+		Rows          map[string]struct {
+			ModelSHA256 string `json:"model_sha256"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(autotuneCatalogJSON, &autotuneCatalog); err != nil {
+		s.t.Fatalf("parse signed autotune fixture: %v", err)
+	}
+	modelHash := autotuneCatalog.Rows[staticLlama32CandidateKey].ModelSHA256
+	if len(modelHash) != sha256.Size*2 {
+		s.t.Fatalf("signed autotune fixture model hash is invalid: %q", modelHash)
+	}
+	autotuneCatalogDigest := sha256.Sum256(autotuneCatalogJSON)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		s.t.Fatalf("generate catalog key: %v", err)
+	}
+
+	minRAM := 16
+	models := []settlementCatalogModel{{
+		ArtifactKind: "mlx_weight_file",
+		HashScope:    "primary_weight_file",
+		ModelID:      settlementFixtureModelID,
+		MinRAMGB:     &minRAM,
+		SHA256:       modelHash,
+		Source:       "integration-test",
+	}}
+	issuedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	expiresAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	body := settlementCatalogBody{
+		CatalogID: "integration-catalog",
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+		IssuedAt:  issuedAt.Format(time.RFC3339),
+		Models:    models,
+		Version:   1,
+	}
+	canonical, err := json.Marshal(body)
+	if err != nil {
+		s.t.Fatalf("marshal catalog body: %v", err)
+	}
+	sig := ed25519.Sign(priv, canonical)
+	file := settlementCatalogFile{
+		CatalogID: body.CatalogID,
+		ExpiresAt: body.ExpiresAt,
+		IssuedAt:  body.IssuedAt,
+		Models:    body.Models,
+		Signature: settlementCatalogSignature{
+			Alg:   "Ed25519",
+			KeyID: "integration-catalog-key",
+			Sig:   base64.RawURLEncoding.EncodeToString(sig),
+		},
+		Version: body.Version,
+	}
+	raw, err := json.Marshal(file)
+	if err != nil {
+		s.t.Fatalf("marshal catalog file: %v", err)
+	}
+	path := filepath.Join(s.tempDir, "settlement-catalog.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		s.t.Fatalf("write settlement catalog: %v", err)
+	}
+	return settlementCatalogFixture{
+		path:                   path,
+		publicKey:              base64.RawURLEncoding.EncodeToString(pub),
+		modelHash:              modelHash,
+		rateCardPath:           rateCardPath,
+		rateCardSigPath:        rateCardSigPath,
+		demandRankPath:         demandRankPath,
+		demandRankSigPath:      demandRankSigPath,
+		autotuneCatalogPath:    autotuneCatalogPath,
+		autotuneCatalogSigPath: autotuneCatalogSigPath,
+		autotuneCatalogSHA256:  hex.EncodeToString(autotuneCatalogDigest[:]),
+		autotuneCatalogVersion: autotuneCatalog.Version,
+		autotunePolicyVersion:  autotuneCatalog.PolicyVersion,
+	}
+}
+
+type settlementCatalogModel struct {
+	ArtifactKind string `json:"artifact_kind"`
+	HashScope    string `json:"hash_scope"`
+	ModelID      string `json:"model_id"`
+	MinRAMGB     *int   `json:"min_ram_gb,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+	SHA256       string `json:"sha256"`
+	Source       string `json:"source"`
+}
+
+type settlementCatalogSignature struct {
+	Alg   string `json:"alg"`
+	KeyID string `json:"key_id"`
+	Sig   string `json:"sig"`
+}
+
+type settlementCatalogBody struct {
+	CatalogID string                   `json:"catalog_id"`
+	ExpiresAt string                   `json:"expires_at"`
+	IssuedAt  string                   `json:"issued_at"`
+	Models    []settlementCatalogModel `json:"models"`
+	Version   int                      `json:"version"`
+}
+
+type settlementCatalogFile struct {
+	CatalogID string                     `json:"catalog_id"`
+	ExpiresAt string                     `json:"expires_at"`
+	IssuedAt  string                     `json:"issued_at"`
+	Models    []settlementCatalogModel   `json:"models"`
+	Signature settlementCatalogSignature `json:"signature"`
+	Version   int                        `json:"version"`
+}
+
+func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int) {
 	s.t.Helper()
 	cfg := map[string]any{
 		"listen": map[string]any{
@@ -574,6 +797,7 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"github_oauth_enabled":     false,
 			"email_magic_link_enabled": false,
 			"oauth": map[string]any{
+				"state_max_per_ip": 20,
 				"callback_allowlist": []string{
 					fmt.Sprintf("http://127.0.0.1:%d/auth/github/callback", gwPort),
 				},
@@ -593,10 +817,12 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"reservation_max_age_hours":      24,
 		},
 		"limits": map[string]any{
-			"max_tokens_per_request":      4096,
-			"demo_max_tokens_per_request": 512,
-			"max_feedback_comment_bytes":  2000,
-			"request_body_bytes":          1048576,
+			"max_tokens_per_request":            4096,
+			"demo_max_tokens_per_request":       512,
+			"max_feedback_comment_bytes":        2000,
+			"max_feedback_body_bytes":           16384,
+			"feedback_requests_per_ip_per_hour": 10,
+			"request_body_bytes":                1048576,
 		},
 		"capacity": map[string]any{
 			"monthly_budget_usd":                500,
@@ -605,8 +831,12 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"tier_cooldown_seconds":             3600,
 		},
 		"timeouts": map[string]any{
+			// Post-#760/#784 C2b: response-header transport must cover
+			// max(coordinator_admission_seconds, effective non_stream_request_seconds).
+			// The fixture keeps a short request wall but uses the runtime
+			// admission default (120s), so the header budget must be at least 120s.
 			"coordinator_request_seconds":        60,
-			"coordinator_header_timeout_seconds": 10,
+			"coordinator_header_timeout_seconds": 120,
 			"streaming_cancel_ms":                500,
 		},
 		"cors": map[string]any{
@@ -619,6 +849,14 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 		"explorer": map[string]any{
 			"enabled": false,
 		},
+	}
+	if settlementReconcileIntervalSeconds > 0 {
+		cfg["settlement"] = map[string]any{
+			"reconcile_enabled":           true,
+			"reconcile_interval_s":        settlementReconcileIntervalSeconds,
+			"reconcile_batch_limit":       100,
+			"reconcile_request_timeout_s": 5,
+		}
 	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -646,13 +884,15 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, gatewayBin, "-config", s.gatewayYAML)
-	cmd.Stderr = io.Discard
+	var seedLogs bytes.Buffer
+	cmd.Stderr = &seedLogs
 	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("seed gateway start: %v", err)
 	}
 	// Poll until the schema is present, then kill.
 	deadline := time.Now().Add(4 * time.Second)
+	schemaReady := false
 	for time.Now().Before(deadline) {
 		db, err := sql.Open("sqlite", s.gatewayDB)
 		if err == nil {
@@ -660,6 +900,7 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 			err = db.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'`).Scan(&ok)
 			db.Close()
 			if err == nil {
+				schemaReady = true
 				break
 			}
 		}
@@ -667,6 +908,9 @@ func (s *scenario) seedGatewayAccountAndKey() string {
 	}
 	_ = cmd.Process.Kill()
 	_ = cmd.Wait()
+	if !schemaReady {
+		s.t.Fatalf("seed gateway did not create accounts schema: %s", seedLogs.String())
+	}
 
 	db, err := sql.Open("sqlite", s.gatewayDB)
 	if err != nil {
@@ -919,22 +1163,28 @@ func (s *scenario) chatRequest(headers map[string]string, body string) (int, htt
 // serves OpenAI-shaped chat completions on the endpoint port.
 // Cancellation tears both halves down.
 type fakeProvider struct {
-	t                *testing.T
-	providerID       string
-	providerToken    string
-	httpPort         int
-	wsURL            string
-	hServer          *http.Server
-	receiptEnabled   bool
-	receiptPubkey    ed25519.PublicKey
-	receiptPrivkey   ed25519.PrivateKey
-	lastRequestBody  []byte
-	lastResponseBody []byte
-	hReady           chan struct{}
-	stopOnce         sync.Once
-	stopped          chan struct{}
-	hitMu            sync.Mutex
-	hits             int // /v1/chat/completions hit count, for sticky verification
+	t                 *testing.T
+	providerID        string
+	providerToken     string
+	httpPort          int
+	wsURL             string
+	hServer           *http.Server
+	receiptEnabled    bool
+	settlementEnabled bool
+	modelID           string
+	modelHash         string
+	catalogReleaseID  string
+	catalogPolicy     string
+	catalogSHA256     string
+	receiptPubkey     ed25519.PublicKey
+	receiptPrivkey    ed25519.PrivateKey
+	lastRequestBody   []byte
+	lastResponseBody  []byte
+	hReady            chan struct{}
+	stopOnce          sync.Once
+	stopped           chan struct{}
+	hitMu             sync.Mutex
+	hits              int // /v1/chat/completions hit count, for sticky verification
 }
 
 // Hits returns the number of /v1/chat/completions requests this fake
@@ -968,6 +1218,7 @@ func newFakeProvider(t *testing.T, providerID string, httpPort int, coordProvURL
 		providerToken: providerToken,
 		httpPort:      httpPort,
 		wsURL:         fmt.Sprintf("%s://%s/ws/provider", wsScheme, u.Host),
+		modelID:       defaultFakeModelID,
 		hReady:        make(chan struct{}),
 		stopped:       make(chan struct{}),
 	}
@@ -980,6 +1231,22 @@ func (p *fakeProvider) enableReceipts() {
 		p.t.Fatalf("generate fake receipt key: %v", err)
 	}
 	p.receiptEnabled = true
+	p.receiptPubkey = pub
+	p.receiptPrivkey = priv
+}
+
+func (p *fakeProvider) enableSettlementReceipts(catalog settlementCatalogFixture) {
+	p.t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		p.t.Fatalf("generate fake settlement receipt key: %v", err)
+	}
+	p.settlementEnabled = true
+	p.modelID = settlementFixtureModelID
+	p.modelHash = catalog.modelHash
+	p.catalogReleaseID = catalog.autotuneCatalogVersion
+	p.catalogPolicy = catalog.autotunePolicyVersion
+	p.catalogSHA256 = catalog.autotuneCatalogSHA256
 	p.receiptPubkey = pub
 	p.receiptPrivkey = priv
 }
@@ -1011,6 +1278,96 @@ func (p *fakeProvider) buildReceiptHeader(requestBody, responseBody []byte) (str
 	)
 	signature := ed25519.Sign(p.receiptPrivkey, []byte(tuple))
 	return base64.StdEncoding.EncodeToString([]byte(tuple)) + "." + base64.StdEncoding.EncodeToString(signature), nil
+}
+
+type settlementMetadata struct {
+	AccountScope               string `json:"account_scope"`
+	RequestID                  string `json:"request_id"`
+	AttemptN                   int64  `json:"attempt_n"`
+	ProviderID                 string `json:"provider_id"`
+	ProviderReceiptKeyID       string `json:"provider_receipt_key_id"`
+	ModelID                    string `json:"model_id"`
+	ExpectedCatalogModelHash   string `json:"expected_catalog_model_hash"`
+	CatalogID                  string `json:"catalog_id"`
+	CatalogBodyDigest          string `json:"catalog_body_digest"`
+	RouteSnapshotDigest        string `json:"route_snapshot_digest"`
+	RouteSnapshotPolicyVersion string `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode          string `json:"route_snapshot_mode"`
+	PromptHash                 string `json:"prompt_hash"`
+	OutputPrefixStartByte      int64  `json:"output_prefix_start_byte"`
+	PendingDeadlineSeconds     int64  `json:"pending_deadline_seconds"`
+}
+
+func decodeSettlementMetadataHeader(header string) (settlementMetadata, bool, error) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return settlementMetadata{}, false, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(header)
+	if err != nil {
+		return settlementMetadata{}, false, fmt.Errorf("decode settlement metadata: %w", err)
+	}
+	var metadata settlementMetadata
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return settlementMetadata{}, false, fmt.Errorf("decode settlement metadata json: %w", err)
+	}
+	return metadata, true, nil
+}
+
+func (p *fakeProvider) buildSettlementReceiptHeader(metadata settlementMetadata, content, finishReason string, promptTokens, completionTokens, terminalTSUnixMS int64) (string, error) {
+	normalizedContent := norm.NFC.String(normalizeSpec015LineEndings(content))
+	deliveredBytes := int64(len([]byte(normalizedContent)))
+	outputPrefixEnd := metadata.OutputPrefixStartByte + deliveredBytes
+	output := map[string]any{
+		"content":                  normalizedContent,
+		"finish_reason":            finishReason,
+		"output_prefix_end_byte":   outputPrefixEnd,
+		"output_prefix_start_byte": metadata.OutputPrefixStartByte,
+		"terminal_state":           "normal_done",
+		"tool_calls":               nil,
+	}
+	outputHash, _, err := spec015CanonicalSHA256Hex(output)
+	if err != nil {
+		return "", fmt.Errorf("canonical output hash: %w", err)
+	}
+	usage := map[string]any{
+		"billable_input_tokens":  promptTokens,
+		"billable_output_tokens": completionTokens,
+		"delivered_output_bytes": deliveredBytes,
+		"observed_input_tokens":  promptTokens,
+		"observed_output_tokens": completionTokens,
+	}
+	tuple := map[string]any{
+		"account_scope":                 metadata.AccountScope,
+		"attempt_n":                     metadata.AttemptN,
+		"catalog_body_digest":           metadata.CatalogBodyDigest,
+		"catalog_id":                    metadata.CatalogID,
+		"expected_catalog_model_hash":   metadata.ExpectedCatalogModelHash,
+		"issued_at_unix_ms":             terminalTSUnixMS,
+		"model_hash":                    p.modelHash,
+		"model_id":                      metadata.ModelID,
+		"output_hash":                   outputHash,
+		"output_prefix_end_byte":        outputPrefixEnd,
+		"output_prefix_start_byte":      metadata.OutputPrefixStartByte,
+		"prompt_hash":                   metadata.PromptHash,
+		"provider_id":                   metadata.ProviderID,
+		"provider_receipt_key_id":       metadata.ProviderReceiptKeyID,
+		"receipt_version":               "4",
+		"request_id":                    metadata.RequestID,
+		"route_snapshot_digest":         metadata.RouteSnapshotDigest,
+		"route_snapshot_mode":           metadata.RouteSnapshotMode,
+		"route_snapshot_policy_version": metadata.RouteSnapshotPolicyVersion,
+		"signature_key_alg":             "Ed25519",
+		"terminal_state":                "normal_done",
+		"terminal_state_ts_unix_ms":     terminalTSUnixMS,
+		"usage":                         usage,
+	}
+	canonical, err := spec015CanonicalJSON(tuple)
+	if err != nil {
+		return "", fmt.Errorf("canonical settlement tuple: %w", err)
+	}
+	signature := ed25519.Sign(p.receiptPrivkey, canonical)
+	return base64.StdEncoding.EncodeToString(canonical) + "." + base64.StdEncoding.EncodeToString(signature), nil
 }
 
 func spec015CanonicalPromptHash(requestBody []byte) (string, error) {
@@ -1160,12 +1517,231 @@ func spec015JCSHash(value any) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func readyStateUpdate() map[string]any {
-	return map[string]any{
+func spec015CanonicalSHA256Hex(value any) (string, []byte, error) {
+	canonical, err := spec015CanonicalJSON(value)
+	if err != nil {
+		return "", nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), canonical, nil
+}
+
+func spec015CanonicalJSON(v any) ([]byte, error) {
+	var b bytes.Buffer
+	if err := writeSpec015JCS(&b, v); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+func writeSpec015JCS(b *bytes.Buffer, v any) error {
+	switch x := v.(type) {
+	case nil:
+		b.WriteString("null")
+	case string:
+		b.WriteString(escapeSpec015JCSString(norm.NFC.String(x)))
+	case bool:
+		if x {
+			b.WriteString("true")
+		} else {
+			b.WriteString("false")
+		}
+	case int:
+		b.WriteString(strconv.Itoa(x))
+	case int64:
+		b.WriteString(strconv.FormatInt(x, 10))
+	case json.Number:
+		formatted, err := canonicalSpec015JSONNumber(x.String())
+		if err != nil {
+			return err
+		}
+		b.WriteString(formatted)
+	case float64:
+		formatted, err := canonicalSpec015Double(x)
+		if err != nil {
+			return err
+		}
+		b.WriteString(formatted)
+	case []any:
+		b.WriteByte('[')
+		for i, item := range x {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeSpec015JCS(b, item); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for key := range x {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return spec015UTF16Less(keys[i], keys[j])
+		})
+		b.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(escapeSpec015JCSString(key))
+			b.WriteByte(':')
+			if err := writeSpec015JCS(b, x[key]); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	default:
+		return fmt.Errorf("unsupported JCS value %T", v)
+	}
+	return nil
+}
+
+var integerNumberPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
+
+func canonicalSpec015JSONNumber(raw string) (string, error) {
+	if integerNumberPattern.MatchString(raw) {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err == nil {
+			return strconv.FormatInt(n, 10), nil
+		}
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return "", fmt.Errorf("invalid JSON number %q", raw)
+	}
+	if f == math.Trunc(f) && f >= math.MinInt64 && f <= math.MaxInt64 {
+		return strconv.FormatInt(int64(f), 10), nil
+	}
+	return canonicalSpec015Double(f)
+}
+
+func canonicalSpec015Double(f float64) (string, error) {
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return "", fmt.Errorf("non-finite number")
+	}
+	if f == 0 {
+		return "0", nil
+	}
+	sign := ""
+	if f < 0 {
+		sign = "-"
+		f = -f
+	}
+	digits, e, err := decimalDigitsAndExponent(strconv.FormatFloat(f, 'g', -1, 64))
+	if err != nil {
+		return "", err
+	}
+	return sign + renderSpec015ECMAScriptNumber(digits, e), nil
+}
+
+func decimalDigitsAndExponent(s string) (string, int, error) {
+	if split := strings.IndexAny(s, "eE"); split >= 0 {
+		mantissa := s[:split]
+		exp, err := strconv.Atoi(s[split+1:])
+		if err != nil {
+			return "", 0, fmt.Errorf("parse float exponent %q: %w", s, err)
+		}
+		point := strings.IndexByte(mantissa, '.')
+		integerDigits := len(mantissa)
+		if point >= 0 {
+			integerDigits = point
+			mantissa = mantissa[:point] + mantissa[point+1:]
+		}
+		digits := strings.TrimLeft(mantissa, "0")
+		if digits == "" {
+			return "0", 1, nil
+		}
+		return digits, exp + integerDigits, nil
+	}
+	point := strings.IndexByte(s, '.')
+	if point < 0 {
+		point = len(s)
+	} else {
+		s = s[:point] + s[point+1:]
+	}
+	leadingZeroes := len(s) - len(strings.TrimLeft(s, "0"))
+	digits := strings.TrimLeft(s, "0")
+	if digits == "" {
+		return "0", 1, nil
+	}
+	return digits, point - leadingZeroes, nil
+}
+
+func renderSpec015ECMAScriptNumber(digits string, e int) string {
+	k := len(digits)
+	switch {
+	case k <= e && e <= 21:
+		return digits + strings.Repeat("0", e-k)
+	case 0 < e && e <= 21:
+		return digits[:e] + "." + digits[e:]
+	case -6 < e && e <= 0:
+		return "0." + strings.Repeat("0", -e) + digits
+	default:
+		exponent := e - 1
+		mantissa := digits[:1]
+		if k > 1 {
+			mantissa += "." + digits[1:]
+		}
+		if exponent >= 0 {
+			return mantissa + "e+" + strconv.Itoa(exponent)
+		}
+		return mantissa + "e-" + strconv.Itoa(-exponent)
+	}
+}
+
+func spec015UTF16Less(a, b string) bool {
+	aa := utf16.Encode([]rune(a))
+	bb := utf16.Encode([]rune(b))
+	for i := 0; i < len(aa) && i < len(bb); i++ {
+		if aa[i] != bb[i] {
+			return aa[i] < bb[i]
+		}
+	}
+	return len(aa) < len(bb)
+}
+
+func escapeSpec015JCSString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r >= 0 && r <= 0x1f {
+				b.WriteString(`\u00`)
+				b.WriteString(hex.EncodeToString([]byte{byte(r)}))
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func readyStateUpdate(modelID, modelHash string) map[string]any {
+	msg := map[string]any{
 		"type":  "state_update",
 		"state": "ready",
 		"metrics_snapshot": map[string]any{
-			"model_id":                   "llama-3.2-3b-instruct",
+			"model_id":                   modelID,
 			"model_params_b":             3.0,
 			"ram_gb":                     16,
 			"max_context_tokens":         8192,
@@ -1177,6 +1753,25 @@ func readyStateUpdate() map[string]any {
 			"avg_latency_ms_since_last":  0.0,
 			"throughput_tps_since_last":  0.0,
 		},
+	}
+	addCanonicalModelIdentity(msg["metrics_snapshot"].(map[string]any), modelHash)
+	return msg
+}
+
+func addCanonicalModelIdentity(msg map[string]any, modelHash string) {
+	if modelHash == "" {
+		return
+	}
+	msg["model_hash"] = modelHash
+	msg["model_hash_algorithm"] = snapshotManifestV1
+}
+
+func TestAddCanonicalModelIdentity(t *testing.T) {
+	const hash = "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a"
+	msg := map[string]any{}
+	addCanonicalModelIdentity(msg, hash)
+	if msg["model_hash"] != hash || msg["model_hash_algorithm"] != snapshotManifestV1 {
+		t.Fatalf("canonical identity frame = %#v", msg)
 	}
 }
 
@@ -1195,6 +1790,11 @@ func (p *fakeProvider) start(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		requestBody, _ := io.ReadAll(r.Body)
+		settlementMetadata, hasSettlementMetadata, err := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		p.hitMu.Lock()
 		p.hits++
 		p.lastRequestBody = append([]byte(nil), requestBody...)
@@ -1202,10 +1802,28 @@ func (p *fakeProvider) start(ctx context.Context) {
 		p.hitMu.Unlock()
 		if chatBodyRequestsStream(requestBody) {
 			w.Header().Set("Content-Type", "text/event-stream")
+			terminalTS := time.Now().UTC().UnixMilli()
+			var receipt string
+			if p.settlementEnabled && hasSettlementMetadata {
+				var err error
+				receipt, err = p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Add("Trailer", "X-MacProvider-Receipt")
+				w.Header().Add("Trailer", "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS")
+			}
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"finish_reason\":null}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from fake provider\"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":12,\"total_tokens\":20},\"choices\":[]}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if receipt != "" {
+				w.Header().Set("X-MacProvider-Receipt", receipt)
+				w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
+			}
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1217,6 +1835,16 @@ func (p *fakeProvider) start(ctx context.Context) {
 				return
 			}
 			w.Header().Set("X-MacProvider-Receipt", receipt)
+		}
+		if p.settlementEnabled && hasSettlementMetadata {
+			terminalTS := time.Now().UTC().UnixMilli()
+			receipt, err := p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("X-MacProvider-Receipt", receipt)
+			w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(fakeCompletionBody))
@@ -1294,7 +1922,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	defer conn.Close()
 
 	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
-	if p.receiptEnabled {
+	if p.receiptEnabled || p.settlementEnabled {
 		providerECDH := make([]byte, 32)
 		if _, err := rand.Read(providerECDH); err != nil {
 			p.t.Errorf("provider ecdh key: %v", err)
@@ -1306,7 +1934,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"stage":                       "initial",
 			"provider_id":                 p.providerID,
 			"hostname":                    "fake-provider",
-			"model_id":                    "llama-3.2-3b-instruct",
+			"model_id":                    p.modelID,
 			"model_params_b":              3.0,
 			"ram_gb":                      16,
 			"max_context_tokens":          8192,
@@ -1316,9 +1944,17 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"endpoint_url":                endpointURL,
 			"provider_ecdh_public_key":    base64.RawURLEncoding.EncodeToString(providerECDH),
 			"provider_receipt_public_key": base64.StdEncoding.EncodeToString(p.receiptPubkey),
-			"supported_models":            []string{"llama-3.2-3b-instruct"},
+			"supported_models":            []string{p.modelID},
 			"publishes_supported_models":  true,
 			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
+		}
+		addCanonicalModelIdentity(initial, p.modelHash)
+		if p.catalogReleaseID != "" {
+			initial["catalog_release_id"] = p.catalogReleaseID
+			initial["catalog_policy_version"] = p.catalogPolicy
+			initial["catalog_candidate_sha256"] = p.catalogSHA256
+			initial["catalog_signer_key_id"] = staticAutotuneSignerKeyID
+			initial["catalog_row_identity"] = staticLlama32CandidateRowID
 		}
 		if err := writeJSONFrame(conn, initial); err != nil {
 			p.t.Errorf("auth initial write: %v", err)
@@ -1343,7 +1979,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"auth_attempt_id":            challenge.AuthAttemptID,
 			"provider_id":                p.providerID,
 			"attestation_token":          nil,
-			"supported_models":           []string{"llama-3.2-3b-instruct"},
+			"supported_models":           []string{p.modelID},
 			"publishes_supported_models": true,
 		}
 		if err := writeJSONFrame(conn, proof); err != nil {
@@ -1362,7 +1998,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			p.t.Errorf("auth_response = %s err=%v", string(responsePayload), err)
 			return
 		}
-		if err := writeJSONFrame(conn, readyStateUpdate()); err != nil {
+		if err := writeJSONFrame(conn, readyStateUpdate(p.modelID, p.modelHash)); err != nil {
 			p.t.Errorf("state_update write: %v", err)
 			return
 		}
@@ -1373,7 +2009,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"tier":                    1,
 			"provider_id":             p.providerID,
 			"hostname":                "fake-provider",
-			"model_id":                "llama-3.2-3b-instruct",
+			"model_id":                p.modelID,
 			"model_params_b":          3.0,
 			"ram_gb":                  16,
 			"max_context_tokens":      8192,
@@ -1429,7 +2065,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			hb := map[string]any{
 				"type":                       "heartbeat",
 				"status":                     "ready",
-				"model_id":                   "llama-3.2-3b-instruct",
+				"model_id":                   p.modelID,
 				"model_params_b":             3.0,
 				"ram_gb":                     16,
 				"max_context_tokens":         8192,
@@ -1441,6 +2077,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"avg_latency_ms_since_last":  0.0,
 				"throughput_tps_since_last":  0.0,
 			}
+			addCanonicalModelIdentity(hb, p.modelHash)
 			if err := writeJSONFrame(conn, hb); err != nil {
 				return
 			}
@@ -1474,10 +2111,38 @@ type requestLogRow struct {
 // in the money-path scenario. Columns match
 // phase5-gateway/internal/storage/sqlite/migrate.go:68-79.
 type usageEventRow struct {
-	AccountID   string
-	TotalTokens int64
-	Outcome     string
-	TokenSource string
+	AccountID        string
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	Outcome          string
+	TokenSource      string
+	RequestID        string
+}
+
+type settlementReceiptVerdictRow struct {
+	RequestID                 string
+	AttemptN                  int64
+	ProviderID                string
+	ReceiptPresent            int
+	ReceiptVersion            sql.NullString
+	ReceiptResult             string
+	SettlementOutcome         string
+	Reason                    string
+	Closed                    int
+	ModelHash                 sql.NullString
+	BuyerDebitOutcome         string
+	ProviderSettlementOutcome string
+	PayoutExclusionOutcome    string
+}
+
+type quotaReservationRow struct {
+	AccountID      string
+	RequestID      string
+	ReservedTokens int64
+	SettledTokens  int64
+	Status         string
+	SettlementHold int
 }
 
 // readLatestUsageEvent opens the gateway SQLite DB and returns the
@@ -1494,16 +2159,60 @@ func (s *scenario) readLatestUsageEvent() (usageEventRow, bool) {
 	defer db.Close()
 	var row usageEventRow
 	err = db.QueryRow(
-		`SELECT account_id, total_tokens, outcome, token_source
+		`SELECT account_id, request_id, prompt_tokens, completion_tokens, total_tokens, outcome, token_source
 		   FROM usage_events WHERE account_id = ?
 		  ORDER BY created_at DESC LIMIT 1`,
 		s.accountID,
-	).Scan(&row.AccountID, &row.TotalTokens, &row.Outcome, &row.TokenSource)
+	).Scan(&row.AccountID, &row.RequestID, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.Outcome, &row.TokenSource)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return usageEventRow{}, false
 		}
 		s.t.Fatalf("query usage_events: %v", err)
+	}
+	return row, true
+}
+
+func (s *scenario) readUsageEvent(requestID string) (usageEventRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.gatewayDB)
+	if err != nil {
+		s.t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	var row usageEventRow
+	err = db.QueryRow(
+		`SELECT account_id, request_id, prompt_tokens, completion_tokens, total_tokens, outcome, token_source
+		   FROM usage_events WHERE account_id = ? AND request_id = ?`,
+		s.accountID, requestID,
+	).Scan(&row.AccountID, &row.RequestID, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.Outcome, &row.TokenSource)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return usageEventRow{}, false
+		}
+		s.t.Fatalf("query usage_events for request %s: %v", requestID, err)
+	}
+	return row, true
+}
+
+func (s *scenario) readQuotaReservation(requestID string) (quotaReservationRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.gatewayDB)
+	if err != nil {
+		s.t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	var row quotaReservationRow
+	err = db.QueryRow(
+		`SELECT account_id, request_id, reserved_tokens, settled_tokens, status, settlement_hold
+		   FROM quota_reservations WHERE account_id = ? AND request_id = ?`,
+		s.accountID, requestID,
+	).Scan(&row.AccountID, &row.RequestID, &row.ReservedTokens, &row.SettledTokens, &row.Status, &row.SettlementHold)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return quotaReservationRow{}, false
+		}
+		s.t.Fatalf("query quota_reservations for request %s: %v", requestID, err)
 	}
 	return row, true
 }
@@ -1533,4 +2242,49 @@ func (s *scenario) readLatestRequestLog() (requestLogRow, bool) {
 		s.t.Fatalf("query request_log: %v", err)
 	}
 	return row, true
+}
+
+func (s *scenario) readSettlementReceiptVerdicts() []settlementReceiptVerdictRow {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.coordinatorDB)
+	if err != nil {
+		s.t.Fatalf("open coord db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
+       receipt_result, settlement_outcome, reason, closed, model_hash,
+       buyer_debit_outcome, provider_settlement_outcome, payout_exclusion_outcome
+  FROM settlement_receipt_verdicts
+ ORDER BY id ASC`)
+	if err != nil {
+		s.t.Fatalf("query settlement_receipt_verdicts: %v", err)
+	}
+	defer rows.Close()
+	var verdicts []settlementReceiptVerdictRow
+	for rows.Next() {
+		var row settlementReceiptVerdictRow
+		if err := rows.Scan(
+			&row.RequestID,
+			&row.AttemptN,
+			&row.ProviderID,
+			&row.ReceiptPresent,
+			&row.ReceiptVersion,
+			&row.ReceiptResult,
+			&row.SettlementOutcome,
+			&row.Reason,
+			&row.Closed,
+			&row.ModelHash,
+			&row.BuyerDebitOutcome,
+			&row.ProviderSettlementOutcome,
+			&row.PayoutExclusionOutcome,
+		); err != nil {
+			s.t.Fatalf("scan settlement_receipt_verdicts: %v", err)
+		}
+		verdicts = append(verdicts, row)
+	}
+	if err := rows.Err(); err != nil {
+		s.t.Fatalf("settlement_receipt_verdict rows: %v", err)
+	}
+	return verdicts
 }

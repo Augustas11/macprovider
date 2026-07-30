@@ -1,0 +1,1 @@
+{"mutation":{"operation":"malformed_authority_domains"},"expected":"field 'authority_domains' must be an array"}

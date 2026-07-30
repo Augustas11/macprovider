@@ -111,7 +111,7 @@ Production caveat:
 
 **Prompt:** `specs/BUILD_SPEC_008_PHASE1_ACTIVATE_PROMPT.md`
 
-**Runbook:** `specs/SPEC-008-PHASE1-ACCEPTANCE-RUNBOOK.md`
+**Runbook:** `docs/runbooks/SPEC-008-PHASE1-ACCEPTANCE-RUNBOOK.md`
 
 | Gate | What | Evidence required |
 |---|---|---|

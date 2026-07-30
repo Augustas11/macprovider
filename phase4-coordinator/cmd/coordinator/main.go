@@ -4,31 +4,68 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
+	"github.com/augstar/macprovider-coordinator/internal/catalogbind"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/mdm"
+	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/payout"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/pow"
+	"github.com/augstar/macprovider-coordinator/internal/providerevents"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/referralapi"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/rewards"
+	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
+	"github.com/augstar/macprovider-coordinator/internal/stats/poolsnapshot"
+	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
+	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
+	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
+
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	prom "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	// SPEC-017 v0.1.8 — register the Postgres driver under the
+	// "postgres" name used by internal/stats.Open. lib/pq is the
+	// only Postgres driver in go.mod for v0.1; switching to pgx
+	// requires a SPEC v0.2 conversation.
+	_ "github.com/lib/pq"
+
 	"github.com/rs/zerolog"
 )
+
+// parseRFC3339Strict parses an RFC 3339 timestamp and returns an
+// explicit error on parse failure. Used in the stats rollup
+// boot path where backfill_mode = "partial" requires the
+// boundary to be valid (round-1 ARCH r1 HIGH 2 fix).
+func parseRFC3339Strict(s string) (time.Time, error) {
+	return time.Parse(time.RFC3339, s)
+}
 
 // version is overridden at build time via
 //
@@ -38,7 +75,55 @@ import (
 var version = "dev"
 
 func main() {
+	// SPEC-017 v0.1.8 Step 4.A — subcommand dispatch. When the
+	// first positional arg is a known operator-CLI verb, route
+	// to the corresponding handler and exit with its code. The
+	// daemon path is preserved below for argv shapes that DON'T
+	// match (the historical `coordinator --config=... --version`
+	// invocations).
+	//
+	// Why before flag.Parse(): the daemon's flag set rejects
+	// non-flag positional args ("partner-keys" would error out
+	// of flag.Parse with "flag provided but not defined"). We
+	// intercept first.
+	if len(os.Args) >= 2 {
+		arg1 := os.Args[1]
+		switch arg1 {
+		case "partner-keys":
+			os.Exit(runPartnerKeys(os.Args[2:]))
+		case "visibility":
+			os.Exit(runVisibility(os.Args[2:]))
+		case "migrate-indexes":
+			os.Exit(runMigrateIndexes(os.Args[2:]))
+		case "backfill-attempt-n":
+			os.Exit(runBackfillAttemptN(os.Args[2:]))
+		case "stats-migrate":
+			os.Exit(runStatsMigrate(os.Args[2:]))
+		}
+		// Round-1 CODE H1 fix: a non-flag first positional that
+		// is NEITHER a known daemon flag NOR a known CLI verb is
+		// a typo. Reject with usage so an operator who mistypes
+		// `coordinator visiblity revert ...` doesn't silently
+		// start the daemon (which would try to load
+		// coordinator.yaml). Daemon flags begin with `-`; CLI
+		// verbs are enumerated below.
+		if !strings.HasPrefix(arg1, "-") {
+			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
+			fmt.Fprintln(os.Stderr, "usage:")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] [--validate-config]")
+			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
+			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
+			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
+			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path>  (one-shot operator migration)")
+			fmt.Fprintln(os.Stderr, "  coordinator backfill-attempt-n --config <path>  (one-shot attempt_n backfill)")
+			fmt.Fprintln(os.Stderr, "  coordinator stats-migrate [--admin-dsn DSN] [--check]  (SPEC-017 stats/rewards migrations)")
+			os.Exit(2)
+		}
+	}
+
 	configPath := flag.String("config", "coordinator.yaml", "path to coordinator YAML config")
+	configOverlay := flag.String("config-overlay", "", "optional YAML overlay merged after --config (overlay keys override)")
+	validateConfig := flag.Bool("validate-config", false, "load config (with overlay if set), validate, and exit")
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -46,18 +131,65 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	if *validateConfig {
+		fmt.Println("config: ok")
+		return
+	}
+	autotuneFeeds, err := buyer.LoadAutotuneFeeds(cfg.AutotuneFeeds)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
+		os.Exit(1)
+	}
+	var autotuneCatalog *autotune.Catalog
+	var autotuneCompatibleCatalogs []*autotune.Catalog
+	if len(autotuneFeeds.AutotuneCandidatesJSON) > 0 {
+		autotuneCatalog, err = autotune.ParseCatalog(autotuneFeeds.AutotuneCandidatesJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune candidate catalog: %v\n", err)
+			os.Exit(1)
+		}
+		if autotune.IsPermanentlyRejectedReleaseID(autotuneCatalog.Version) {
+			fmt.Fprintf(os.Stderr, "autotune candidate catalog: release ID %q is permanently rejected\n", autotuneCatalog.Version)
+			os.Exit(1)
+		}
+		autotuneCatalog.SignerKeyID = autotuneFeeds.AutotuneCandidatesVerification.KeyID
+		autotuneCompatibleCatalogs, err = loadPreviousAutotuneCatalog(cfg.AutotuneFeeds)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune previous catalog: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	compatibilityPolicyMode := "unconfigured"
+	if cfg.Coordinator.CompatibilitySet.Configured() {
+		compatibilityPolicyMode = "configured"
+	}
+	logger.Info().
+		Str("compatibility_policy", compatibilityPolicyMode).
+		Str("recommended_compatibility_set_id", cfg.Coordinator.CompatibilitySet.TargetID).
+		Int("accepted_compatibility_set_count", len(cfg.Coordinator.CompatibilitySet.AcceptedIDs)).
+		Int("first_hop_bridge_set_count", len(cfg.Coordinator.CompatibilitySet.FirstHopBridgeIDs)).
+		Msg("provider compatibility-set admission policy initialized")
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
 		os.Exit(1)
 	}
+	// #608 Partial: fail closed when active Tier-2 rows conflict with the
+	// current autotune admission identity for the same model_id. Does not
+	// introduce a Tier-2 fallback (Entry 170 / #609); only rejects drift.
+	if err := catalogbind.RequireActiveReleaseBinding(autotuneCatalog, tier2.Default()); err != nil {
+		fmt.Fprintf(os.Stderr, "catalog binding: %v\n", err)
+		os.Exit(1)
+	}
+	metricsRegistry := prom.NewRegistry()
+	metricsHandle := statsmetrics.New(metricsRegistry)
 	registry := pool.NewRegistry(cfg.Providers)
 	startedAt := time.Now().UTC()
 	tokenStore, err := auth.OpenStore(cfg.Storage.DBPath)
@@ -72,6 +204,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	// SPEC-002 v1.4.2 R-2 / ISS-188: request_log.external_request_id
+	// is added by OpenStore as an additive column. The matching partial-
+	// NULL reconciliation index is NOT auto-built here — the request-log
+	// store caps the pool at one writer connection (see
+	// requestlog.OpenStore SetMaxOpenConns(1)), so running CREATE INDEX
+	// from the daemon would contend with the 6s-timeout INSERT hot
+	// path. The index ships via the `coordinator migrate-indexes`
+	// subcommand, intended to be invoked once per deploy by the
+	// operator runbook before binding traffic (or during a maintenance
+	// window).
 	canaryStore, err := setupCanarySanctionStore(context.Background(), cfg, reqLogStore.DB(), registry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)
@@ -88,21 +230,279 @@ func main() {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
 		os.Exit(1)
 	}
+	connectionEventStore, err := providerevents.Open(providerevents.DefaultDBPath(cfg.Storage.DBPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "provider connection events storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer connectionEventStore.Close()
+	if err := connectionEventStore.ReconcileBounds(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "provider connection events reconcile: %v\n", err)
+		os.Exit(1)
+	}
 	billingStore, err := billing.NewStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
 	}
+	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
+	// startup snapshot so the snapshot's canonical hash captures the
+	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
+	// "startup" source suppresses the billing_config_flag_changed
+	// audit emit per SPEC §11.6.4 (no prior acknowledged value).
+	if err := billingStore.SetForceVoidEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceVoidEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing force-void flag init: %v\n", err)
+		os.Exit(1)
+	}
+	if err := billingStore.SetForceCreditEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceCreditEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing force-credit flag init: %v\n", err)
+		os.Exit(1)
+	}
+	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
+	// SPEC-017 v0.1.8 Step 1 — Postgres pools for the Network
+	// Stats API. Fail-closed per BUILD §C.3: any missing required
+	// runtime DSN or any failed startup smoke aborts coordinator
+	// boot BEFORE any HTTP listener binds. When cfg.Stats.Enabled
+	// is false (the v0.1 default), Open returns stats.ErrDisabled
+	// and the /v1/stats/* mux subtree is NOT registered later;
+	// 404 from the existing mux fallback is the correct posture
+	// (NOT a custom JSON envelope, which would violate the §5.9
+	// closed code vocabulary — BUILD §C.4).
+	//
+	// The CLI operator DSN (cfg.Stats.PartnerKeysAdminDSN) is
+	// declared but INTENTIONALLY NOT OPENED here — the
+	// coordinator process should never hold an
+	// INSERT-on-partner_keys connection at runtime. Step 4.A's
+	// `coordinator partner-keys issue/revoke` subcommands open
+	// that DSN at invocation time only. SECURITY §B.1 invariant.
+	var statsPools *stats.Pools
+	if cfg.Stats.Enabled {
+		statsCfg := stats.Config{
+			Enabled:             cfg.Stats.Enabled,
+			ReaderDSN:           cfg.Stats.ReaderDSN,
+			RollupDSN:           cfg.Stats.RollupDSN,
+			PartnerKeys:         stats.PartnerKeysConfig{LastUsedAtUpdatesEnabled: cfg.Stats.PartnerKeys.LastUsedAtUpdatesEnabled, WriterDSN: cfg.Stats.PartnerKeys.WriterDSN},
+			PartnerKeysAdminDSN: cfg.Stats.PartnerKeysAdminDSN,
+			Rollup: stats.RollupConfig{
+				BackfillMode:            cfg.Stats.Rollup.BackfillMode,
+				PartialHistorySince:     cfg.Stats.Rollup.PartialHistorySince,
+				LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+				UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
+				DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
+				NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
+				LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
+			},
+			CORS: stats.CORSConfig{
+				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
+				PartnerOriginAllowlist:     cfg.Stats.CORS.PartnerOriginAllowlist,
+			},
+			TrustedProxies: cfg.Stats.TrustedProxies,
+		}
+		var err error
+		statsPools, err = stats.Open(context.Background(), statsCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats: %v\n", err)
+			os.Exit(1)
+		}
+		// MIGRATIONS ARE NOT RUN AT COORDINATOR BOOT (round-1
+		// CRITICAL fix across all three lanes: SECURITY r1
+		// CRIT-2, CODE r1 HIGH C2, ARCH r1 HIGH C1). The earlier
+		// draft applied migrations through the stats_rollup
+		// runtime pool with a STATS_SKIP_MIGRATIONS_AT_BOOT=1
+		// opt-out — that defaulted to over-privileging the
+		// runtime role and made the safe production path a
+		// remember-this-env-var footgun. Migrations are now
+		// operator-side: invoke `statsmigrations.Apply` from an
+		// admin DSN via psql or a follow-up
+		// `coordinator stats migrate --admin-dsn=...`
+		// subcommand. The integration test harness applies
+		// migrations through its own admin DSN.
+		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup); migrations are operator-applied; /v1/stats/* will be mounted by Step 3")
+	} else {
+		logger.Info().Msg("SPEC-017 stats DISABLED via config (default); /v1/stats/* not registered")
+	}
+	defer func() {
+		if statsPools != nil {
+			_ = statsPools.Close()
+		}
+	}()
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
+	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
+	// tables via `statsPools.Rollup`, writes the seven
+	// stats_* + stats_components_health + stats_rewards_populated
+	// surfaces, and emits structured drift-detection events. Per
+	// SPEC §7.2.5 the rollup MUST NOT use Reader / ProviderPortal
+	// pools — `New(statsPools.Rollup, ...)` enforces.
+	//
+	// poolsnapshot.NewWithHardware wires the live §5.1.1 snapshot fields
+	// (nodes_online, nodes_hardware_attested, utilization, RAM,
+	// models_serving) from the in-process pool.Registry and enriches
+	// hardware capacity from an async stats_rollup-side cache. The
+	// snapshot path itself remains memory-only: no DB lookups on buyer,
+	// routing, streaming, heartbeat, or public stats request paths.
+	var statsRollup *statsrollup.Runner
+	if statsPools != nil {
+		// Round-1 ARCH r1 HIGH 2 fix: BackfillMode must be the
+		// authoritative selector. "full" forces
+		// PartialHistorySinceUnix = 0 (the boundary the rollup
+		// queries against; 0 = no lower-bound filter); "partial"
+		// requires a non-empty partial_history_since and fails
+		// startup if it doesn't parse.
+		mode := cfg.Stats.Rollup.BackfillMode
+		if mode == "" {
+			mode = "partial"
+		}
+		var partialUnix int64
+		switch mode {
+		case "full":
+			partialUnix = 0
+		case "partial":
+			// Round-2 ARCH r2 HIGH 2 fix: backfill_mode = "partial"
+			// requires a non-empty RFC 3339 partial_history_since
+			// when stats.enabled = true. Path A semantics demand
+			// a rollup-start boundary that Step 3 can emit as
+			// the JSON `partial_history_since` field. Empty +
+			// partial would silently behave like "full" while
+			// leaving Step 3 with no field to emit — two
+			// conforming sessions could disagree about which
+			// path is in effect. Force the operator to be
+			// explicit.
+			if cfg.Stats.Rollup.PartialHistorySince == "" {
+				fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must be non-empty when backfill_mode = 'partial'; use backfill_mode = 'full' for unconstrained history\n")
+				os.Exit(1)
+			}
+			parsed, perr := parseRFC3339Strict(cfg.Stats.Rollup.PartialHistorySince)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must parse as RFC 3339 when backfill_mode = 'partial' (got %q): %v\n", cfg.Stats.Rollup.PartialHistorySince, perr)
+				os.Exit(1)
+			}
+			partialUnix = parsed.Unix()
+		default:
+			fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.backfill_mode must be 'partial' or 'full' (got %q)\n", mode)
+			os.Exit(1)
+		}
+
+		rollupCfg := statsrollup.Config{
+			BackfillMode:            mode,
+			PartialHistorySinceUnix: partialUnix,
+			LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+			UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
+			DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
+			NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
+			LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
+		}
+		hardwareCache := statshardware.NewCache(statsPools.Rollup)
+		hardwareCtx, cancelHardwareRefresh := context.WithTimeout(shutdownCtx, 2*time.Second)
+		if err := hardwareCache.Refresh(hardwareCtx); err != nil {
+			logger.Warn().Err(err).Msg("stats hardware cache initial refresh failed; hardware overview fields will remain zero until refresh succeeds")
+		}
+		cancelHardwareRefresh()
+		hardwareCache.Start(shutdownCtx, func(err error) {
+			logger.Warn().Err(err).Msg("stats hardware cache refresh failed; retaining previous hardware snapshot")
+		})
+
+		var err error
+		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, poolsnapshot.NewWithHardware(registry, hardwareCache), logger.With().Str("subsystem", "stats_rollup").Logger())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
+			os.Exit(1)
+		}
+		statsRollup.Start(shutdownCtx)
+		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+	}
+
+	// SPEC-MALIBU-EMISSION-LEDGER — bootstrap accrual worker (default-off).
+	var rewardsRunner *rewards.Runner
+	var rewardsDB *sql.DB
+	if strings.TrimSpace(cfg.MalibuEmission.WriterDSN) != "" {
+		var err error
+		rewardsDB, err = sql.Open("postgres", cfg.MalibuEmission.WriterDSN)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: open writer pool: %v\n", err)
+			os.Exit(1)
+		}
+		rewardsDB.SetMaxOpenConns(4)
+		rewardsDB.SetMaxIdleConns(2)
+		rewardsDB.SetConnMaxLifetime(5 * time.Minute)
+		defer rewardsDB.Close()
+	}
+	if cfg.MalibuEmission.Enabled {
+		if rewardsDB == nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: writer_dsn is required when enabled\n")
+			os.Exit(1)
+		}
+		sqlitePath := strings.TrimSpace(cfg.MalibuEmission.SQLitePayoutDBPath)
+		if sqlitePath == "" {
+			sqlitePath = cfg.Storage.DBPath
+		}
+		rewardsCfg := rewards.Config{
+			Enabled:                true,
+			WriterDSN:              cfg.MalibuEmission.WriterDSN,
+			TickInterval:           time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+			ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+			WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+			SQLitePayoutDBPath:     sqlitePath,
+			WalletMirrorInterval:   time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+			UnlockEvalInterval:     time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+			MaxSerializableRetries: cfg.MalibuEmission.MaxSerializableRetries,
+			BaseUSDCBalanceRPCURLs: cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
+		}
+		var err error
+		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger(), rewards.RunnerDeps{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: %v\n", err)
+			os.Exit(1)
+		}
+		rewardsRunner.Start(shutdownCtx)
+		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
+	} else {
+		logger.Info().Msg("malibu_emission DISABLED via config (default)")
+	}
+	// Round-3 ARCH r3 LOW 2 fix: defers run LIFO, so a non-signal
+	// return path would call `Wait()` BEFORE the
+	// `stopBackground()` registered earlier — blocking forever on
+	// still-running rollup goroutines. Combining cancellation +
+	// drain in one defer registered AFTER the rollup is
+	// constructed guarantees cancellation always precedes Wait.
+	defer func() {
+		stopBackground()
+		if statsRollup != nil {
+			statsRollup.Wait()
+		}
+	}()
 	wsOpts := []providerws.Option{}
+	var grandfatherBefore *time.Time
+	if raw := strings.TrimSpace(cfg.Referrals.GrandfatherBefore); raw != "" && cfg.Referrals.RequireForRegistration {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("parse referral grandfather cutoff")
+		}
+		grandfatherBefore = &parsed
+	}
+	referralPolicy := auth.ReferralPolicy{
+		RequireForRegistration:  cfg.Referrals.RequireForRegistration,
+		EnableSocialBonus:       cfg.Referrals.EnableSocialInviteBonus,
+		Campaign:                cfg.Referrals.Campaign,
+		PolicyVersion:           cfg.Referrals.PolicyVersion,
+		GrandfatherBefore:       grandfatherBefore,
+		CurrentKeyID:            cfg.Referrals.CurrentKeyID,
+		HMACKeys:                cfg.Referrals.HMACKeys,
+		ProviderBaseUses:        cfg.Referrals.ProviderBaseUses,
+		SocialBonusUses:         cfg.Referrals.SocialBonusUses,
+		ChallengeTTL:            time.Duration(cfg.Referrals.ChallengeTTLS) * time.Second,
+		SocialVerificationDwell: time.Duration(cfg.Referrals.SocialVerificationDwellS) * time.Second,
+	}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
+	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	wsOpts = append(wsOpts, providerws.WithConnectionEventStore(connectionEventStore))
+	wsOpts = append(wsOpts, providerws.WithConnectionEventMetrics(metricsHandle))
 	if canaryStore != nil {
 		wsOpts = append(wsOpts, providerws.WithCanarySanctionStore(canaryStore))
 	}
@@ -119,7 +519,143 @@ func main() {
 	// interface layer (codex architect review on PR #44, interface
 	// segregation MINOR).
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
+	wsOpts = append(wsOpts, providerws.WithBootstrapTokenStore(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
+	// Issue #585: request, dual-control approval, one-shot consumption,
+	// admission-key CAS, and recovery audit share the token store's SQLite
+	// transaction boundary. Generic Postgres signature exemptions are never
+	// recovery authority.
+	wsOpts = append(wsOpts, providerws.WithAdmissionIdentityRecoveryAdminStore(tokenStore))
+	// Issue #764 tripwire. Deliberately OUTSIDE the statsPools branch: the
+	// capacity ceiling is always active, so its counter must always be wired —
+	// a coordinator without a stats database must not silently lose the signal.
+	wsOpts = append(wsOpts, providerws.WithCapacityOverClaimMetrics(metricsHandle))
+	if statsPools != nil {
+		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
+		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
+		wsOpts = append(wsOpts, providerws.WithModelHashMismatchMetrics(metricsHandle))
+		wsOpts = append(wsOpts, providerws.WithCredentialBootstrapMetrics(metricsHandle))
+	}
+	if autotuneCatalog != nil {
+		bridgeDeadline, err := cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadlineTime()
+		if err != nil {
+			logger.Fatal().Err(err).Msg("parse provider catalog admission bridge deadline")
+		}
+		wsOpts = append(wsOpts,
+			providerws.WithAutotuneCatalog(autotuneCatalog, autotuneCompatibleCatalogs...),
+			providerws.WithAutotuneCatalogEnforcement(cfg.AutotuneFeeds.EnforceProviderAdmission, bridgeDeadline),
+		)
+		catalogLog := logger.Info().
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Int("autotune_compatible_previous_releases", len(autotuneCompatibleCatalogs)).
+			Str("autotune_catalog_signer_key_id", autotuneCatalog.SignerKeyID).
+			Bool("autotune_provider_admission_enforced", cfg.AutotuneFeeds.EnforceProviderAdmission)
+		if !cfg.AutotuneFeeds.EnforceProviderAdmission {
+			catalogLog = catalogLog.
+				Time("autotune_provider_admission_bridge_deadline", bridgeDeadline).
+				Dur("autotune_provider_admission_bridge_remaining", time.Until(bridgeDeadline))
+		}
+		catalogLog.Msg("provider catalog compatibility enabled")
+	}
+	var onboardingStore *onboarding.PGStore
+	if shouldOpenOnboardingStore(cfg.Onboarding) {
+		if cfg.Onboarding.AppTrackRegisterEnabled {
+			onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
+				cfg.Onboarding.PostgresDSN,
+				cfg.Onboarding.AuthPolicyRequestDSN,
+				cfg.Onboarding.AuthPolicyApproveDSN,
+				cfg.Onboarding.AuthPolicyCutoverDSN,
+				cfg.Onboarding.HardwareTrustRequestDSN,
+				cfg.Onboarding.HardwareTrustApproveDSN,
+			)
+		} else {
+			// Keep the primary authority available to reconcile referral mints
+			// created before an operator disabled the public registration route.
+			onboardingStore, err = onboarding.OpenPGStore(cfg.Onboarding.PostgresDSN)
+		}
+		if err != nil {
+			logger.Fatal().Err(err).Msg("open onboarding postgres store")
+		}
+		defer onboardingStore.Close()
+		if err := onboardingStore.Smoke(context.Background()); err != nil {
+			logger.Fatal().Err(err).Msg("onboarding postgres smoke failed")
+		}
+		if cfg.Onboarding.AppTrackRegisterEnabled {
+			wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
+			wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+			wsOpts = append(wsOpts, providerws.WithHardwareTrustAdminStore(onboardingStore))
+		}
+	}
+	var autotuneEvidenceStore autotune.EvidenceStore
+	if autotuneCatalog != nil && onboardingStore != nil && onboardingStore.DB() != nil {
+		autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
+		wsOpts = append(wsOpts, providerws.WithAutotuneEvidenceStore(autotuneEvidenceStore))
+	}
+	if autotuneEvidenceStore != nil && cfg.ProofOfWeights.AutotuneEvidenceTTLDays > 0 {
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Msg("proof-of-weights admission cap observation enabled")
+	} else if autotuneEvidenceStore != nil {
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Msg("proof-of-weights admission cap observation disabled because evidence TTL is not positive")
+	}
+	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		if autotuneCatalog == nil {
+			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires autotune candidate catalog feeds")
+		}
+		if onboardingStore == nil || onboardingStore.DB() == nil {
+			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires onboarding postgres store")
+		}
+		if autotuneEvidenceStore == nil {
+			autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
+		}
+		wsOpts = append(wsOpts, providerws.WithAutotuneHelloGate(autotuneCatalog, autotuneEvidenceStore))
+		// Issue #582 FIX A/B: active-session trust enforcement (bounded
+		// revalidation sweep + advisory-locked registration re-check) rides the
+		// same provider_onboarding handle and is wired alongside the admission
+		// trust join so it is active exactly when the hello gate is.
+		wsOpts = append(wsOpts, providerws.WithProviderTrustChecker(onboardingStore))
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Msg("proof-of-weights autotune hello gate enabled")
+	}
+	if cfg.ProofOfWeights.TelemetryDrift.Enabled {
+		if autotuneCatalog == nil {
+			logger.Fatal().Msg("proof_of_weights.telemetry_drift.enabled requires autotune candidate catalog feeds")
+		}
+		if onboardingStore == nil || onboardingStore.DB() == nil {
+			logger.Fatal().Msg("proof_of_weights.telemetry_drift.enabled requires onboarding postgres store")
+		}
+		driftCfg, err := pow.TelemetryDriftConfigFrom(
+			true,
+			cfg.ProofOfWeights.TelemetryDrift.TPSRatioThreshold,
+			cfg.ProofOfWeights.TelemetryDrift.TPSMinAbsolute,
+			cfg.ProofOfWeights.TelemetryDrift.TPSMinRequestsWindow,
+			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnStatus,
+			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnArtifactDrift,
+			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
+			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateThreshold,
+			cfg.ProofOfWeights.TelemetryDrift.AlertCooldownSeconds,
+			cfg.ProofOfWeights.TelemetryDrift.QuarantineMissingBenchmark,
+		)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("proof_of_weights.telemetry_drift config invalid")
+		}
+		if autotuneEvidenceStore == nil {
+			autotuneEvidenceStore = autotune.NewPGEvidenceStore(onboardingStore.DB())
+		}
+		ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore, ttl)))
+		logger.Info().
+			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
+			Int("tps_min_requests_window", driftCfg.TPSMinRequestsWindow).
+			Int("opoi_pass_rate_window", driftCfg.OPoIPassRateWindow).
+			Bool("quarantine_missing_benchmark", driftCfg.QuarantineMissingBenchmark).
+			Msg("proof-of-weights telemetry drift alerts enabled")
+	}
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().
 			Bool("allow_tokenless_provisional_bootstrap", cfg.Auth.AllowTokenlessProvisionalBootstrap).
@@ -274,6 +810,9 @@ func main() {
 		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
 	))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
+	if rewardsRunner != nil {
+		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
+	}
 	buyerServer := buyer.NewServer(
 		registry,
 		logger,
@@ -285,32 +824,65 @@ func main() {
 		buyer.WithFailoverConfig(cfg.Routing.FailoverEnabled, time.Duration(cfg.Routing.FailoverTimeoutS)*time.Second),
 		buyer.WithRoutingConfig(cfg.Routing),
 		buyer.WithTier2Config(cfg.Tier2),
+		buyer.WithModelVersionFloors(cfg.CoordinatorAdvertisedVersion.PerModelRequiredBinaryVersion),
 		buyer.WithLimitsConfig(cfg.Limits),
-		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithTrustedProxies(mustParseTrustedProxies(cfg, logger)),
+		buyer.WithOperatorKey(cfg.Auth.OperatorKey),
 		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
+		buyer.WithRequireGatewayContext(cfg.Coordinator.RequireGatewayContext),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
+		buyer.WithSettlementRelay(wsServer.DispatchInferenceWithSettlement),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
 		buyer.WithBilling(billingStore, cfg.Rewards),
 		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
+		buyer.WithAutotuneFeeds(autotuneFeeds),
+		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
 		}),
 	)
-	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
-	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
+	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
+	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
-	billingHandler := billingStore.HandlersWithBridge(
+	// SPEC-005 v0.4 (issue #169) — `billing.quarantine_resolution_force_void_enabled`
+	// gates the §11.6 force-void endpoint at the route layer. Default
+	// false: endpoint returns HTTP 404 until the operator explicitly
+	// flips the flag via the existing config-reload primitive.
+	// The flag is held as an atomic on billingStore; SIGHUP reload
+	// calls billingStore.SetForceVoidEnabled which emits the
+	// `billing_config_flag_changed` audit event on real flips.
+	var idlePrewarmReader *statsprewarm.Reader
+	if statsPools != nil {
+		idlePrewarmReader = statsprewarm.NewReader(statsPools.Reader)
+	}
+	billingHandler := billingStore.HandlersWithQuarantineGatesAndIdlePrewarm(
 		cfg.Auth.OperatorKey,
-		cfg.Auth.GatewayServiceToken,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
+		cfg.Billing.QuarantineResolutionForceVoidEnabled,
+		cfg.Billing.QuarantineResolutionForceCreditEnabled,
+		idlePrewarmReader,
 	)
+	// §11.5 launch-gate item 10 — operator-visible startup state.
+	logger.Info().
+		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+		Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+		Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
+		Str("event", "spec005_v0_4_route_layer_flag_init").
+		Msg("quarantine force-void route-layer flag initialized")
 	providerMux.Handle("/admin/ledger/", billingHandler)
+	if rewardsDB != nil {
+		providerMux.Handle("/admin/trust-promotion/", rewards.TrustPromotionMux(rewards.TrustAdminDeps{
+			DB:           rewardsDB,
+			OperatorKeys: cfg.Auth.OperatorKeys,
+		}))
+	}
 
 	// SPEC-016 §4.1 — wire the payout package. Migrations + asserts
 	// run unconditionally so a future flip of payout.enabled does
@@ -370,8 +942,169 @@ func main() {
 		// per SPEC §6.5.
 		go startPayoutSIGHUPListener(shutdownCtx, *configPath, payoutS2.tuning, payoutS2.rpcs, logger)
 	}
+
+	// SPEC-017 v0.1.8 Step 3 — /v1/stats/* mux subtree. Mounts
+	// only when stats.enabled = true. The handler stack uses
+	// the stats_reader pool exclusively (no admin DSN, no
+	// rollup pool). Per BUILD §2 Step 3 the same binary serves
+	// both coordinator.streamvc.live/v1/stats/* and
+	// stats.streamvc.live/v1/stats/*; nginx vhost config
+	// (Step 4.B) routes both to this provider port.
+	if statsPools != nil {
+		// SPEC-017 v0.1.8 Step 4.C — Prometheus metrics. The
+		// coordinator owns its own registry (not the global
+		// DefaultRegisterer) so concurrent test runs don't
+		// double-register. SPEC-026 adds /admin/metrics below;
+		// /metrics remains as a loopback-compatible alias only.
+		statsHandler := stats.NewMuxWithMetricsAndRateLimit(
+			statsstore.New(statsPools.Reader),
+			stats.CORSConfig{
+				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
+				PartnerOriginAllowlist:     cfg.Stats.CORS.PartnerOriginAllowlist,
+			},
+			cfg.Stats.Rollup.BackfillMode,
+			cfg.Stats.Rollup.PartialHistorySince,
+			cfg.Stats.TrustedProxies,
+			logger.With().Str("subsystem", "stats_handlers").Logger(),
+			metricsHandle,
+			stats.RateLimitConfig{
+				MaxBuckets:   cfg.Stats.RateLimit.MaxBuckets,
+				IdleTTL:      time.Duration(cfg.Stats.RateLimit.IdleTTLSeconds) * time.Second,
+				PreflightRPM: cfg.Stats.RateLimit.PreflightRPM,
+			},
+		).Handler()
+		providerMux.Handle("/v1/stats/", statsHandler)
+		providerMux.Handle("/metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))
+		logger.Info().Msg("SPEC-017 stats handlers + /metrics mounted on provider port")
+
+		// Wire rollup lag observation periodically — gauge value
+		// = now - stats_components_health.generated_at per
+		// component. Background goroutine; cancelled with
+		// shutdownCtx.
+		if statsRollup != nil {
+			statsRollup.WithMetrics(metricsHandle)
+			go observeRollupLag(shutdownCtx, statsPools.Reader, metricsHandle, logger)
+		}
+	}
+	providerMux.Handle("/admin/metrics", operatorMetricsHandler(cfg.Auth.OperatorKey, metricsRegistry))
+
+	var register http.HandlerFunc
+	var hardwareEvidence http.HandlerFunc
+	registerHandler := &onboarding.Handler{
+		StatsDB:                             onboardingStore,
+		AuthTokenStore:                      tokenStore,
+		ReferralStore:                       tokenStore,
+		ReferralPolicy:                      referralPolicy,
+		CoordinatorDomain:                   cfg.Onboarding.CoordinatorDomain,
+		CoordinatorWSURL:                    "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
+		TrustedProxies:                      mustParseTrustedProxies(cfg, logger),
+		IPRateLimiter:                       onboarding.NewMemoryRateLimiter(5, time.Minute),
+		CommittedRetryRateLimiter:           onboarding.NewMemoryRateLimiter(5, time.Minute),
+		CommittedRetryGlobalRateLimiter:     onboarding.NewMemoryRateLimiter(60, time.Minute),
+		CommittedRetrySlots:                 make(chan struct{}, 4),
+		ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
+		HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
+		HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
+		AppAttestVerifier: onboarding.AppleAppAttestVerifier{
+			Config: onboarding.AppAttestConfig{
+				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+				BundleID:          cfg.Onboarding.BundleID,
+				TeamID:            cfg.Onboarding.AppleTeamID,
+			},
+		},
+		Metrics: metricsHandle,
+		AppAttestConfig: onboarding.AppAttestConfig{
+			CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+			BundleID:          cfg.Onboarding.BundleID,
+			TeamID:            cfg.Onboarding.AppleTeamID,
+		},
+	}
+	// Pending cross-store referral mints must converge even when operators
+	// disable the admission route or referral enforcement after a crash.
+	startAppTrackReferralMintReconciler(shutdownCtx, registerHandler, logger)
+	if cfg.Onboarding.AppTrackRegisterEnabled {
+		asnResolver, err := onboarding.NewStaticASNResolver(cfg.Onboarding.ASNPrefixes)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("onboarding ASN resolver config invalid")
+		}
+		registerHandler.ASNResolver = asnResolver
+		register = registerHandler.HandleAppTrackRegister
+		hardwareEvidence = registerHandler.HandleHardwareEvidence
+		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
+	}
+	// Phase 2 Track P2-A: MDM enrollment profile endpoint.
+	// Enabled when tier2.mdm.enrollment_base_url is configured.
+	var enrollHandler http.HandlerFunc
+	if cfg.Tier2.MDM.EnrollmentBaseURL != "" {
+		eh := buildEnrollHandler(cfg, logger)
+		enrollHandler = eh.HandleEnroll
+		logger.Info().
+			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
+			Msg("MDM enrollment profile route mounted on buyer port (/v1/enroll)")
+	}
+	var buyerHandler http.Handler = buyerHandlerWithOptionalProviderEndpoints(
+		buyerServer.Handler(),
+		cfg.Onboarding.AppTrackRegisterEnabled,
+		register,
+		hardwareEvidence,
+		enrollHandler,
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
+	)
+	var trustedReferralProxies []netip.Prefix
+	if cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.RequireForRegistration {
+		trustedReferralProxies = mustParseTrustedProxies(cfg, logger)
+	}
+	var referralValidationHandler http.HandlerFunc
+	if cfg.Referrals.EnablePublicValidation {
+		referralValidation := newReferralValidationHandler(tokenStore, referralPolicy, trustedReferralProxies, cfg.Referrals.RequestAccessURL, metricsHandle)
+		referralValidationHandler = referralValidation.ServeHTTP
+	}
+	// Public invite credentials live exclusively in the browser fragment at
+	// malibu.tech/j. The coordinator exposes only body-based validation and
+	// must not mount the legacy credential-bearing /j/<code> route.
+	buyerHandler = withReferralValidation(buyerHandler, referralValidationHandler)
+	var referralStatus, referralChallenge, referralVerify http.HandlerFunc
+	if cfg.Referrals.RequireForRegistration {
+		advocacy := &referralapi.AdvocacyHandler{
+			Store:            tokenStore,
+			Tokens:           tokenStore,
+			Policy:           referralPolicy,
+			PublicLimiter:    referralapi.NewBoundedLimiter(60, time.Minute, 4096),
+			ProviderLimiter:  referralapi.NewBoundedLimiter(10, time.Minute, 4096),
+			AuthSlots:        make(chan struct{}, 16),
+			VerifySlots:      make(chan struct{}, 8),
+			JoinBaseURL:      cfg.Referrals.JoinBaseURL,
+			JoinLinksEnabled: cfg.Referrals.EnableJoinLinks,
+			Metrics:          metricsHandle,
+			SourceIP: func(r *http.Request) string {
+				return onboarding.ClientIP(r, trustedReferralProxies)
+			},
+		}
+		referralStatus = advocacy.HandleStatus
+		startReferralServingReconciler(shutdownCtx, referralapi.ServingReconciler{
+			Source: referralapi.SQLiteServingEvidence{Path: cfg.Storage.DBPath},
+			Store:  tokenStore,
+			Policy: referralPolicy,
+		}, logger)
+		if cfg.Referrals.EnableSocialInviteBonus {
+			xClient, err := referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("invalid social verification configuration")
+			}
+			advocacy.PostVerifier = xClient
+			referralChallenge = advocacy.HandleChallenge
+			referralVerify = advocacy.HandleVerify
+			startSocialVerificationPromotionReconciler(shutdownCtx, tokenStore, referralPolicy, xClient, logger)
+		}
+		logger.Info().
+			Bool("social_invite_bonus", cfg.Referrals.EnableSocialInviteBonus).
+			Str("campaign", cfg.Referrals.Campaign).
+			Msg("provider referral status endpoint mounted; mutation routes remain feature-gated")
+	}
+	buyerHandler = withReferralAdvocacy(buyerHandler, referralStatus, referralChallenge, referralVerify)
+
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
-	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
+	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
 	errs := make(chan error, 2)
 
 	if err := billingStore.StartStartupScan(context.Background(), cfg.Settlement, time.Now().UTC()); err != nil {
@@ -381,6 +1114,7 @@ func main() {
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
+	startProviderConnectionEventPruner(shutdownCtx, connectionEventStore, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
 	startPayoutNoncePruner(shutdownCtx, payoutAddresses, logger)
@@ -400,7 +1134,7 @@ func main() {
 		select {
 		case sig := <-signals:
 			if sig == syscall.SIGHUP {
-				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer, billingStore)
+				reloadCoordinatorConfig(*configPath, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, billingStore)
 				continue
 			}
 			timeout := 30 * time.Second
@@ -429,6 +1163,9 @@ func main() {
 				logger.Error().Err(err).Msg("provider http shutdown failed")
 				os.Exit(1)
 			}
+			wsServer.CloseAllProviderSessions("coordinator shutdown")
+			wsServer.WaitProviderConnections(2 * time.Second)
+			wsServer.FlushConnectionEvents(2 * time.Second)
 			// M2-2: wait for the swap-audit drain goroutine to finish so
 			// the last few model swaps are persisted. The drain goroutine
 			// exits on shutdownCtx.Done() (already cancelled by
@@ -460,17 +1197,90 @@ func main() {
 	}
 }
 
+// loadPreviousAutotuneCatalog loads exactly the release recorded by the
+// deployer's root-owned .previous-target marker. It is signature/schema
+// verified through the same loader as the active feed and is never discovered
+// from an unbounded directory scan.
+func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Catalog, error) {
+	if cfg.AutotuneCandidatesPath == "" {
+		return nil, nil
+	}
+	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
+	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read previous-target: %w", err)
+	}
+	target := strings.TrimSpace(string(targetBytes))
+	if target == "" {
+		return nil, nil
+	}
+	releaseID := strings.TrimPrefix(target, "releases/")
+	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
+		return nil, fmt.Errorf("invalid previous-target %q", target)
+	}
+	for _, r := range releaseID {
+		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._-", r) {
+			return nil, fmt.Errorf("invalid previous-target %q", target)
+		}
+	}
+	// Compatibility is optional. Never let a stale tombstoned bridge prevent a
+	// verified current catalog from starting. The deploy rollback restores the
+	// previous binary, config, and catalog as one unit if current activation fails.
+	if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
+		return nil, nil
+	}
+	previousCfg := cfg
+	previousCfg.DemandRankPath = ""
+	previousCfg.DemandRankSigPath = ""
+	previousCfg.AutotuneCandidatesPath = filepath.Join(root, target, "autotune-candidates.json")
+	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
+	feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(previousCfg)
+	if err != nil {
+		return nil, fmt.Errorf("verify %s: %w", target, err)
+	}
+	previous, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", target, err)
+	}
+	previous.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
+	return []*autotune.Catalog{previous}, nil
+}
+
 type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
 }
 
-func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB, registry *pool.Registry) (providerws.CanarySanctionStore, error) {
-	if !cfg.Pool.CanaryEnabled {
-		return nil, nil
+// mustParseTrustedProxies parses cfg.Proxy.TrustedProxies into the
+// netip.Prefix slice the buyer Server's rate-limit keying expects.
+// Validate() at config.Load already rejected malformed CIDRs and
+// default-route prefixes, so this helper should never fail in
+// practice. If it DOES fail post-Validate (drift between Validate
+// and TrustedProxyPrefixes, e.g. a future contributor splits the
+// validation), the architect-lane r1 audit (issue #125 L3) called
+// out the prior silent-nil fallback as a weakening of the
+// validation contract — a proxied-clients-collapse bug masquerading
+// as a non-event. Fail-fast at startup instead. Issue #125.
+func mustParseTrustedProxies(cfg config.Config, logger zerolog.Logger) []netip.Prefix {
+	prefixes, err := cfg.TrustedProxyPrefixes()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("trusted_proxies parse failed at startup")
 	}
+	return prefixes
+}
+
+func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB, registry *pool.Registry) (providerws.CanarySanctionStore, error) {
 	store, err := providerws.NewSQLiteCanarySanctionStore(db)
 	if err != nil {
 		return nil, err
+	}
+	if !cfg.Pool.CanaryEnabled {
+		// Keep the store wired so an authenticated operator recovery can delete
+		// durable sanctions while probes are disabled. Do not load sanctions
+		// into the registry until canaries are enabled again.
+		return store, nil
 	}
 	canarySanctions, err := store.LoadCanarySanctions(ctx)
 	if err != nil {
@@ -498,6 +1308,32 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 	prune()
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+func startProviderConnectionEventPruner(ctx context.Context, store *providerevents.SQLiteStore, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	prune := func() {
+		if err := store.ReconcileBounds(ctx); err != nil {
+			logger.Warn().Err(err).Msg("provider connection events reconcile failed")
+			return
+		}
+		logger.Info().Msg("provider connection events bounds reconciled")
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
@@ -583,6 +1419,125 @@ func startGitHubAuthStatePruner(ctx context.Context, store githubAuthStatePruner
 	}()
 }
 
+type appTrackReferralMintReconciler interface {
+	ReconcilePendingAppTrackReferralMints(context.Context) error
+}
+
+func shouldOpenOnboardingStore(cfg config.OnboardingConfig) bool {
+	return cfg.AppTrackRegisterEnabled || strings.TrimSpace(cfg.PostgresDSN) != ""
+}
+
+func startAppTrackReferralMintReconciler(ctx context.Context, handler appTrackReferralMintReconciler, logger zerolog.Logger) {
+	if handler == nil {
+		return
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			if err := handler.ReconcilePendingAppTrackReferralMints(reconcileCtx); err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("App-track referral mint reconciliation failed")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
+func startReferralServingReconciler(ctx context.Context, reconciler referralapi.ServingReconciler, logger zerolog.Logger) {
+	if reconciler.Source == nil || reconciler.Store == nil || !reconciler.Policy.RequireForRegistration {
+		return
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			qualified, err := reconciler.Reconcile(reconcileCtx)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("referral serving qualification reconciliation failed")
+				return
+			}
+			if qualified > 0 {
+				logger.Info().Int("qualified", qualified).Msg("provider referral invite capacity awarded from verified serving evidence")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
+type socialAuthorLookup interface {
+	RecheckPost(context.Context, string, string) (string, error)
+}
+
+func startSocialVerificationPromotionReconciler(
+	ctx context.Context,
+	store *auth.Store,
+	policy auth.ReferralPolicy,
+	verifier socialAuthorLookup,
+	logger zerolog.Logger,
+) {
+	if store == nil || verifier == nil || !policy.EnableSocialBonus {
+		return
+	}
+	recheck := func(ctx context.Context, postID, boundAuthorID, shareURLHash string) error {
+		authorID, err := verifier.RecheckPost(ctx, postID, shareURLHash)
+		if err != nil {
+			if errors.Is(err, referralapi.ErrXPostTransient) {
+				return fmt.Errorf("%w: x lookup unavailable", auth.ErrSocialRecheckTransient)
+			}
+			return err
+		}
+		if boundAuthorID == "" || authorID != boundAuthorID {
+			return fmt.Errorf("x post author no longer matches")
+		}
+		return nil
+	}
+	go func() {
+		reconcile := func() {
+			reconcileCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			granted, err := store.PromoteMaturedSocialVerifications(reconcileCtx, policy, time.Now().UTC(), recheck)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Msg("social verification promotion failed")
+				return
+			}
+			if granted > 0 {
+				logger.Info().Int("granted", granted).Msg("social invite bonus granted exactly once")
+			}
+		}
+		reconcile()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
 func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
@@ -633,12 +1588,12 @@ type payoutStep2 struct {
 	runner      *payout.Runner
 	reorg       *payout.ReorgPoller
 	state       payout.LeaseState
-	reaper      *payout.Reaper             // Step 3 §4.8a + §4.8c outbox reaper
-	chainWorker *payout.ChainBalanceWorker // Step 4 §7.4
-	tuning      *payout.TuningProvider     // Step 4 §6.5 SIGHUP-reloadable
-	rpcs        payout.TwoRPCs             // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
+	reaper      *payout.Reaper               // Step 3 §4.8a + §4.8c outbox reaper
+	chainWorker *payout.ChainBalanceWorker   // Step 4 §7.4
+	tuning      *payout.TuningProvider       // Step 4 §6.5 SIGHUP-reloadable
+	rpcs        payout.TwoRPCs               // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
 	chronic     *payout.ChronicOutageTracker // #165 A2 — per-RPC sliding-window error tracker; Run() goroutine drives Evaluate
-	stop        func(context.Context)      // calls Stop on every component then Release
+	stop        func(context.Context)        // calls Stop on every component then Release
 }
 
 func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, claimer payout.PayoutClaimer, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, *payoutStep2, error) {
@@ -1224,10 +2179,162 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, billingStores ...*billing.Store) {
+func listenAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Handler {
+	metrics := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !auth.OperatorOnlyBearerMatches(r.Header, operatorKey) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"operator bearer token required"}}` + "\n"))
+			return
+		}
+		metrics.ServeHTTP(w, r)
+	})
+}
+
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	if enabled {
+		mux.HandleFunc("/v1/providers/register", register)
+		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
+	}
+	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
+	if enroll != nil {
+		mux.HandleFunc("/v1/enroll", enroll)
+	}
+	if malibuAccrual != nil {
+		mux.Handle("/v1/provider/malibu-accrual", malibuAccrual)
+	}
+	mux.Handle("/", base)
+	return mux
+}
+
+func withReferralValidation(base http.Handler, validate http.HandlerFunc) http.Handler {
+	if validate == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/referrals/validate", validate)
+	mux.Handle("/", base)
+	return mux
+}
+
+func withReferralAdvocacy(base http.Handler, status, challenge, verify http.HandlerFunc) http.Handler {
+	if status == nil && challenge == nil && verify == nil {
+		return base
+	}
+	mux := http.NewServeMux()
+	if status != nil {
+		mux.HandleFunc("/v1/provider/referrals", status)
+	}
+	if challenge != nil {
+		mux.HandleFunc("/v1/provider/referrals/x/challenge", challenge)
+	}
+	if verify != nil {
+		mux.HandleFunc("/v1/provider/referrals/x/verify", verify)
+	}
+	mux.Handle("/", base)
+	return mux
+}
+
+func newReferralValidationHandler(store referralapi.ValidationStore, policy auth.ReferralPolicy, trustedProxies []netip.Prefix, requestAccessURL string, metrics referralapi.ReferralMetrics) *referralapi.ValidationHandler {
+	return &referralapi.ValidationHandler{
+		Store:            store,
+		Policy:           policy,
+		PublicLimiter:    referralapi.NewBoundedLimiter(30, time.Minute, 4096),
+		ValidateSlots:    make(chan struct{}, 4),
+		RequestAccessURL: strings.TrimSpace(requestAccessURL),
+		Metrics:          metrics,
+		SourceIP: func(r *http.Request) string {
+			return onboarding.ClientIP(r, trustedProxies)
+		},
+	}
+}
+
+// buildEnrollHandler constructs the MDM enrollment handler for POST /v1/enroll.
+// Called only when tier2.mdm.enrollment_base_url is configured.
+func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.EnrollHandler {
+	mdmCfg := cfg.Tier2.MDM
+	eh := &onboarding.EnrollHandler{
+		MDMConfig: mdm.Config{
+			EnrollmentBaseURL: mdmCfg.EnrollmentBaseURL,
+			MDMServerURL:      mdmCfg.MDMServerURL,
+			SCEPUrl:           mdmCfg.SCEPUrl,
+			PushTopic:         mdmCfg.PushTopic,
+		},
+		Logger: logger,
+	}
+	if mdmCfg.ProfileSignerCertPath != "" && mdmCfg.ProfileSignerKeyPath != "" {
+		signer, err := onboarding.NewFileProfileSigner(mdmCfg.ProfileSignerCertPath, mdmCfg.ProfileSignerKeyPath)
+		if err != nil {
+			logger.Error().Err(err).
+				Str("cert_path", mdmCfg.ProfileSignerCertPath).
+				Str("key_path", mdmCfg.ProfileSignerKeyPath).
+				Msg("MDM profile signer init failed — profiles will be served unsigned")
+		} else {
+			eh.Signer = signer
+			logger.Info().Msg("MDM enrollment profile CMS signer loaded")
+		}
+	}
+	return eh
+}
+
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
+	if rewardsDB == nil {
+		return nil
+	}
+	rewardsCfg := rewards.Config{
+		ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+		WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+		SQLitePayoutDBPath:     cfg.MalibuEmission.SQLitePayoutDBPath,
+	}
+	if rewardsCfg.SQLitePayoutDBPath == "" {
+		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath
+	}
+	return rewards.NewAccrualHandler(rewards.AccrualHandlerDeps{
+		DB:                    rewardsDB,
+		TokenStore:            tokenStore,
+		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
+		Config:                rewardsCfg,
+		Connectivity:          connectivity,
+	})
+}
+
+func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}` + "\n"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotImplemented)
+	_, _ = w.Write([]byte(`{"error":"wallet_change_requires_spec_027"}` + "\n"))
+}
+
+func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
+	reloadCoordinatorConfig(configPath, startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, billingStores...)
+}
+
+func reloadCoordinatorConfig(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore, billingStores ...*billing.Store) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
+		return
+	}
+	telemetryDrift, err := telemetryDriftEvaluatorForReload(cfg, autotuneCatalog, autotuneEvidenceStore)
+	if err != nil {
+		logger.Error().Err(err).Msg("proof_of_weights config reload rejected")
+		return
+	}
+	if cfg.ProofOfWeights.RequireAutotuneHelloGate && (autotuneCatalog == nil || autotuneEvidenceStore == nil) {
+		logger.Error().Msg("proof_of_weights config reload rejected: autotune hello gate dependencies are not wired")
 		return
 	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
@@ -1247,23 +2354,108 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	// post-condition + swap now happen atomically inside
 	// ConfigureDefaultStrict so this path cannot be bypassed by a future
 	// caller skipping a step.
-	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger); err != nil {
+	//
+	// #608 Partial: the optional guard rejects a reload that would install
+	// Tier-2 rows conflicting with the in-memory autotune admission catalog
+	// before the package singleton is swapped.
+	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger, func(next *tier2.Catalog) error {
+		return catalogbind.RequireActiveReleaseBinding(autotuneCatalog, next)
+	}); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
 	if len(billingStores) > 0 && billingStores[0] != nil {
-		snapshotID, err := billingStores[0].InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
+		// R3 fix (ARCH-H1): snapshot + flag-change audit + in-memory
+		// publish are now ONE atomic operation in
+		// billing.Store.ReloadBillingConfig. If COMMIT fails, the
+		// snapshot is not written, the flag-change audit is not
+		// written, and the force-void flag stays at its prior value.
+		// Only AFTER COMMIT do we publish the rewards / settlement
+		// in-memory configs that depend on the snapshot id.
+		snapshotID, err := billingStores[0].ReloadBillingConfigV05(
+			context.Background(),
+			cfg.Rewards,
+			cfg.Billing.QuarantineResolutionForceVoidEnabled,
+			cfg.Billing.QuarantineResolutionForceCreditEnabled,
+			int64(cfg.Billing.ForceCreditSettlementHoldSeconds),
+			"sighup",
+			time.Now().UTC(),
+		)
 		if err != nil {
-			logger.Error().Err(err).Msg("billing config snapshot reload rejected")
+			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
 		}
-		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
+		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID, cfg.Stats.Rollup.UsdPerMillionCredits)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
+		logger.Info().
+			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+			Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
+			Str("event", "spec005_v0_4_route_layer_flag_reload").
+			Msg("quarantine force-void route-layer flag reloaded")
+	}
+	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
+	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
+	benchmarkQuarantinesCleared := 0
+	if telemetryDrift == nil || !cfg.ProofOfWeights.TelemetryDrift.QuarantineMissingBenchmark {
+		benchmarkQuarantinesCleared = wsServer.ClearBenchmarkQuarantines()
 	}
 	updated := wsServer.RefreshTier2HashStatuses()
-	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")
+	logger.Info().
+		Int("provider_hash_statuses_updated", updated).
+		Uint64("proof_of_weights_generation", proofReload.Generation).
+		Int("proof_of_weights_pre_quarantined", proofReload.PreQuarantined).
+		Int("proof_of_weights_revalidated", proofReload.Revalidated).
+		Int("proof_of_weights_sandboxed", proofReload.Sandboxed).
+		Int("proof_of_weights_route_excluded", proofReload.RouteExcluded).
+		Int("proof_of_weights_still_evidence_stale", proofReload.StillEvidenceStale).
+		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
+		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
+		Msg("tier2/proof_of_weights config reloaded")
+	// Issue #266 T1 — wire SPEC-004 FR-SR-5 paragraph 2 ("invalidate
+	// on class reconfig"): swap the buyer-server's routing.model_classes
+	// snapshot and purge sticky-affinity entries for any class whose
+	// membership shape changed. Default-OFF posture preserved: when
+	// model_classes is unset / unchanged the call returns 0 changes.
+	changed, invalidated := buyerServer.SetRoutingClasses(cfg.Routing.ModelClasses)
+	if len(changed) > 0 {
+		logger.Info().
+			Strs("changed_classes", changed).
+			Int("sticky_entries_invalidated", invalidated).
+			Str("event", "spec004_fr_sr_5_class_reload").
+			Msg("routing.model_classes reload: shape changed; sticky entries invalidated")
+	}
+}
+
+func telemetryDriftEvaluatorForReload(cfg config.Config, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore) (*pow.Evaluator, error) {
+	if !cfg.ProofOfWeights.TelemetryDrift.Enabled {
+		return nil, nil
+	}
+	if autotuneCatalog == nil {
+		return nil, fmt.Errorf("proof_of_weights.telemetry_drift.enabled requires autotune candidate catalog feeds")
+	}
+	if autotuneEvidenceStore == nil {
+		return nil, fmt.Errorf("proof_of_weights.telemetry_drift.enabled requires onboarding evidence store")
+	}
+	driftCfg, err := pow.TelemetryDriftConfigFrom(
+		true,
+		cfg.ProofOfWeights.TelemetryDrift.TPSRatioThreshold,
+		cfg.ProofOfWeights.TelemetryDrift.TPSMinAbsolute,
+		cfg.ProofOfWeights.TelemetryDrift.TPSMinRequestsWindow,
+		cfg.ProofOfWeights.TelemetryDrift.HashAlertOnStatus,
+		cfg.ProofOfWeights.TelemetryDrift.HashAlertOnArtifactDrift,
+		cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
+		cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateThreshold,
+		cfg.ProofOfWeights.TelemetryDrift.AlertCooldownSeconds,
+		cfg.ProofOfWeights.TelemetryDrift.QuarantineMissingBenchmark,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	return pow.NewEvaluator(driftCfg, autotuneCatalog, autotuneEvidenceStore, ttl), nil
 }
 
 func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {
@@ -1301,8 +2493,9 @@ const (
 // reaches the field-class check. When Phase 2/3 removes those blocks, update
 // the field class here.
 var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
-	"ObserveEnabled":      tier2HotReloadable,
-	"RequireHashVerified": tier2HotReloadable,
+	"ObserveEnabled":       tier2HotReloadable,
+	"RequireHashVerified":  tier2HotReloadable,
+	"ModelHashLegacyUntil": tier2HotReloadable,
 
 	"CatalogPath":      tier2StartupOnly,
 	"CatalogPublicKey": tier2StartupOnly,
@@ -1319,6 +2512,9 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"RequireEncryptedLeg":            tier2HotReloadable,
 	"RequireAttestation":             tier2HotReloadable,
 	"AttestationMaxAgeS":             tier2HotReloadable,
+	"SELivenessIntervalS":            tier2HotReloadable,
+	"SELivenessTimeoutS":             tier2HotReloadable,
+	"SELivenessMaxFailures":          tier2HotReloadable,
 	"BehavioralSafetyEnabled":        tier2HotReloadable,
 	"OutputSizeCapBytes":             tier2HotReloadable,
 	"OutputBytesPerTokenCeiling":     tier2HotReloadable,
@@ -1327,6 +2523,9 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"ResponseTimeAnomalyEnabled":     tier2HotReloadable,
 	"ResponseTimeAnomalyFactor":      tier2HotReloadable,
 	"ResponseTimeAnomalyMinMS":       tier2HotReloadable,
+	// MDM enrollment config — startup-only: changing push cert or SCEP
+	// settings mid-flight would invalidate already-issued profiles.
+	"MDM": tier2StartupOnly,
 }
 
 func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
@@ -1469,6 +2668,32 @@ func startPayoutSIGHUPListener(
 					}
 				}
 			}
+		}
+	}
+}
+
+// observeRollupLag periodically updates the
+// stats_rollup_lag_seconds gauge per §9.5 component, reading
+// each component's generated_at from stats_components_health.
+// Runs at a 15s cadence; cancelled when ctx.Done() fires.
+//
+// Read-only via the reader pool — does NOT contend with the
+// rollup writer pool.
+//
+// Round-3 ARCH r3 MEDIUM 1 / CODE r3 MEDIUM 2 fix: the per-tick
+// SQL pass moved into `statsrollup.ObserveRollupLagOnce` so the
+// Step 4.C wired-mux hygiene test can drive the gauge through the
+// same production code path instead of a synthetic Set() call.
+func observeRollupLag(ctx context.Context, readerDB *sql.DB, m *statsmetrics.Metrics, logger zerolog.Logger) {
+	tick := time.NewTicker(15 * time.Second)
+	defer tick.Stop()
+	_ = logger // keep import used; no per-tick log line
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			statsrollup.ObserveRollupLagOnce(ctx, readerDB, m)
 		}
 	}
 }

@@ -109,7 +109,7 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_seed","gateway_marker":true,"partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_seed", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_req_seed", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -120,23 +120,190 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 	}
 }
 
-func TestSessionDetailGatewayOnlyReturnsEmptyLocalArrays(t *testing.T) {
-	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+// TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID pins
+// the §5.6 security contract: when the coordinator resolves the
+// path-segment as an internal request_id and the resolved
+// request_log row carries an external_request_id and account_id,
+// the gateway proxy URL MUST be
+// /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>.
+// Forwarding the coordinator-internal id risks the gateway
+// interpreting it as a buyer-supplied X-Request-ID and returning a
+// wrong-account 200 (ISS-212 R3 security MEDIUM). SPEC-007 v0.5
+// (#245) made the ext_ prefix mandatory.
+func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T) {
+	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO request_log (ts_utc, request_id, external_request_id, account_id, model, latency_ms, routing_ms, status, stream)
+		 VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0)`,
+		fixedExplorerTime().Format(time.RFC3339Nano), "coord-internal-uuid-aaaa", "buyer-supplied-X", "acct_A", "llama", http.StatusOK); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+	// Use RequestURI (not URL.Path) so a buggy implementation that
+	// path-escapes the `?` is caught here, not silently rendered
+	// as a decoded path that looks correct in the test.
+	var capturedRequestURI string
+	var capturedRawPath string
+	var capturedRawQuery string
 	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		capturedRawPath = r.URL.EscapedPath()
+		capturedRawQuery = r.URL.RawQuery
+		capturedRequestURI = capturedRawPath
+		if capturedRawQuery != "" {
+			capturedRequestURI += "?" + capturedRawQuery
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_gateway_only","usage_event":{"request_id":"req_gateway_only"},"partial":false,"error":null}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"request_id":"buyer-supplied-X","partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_gateway_only", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_coord-internal-uuid-aaaa", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	for _, want := range []string{`"attempts":[]`, `"ledger_rows":[]`, `"provider_identity_snapshots":[]`, `"req_gateway_only"`} {
-		if !strings.Contains(resp.Body.String(), want) {
-			t.Fatalf("gateway-only detail missing %q: %s", want, resp.Body.String())
-		}
+	// Wire-level assertions — the `?` MUST be a real query separator,
+	// not a path-escaped `%3F`. Catching the R4 false-positive class:
+	// a regression that drops account_id into URL.Path would have
+	// URL.EscapedPath include `%3Faccount_id%3Dacct_A` and
+	// URL.RawQuery be empty.
+	// #231 SPEC-007 v0.4: coordinator proxy URL uses the typed
+	// `ext_<external_request_id>` form so the gateway's
+	// path-segment-typing deprecation audit doesn't fire on every
+	// operator-driven session-detail navigation.
+	wantPath := "/admin/explorer/sessions/ext_buyer-supplied-X"
+	wantQuery := "account_id=acct_A"
+	if capturedRawPath != wantPath {
+		t.Fatalf("gateway proxy escaped path = %q, want %q (issue #212 v0.3 §5.6: external_request_id in path)", capturedRawPath, wantPath)
+	}
+	if capturedRawQuery != wantQuery {
+		t.Fatalf("gateway proxy raw query = %q, want %q (issue #212 v0.3 §5.6: account_id MUST be a real query parameter, not path-escaped)", capturedRawQuery, wantQuery)
+	}
+	if capturedRequestURI != wantPath+"?"+wantQuery {
+		t.Fatalf("gateway proxy request-URI = %q, want %q", capturedRequestURI, wantPath+"?"+wantQuery)
+	}
+}
+
+// TestSessionDetailGatewayProxySkippedOnIncompleteIdentity pins the
+// ISS-212 R4 security MEDIUM: when the coordinator-resolved row
+// lacks either external_request_id or account_id (legacy /
+// pre-v0.9.1-gateway / direct-legacy-buyer rows), the coordinator
+// MUST NOT proxy to the gateway — forwarding with a partial key
+// would risk a wrong-account 200 embed. The gateway section is
+// marked `gateway_identity_unavailable`.
+func TestSessionDetailGatewayProxySkippedOnIncompleteIdentity(t *testing.T) {
+	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	// Seed a row with internal id but NULL account_id (legacy shape).
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO request_log (ts_utc, request_id, external_request_id, account_id, model, latency_ms, routing_ms, status, stream)
+		 VALUES (?, ?, ?, NULL, ?, 0, 0, ?, 0)`,
+		fixedExplorerTime().Format(time.RFC3339Nano), "coord-internal-uuid-legacy", "buyer-X", "llama", http.StatusOK); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+	gatewayCalled := false
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gatewayCalled = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_coord-internal-uuid-legacy", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if gatewayCalled {
+		t.Fatalf("gateway MUST NOT be proxied when account_id is NULL (issue #212 v0.3 §5.6 both-or-nothing)")
+	}
+	if !strings.Contains(resp.Body.String(), `"gateway_identity_unavailable"`) {
+		t.Fatalf("response missing gateway_identity_unavailable marker: %s", resp.Body.String())
+	}
+}
+
+// TestSessionDetailNoCoordinatorRowReturns404 pins the SPEC-007 v0.3
+// §5.6 internal-id-only contract: the path-segment is the
+// coordinator-internal request_id. When SessionDetail returns
+// ErrNoRows (no coordinator row matches), the handler MUST return
+// 404 — it MUST NOT fall back to proxying the raw path-segment to
+// the gateway, which would silently let operators trigger the
+// path-segment-overload class deferred to v0.4 (and risk a
+// wrong-account 200 embed). Pre-v0.3 behavior allowed the
+// gateway-only fallback; that path was removed in v0.3 per ISS-212
+// R5 code MEDIUM.
+func TestSessionDetailNoCoordinatorRowReturns404(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	gatewayCalled := false
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gatewayCalled = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_no-such-internal-id", "operator-key")
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s, want 404", resp.Code, resp.Body.String())
+	}
+	if gatewayCalled {
+		t.Fatalf("gateway proxy fired despite no coordinator row (issue #212 v0.3 §5.6: path-segment is internal-id only)")
+	}
+}
+
+// Test82Item4_ProviderMapExposesAuthState verifies that the explorer
+// admin surface includes the SPEC-003 FR-C9.4 auth_state value for every
+// provider in the list + detail views, so operators can see WHY a
+// session is non-routable (e.g. bearerless_duplicate) without needing to
+// cross-reference /poolz.
+func Test82Item4_ProviderMapExposesAuthState(t *testing.T) {
+	cases := []struct {
+		name      string
+		authState pool.AuthState
+		// What the rendered JSON's "auth_state" field MUST contain.
+		wantJSONFrag string
+	}{
+		{"bearer_validated", pool.AuthBearerValidated, `"auth_state":"bearer_validated"`},
+		{"self_minted", pool.AuthSelfMinted, `"auth_state":"self_minted"`},
+		{"bearerless_duplicate", pool.AuthBearerlessDuplicate, `"auth_state":"bearerless_duplicate"`},
+		{"mint_failed", pool.AuthMintFailed, `"auth_state":"mint_failed"`},
+		{"empty_legacy", pool.AuthState(""), `"auth_state":""`},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			h, db := newTestExplorer(t, nil)
+			left, right := net.Pipe()
+			t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
+			providerID := "provider_" + tc.name
+			registry := pool.NewRegistry(nil)
+			registry.Register(&pool.Provider{
+				ProviderID: providerID,
+				AssignedID: "assigned_" + tc.name,
+				ModelID:    "llama",
+				State:      pool.StateReady,
+				SlotsFree:  1,
+				SlotsTotal: 1,
+				AuthState:  tc.authState,
+			}, left)
+			h.pool = registry
+			if _, err := db.ExecContext(context.Background(), `
+insert into provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+values (?, ?, ?, ?, ?)`,
+				"hash-"+tc.name, "tok_"+tc.name, providerID, tc.name, fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("seed provider token: %v", err)
+			}
+
+			// List view.
+			respList := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers", "operator-key")
+			if respList.Code != http.StatusOK {
+				t.Fatalf("list status=%d body=%s", respList.Code, respList.Body.String())
+			}
+			if !strings.Contains(respList.Body.String(), tc.wantJSONFrag) {
+				t.Fatalf("list missing %q: %s", tc.wantJSONFrag, respList.Body.String())
+			}
+
+			// Detail view.
+			respDetail := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers/"+providerID, "operator-key")
+			if respDetail.Code != http.StatusOK {
+				t.Fatalf("detail status=%d body=%s", respDetail.Code, respDetail.Body.String())
+			}
+			if !strings.Contains(respDetail.Body.String(), tc.wantJSONFrag) {
+				t.Fatalf("detail missing %q: %s", tc.wantJSONFrag, respDetail.Body.String())
+			}
+		})
 	}
 }
 
@@ -235,8 +402,16 @@ func TestAC13_ConsumedAndVoidedSettlementsAreImmutable(t *testing.T) {
 	seedSettlement(t, db, "provider_consumed", "consumed", fixedExplorerTime().Add(-48*time.Hour), "settlement_consumed")
 	seedSettlement(t, db, "provider_voided", "voided", fixedExplorerTime().Add(-72*time.Hour), "settlement_voided")
 	before := tableCounts(t, db)
+	// parseWindow defaults `to` to time.Now().UTC(), so the
+	// default window drifts past the fixedExplorerTime() seeds as
+	// wall-clock advances (TestAC13 started failing once real-now
+	// crossed 30 days past 2026-06-01). Pass explicit from/to that
+	// bracket the seeded windowEnd values so the test is wall-
+	// clock-independent.
+	from := fixedExplorerTime().Add(-96 * time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
 	for _, status := range []string{"consumed", "voided"} {
-		resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/settlements?status="+status, "operator-key")
+		resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/settlements?status="+status+"&from="+from+"&to="+to, "operator-key")
 		if resp.Code != http.StatusOK {
 			t.Fatalf("%s status=%d body=%s", status, resp.Code, resp.Body.String())
 		}
@@ -363,7 +538,7 @@ func TestAC14_HealthExposesReconciliationDelta(t *testing.T) {
 
 func TestAC15_ActivityCursorMonotonic(t *testing.T) {
 	h, db := newTestExplorer(t, nil)
-	seedRequestLog(t, db, fixedExplorerTime().Add(-time.Minute), "req_activity_next")
+	seedRequestLogWithQueueWait(t, db, fixedExplorerTime().Add(time.Minute), "req_activity_next", 17)
 	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
 	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
 	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to, "operator-key")
@@ -378,6 +553,9 @@ func TestAC15_ActivityCursorMonotonic(t *testing.T) {
 	items := body["events"].([]any)
 	if len(items) == 0 || items[0].(map[string]any)["cursor"] == "" {
 		t.Fatalf("activity row cursor missing: %s", resp.Body.String())
+	}
+	if got := items[0].(map[string]any)["queue_wait_ms"]; got != float64(17) {
+		t.Fatalf("queue_wait_ms = %#v, want 17 in activity row: %s", got, resp.Body.String())
 	}
 	page2 := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to+"&cursor="+next, "operator-key")
 	if page2.Code != http.StatusOK {
@@ -449,7 +627,8 @@ func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	body := decodeObject(t, resp)
-	ids := requestIDs(body["events"].([]any))
+	events := body["events"].([]any)
+	ids := requestIDs(events)
 	if len(ids) != 2 || !ids["req_live_activity"] || !ids["req_live_activity_2"] {
 		t.Fatalf("new activity missing: %s", resp.Body.String())
 	}
@@ -458,6 +637,12 @@ func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
 	}
 	if body["latest_cursor"] == latest {
 		t.Fatalf("latest cursor did not advance: %s", resp.Body.String())
+	}
+	for _, event := range events {
+		row := event.(map[string]any)
+		if row["queue_wait_ms"] == nil {
+			t.Fatalf("queue_wait_ms missing from since-cursor activity row: %s", resp.Body.String())
+		}
 	}
 }
 
@@ -633,7 +818,7 @@ func TestDashboardCrossViewLinkWiring(t *testing.T) {
 	raw := readStatic(t, "static/js/dashboard.js")
 	for _, want := range []string{
 		`dataset.view`,
-		`/admin/explorer/sessions/${encodeURIComponent(v)}`,
+		`/admin/explorer/sessions/int_${encodeURIComponent(v)}`,
 		`/admin/explorer/buyers/${encodeURIComponent(v)}`,
 		`/admin/explorer/providers/${encodeURIComponent(v)}`,
 		`/admin/explorer/settlements/${encodeURIComponent(v)}`,
@@ -722,7 +907,7 @@ func TestAC25_CoreExplorerRoutesTraverseSuccessfully(t *testing.T) {
 	for _, path := range []string{
 		"/admin/explorer/overview?include_gateway=false",
 		"/admin/explorer/sessions",
-		"/admin/explorer/sessions/req_seed",
+		"/admin/explorer/sessions/int_req_seed",
 		"/admin/explorer/buyers",
 		"/admin/explorer/providers",
 		"/admin/explorer/providers/provider_seed",
@@ -811,7 +996,20 @@ func newTestExplorer(t *testing.T, mutate func(*config.Config)) (*Handler, *sql.
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
-	if err := reqStore.Insert(context.Background(), requestlog.Row{TSUtc: fixedExplorerTime(), RequestID: "req_seed", Model: "llama", Status: http.StatusOK}); err != nil {
+	// SPEC-007 v0.3 §5.6 both-or-nothing: the default fixture row
+	// MUST carry both external_request_id and account_id so the
+	// gateway-proxy path is exercised by existing tests (e.g.
+	// TestAC07_SessionDetailIncludesLocalAndGatewayData). Legacy /
+	// incomplete-identity rows are exercised by their own targeted
+	// tests (e.g. TestSessionDetailGatewayProxySkippedOnIncompleteIdentity).
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:             fixedExplorerTime(),
+		RequestID:         "req_seed",
+		ExternalRequestID: "buyer_seed_X",
+		AccountID:         "acct_seed",
+		Model:             "llama",
+		Status:            http.StatusOK,
+	}); err != nil {
 		t.Fatalf("request log insert: %v", err)
 	}
 	if _, err := reqStore.DB().ExecContext(context.Background(), `
@@ -858,6 +1056,7 @@ insert into ledger_payout_ready (
 	}
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
 	cfg.Explorer.Enabled = true
 	if mutate != nil {
 		mutate(&cfg)
@@ -878,13 +1077,18 @@ func requestExplorer(t *testing.T, h *Handler, method, path, bearer string) *htt
 
 func seedRequestLog(t *testing.T, db *sql.DB, ts time.Time, requestID string) {
 	t.Helper()
+	seedRequestLogWithQueueWait(t, db, ts, requestID, 0)
+}
+
+func seedRequestLogWithQueueWait(t *testing.T, db *sql.DB, ts time.Time, requestID string, queueWaitMs float64) {
+	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `
 insert into request_log (
 	ts_utc, request_id, model, provider_assigned_id, prompt_tokens, completion_tokens,
-	total_tokens, latency_ms, routing_ms, status, stream, buyer_ip, error, error_code,
+	total_tokens, latency_ms, routing_ms, queue_wait_ms, status, stream, buyer_ip, error, error_code,
 	pref_header, provider_header, retried
-) values (?, ?, 'llama', 'assigned_seed', 1, 1, 2, 10, 2, 200, 0, '', NULL, NULL, NULL, NULL, 0)`,
-		ts.UTC().Format(time.RFC3339Nano), requestID); err != nil {
+) values (?, ?, 'llama', 'assigned_seed', 1, 1, 2, 10, 2, ?, 200, 0, '', NULL, NULL, NULL, NULL, 0)`,
+		ts.UTC().Format(time.RFC3339Nano), requestID, queueWaitMs); err != nil {
 		t.Fatalf("seed request_log: %v", err)
 	}
 }

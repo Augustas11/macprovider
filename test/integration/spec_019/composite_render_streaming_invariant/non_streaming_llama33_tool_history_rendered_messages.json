@@ -1,0 +1,18 @@
+[
+  {
+    "role": "system",
+    "content": "<|start_header_id|>system<|end_header_id|>\n\nRespond with JSON matching schema person_tool_result before any other text.<|eot_id|>"
+  },
+  {
+    "role": "user",
+    "content": "<|start_header_id|>user<|end_header_id|>\n\nReturn Ada and call lookup_age if needed.<|eot_id|>"
+  },
+  {
+    "role": "assistant",
+    "content": "<|python_tag|>{\"id\":\"call_lookup_age_ada\",\"name\":\"lookup_age\",\"parameters\":{\"name\":\"Ada\"},\"type\":\"function\"}<|eom_id|>"
+  },
+  {
+    "role": "tool",
+    "content": "<|start_header_id|>ipython<|end_header_id|>\n{\"age\":37}<|eot_id|>"
+  }
+]

@@ -16,13 +16,13 @@ WorkingDirectory=/opt/macprovider
 EnvironmentFile=-/etc/macprovider/coordinator.env
 
 # Binary + config paths
-ExecStart=/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml
+ExecStart=/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml
 
 # Graceful shutdown: SIGTERM triggers SPEC-002 § 6 drain sequence.
-# coordinator drains in-flight requests up to request_timeout_s (300s)
-# and sends drain to providers. Allow up to 360s before SIGKILL.
+# coordinator drains in-flight requests up to request_timeout_s (900s)
+# and sends drain to providers. Allow up to 960s before SIGKILL.
 KillSignal=SIGTERM
-TimeoutStopSec=360
+TimeoutStopSec=960
 Restart=on-failure
 RestartSec=5
 

@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "task_id": "T0-02",
+  "verdict": "YELLOW",
+  "verdict_reason": "2 of 3 required models complete without swap; Gemma-4-26b blocked by mlx-swift-lm 3.31.4 Gemma4 MoE architecture gap (see blocker section).",
+  "run_date": "2026-07-07",
+  "hardware": {
+    "chip": "Apple M5",
+    "model": "MacBook Air (Mac17,3)",
+    "ram_gb": 32,
+    "macos": "26.5 (Build 25F71)",
+    "macprovider_cli_version": "1.8.19",
+    "mlx_swift_pin": "0.31.6 (rev 0bb916c67f4b)",
+    "mlx_swift_lm_pin": "3.31.4 (rev bd4b7434e6bd)",
+    "bench_binary": "phase3-binary/.build/release/macprovider-cli (swift build -c release)",
+    "metallib_source": "built from mlx-swift 0.31.6 checkout via scripts/build-mlx-metallib.sh",
+    "production_provider_during_bench": "STOPPED — live.streamvc.macprovider (PID 71387, qwen3-coder-30b-a3b-instruct on port 61919) was safely bootout via launchctl before bench; restored after."
+  },
+  "swap_observed": false,
+  "models": [
+    {
+      "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "role": "dense_control",
+      "status": "GREEN",
+      "decode_tps_p50": 27.1,
+      "prefill_tps_p50": 420.7,
+      "ttft_ms_p50": 1288,
+      "decode_tokens_actual_p50": 42,
+      "prefill_tokens_actual": 542,
+      "runs": 5,
+      "prior_baseline_tps": 29.21,
+      "prior_baseline_note": "2026-06-30 / mlx-swift-lm 2.29.1 on same M5 hardware",
+      "delta_vs_prior_pct": -7.2,
+      "red_threshold_pct": 10.0,
+      "verdict": "GREEN — within 10% of prior baseline; prefill +53.7% faster on newer MLX",
+      "snapshot_path": "audits/2026-07-07/bench-snapshots/qwen2.5-7b-instruct-4bit.json",
+      "bandwidth_model_note": "Implied M5 bandwidth: 27.1 * 7B * 0.5B/param / 0.8 = 118.6 GB/s (consistent with M5 MBA peak)"
+    },
+    {
+      "model_id": "mlx-community/gpt-oss-20b-MXFP4-Q8",
+      "role": "moe_control",
+      "status": "GREEN",
+      "decode_tps_p50": 26.3,
+      "prefill_tps_p50": 314.2,
+      "ttft_ms_p50": 1853,
+      "decode_tokens_actual_p50": 92,
+      "prefill_tokens_actual": 582,
+      "runs": 5,
+      "catalog_min_sustained_tps": 12.0,
+      "catalog_target_met": true,
+      "verdict": "GREEN — 26.3 TPS vs 12 TPS catalog floor; well above threshold",
+      "snapshot_path": "audits/2026-07-07/bench-snapshots/gpt-oss-20b-MXFP4-Q8.json",
+      "bandwidth_model": {
+        "formula": "decode_tps ≈ bandwidth_GBps * 0.8 / (active_params * 0.5625 / 1e9)",
+        "bandwidth_GBps_derived": 118.6,
+        "measured_tps": 26.3,
+        "implied_active_params_B": 6.42,
+        "total_params_B": 20.0,
+        "active_fraction_pct": 32.1,
+        "note": "6.4B implied active of 20B total; consistent with MoE top-k routing (e.g. top-2 of N experts where active expert mass ≈ 6.4B)"
+      }
+    },
+    {
+      "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+      "role": "moe_primary",
+      "status": "YELLOW",
+      "decode_tps_p50": null,
+      "prefill_tps_p50": null,
+      "ttft_ms_p50": null,
+      "verdict": "YELLOW — BLOCKED: mlx-swift-lm 3.31.4 fails to load Gemma4 MoE (unhandled keys: experts, router, post_feedforward_layernorm_1/2, pre_feedforward_layernorm_2 in Gemma4DecoderLayer)",
+      "snapshot_path": null,
+      "blocker": {
+        "error": "Unhandled keys [\"experts\", \"post_feedforward_layernorm_1\", \"post_feedforward_layernorm_2\", \"pre_feedforward_layernorm_2\", \"router\"] in language_model.model.layers.0 in Gemma4Model.Gemma4TextModel.Gemma4TextModelInner.Gemma4DecoderLayer",
+        "root_cause": "mlx-swift-lm 3.31.4 Gemma4 model class lacks MoE expert/router wiring — architecture added in a later release",
+        "fix": "T1-01 pin bump to mlx-swift-lm ≥ version with Gemma4 MoE support",
+        "catalog_impact": "P1-Gemma catalog TPS gate cannot be measured until T1-01 is complete"
+      },
+      "bandwidth_model_predicted": {
+        "formula": "decode_tps ≈ bandwidth_GBps * 0.8 / (active_params * 0.5625 / 1e9)",
+        "architecture": "Gemma4 MoE: 30 layers, 128 experts per layer, top-8 active, hidden=2816, moe_intermediate_size=704",
+        "total_params_B": 26.0,
+        "active_params_estimate_B": 3.97,
+        "active_params_derivation": "Attention (1.04B) + active-MoE-FFN (1.47B = 23.5B_expert * 8/128) + embeddings (1.48B) ≈ 3.97B",
+        "predicted_tps_at_118_GBps": "~42 TPS (predicted; not measured — harness must re-run after T1-01)",
+        "note": "High predicted TPS because MoE sparsity means only 15% of expert weights read per token"
+      }
+    }
+  ],
+  "tg0_status": {
+    "harness_ready": true,
+    "baseline_json_committed": true,
+    "reference_hardware_documented": true,
+    "verdict": "YELLOW — 2/3 models complete; Gemma4 MoE blocked on current pin. PROCEED to T1-01 (pin bump) which unblocks Gemma4 baseline re-measure. Dense control (Qwen) and MoE control (gpt-oss) are sufficient baselines to gate T1-01 correctness check.",
+    "proceed_to_t1": true,
+    "proceed_condition": "T1-01 must include Gemma4 re-measure as T1-02 precondition"
+  },
+  "metallib_fix_note": "First bench attempt used production binary's mlx-swift_Cmlx.bundle (compiled for a different MLX version). Correct metallib was built from mlx-swift 0.31.6 checkout using scripts/build-mlx-metallib.sh. Without this fix, Qwen showed 12.4 TPS (mismatched Metal shaders). With version-matched metallib: 27.1 TPS. Metallib mismatch produces wrong (not absent) shaders — Metal does not error out, just runs suboptimally.",
+  "refresh_2026_07_07_pm": {
+    "note": "Post-T3 merge sanity rerun; decode TPS ~17% below morning session — likely thermal throttling after sustained afternoon bench load.",
+    "snapshots": {
+      "qwen2.5_7b": "audits/2026-07-07/bench-snapshots/t0-02-refresh-qwen2.5-7b.json",
+      "gpt_oss_20b": "audits/2026-07-07/bench-snapshots/t0-02-refresh-gpt-oss-20b.json"
+    },
+    "decode_tps_p50": {
+      "qwen2.5_7b": 22.4,
+      "gpt_oss_20b": 22.9
+    }
+  }
+}

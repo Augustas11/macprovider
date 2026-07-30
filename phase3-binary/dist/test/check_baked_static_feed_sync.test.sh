@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+python3 "$ROOT/scripts/catalog-release.py" verify
+printf 'PASS: canonical, generated, signed, and baked autotune release bytes agree\n'

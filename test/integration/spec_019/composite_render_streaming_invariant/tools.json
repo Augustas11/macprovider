@@ -1,0 +1,21 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "lookup_age",
+      "description": "Lookup an age by name.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+]

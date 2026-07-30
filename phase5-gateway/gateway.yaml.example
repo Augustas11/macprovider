@@ -14,18 +14,13 @@ public:
 coordinator:
   buyer_url: http://127.0.0.1:8443
   operator_url: http://127.0.0.1:8444
-  # operator_key is the gateway's OWN human-admin credential (used by
-  # /admin/* on the gateway plane AND the legacy upstream credential).
-  # Required.
+  # operator_key is the gateway's human-admin credential and remains the
+  # credential used for operator-only upstream endpoints such as /poolz.
   operator_key: env:COORDINATOR_OPERATOR_KEY
-  # service_token is the optional service-to-service credential the
-  # gateway sends on UPSTREAM calls to the coordinator (M3-2 / SECU-4).
-  # When set, the gateway prefers it over operator_key for /poolz and
-  # /internal/* upstream calls; operator_key remains the fallback so an
-  # upgraded gateway can still talk to a not-yet-upgraded coordinator.
-  # Mint with: openssl rand -hex 32. Leave unset to preserve pre-bridge
-  # behavior (operator_key flows everywhere).
-  # service_token: env:COORDINATOR_SERVICE_TOKEN
+  # Required service-to-service credential sent on upstream /internal/*
+  # calls. It must match coordinator auth.gateway_service_token and differ
+  # from operator credentials. Mint with: openssl rand -hex 32.
+  service_token: env:COORDINATOR_SERVICE_TOKEN
   poolz_poll_interval_s: 10
 
 storage:
@@ -39,9 +34,15 @@ auth:
   github_oauth_enabled: true
   email_magic_link_enabled: false
   oauth:
+    state_max_per_ip: 20
     callback_allowlist:
       - https://api.streamvc.live/auth/github/callback
       - http://localhost:9443/auth/github/callback
+    return_to_allowlist:
+      - https://malibu.tech/console/auth/callback.html
+      - https://www.malibu.tech/console/auth/callback.html
+      - http://127.0.0.1:5173/console/auth/callback.html
+      - http://localhost:5173/console/auth/callback.html
     github:
       client_id: env:GITHUB_OAUTH_CLIENT_ID
       client_secret: env:GITHUB_OAUTH_CLIENT_SECRET
@@ -55,7 +56,8 @@ quotas:
   account_daily_tokens: 100000
   demo_daily_tokens_per_ip: 1000
   demo_sessions_per_ip_per_hour: 10
-  account_concurrency: 2
+  account_concurrency: 4
+  account_request_rate_per_second: 30
   demo_concurrency: 2
   signup_accounts_per_ip_per_day: 3
   reaper_interval_hours: 1
@@ -65,6 +67,8 @@ limits:
   max_tokens_per_request: 4096
   demo_max_tokens_per_request: 512
   max_feedback_comment_bytes: 2000
+  max_feedback_body_bytes: 16384
+  feedback_requests_per_ip_per_hour: 10
   request_body_bytes: 1048576
 
 kill_switch:
@@ -79,11 +83,84 @@ capacity:
 
 timeouts:
   coordinator_request_seconds: 300
-  # Non-streaming inference does not commit coordinator response headers until
-  # the provider returns a full response. Keep this above expected first
-  # response latency for large local models.
-  coordinator_header_timeout_seconds: 60
+  # NEITHER streaming nor non-streaming coordinator responses commit headers
+  # until provider work begins:
+  #   - Non-streaming: coordinator buffers the entire response, so headers
+  #     arrive at completion.
+  #   - Streaming (post-#92): headers wait for the first commit-worthy SSE
+  #     event from the provider; pre-event garbage no longer commits.
+  # In both cases, the coordinator can legitimately take up to the configured
+  # phase budget before sending headers for slow large-model inference. Keep
+  # this >= max(coordinator_admission_seconds, non_stream_request_seconds) so
+  # a slow-but-valid provider doesn't false-fail with coordinator_unavailable.
+  # Pearl sets this above the coordinator 900s request wall so coordinator
+  # relay-timeout attribution wins before the gateway buyer wall.
+  coordinator_header_timeout_seconds: 960
+  # --- issue #760: per-phase deadlines (streaming path) -------------------
+  # coordinator_request_seconds above is no longer the streaming wall. It is
+  # kept as the FLOOR of the derived streaming ceiling below, so decomposing
+  # the wall can only ever let a request live longer than it does today, never
+  # cut one that survives. Deploy C2 now anchors the coordinator/provider
+  # upstream walls to stream_ceiling_max_seconds for streaming, and C2b anchors
+  # header transport timeout to max(coordinator_admission_seconds, effective
+  # non_stream_request_seconds).
+  #
+  # TCP dial + TLS handshake budget. A hung handshake is never legitimate
+  # work. Deliberately NOT applied to response headers — shortening
+  # coordinator_header_timeout_seconds reintroduces the #92 / #171 regression
+  # where a slow-but-valid inference false-failed as coordinator_unavailable.
+  coordinator_connect_seconds: 60
+  # Gateway first byte of request -> coordinator response headers, across the
+  # whole 503/502 retry loop. This is the one real behavior change of #760: a
+  # pre-header hang now fails at 120s instead of 300s.
+  coordinator_admission_seconds: 120
+  # Response headers -> first content-bearing SSE delta. 0 (or unset) derives
+  # min(120, coordinator_header_timeout_seconds); an explicit value must be
+  # <= coordinator_header_timeout_seconds (the transport gives up first).
+  first_token_seconds: 0
+  # Hard streaming safety ceiling, derived from the request's max_tokens:
+  #   clamp(floor + max_tokens * per_token_ms,
+  #         >= coordinator_request_seconds, <= max)
+  # Armed once at gateway first byte of request and never re-armed, so no
+  # amount of upstream progress can push it out. stream_ceiling_max_seconds
+  # is the operator dial for how long one account_concurrency slot can be
+  # held (quotas.account_concurrency x this value in the worst case).
+  stream_ceiling_floor_seconds: 60
+  stream_ceiling_per_token_ms: 250
+  stream_ceiling_max_seconds: 900
+  # Non-streaming requests keep a single flat wall: the coordinator buffers
+  # the whole response, so there is no intermediate phase to observe. Deploy
+  # C2 requires this wall to be greater than coordinator request_timeout_s;
+  # otherwise a gateway-side cancel can race/preempt coordinator relay-timeout
+  # attribution and hide FR-P11a breaker faults.
+  non_stream_request_seconds: 960
   streaming_cancel_ms: 500
+  # Post-first-byte stream idle timeout. If the coordinator stops producing
+  # SSE bytes, terminate with provider_timeout before buyer clients hit their
+  # own shorter request deadlines. #760 made this a CONTENT-progress budget:
+  # it is re-based only by a frame carrying generated text, so a provider that
+  # keeps the socket warm with role-only, keepalive, or usage-only frames no
+  # longer holds the stream open indefinitely.
+  streaming_idle_ms: 10000
+
+retry_503:
+  # Retries coordinator 503 no_provider_available AND transient 502 provider
+  # transport failures (provider_disconnected / provider_error / provider_failed).
+  # Does NOT retry null-usage provider errors, tier-2 policy rejects, or
+  # post-inference structured-output 502s (malformed_json_response, etc.).
+  enabled: true
+  max_attempts: 3
+  backoff_base_ms: 100
+  backoff_max_ms: 500
+
+settlement:
+  # SPEC-022: automatically close held buyer reservations once coordinator
+  # settlement finality is available. Disable only for emergency operator
+  # intervention; manual /admin/settlement/reconcile remains available.
+  reconcile_enabled: true
+  reconcile_interval_s: 30
+  reconcile_batch_limit: 100
+  reconcile_request_timeout_s: 10
 
 routing:
   sticky_enabled: false
@@ -93,3 +170,7 @@ cors:
   allowed_origins:
     - https://console.streamvc.live
     - https://streamvc.live
+    - https://malibu.tech
+    - https://www.malibu.tech
+    - http://127.0.0.1:5173
+    - http://localhost:5173

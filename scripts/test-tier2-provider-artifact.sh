@@ -43,14 +43,21 @@ make_fake_binary() {
   local dir="$1"
   local version="$2"
   local include_surfaces="$3"
+  local supports_release_preflight="${4:-1}"
   mkdir -p "$dir"
   cat >"$dir/macprovider-cli" <<EOF
 #!/usr/bin/env bash
+if [ -n "\${FAKE_PROVIDER_EXECUTION_MARKER:-}" ]; then
+  : > "\$FAKE_PROVIDER_EXECUTION_MARKER"
+fi
 if [ "\${1:-}" = "--version" ]; then
   printf '%s\n' "$version"
   exit 0
 fi
-exit 0
+if [ "$supports_release_preflight" = "1" ] && [ "\${1:-}" = "release-payload-preflight" ]; then
+  exit "\${FAKE_RELEASE_PREFLIGHT_RC:-0}"
+fi
+exit 64
 EOF
   if [ "$include_surfaces" = "1" ]; then
     cat >>"$dir/macprovider-cli" <<'EOF'
@@ -75,17 +82,70 @@ EOF
 EOF
   fi
   chmod +x "$dir/macprovider-cli"
+  printf 'fake metallib\n' >"$dir/mlx.metallib"
 }
 
 make_tarball() {
   local src_dir="$1"
   local out="$2"
-  tar -czf "$out" -C "$src_dir" macprovider-cli
+  tar -czf "$out" -C "$src_dir" .
+}
+
+make_malicious_tarball() {
+  local out="$1"
+  local kind="$2"
+  python3 - "$out" "$kind" <<'PY'
+import io
+import stat
+import sys
+import tarfile
+
+out, kind = sys.argv[1], sys.argv[2]
+
+def add_file(tar, name, data, mode=0o644):
+    payload = data.encode()
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    info.mode = mode
+    tar.addfile(info, io.BytesIO(payload))
+
+with tarfile.open(out, "w:gz") as tar:
+    add_file(tar, "macprovider-cli", "#!/usr/bin/env bash\nprintf '1.2.6\\n'\n", 0o755)
+    if kind != "symlink-metallib":
+        add_file(tar, "mlx.metallib", "fake metallib\n")
+
+    if kind == "traversal":
+        add_file(tar, "../evil", "evil\n")
+    elif kind == "absolute":
+        add_file(tar, "/tmp/evil", "evil\n")
+    elif kind == "symlink-metallib":
+        info = tarfile.TarInfo("mlx.metallib")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    elif kind == "hardlink":
+        info = tarfile.TarInfo("hardlink")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "macprovider-cli"
+        tar.addfile(info)
+    elif kind == "fifo":
+        info = tarfile.TarInfo("fifo")
+        info.type = tarfile.FIFOTYPE
+        info.mode = stat.S_IFIFO | 0o644
+        tar.addfile(info)
+    else:
+        raise SystemExit(f"unknown malicious tar kind: {kind}")
+PY
 }
 
 good_dir="$WORKDIR/good"
 good_tar="$WORKDIR/good.tar.gz"
 make_fake_binary "$good_dir" "1.2.6" "1"
+mkdir -p "$good_dir/catalog-release"
+for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+  printf '{}\n' > "$good_dir/catalog-release/$catalog_member"
+done
 make_tarball "$good_dir" "$good_tar"
 good_sha="$(sha256_file "$good_tar")"
 
@@ -95,6 +155,138 @@ PROVIDER_ARTIFACT="$good_tar" \
   "$CHECKER" >"$WORKDIR/good.out" 2>"$WORKDIR/good.err"
 assert_contains "$WORKDIR/good.err" "SPEC-008 Phase 2 B6 provider artifact preflight passed"
 
+preflight_dir="$WORKDIR/release-preflight"
+preflight_tar="$WORKDIR/release-preflight.tar.gz"
+fake_bin="$WORKDIR/fake-bin"
+make_fake_binary "$preflight_dir" "1.8.39" "1"
+mkdir -p "$preflight_dir/catalog-release" "$preflight_dir/compatibility-set-local" "$fake_bin"
+for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json \
+  rate-card.json.sig; do
+  printf '{}\n' > "$preflight_dir/catalog-release/$catalog_member"
+done
+for local_member in install.sh provider-launch-agent.plist.template updater-rollback.json \
+  watchdog-launch-agent.plist.template watchdog.sh; do
+  printf '{}\n' > "$preflight_dir/compatibility-set-local/$local_member"
+done
+printf '{}\n' > "$preflight_dir/compatibility-set.json"
+cat > "$fake_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$fake_bin/lipo-arm64" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "-archs" ] || exit 64
+printf 'arm64\n'
+EOF
+cat > "$fake_bin/lipo-x86_64" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "-archs" ] || exit 64
+printf 'x86_64\n'
+EOF
+chmod +x "$fake_bin/python3" "$fake_bin/lipo-arm64" "$fake_bin/lipo-x86_64"
+make_tarball "$preflight_dir" "$preflight_tar"
+preflight_sha="$(sha256_file "$preflight_tar")"
+
+if PATH="$fake_bin:$PATH" \
+  FAKE_RELEASE_PREFLIGHT_RC=17 \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  "$CHECKER" >"$WORKDIR/preflight-failure.out" 2>"$WORKDIR/preflight-failure.err"; then
+  die "staged provider release-payload-preflight failure was ignored"
+fi
+
+PATH="$fake_bin:$PATH" \
+  FAKE_RELEASE_PREFLIGHT_RC=0 \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  "$CHECKER" >"$WORKDIR/preflight-success.out" 2>"$WORKDIR/preflight-success.err"
+assert_contains "$WORKDIR/preflight-success.err" \
+  "staged provider validated its signed compatibility release payload"
+
+structural_marker="$WORKDIR/structural-executed"
+PATH="$fake_bin:$PATH" \
+  FAKE_PROVIDER_EXECUTION_MARKER="$structural_marker" \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  PROVIDER_RUNTIME_MODE=structural \
+  PROVIDER_EXPECTED_ARCHES=arm64 \
+  PROVIDER_LIPO_BIN="$fake_bin/lipo-arm64" \
+  "$CHECKER" >"$WORKDIR/structural.out" 2>"$WORKDIR/structural.err"
+[ ! -e "$structural_marker" ] || die "structural mode executed the provider binary"
+assert_contains "$WORKDIR/structural.err" "provider architecture ok: arm64"
+assert_contains "$WORKDIR/structural.err" \
+  "provider runtime execution deferred to an architecture-compatible verifier"
+if PATH="$fake_bin:$PATH" \
+  PROVIDER_ARTIFACT="$preflight_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$preflight_sha" \
+  PROVIDER_RUNTIME_MODE=structural \
+  PROVIDER_EXPECTED_ARCHES=arm64 \
+  PROVIDER_LIPO_BIN="$fake_bin/lipo-x86_64" \
+  "$CHECKER" >"$WORKDIR/structural-wrong-arch.out" 2>"$WORKDIR/structural-wrong-arch.err"; then
+  die "structural mode accepted the wrong provider architecture"
+fi
+assert_contains "$WORKDIR/structural-wrong-arch.err" \
+  "provider architecture mismatch: got x86_64 want arm64"
+
+missing_tier2_dir="$WORKDIR/missing-tier2"
+missing_tier2_tar="$WORKDIR/missing-tier2.tar.gz"
+cp -R "$preflight_dir/." "$missing_tier2_dir/"
+rm -f "$missing_tier2_dir/catalog-release/tier2-catalog.json"
+make_tarball "$missing_tier2_dir" "$missing_tier2_tar"
+missing_tier2_sha="$(sha256_file "$missing_tier2_tar")"
+if PATH="$fake_bin:$PATH" \
+  PROVIDER_ARTIFACT="$missing_tier2_tar" \
+  PROVIDER_VERSION="1.8.39" \
+  PROVIDER_SHA256="$missing_tier2_sha" \
+  "$CHECKER" >"$WORKDIR/missing-tier2.out" 2>"$WORKDIR/missing-tier2.err"; then
+  die "provider artifact missing Tier-2 catalog unexpectedly passed"
+fi
+assert_contains "$WORKDIR/missing-tier2.err" \
+  "exactly one catalog-release/tier2-catalog.json"
+
+historical_dir="$WORKDIR/historical-release"
+historical_tar="$WORKDIR/historical-release.tar.gz"
+mkdir -p "$historical_dir"
+cp -R "$preflight_dir/." "$historical_dir/"
+make_fake_binary "$historical_dir" "1.8.38" "1" "0"
+make_tarball "$historical_dir" "$historical_tar"
+historical_sha="$(sha256_file "$historical_tar")"
+PATH="$fake_bin:$PATH" \
+  PROVIDER_ARTIFACT="$historical_tar" \
+  PROVIDER_VERSION="1.8.38" \
+  PROVIDER_SHA256="$historical_sha" \
+  "$CHECKER" >"$WORKDIR/historical.out" 2>"$WORKDIR/historical.err"
+assert_contains "$WORKDIR/historical.err" \
+  "compatibility-set manifest signature and provider version verified"
+if grep -q "staged provider validated its signed compatibility release payload" \
+  "$WORKDIR/historical.err"; then
+  die "historical provider unexpectedly ran the v1.8.39 release preflight"
+fi
+
+missing_catalog_dir="$WORKDIR/missing-catalog"
+missing_catalog_tar="$WORKDIR/missing-catalog.tar.gz"
+make_fake_binary "$missing_catalog_dir" "1.8.31" "1"
+mkdir -p "$missing_catalog_dir/catalog-release"
+for catalog_member in release.json trusted-keys.json tier2-catalog.json autotune-candidates.json \
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json; do
+  printf '{}\n' > "$missing_catalog_dir/catalog-release/$catalog_member"
+done
+make_tarball "$missing_catalog_dir" "$missing_catalog_tar"
+missing_catalog_sha="$(sha256_file "$missing_catalog_tar")"
+if PROVIDER_ARTIFACT="$missing_catalog_tar" \
+  PROVIDER_VERSION="1.8.31" \
+  PROVIDER_SHA256="$missing_catalog_sha" \
+  "$CHECKER" >"$WORKDIR/missing-catalog.out" 2>"$WORKDIR/missing-catalog.err"; then
+  die "catalog-incomplete v1.8.31 artifact unexpectedly passed"
+fi
+assert_contains "$WORKDIR/missing-catalog.err" \
+  "exactly one catalog-release/rate-card.json.sig"
+
 PROVIDER_ARTIFACT="$good_tar" \
   PROVIDER_VERSION="1.2.6" \
   PROVIDER_SHA256="" \
@@ -102,7 +294,7 @@ PROVIDER_ARTIFACT="$good_tar" \
 assert_contains "$WORKDIR/dynamic.err" "provider artifact sha256 observed"
 
 if PROVIDER_ARTIFACT="$good_tar" \
-  PROVIDER_VERSION="9.9.9" \
+  PROVIDER_VERSION="1.2.7" \
   PROVIDER_SHA256="$good_sha" \
   "$CHECKER" >"$WORKDIR/version.out" 2>"$WORKDIR/version.err"; then
   die "version mismatch unexpectedly passed"
@@ -130,6 +322,47 @@ if PROVIDER_ARTIFACT="$missing_surface_tar" \
   die "missing Tier-2 surface unexpectedly passed"
 fi
 assert_contains "$WORKDIR/surface.err" "provider binary lacks Tier-2 surface string"
+
+missing_metallib_dir="$WORKDIR/missing-metallib"
+missing_metallib_tar="$WORKDIR/missing-metallib.tar.gz"
+make_fake_binary "$missing_metallib_dir" "1.2.6" "1"
+rm -f "$missing_metallib_dir/mlx.metallib"
+make_tarball "$missing_metallib_dir" "$missing_metallib_tar"
+missing_metallib_sha="$(sha256_file "$missing_metallib_tar")"
+
+if PROVIDER_ARTIFACT="$missing_metallib_tar" \
+  PROVIDER_VERSION="1.2.6" \
+  PROVIDER_SHA256="$missing_metallib_sha" \
+  "$CHECKER" >"$WORKDIR/metallib.out" 2>"$WORKDIR/metallib.err"; then
+  die "missing MLX Metal kernels unexpectedly passed"
+fi
+assert_contains "$WORKDIR/metallib.err" "provider artifact lacks MLX Metal kernels"
+
+for kind in traversal absolute; do
+  bad_tar="$WORKDIR/${kind}.tar.gz"
+  make_malicious_tarball "$bad_tar" "$kind"
+  bad_sha="$(sha256_file "$bad_tar")"
+  if PROVIDER_ARTIFACT="$bad_tar" \
+    PROVIDER_VERSION="1.2.6" \
+    PROVIDER_SHA256="$bad_sha" \
+    "$CHECKER" >"$WORKDIR/${kind}.out" 2>"$WORKDIR/${kind}.err"; then
+    die "$kind artifact unexpectedly passed"
+  fi
+  assert_contains "$WORKDIR/${kind}.err" "unsafe provider artifact path"
+done
+
+for kind in symlink-metallib hardlink fifo; do
+  bad_tar="$WORKDIR/${kind}.tar.gz"
+  make_malicious_tarball "$bad_tar" "$kind"
+  bad_sha="$(sha256_file "$bad_tar")"
+  if PROVIDER_ARTIFACT="$bad_tar" \
+    PROVIDER_VERSION="1.2.6" \
+    PROVIDER_SHA256="$bad_sha" \
+    "$CHECKER" >"$WORKDIR/${kind}.out" 2>"$WORKDIR/${kind}.err"; then
+    die "$kind artifact unexpectedly passed"
+  fi
+  assert_contains "$WORKDIR/${kind}.err" "provider artifact contains unsafe link or device members"
+done
 
 PROVIDER_ARTIFACT="$missing_surface_tar" \
   PROVIDER_VERSION="1.2.6" \

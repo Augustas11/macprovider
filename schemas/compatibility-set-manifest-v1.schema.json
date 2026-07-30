@@ -1,0 +1,565 @@
+{
+  "$defs": {
+    "catalog": {
+      "additionalProperties": false,
+      "properties": {
+        "activation": {
+          "const": "local"
+        },
+        "files": {
+          "additionalProperties": false,
+          "properties": {
+            "autotune-candidates.json": {
+              "$ref": "#/$defs/sha256"
+            },
+            "autotune-candidates.json.sig": {
+              "$ref": "#/$defs/sha256"
+            },
+            "demand-rank.json": {
+              "$ref": "#/$defs/sha256"
+            },
+            "demand-rank.json.sig": {
+              "$ref": "#/$defs/sha256"
+            },
+            "release.json": {
+              "$ref": "#/$defs/sha256"
+            },
+            "tier2-catalog.json": {
+              "$ref": "#/$defs/sha256"
+            },
+            "trusted-keys.json": {
+              "$ref": "#/$defs/sha256"
+            }
+          },
+          "required": [
+            "autotune-candidates.json",
+            "autotune-candidates.json.sig",
+            "demand-rank.json",
+            "demand-rank.json.sig",
+            "release.json",
+            "tier2-catalog.json",
+            "trusted-keys.json"
+          ],
+          "type": "object"
+        },
+        "policy_version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "release_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "macprovider.autotune-release.v1"
+        }
+      },
+      "required": [
+        "activation",
+        "files",
+        "policy_version",
+        "release_id",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "rollout": {
+      "oneOf": [
+        {
+          "const": {
+            "bridge_duration_seconds": 86400,
+            "enforce_provider_admission": false,
+            "mode": "bridge_required"
+          }
+        },
+        {
+          "const": {
+            "bridge_duration_seconds": 0,
+            "enforce_provider_admission": true,
+            "mode": "strict_post_migration"
+          }
+        }
+      ]
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "signature": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ecdsa-p256-sha256"
+        },
+        "key_id": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "key_id",
+        "signature"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://streamvc.live/schemas/compatibility-set-manifest-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "macprovider.compatibility-set-envelope.v1"
+    },
+    "signatures": {
+      "items": {
+        "$ref": "#/$defs/signature"
+      },
+      "maxItems": 1,
+      "type": "array"
+    },
+    "signed": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_binding": {
+          "additionalProperties": false,
+          "properties": {
+            "embedded_container_hashes": {
+              "const": "excluded_to_avoid_self_reference"
+            },
+            "mode": {
+              "const": "signed_release_checksums"
+            }
+          },
+          "required": [
+            "embedded_container_hashes",
+            "mode"
+          ],
+          "type": "object"
+        },
+        "compatibility_set_id": {
+          "type": "string"
+        },
+        "components": {
+          "additionalProperties": false,
+          "properties": {
+            "catalog": {
+              "$ref": "#/$defs/catalog"
+            },
+            "coordinator_admission": {
+              "additionalProperties": false,
+              "properties": {
+                "activation": {
+                  "const": "required_remote_gate"
+                },
+                "handshake": {
+                  "const": "accepted_set_echo_v1"
+                },
+                "policy_version": {
+                  "const": "provider-admission.v1"
+                },
+                "rollout": {
+                  "$ref": "#/$defs/rollout"
+                },
+                "scope": {
+                  "const": "remote_coordinator_policy"
+                },
+                "version": {
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "activation",
+                "handshake",
+                "policy_version",
+                "rollout",
+                "scope",
+                "version"
+              ],
+              "type": "object"
+            },
+            "launchd": {
+              "additionalProperties": false,
+              "properties": {
+                "activation": {
+                  "const": "local"
+                },
+                "contract": {
+                  "const": "macprovider.launch-agent.v1"
+                },
+                "install_contract": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "const": "compatibility-set-local/install.sh"
+                    },
+                    "sha256": {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "label": {
+                  "const": "live.streamvc.macprovider"
+                },
+                "plist_template": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "const": "compatibility-set-local/provider-launch-agent.plist.template"
+                    },
+                    "sha256": {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "activation",
+                "contract",
+                "install_contract",
+                "label",
+                "plist_template"
+              ],
+              "type": "object"
+            },
+            "malibu_app": {
+              "additionalProperties": false,
+              "properties": {
+                "activation": {
+                  "const": "cli_owned_if_installed"
+                },
+                "bundle_id": {
+                  "const": "tech.malibu.app"
+                },
+                "compatibility_handoff": {
+                  "const": {
+                    "delivery": "signed_dmg_transaction_member",
+                    "embedded_manifest_path": "Contents/Resources/compatibility-set.json",
+                    "provider_mutation": "forbidden",
+                    "reader_compatibility": "backward_compatible"
+                  }
+                },
+                "minimum_status_reader": {
+                  "const": 1
+                },
+                "version": {
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "activation",
+                "bundle_id",
+                "compatibility_handoff",
+                "minimum_status_reader",
+                "version"
+              ],
+              "type": "object"
+            },
+            "provider_cli": {
+              "additionalProperties": false,
+              "properties": {
+                "activation": {
+                  "const": "local"
+                },
+                "designated_identifier": {
+                  "const": "live.streamvc.macprovider.cli"
+                },
+                "platform": {
+                  "const": "darwin-arm64"
+                },
+                "status_contract": {
+                  "const": "macprovider.local-status.v1"
+                },
+                "version": {
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "activation",
+                "designated_identifier",
+                "platform",
+                "status_contract",
+                "version"
+              ],
+              "type": "object"
+            },
+            "updater_rollback": {
+              "additionalProperties": false,
+              "properties": {
+                "activation": {
+                  "const": "local"
+                },
+                "metadata": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "const": "compatibility-set-local/updater-rollback.json"
+                    },
+                    "sha256": {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "metadata_version": {
+                  "const": 1
+                },
+                "protocol": {
+                  "const": "macprovider.compatibility-set-transaction.v1"
+                }
+              },
+              "required": [
+                "activation",
+                "metadata",
+                "metadata_version",
+                "protocol"
+              ],
+              "type": "object"
+            },
+            "watchdog": {
+              "additionalProperties": false,
+              "properties": {
+                "activation": {
+                  "const": "local"
+                },
+                "contract": {
+                  "const": "macprovider.exact-service-pid-watchdog.v1"
+                },
+                "monitored_label": {
+                  "const": "live.streamvc.macprovider"
+                },
+                "plist_template": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "const": "compatibility-set-local/watchdog-launch-agent.plist.template"
+                    },
+                    "sha256": {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "script": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "const": "compatibility-set-local/watchdog.sh"
+                    },
+                    "sha256": {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "service_label": {
+                  "const": "live.streamvc.macprovider-watchdog"
+                }
+              },
+              "required": [
+                "activation",
+                "contract",
+                "monitored_label",
+                "plist_template",
+                "script",
+                "service_label"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "catalog",
+            "coordinator_admission",
+            "launchd",
+            "malibu_app",
+            "provider_cli",
+            "updater_rollback",
+            "watchdog"
+          ],
+          "type": "object"
+        },
+        "release": {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "pattern": "^[0-9a-f]{40}$",
+              "type": "string"
+            },
+            "repository": {
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+              "type": "string"
+            },
+            "tag": {
+              "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+              "type": "string"
+            },
+            "version": {
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "commit",
+            "repository",
+            "tag",
+            "version"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "const": "macprovider.compatibility-set.v1"
+        },
+        "transaction": {
+          "additionalProperties": false,
+          "properties": {
+            "activation": {
+              "const": "crash_recoverable_local_activation_group"
+            },
+            "autoupdate_scope": {
+              "const": "compatibility_cohort"
+            },
+            "maintenance_lease": {
+              "additionalProperties": false,
+              "properties": {
+                "maximum_seconds": {
+                  "maximum": 1200,
+                  "minimum": 60,
+                  "type": "integer"
+                },
+                "protocol": {
+                  "const": "macprovider.maintenance-lease.v1"
+                }
+              },
+              "required": [
+                "maximum_seconds",
+                "protocol"
+              ],
+              "type": "object"
+            },
+            "membership": {
+              "const": {
+                "local_activation_group": [
+                  "catalog",
+                  "launchd",
+                  "malibu_app",
+                  "provider_cli",
+                  "release_resources",
+                  "updater_rollback",
+                  "watchdog"
+                ],
+                "required_external_gates": [
+                  "coordinator_admission"
+                ],
+                "preserved_state_invariants": [
+                  "credentials",
+                  "identity",
+                  "operator_config"
+                ]
+              }
+            },
+            "preflight": {
+              "const": {
+                "mode": "exact_target_set",
+                "remote_gate": "coordinator_acceptance_required"
+              }
+            },
+            "readiness_proof": {
+              "additionalProperties": false,
+              "properties": {
+                "compatibility_set_echo": {
+                  "const": "exact"
+                },
+                "contract": {
+                  "const": "macprovider.local-status.v1"
+                },
+                "network_state": {
+                  "const": "buyer_serving"
+                },
+                "timeout_seconds": {
+                  "maximum": 1200,
+                  "minimum": 60,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "compatibility_set_echo",
+                "contract",
+                "network_state",
+                "timeout_seconds"
+              ],
+              "type": "object"
+            },
+            "rollback": {
+              "const": {
+                "members": [
+                  "catalog",
+                  "launchd",
+                  "malibu_app",
+                  "provider_cli",
+                  "release_resources",
+                  "updater_rollback",
+                  "watchdog"
+                ],
+                "mode": "local_activation_group"
+              }
+            }
+          },
+          "required": [
+            "activation",
+            "autoupdate_scope",
+            "maintenance_lease",
+            "membership",
+            "preflight",
+            "readiness_proof",
+            "rollback"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "artifact_binding",
+        "compatibility_set_id",
+        "components",
+        "release",
+        "schema_version",
+        "transaction"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "signatures",
+    "signed"
+  ],
+  "title": "macprovider compatibility-set signed envelope",
+  "type": "object"
+}

@@ -1,15 +1,41 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.5
-**Status:** Draft (post round-5 audit response, pre round-6
-audit — convergence target: 0 CRITICAL / 0 MAJOR → LOCK)
+**Version:** 1.6
+**Status:** v1.6 canonical model-identity amendment proposed by issue #609
+(2026-07-18). The supported-model catalog contract remains **LOCKED** at
+v1.5 (2026-06-06, Decision-log Entry 54 —
+codex round-6 returned 0 CRITICAL / 0 MAJOR / 0 MINOR). Implemented on
+both sides (provider `supported_models[]` advertisement, coordinator
+`Provider` extension, opt-in `/v1/status` echo). The former "pre round-6"
+status predated the lock and was never flipped. (Former open gap NOW
+CLOSED, 2026-07-11: the R-3.3.4 `seenModels` union of `supported_models`
+is implemented — the seen-model index is seeded with the union of
+`ModelID` and every `SupportedModels[]` entry at BOTH the registration
+and heartbeat sites, so a declared-but-cold model now returns 503
+`no_provider_available` (retryable) instead of 404 `model_not_found`. No
+normative text changed; see the R-3.3.4 implementation note in §3.3.)
 **Date drafted:** 2026-06-06
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §7 OQ-1 (case preservation) and OQ-2 (admission counter) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-010.
+
+**Change log v1.6 (issue #609 canonical model identity):**
+- Names the canonical signed-snapshot identity
+  `macprovider.snapshot-manifest.v1` while reusing the canonical byte
+  algorithm already specified by SPEC-023 §3.2.
+- Adds typed provider/coordinator wire semantics, a separate optional
+  safetensors-weights diagnostic identity, exact admitted-row comparison,
+  route/receipt binding, warm-swap requirements, and a finite fail-closed
+  bridge for providers that do not yet report an algorithm.
+- Adds stable requirements SPEC-010-R001 through SPEC-010-R006. This is a
+  bounded `model-catalog-identity` amendment; it does not reopen or reconcile
+  unrelated SPEC-010 lifecycle behavior.
+
 **Change log v1.5 (round-5 polish pass — lock candidate):**
 Round-5 verdict was READY TO LOCK with 0 CRITICAL / 0 MAJOR /
-3 MINOR / 0 QUESTION (specs/SPEC-010-audit.md round 5). v1.5
+3 MINOR / 0 QUESTION (`audits/spec-010/SPEC-010-audit.md` round 5). v1.5
 closes the 3 MINORs as a final polish pass before lock:
 - **A5.1 MINOR fix** (retention/defer creation should
   explicitly gate on SPEC-010 field presence): R-3.1.10
@@ -36,7 +62,7 @@ closes the 3 MINORs as a final polish pass before lock:
 
 **Change log v1.4 (round-4 audit response):** Round-4 produced
 0 CRITICAL / 2 MAJOR / 5 MINOR findings
-(specs/SPEC-010-audit.md round 4). v1.4 closes all 7. Both
+(`audits/spec-010/SPEC-010-audit.md` round 4). v1.4 closes all 7. Both
 MAJORs were code-precision items at the same boundary as v1.3
 focus (initial-stage table accuracy + R-3.1.10 cleanup
 mechanism).
@@ -99,7 +125,7 @@ mechanism).
 
 **Change log v1.3 (round-3 audit response — code-grounding
 pass):** Round-3 produced 0 CRITICAL / 5 MAJOR / 0 MINOR
-findings (specs/SPEC-010-audit.md round 3). All 5 MAJORs were
+findings (`audits/spec-010/SPEC-010-audit.md` round 3). All 5 MAJORs were
 one logical cluster: v1.2 §3.1.A field table and R-3.1.10
 retention contract were written without spot-checking the
 actual `parseAuthInitial` parser and `server.go` auth-attempt
@@ -153,7 +179,7 @@ flow. v1.3 closes all 5 by code-grounding §3.1.A against
 
 **Change log v1.2 (round-2 audit response):** Round-2 produced
 0 CRITICAL / 3 MAJOR / 2 MINOR findings
-(specs/SPEC-010-audit.md round 2). v1.2 closes all 5. The 3
+(`audits/spec-010/SPEC-010-audit.md` round 2). v1.2 closes all 5. The 3
 MAJORs were one logical cluster — B.1 round 2, B2.1, B2.2 — all
 rooted in the same issue: the v2 `auth_request` flow exists in
 code but no locked spec normatively documents it, so v1.1's
@@ -187,7 +213,7 @@ contract" rather than "must extend existing v2 text."
 
 **Change log v1.1 (round-1 audit response on the narrow-scope
 SPEC-010 v1.0):** Round-1 produced 0 CRITICAL / 3 MAJOR / 1 MINOR
-findings (specs/SPEC-010-audit.md round 1). v1.1 closes all
+findings (`audits/spec-010/SPEC-010-audit.md` round 1). v1.1 closes all
 four.
 - **B.1 fix** (wire frame name + wrong SPEC-002 section): §3.1
   example now uses the correct `auth_request` frame shape with
@@ -218,11 +244,11 @@ through v0.3 of SPEC-010 bundled
 capability advertisement, warm-swap mechanism, demand-pull cold
 wake, buyer catalog visibility, and operator state visibility into
 a single ~1400-line spec. Three audit rounds (rounds 1-3 in
-`specs/SPEC-012-source-audit-history.md`) showed the wide scope
+`audits/spec-012/SPEC-012-source-audit-history.md`) showed the wide scope
 generates 12+ audit findings per round driven by cross-feature
 collisions across 5 locked specs. **SPEC-010 v1.0 is the result of
 splitting that work.** The wide-scope draft is preserved at
-`specs/SPEC-012-source.md`; warm-swap mechanism becomes SPEC-011;
+`specs/SPEC-012-coordinator-demand-pull.md`; warm-swap mechanism becomes SPEC-011;
 demand-pull + catalog visibility becomes SPEC-012 (paired with a
 SPEC-008 v0.4 normative edit).
 
@@ -352,6 +378,9 @@ guards for optional fields. The fields are:
 | Hostname | `hostname` | string | **REQUIRED** by `parseAuthInitial:337` `requireString` | NOTE: struct tag is `omitempty` but parser requires it |
 | Loaded model | `model_id` | string | **REQUIRED** by `parseAuthInitial:340` `requireString` | NOTE: struct tag is `omitempty` but parser requires it |
 | Model hash | `model_hash` | string sha256-hex | optional (parser uses `if v, ok` guard at line 343) | SPEC-008 Pillar A |
+| Model hash algorithm | `model_hash_algorithm` | string | optional at parsing; required by canonical admission policy when `model_hash` is present outside the bounded migration bridge | SPEC-010 §3.7 |
+| Weights manifest hash | `weights_manifest_sha256` | string sha256-hex | optional; MUST be paired with `weights_manifest_algorithm` | Diagnostic runtime evidence only; SPEC-010 §3.7 |
+| Weights manifest algorithm | `weights_manifest_algorithm` | string | optional; MUST equal `macprovider.safetensors-manifest.v1` and be paired with `weights_manifest_sha256` | Diagnostic runtime evidence only; SPEC-010 §3.7 |
 | Model params (B) | `model_params_b` | float | **REQUIRED** by `parseAuthInitial:348` `requireFloat` | |
 | RAM (GB) | `ram_gb` | int | **REQUIRED** by `parseAuthInitial:351` `requireInt` | |
 | Max context tokens | `max_context_tokens` | int | **REQUIRED** by `parseAuthInitial:354` `requireInt` | |
@@ -741,10 +770,15 @@ against retained initial-stage values, mismatch rejection).
 
 ### 3.2 Heartbeat frame
 
-Unchanged. `supported_models` and `publishes_supported_models` are
-set at `auth` and are immutable for the lifetime of the WS
-connection. To change the supported set, the provider must
-reconnect.
+`supported_models` and `publishes_supported_models` remain set at `auth`
+and immutable for the lifetime of the WS connection. To change the
+supported set, the provider must reconnect.
+
+The v1.6 model-identity amendment adds `model_hash_algorithm`,
+`weights_manifest_sha256`, and `weights_manifest_algorithm` alongside the
+existing heartbeat `model_hash`. Their pairing, validation, and authority
+semantics are defined only by §3.7. A heartbeat model change MUST be checked
+against the exact signed catalog release admitted for that provider session.
 
 Rationale: keeps heartbeat path zero-allocation; avoids racing
 mid-stream capability changes with in-flight routing decisions.
@@ -807,6 +841,62 @@ default serializations. §3.3 specifies the one place
   providers on the legacy auth shape (single `model_id`, no
   `supported_models`) until SPEC-012 ships a complete
   cold-supported handling story.
+
+> **Implementation note (2026-07-11, no normative change):** R-3.3.4
+> is implemented in `phase4-coordinator/internal/pool/provider.go` via
+> `recordSeenModelsUnionLocked`, called at BOTH the registration site
+> (`RegisterAtDetailed`) and the heartbeat site (`ApplyHeartbeat`).
+> Each `SupportedModels[]` entry flows through the same
+> `recordSeenModelLocked` path as `ModelID`, so it shares the served
+> model_id's normalization (lowercase canonical key for the
+> pool-lifetime accumulator, raw id for the per-session attribution
+> set) and its lifecycle: dropped from the per-session index on
+> disconnect / session-replacement (M2-5 / PERF-5) and retained
+> append-only in the SPEC-002 § 7.2 lifetime accumulator for the
+> coordinator process lifetime. Legacy providers carry
+> `SupportedModels == [model_id]` (R-3.1.5 synthesis), so the union
+> collapses to `{model_id}` and the L-1 / R-3.5.1 byte-identical
+> default path is preserved. The buyer-side 404→503 flip is driven
+> entirely by the existing `ModelKnown()` gate in
+> `internal/buyer/server.go`. Covered by
+> `TestModelKnownUnionsDeclaredSupportedModels`,
+> `TestModelKnownUnionsSupportedModelsOnHeartbeat`
+> (`internal/pool/provider_test.go`) and
+> `TestChatCompletionsDeclaredButColdModelReturns503`
+> (`internal/buyer/server_test.go`).
+>
+> **Follow-up (2026-07-11, codex code-lane audit of PR #555, no
+> normative change):** the seen-index union above
+> (`recordSeenModelsUnionLocked`) is a best-effort accumulator bounded
+> by `maxSeenModelsPerProvider` (32, per-session),
+> `maxLifetimeContribPerProvider` (128, per-provider lifetime), and
+> `maxSeenModelsLifetime` (4096, global lifetime) — a provider whose
+> declared catalog exceeds those caps could have entries silently
+> dropped from the seen index, 404ing a declared model even though a
+> currently-connected provider declares it. Fixed by adding a live-
+> provider `SupportedModels` scan to `ModelKnown()` (alongside the
+> pre-existing live `ModelID` scan), so a declared model on a
+> CURRENTLY-CONNECTED provider is always known regardless of seen-
+> index cap state — this is the correctness core of R-3.3.4, not an
+> optional hardening. Covered by
+> `TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps`
+> (`internal/pool/provider_test.go`) and
+> `TestChatCompletionsDeclaredModelBeyondSeenIndexCapsReturns503`
+> (`internal/buyer/server_test.go`).
+>
+> **Cross-spec reconciliation (RESOLVED 2026-07-15, runbook item 22):**
+> R-3.3.4 above is `MUST` and is authoritative on this question (the more
+> specific rule, matching shipped behavior — #555). The two sibling specs,
+> which previously diverged, now cross-reference it: SPEC-002 R-3.X.6 was
+> strengthened from `MAY` to `MUST` (SPEC-002 v1.5.4); SPEC-006 §17.2 now
+> names declared `supported_models` alongside "served or recently seen" in
+> the "known" list, so a declared-but-cold model is *known* and returns
+> `503 no_provider_available` via §17.3, not `404 model_not_found`
+> (SPEC-006 v0.9.12). The reconciliation changes no dispatch outcome —
+> R-3.4.1 and SPEC-002 R-3.X.6's "MUST NOT change dispatch outcomes" both
+> still hold; only the buyer error code for a declared-but-cold request on
+> default routing is affected (404→503), which was already the shipped
+> behavior (#555). No SPEC-010 normative text changed.
 
 ### 3.4 Router: candidate filter (semantically unchanged in v1.0)
 
@@ -874,6 +964,66 @@ configs are introduced by SPEC-011 (swap_*) and SPEC-012
 - **R-3.6.4** Provider binary MUST gain `--publish-supported-models
   <bool>` flag (default `false`), populating
   `publishes_supported_models` in the `auth` frame.
+
+### 3.7 Canonical model artifact identity (v1.6 amendment)
+
+This section is the sole authority for model identity names and comparison
+semantics. SPEC-023 §3.2 remains the authority for the canonical artifact-set
+manifest bytes referenced below; this section does not duplicate that byte
+algorithm.
+
+- **SPEC-010-R001 — Canonical signed-snapshot identity.** The algorithm
+  identifier is exactly `macprovider.snapshot-manifest.v1`. Its digest is the
+  lowercase SHA-256 `model_sha256` from the exact signed candidate-catalog row,
+  whose canonical bytes are defined by SPEC-023 §3.2. The CLI MUST first
+  verify the downloaded snapshot against that row, then report the verified
+  row digest as `model_hash`. No component may infer this algorithm from the
+  presence or shape of a hash, or report a weights-only/subset digest under
+  this name.
+
+- **SPEC-010-R002 — Typed wire contract.** Provider hello, v2 auth initial,
+  heartbeat, local status, safety telemetry, and Tier-2 attestation projections
+  MUST keep `model_hash` paired with `model_hash_algorithm`. A modern canonical
+  pair uses only `macprovider.snapshot-manifest.v1` and a 64-character
+  lowercase SHA-256 digest. An explicit unknown algorithm, malformed pair, or
+  algorithm without a hash MUST be rejected; the coordinator MUST NOT guess
+  semantics from a hash value.
+
+- **SPEC-010-R003 — Separate weights evidence.** Implementations MAY report
+  `weights_manifest_sha256` only with
+  `weights_manifest_algorithm = "macprovider.safetensors-manifest.v1"`.
+  This pair identifies the sorted safetensors weights manifest used for runtime
+  diagnostics. It MUST NOT substitute for, be compared with, or satisfy the
+  canonical catalog artifact identity.
+
+- **SPEC-010-R004 — Exact admitted-row authority and settlement binding.**
+  Admission MUST select the expected `model_sha256` from the provider's exact
+  signed current or explicitly compatible-previous catalog release and model
+  row. That expected value remains session authority for later heartbeats.
+  Coordinator/Tier-2 logic MUST compare only the named provider artifact
+  identity with that same expected row; an independently selected catalog row
+  or second catalog fallback cannot authorize it. If existing Tier-2 signed
+  material is retained as proof, its expected hash MUST equal the admitted
+  autotune row. Buyer route snapshots MUST bind both algorithm and digest; the
+  existing receipt v0.4 transitively binds them through the signed route
+  snapshot digest without adding receipt keys.
+
+- **SPEC-010-R005 — Bounded missing-algorithm migration.** A provider that
+  omits `model_hash_algorithm` MAY remain connected only before an explicit
+  future RFC3339 `tier2.model_hash_legacy_until`. Its hash is untyped evidence
+  and MUST NOT be compared with any catalog digest or treated as verified.
+  Missing, malformed, or expired deadlines fail closed. Deploy preflight MUST
+  reject a declared mixed-version bridge unless the deadline resolves and is
+  in the future. Operators MUST count
+  `model_hash_algorithm_legacy_bridge`, update the remaining providers, and
+  remove the bridge field when the count reaches zero.
+
+- **SPEC-010-R006 — Warm-swap identity.** Before publishing a warm-swapped
+  model, the CLI MUST verify the complete target snapshot against the exact
+  signed target row and atomically replace the model ID, digest, and algorithm.
+  A swap with no bound signed target row, a mismatched digest, or a snapshot
+  that fails SPEC-023 §3.2 validation MUST fail closed without publishing the
+  new model under the prior model's identity.
 
 ---
 
@@ -1302,13 +1452,13 @@ predicate available for SPEC-011 / SPEC-012 to consume.
 
 ## 7. Open questions
 
-- **OQ-1** Should `/v1/status.supported_models` per-entry echo
+- **OQ-1** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — preserve-case shipped (`phase3-binary/Sources/MacProviderCore/Config.swift:251`) and produced no buyer-dashboard signal in 6+ months._ Should `/v1/status.supported_models` per-entry echo
   preserve the provider's chosen case (R-3.1.7's "wire format
   preserves case") or always normalize? v1.0 chooses
   preserve-case to give operators a way to spot
   case-normalization issues in their config; reconsider if
   buyer-side dashboards demand consistency.
-- **OQ-2** Should the coordinator log a counter
+- **OQ-2** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — SPEC-011 and SPEC-012 shipped without adding the counter, so the punt landed nowhere. Revisit only if operator observability genuinely needs the metric._ Should the coordinator log a counter
   (`spec010_providers_with_supported_models`) at admission for
   operator metrics? Currently no — v1.0 produces no new log
   events to preserve L-1. SPEC-011/SPEC-012 can add metrics as
@@ -1341,10 +1491,11 @@ predicate available for SPEC-011 / SPEC-012 to consume.
   v1.3.5 candidate per §6.2 above MUST ADD that section
 - [SPEC-004 v0.3.1](SPEC-004-smart-router.md) §4
 - [SPEC-008 v0.3](SPEC-008-tier2.md) (no interaction — see §6.3)
-- [SPEC-012 source draft](SPEC-012-source.md) — wide-scope v0.3
-  spec that produced 3 audit rounds; basis for SPEC-011 +
-  SPEC-012 split
-- [SPEC-012 source audit history](SPEC-012-source-audit-history.md)
+- [SPEC-012 coordinator demand-pull draft](SPEC-012-coordinator-demand-pull.md)
+  — retained unique coordinator-driven contract
+- [SPEC-012 split history](../docs/spec-history/SPEC-012-v0.3-history.md)
+  — wide-scope predecessor and split rationale
+- [SPEC-012 source audit history](../audits/spec-012/SPEC-012-source-audit-history.md)
   — rounds 1-3 against the wide-scope v0.1, v0.2, v0.3
 - [phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift](../phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift)
 - [phase4-coordinator/internal/ws/messages.go](../phase4-coordinator/internal/ws/messages.go)

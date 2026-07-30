@@ -1,0 +1,476 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+index dbf42ae..64ae898 100644
+--- a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
++++ b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
+ actor CoordinatorClient {
+     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
+ 
+-    static let binaryVersion = "1.8.4"
++    static let binaryVersion = "1.8.5"
+     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
+ 
+     private let coordinatorURL: URL
+diff --git a/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift b/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
+index cc1a133..fd370e5 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
+@@ -1481,10 +1481,10 @@ final class CoordinatorClientTests: XCTestCase {
+         let hello = await client.helloMessage()
+         let auth = await client.authInitialMessage(attempt: attempt)
+ 
+-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.4")
+-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.4")
+-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.4")
+-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.4")
++        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.5")
++        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.5")
++        XCTAssertEqual(hello["binary_version"] as? String, "1.8.5")
++        XCTAssertEqual(auth["binary_version"] as? String, "1.8.5")
+     }
+ 
+     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+index b38f0ff..f1682e3 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+@@ -81,11 +81,19 @@ final class MalibuAgent: ObservableObject {
+         }
+         guard !isShuttingDown else { return }
+ 
++        // FreePortProbe: ask the kernel for a free 127.0.0.1 TCP port so the
++        // CLI's local HTTP inference endpoint doesn't collide with whatever
++        // else may be on port 8080 (Node dev server, Rails, jaeger). Falling
++        // back to nil lets the CLI use its default 8080; the CLI's own bind
++        // error surfaces the failure with the same context as before, so
++        // this cannot regress.
++        let probedPort = try? FreePortProbe.probe()
++
+         let launch = CLIChildProcess.Launch(
+             executable: cliURL,
+             configPath: paths.configFile,
+             controlSocketPath: paths.controlSocket,
+-            httpPort: nil,
++            httpPort: probedPort,
+             logFileURL: paths.cliLogFile,
+             extraEnvironment: extraEnv
+         )
+@@ -172,7 +180,7 @@ final class MalibuAgent: ObservableObject {
+ 
+         let client = ControlSocketClient(socketPath: socketPath)
+         do {
+-            try await client.connect(timeout: 10)
++            try await client.connect(timeout: MalibuOnboardingTimeouts.controlSocketConnectSec)
+         } catch {
+             // AUDIT R6 CODE M-connect fix: previously we set .error and returned,
+             // leaving `self.child` pointing at a running CLI. `start()`'s
+diff --git a/phase3-binary/app/Sources/Malibu/Onboarding/LaunchProviderController.swift b/phase3-binary/app/Sources/Malibu/Onboarding/LaunchProviderController.swift
+index dbe7dc2..f2f78ca 100644
+--- a/phase3-binary/app/Sources/Malibu/Onboarding/LaunchProviderController.swift
++++ b/phase3-binary/app/Sources/Malibu/Onboarding/LaunchProviderController.swift
+@@ -63,7 +63,7 @@ final class LaunchProviderController: ObservableObject {
+         var providerID: (Curve25519.Signing.PrivateKey) -> String
+         var currentProviderToken: (String) async -> String?
+         var registerProvider: (Curve25519.Signing.PrivateKey, String?) async throws -> RegisterResponse
+-        var saveProviderIdentity: (String, String) async throws -> Void
++        var saveProviderIdentity: (String, String, URL) async throws -> Void
+         var repairMarkerlessAppConfig: (String) async throws -> Void
+         var saveState: (OnboardingState) throws -> Void
+         var updateState: (String, String, Date?, OnboardingState.ModelDownloadState?) throws -> Void
+@@ -90,8 +90,8 @@ final class LaunchProviderController: ObservableObject {
+                     let request = try registerClient.makeSignedRequest(identityKey: key)
+                     return try await registerClient.postRegister(request, bearerProof: bearerProof)
+                 },
+-                saveProviderIdentity: { providerID, token in
+-                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
++                saveProviderIdentity: { providerID, token, coordinatorWSURL in
++                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL)
+                 },
+                 repairMarkerlessAppConfig: { providerID in
+                     try await ProviderConfig.repairMarkerlessAppOwnedConfig(providerID: providerID)
+@@ -125,7 +125,9 @@ final class LaunchProviderController: ObservableObject {
+                 startAgent: { await agent?.start() },
+                 waitForFirstServing: {
+                     guard let agent else { return Date() }
+-                    for _ in 0..<60 {
++                    let deadline = Date().addingTimeInterval(MalibuOnboardingTimeouts.firstServingFrameSec)
++                    let pollNanos = UInt64(MalibuOnboardingTimeouts.firstServingPollIntervalSec * 1_000_000_000)
++                    while Date() < deadline {
+                         switch agent.snapshot.state {
+                         case .serving:
+                             return Date()
+@@ -136,7 +138,7 @@ final class LaunchProviderController: ObservableObject {
+                                 userInfo: [NSLocalizedDescriptionKey: agent.snapshot.lastError ?? "Provider failed to start."]
+                             )
+                         default:
+-                            try await Task.sleep(nanoseconds: 500_000_000)
++                            try await Task.sleep(nanoseconds: pollNanos)
+                         }
+                     }
+                     throw NSError(
+@@ -252,7 +254,7 @@ final class LaunchProviderController: ObservableObject {
+             stage = .registering
+             let bearerProof = await dependencies.currentProviderToken(providerID)
+             let response = try await dependencies.registerProvider(key, bearerProof)
+-            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
++            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken, response.coordinatorWebSocketURL)
+             try dependencies.updateState(response.providerID, "registered", nil, nil)
+ 
+             try await finishLaunch(providerID: response.providerID, from: .autotune, plan: nil)
+@@ -381,7 +383,7 @@ final class LaunchProviderController: ObservableObject {
+         stage = .registering
+         let bearerProof = await dependencies.currentProviderToken(providerID)
+         let response = try await dependencies.registerProvider(key, bearerProof)
+-        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
++        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken, response.coordinatorWebSocketURL)
+         try dependencies.updateState(response.providerID, "registered", nil, nil)
+         try await finishLaunch(providerID: response.providerID, from: .autotune, plan: existing.modelDownload.map {
+             ModelDownloadPlan(modelName: $0.modelID, state: $0, earningsEstimate: nil)
+diff --git a/phase3-binary/app/Sources/Malibu/System/FreePortProbe.swift b/phase3-binary/app/Sources/Malibu/System/FreePortProbe.swift
+new file mode 100644
+index 0000000..12e61f9
+--- /dev/null
++++ b/phase3-binary/app/Sources/Malibu/System/FreePortProbe.swift
+@@ -0,0 +1,57 @@
++import Darwin
++import Foundation
++
++/// Ask the kernel for a free TCP port on 127.0.0.1 before spawning
++/// `macprovider-cli serve`. The CLI defaults to port 8080 for its local
++/// HTTP inference endpoint and has no auto-fallback if that port is
++/// occupied. On any developer Mac running a Node dev server / Rails app /
++/// jaeger / anything on 8080, the CLI dies with
++/// `Error: bind(...): Address already in use (errno: 48)` before it ever
++/// opens the control socket — reproduced on the 2026-07-05 v1.8.4 smoke.
++///
++/// The probe binds a socket to `127.0.0.1:0` (kernel picks a free port),
++/// records the assigned port, closes the socket, and returns the number.
++/// There is a small race between our close and the CLI's bind, but the
++/// window is <100ms in practice and the fallback is the CLI's own bind
++/// error — same failure mode as before, no regression.
++enum FreePortProbe {
++    /// Returned when no ephemeral TCP port could be allocated. In practice
++    /// this only fires on a machine that has exhausted its ephemeral range
++    /// (very rare); the CLI's own bind will then produce the same error
++    /// with better context.
++    enum ProbeError: Error {
++        case socketCreationFailed(errno: Int32)
++        case bindFailed(errno: Int32)
++        case sockNameFailed(errno: Int32)
++    }
++
++    /// Probe a free TCP port on 127.0.0.1 and return the kernel-assigned
++    /// port number. The probing socket is closed before this returns.
++    static func probe() throws -> Int {
++        let sock = socket(AF_INET, SOCK_STREAM, 0)
++        guard sock >= 0 else { throw ProbeError.socketCreationFailed(errno: errno) }
++        defer { Darwin.close(sock) }
++
++        var addr = sockaddr_in()
++        addr.sin_family = sa_family_t(AF_INET)
++        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
++        addr.sin_port = 0  // kernel picks
++        let bindResult = withUnsafePointer(to: &addr) { rawPtr -> Int32 in
++            rawPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
++                Darwin.bind(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
++            }
++        }
++        guard bindResult == 0 else { throw ProbeError.bindFailed(errno: errno) }
++
++        var boundAddr = sockaddr_in()
++        var boundLen = socklen_t(MemoryLayout<sockaddr_in>.size)
++        let nameResult = withUnsafeMutablePointer(to: &boundAddr) { rawPtr -> Int32 in
++            rawPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
++                Darwin.getsockname(sock, sockaddrPtr, &boundLen)
++            }
++        }
++        guard nameResult == 0 else { throw ProbeError.sockNameFailed(errno: errno) }
++        let port = Int(UInt16(bigEndian: boundAddr.sin_port))
++        return port
++    }
++}
+diff --git a/phase3-binary/app/Sources/Malibu/System/MalibuOnboardingTimeouts.swift b/phase3-binary/app/Sources/Malibu/System/MalibuOnboardingTimeouts.swift
+new file mode 100644
+index 0000000..097ef40
+--- /dev/null
++++ b/phase3-binary/app/Sources/Malibu/System/MalibuOnboardingTimeouts.swift
+@@ -0,0 +1,81 @@
++import Foundation
++
++/// Central registry of onboarding-path timeouts that Malibu.app applies while
++/// waiting on the `macprovider-cli` subprocess. Every timeout on the "clicked
++/// Launch Provider → reached .live" path must live here so the values can be
++/// audited as a set, not one file at a time.
++///
++/// **Design frame**: these budgets are App-side authoritative ceilings. The
++/// CLI does not signal progress or expose its own deadlines on the fresh-
++/// install code path (see PR #396 for the parallel argument on autotune).
++/// So we size each budget to the empirical worst case × ~3-5× safety margin
++/// on the largest realistic model at cold boot on a slow disk, capped below
++/// spinner-fatigue thresholds.
++///
++/// **Why so long**: fresh-install onboarding runs against a cold MLX runtime
++/// and a cold model file. Realistic timings from `mlx-community/Qwen3-Coder-
++/// 30B-A3B-Instruct-4bit` (the current default recommendation):
++///   * MLX runtime init: 1-5s
++///   * Model file page-in (17 GB, cold): 30-90s on APFS, 5-15s cached
++///   * Prefill compile: 10-30s
++///   * Coordinator handshake: 5-15s
++///   * First status frame emit: <5s
++/// Compounded worst-case cold: **60-135s** for the full "started → serving"
++/// path. Warm restart: **10-30s**. Prior values (10s / 30s) fired inside
++/// the legitimate cold-start window on every fresh install and produced the
++/// 2026-07-05 v1.8.4 smoke failure.
++///
++/// Bumping these DOES NOT change median UX because a healthy CLI returns
++/// long before the ceiling. It only affects the "wedged CLI, no way to
++/// signal" edge case, where a bit more spinner is preferable to killing a
++/// healthy run mid-way through cold boot.
++enum MalibuOnboardingTimeouts {
++    /// Time budget for the CLI serve subprocess to open its Unix control
++    /// socket after Malibu.app spawns it (`macprovider-cli serve --ctl-
++    /// socket-path ...`). The CLI must:
++    ///   1. `Process.run()` returns synchronously; the fork/exec completes
++    ///   2. MLX runtime static init
++    ///   3. Config parse + validation
++    ///   4. `bind()` the AF_UNIX socket at the specified path
++    ///
++    /// Empirical: 1-10s on this Mac. Cold boot on slower hardware or after
++    /// system suspend can push to 30-60s (kernel page-in cost). Budget
++    /// 5 min to be robust against TCC dialog races, Spotlight indexing
++    /// contention, and slow-disk cold boot.
++    ///
++    /// Prior value: 10s (via `MalibuAgent.connectControl` call site) —
++    /// too short; produced `NSPOSIXErrorDomain Code=60 "Operation timed
++    /// out"` on 2026-07-05 v1.8.4 fresh-install smoke.
++    static let controlSocketConnectSec: TimeInterval = 300
++
++    /// Time budget for the CLI to reach `.serving` state after the control
++    /// socket connects. From socket-accept to first `statusResponse(state:
++    /// "serving")` frame the CLI must:
++    ///   1. Load the model into unified memory (30-60s cold for a 30B MoE,
++    ///      5-15s warm from cache)
++    ///   2. Compile the prefill kernel (10-30s cold, cached after first
++    ///      run)
++    ///   3. Complete coordinator authentication handshake (5-15s including
++    ///      WebSocket TLS)
++    ///   4. Emit first status frame with `state == "serving"`
++    ///
++    /// Empirical worst-case cold: **135s** on this Mac. Warm restart:
++    /// **10-30s**. Budget 10 min for cold on slower hardware, MLX Metal
++    /// compile misses, or coordinator round-trip spikes.
++    ///
++    /// Prior value: 30s (60-iteration polling loop × 500ms in
++    /// `LaunchProviderController.dependencies.waitForFirstServing`) —
++    /// too short; produced "Timed out waiting for the first serving
++    /// frame." on 2026-07-05 v1.8.4 fresh-install smoke retry.
++    static let firstServingFrameSec: TimeInterval = 600
++
++    /// Poll interval for `waitForFirstServing`. The controller polls
++    /// `snapshot.state` because the state machine transitions there are
++    /// event-driven inside MalibuAgent but the controller wants a
++    /// deadline-based wait rather than a Combine subscription.
++    ///
++    /// 500ms is a decent compromise between CPU wake-ups and perceived
++    /// stage-transition latency. Do not shrink below 250ms or the loop
++    /// starts costing CPU over 10 minutes of wall-clock.
++    static let firstServingPollIntervalSec: TimeInterval = 0.5
++}
+diff --git a/phase3-binary/app/Sources/Malibu/System/ProviderConfig.swift b/phase3-binary/app/Sources/Malibu/System/ProviderConfig.swift
+index 6b904f4..8ed1649 100644
+--- a/phase3-binary/app/Sources/Malibu/System/ProviderConfig.swift
++++ b/phase3-binary/app/Sources/Malibu/System/ProviderConfig.swift
+@@ -170,14 +170,15 @@ enum ProviderConfig {
+         }
+     }
+ 
+-    static func saveProviderIdentity(providerID: String, token: String) async throws {
+-        try await saveProviderIdentity(providerID: providerID, token: token, paths: .current)
++    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL) async throws {
++        try await saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL, paths: .current)
+     }
+ 
+-    static func saveProviderIdentity(providerID: String, token: String, paths: ProviderPaths) async throws {
++    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL, paths: ProviderPaths) async throws {
+         try await saveProviderIdentity(
+             providerID: providerID,
+             token: token,
++            coordinatorWSURL: coordinatorWSURL,
+             paths: paths,
+             readToken: { await KeychainStore.readProviderToken(providerID: $0) },
+             saveToken: { try await KeychainStore.saveProviderToken(providerID: $0, token: $1) },
+@@ -188,6 +189,7 @@ enum ProviderConfig {
+     static func saveProviderIdentity(
+         providerID: String,
+         token: String,
++        coordinatorWSURL: URL,
+         paths: ProviderPaths,
+         readToken: @escaping (String) async -> String?,
+         saveToken: @escaping (String, String) async throws -> Void,
+@@ -221,9 +223,11 @@ enum ProviderConfig {
+                     !$0.hasPrefix("provider_id:")
+                         && !$0.hasPrefix("provider_token:")
+                         && !$0.hasPrefix("link_state:")
++                        && !$0.hasPrefix("coordinator_url:")
+                 }
+         }
+         lines.append("provider_id: \(providerID)")
++        lines.append("coordinator_url: \(coordinatorWSURL.absoluteString)")
+         lines.append("link_state: \(LinkState.pendingLink.rawValue)")
+         // We deliberately do NOT write the token to disk. The CLI must be
+         // launched with the token in the environment (MACPROVIDER_PROVIDER_TOKEN),
+diff --git a/phase3-binary/app/Tests/MalibuTests/LaunchProviderControllerTests.swift b/phase3-binary/app/Tests/MalibuTests/LaunchProviderControllerTests.swift
+index b9f6a4f..74423cd 100644
+--- a/phase3-binary/app/Tests/MalibuTests/LaunchProviderControllerTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/LaunchProviderControllerTests.swift
+@@ -331,7 +331,7 @@ final class LaunchProviderControllerTests: XCTestCase {
+                         coordinatorWebSocketURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!
+                     )
+                 },
+-                saveProviderIdentity: { providerID, token in
++                saveProviderIdentity: { providerID, token, _ in
+                     self.savedProviderID = providerID
+                     self.savedToken = token
+                 },
+diff --git a/phase3-binary/app/Tests/MalibuTests/MalibuOnboardingTimeoutsTests.swift b/phase3-binary/app/Tests/MalibuTests/MalibuOnboardingTimeoutsTests.swift
+new file mode 100644
+index 0000000..779d2b3
+--- /dev/null
++++ b/phase3-binary/app/Tests/MalibuTests/MalibuOnboardingTimeoutsTests.swift
+@@ -0,0 +1,108 @@
++import XCTest
++@testable import Malibu
++
++/// Pins the invariants for the shared onboarding-path timeout registry.
++///
++/// **Design decision**: these budgets are App-side authoritative ceilings
++/// because the CLI does not signal progress or expose its own deadlines on
++/// the fresh-install code path. Each budget must survive the empirical
++/// worst-case cold-start of a 30B MoE model on Apple silicon.
++///
++/// The 2026-07-05 v1.8.4 smoke shows that a 10s `controlSocketConnect` and a
++/// 30s `firstServingFrame` both fire on fresh-install onboarding while the
++/// CLI is doing legitimate cold-boot work (MLX runtime init, model page-in,
++/// prefill compile, coordinator handshake). Any value below the realistic
++/// worst-case will reproduce that failure on some tier of hardware.
++final class MalibuOnboardingTimeoutsTests: XCTestCase {
++    /// Realistic cold-start ceiling for CLI serve subprocess to open the
++    /// Unix control socket:
++    ///   * process fork/exec: <1s
++    ///   * MLX runtime static init: 1-5s
++    ///   * config parse + validation: 1-5s
++    ///   * AF_UNIX bind: <1s
++    /// Empirical: 1-10s on this Mac. Slower disk / kernel page-in cost
++    /// can push to 30-60s. 90s covers 3× that with margin.
++    private static let coldStartControlSocketWorstCaseSec: TimeInterval = 90
++
++    /// Realistic cold-start ceiling for reaching the first `.serving` frame:
++    ///   * model file page-in (17 GB, cold): 30-90s on APFS
++    ///   * prefill kernel compile: 10-30s
++    ///   * coordinator TLS + auth handshake: 5-15s
++    ///   * first status frame emit: <5s
++    /// Empirical worst-case cold: 60-135s. 240s covers ~2× that with
++    /// margin for slow-disk / thermal-throttle / spinning-rust worst case.
++    private static let coldStartServingWorstCaseSec: TimeInterval = 240
++
++    /// Above this, the user is trapped in a multi-hour spinner and has
++    /// almost certainly quit the app. Beyond legitimate CLI-start runtime
++    /// by any reasonable interpretation.
++    private static let untenableSpinnerCeilingSec: TimeInterval = 2 * 60 * 60
++
++    // MARK: - controlSocketConnect
++
++    func testControlSocketConnectCoversColdStartWorstCase() {
++        XCTAssertGreaterThanOrEqual(
++            MalibuOnboardingTimeouts.controlSocketConnectSec,
++            Self.coldStartControlSocketWorstCaseSec,
++            """
++            controlSocketConnectSec=\(MalibuOnboardingTimeouts.controlSocketConnectSec)s \
++            is below the realistic cold-start worst case of \
++            \(Self.coldStartControlSocketWorstCaseSec)s. \
++            Fresh-install onboarding on slower hardware will hit \
++            NSPOSIXErrorDomain Code=60 before the CLI can open the Unix \
++            control socket.
++            """
++        )
++    }
++
++    func testControlSocketConnectIsNotUntenable() {
++        XCTAssertLessThanOrEqual(
++            MalibuOnboardingTimeouts.controlSocketConnectSec,
++            Self.untenableSpinnerCeilingSec,
++            "controlSocketConnectSec must not exceed 2h or wedged CLI traps the user in a multi-hour spinner."
++        )
++    }
++
++    // MARK: - firstServingFrame
++
++    func testFirstServingFrameCoversColdStartWorstCase() {
++        XCTAssertGreaterThanOrEqual(
++            MalibuOnboardingTimeouts.firstServingFrameSec,
++            Self.coldStartServingWorstCaseSec,
++            """
++            firstServingFrameSec=\(MalibuOnboardingTimeouts.firstServingFrameSec)s \
++            is below the realistic cold-start worst case of \
++            \(Self.coldStartServingWorstCaseSec)s for a 30B MoE model. \
++            Fresh-install onboarding will hit "Timed out waiting for the \
++            first serving frame." while the CLI is still doing legitimate \
++            model-load / prefill / coordinator-handshake work.
++            """
++        )
++    }
++
++    func testFirstServingFrameIsNotUntenable() {
++        XCTAssertLessThanOrEqual(
++            MalibuOnboardingTimeouts.firstServingFrameSec,
++            Self.untenableSpinnerCeilingSec,
++            "firstServingFrameSec must not exceed 2h or wedged CLI traps the user in a multi-hour spinner."
++        )
++    }
++
++    // MARK: - poll interval
++
++    func testFirstServingPollIntervalIsReasonable() {
++        // Below 250ms burns CPU over the ~10 min worst case (2400 wake-ups
++        // at 250ms vs 1200 at 500ms). Above 2s makes stage transitions
++        // feel laggy in the healthy case.
++        XCTAssertGreaterThanOrEqual(
++            MalibuOnboardingTimeouts.firstServingPollIntervalSec,
++            0.25,
++            "poll interval below 250ms wastes CPU during the multi-minute waits."
++        )
++        XCTAssertLessThanOrEqual(
++            MalibuOnboardingTimeouts.firstServingPollIntervalSec,
++            2.0,
++            "poll interval above 2s makes healthy-case transitions feel laggy."
++        )
++    }
++}
+diff --git a/phase3-binary/app/Tests/MalibuTests/ProviderConfigTests.swift b/phase3-binary/app/Tests/MalibuTests/ProviderConfigTests.swift
+index f500935..aa47920 100644
+--- a/phase3-binary/app/Tests/MalibuTests/ProviderConfigTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/ProviderConfigTests.swift
+@@ -413,6 +413,7 @@ final class ProviderConfigParserTests: XCTestCase {
+             try await ProviderConfig.saveProviderIdentity(
+                 providerID: "p_failed",
+                 token: "provider-token",
++                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
+                 paths: paths,
+                 readToken: { _ in nil },
+                 saveToken: { _, _ in
+@@ -440,6 +441,7 @@ final class ProviderConfigParserTests: XCTestCase {
+             try await ProviderConfig.saveProviderIdentity(
+                 providerID: "p_marker_failed",
+                 token: "provider-token",
++                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
+                 paths: paths,
+                 readToken: { _ in nil },
+                 saveToken: { _, token in savedToken = token },
+@@ -469,6 +471,7 @@ final class ProviderConfigParserTests: XCTestCase {
+             try await ProviderConfig.saveProviderIdentity(
+                 providerID: "p_verify_failed",
+                 token: "provider-token",
++                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
+                 paths: paths,
+                 readToken: { _ in nil },
+                 saveToken: { _, token in savedToken = token },

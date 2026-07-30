@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,18 +16,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
 
 const reloadTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const reloadOtherHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+type reloadStubAutotuneEvidence struct{}
+
+func (reloadStubAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+	return autotune.VerifiedEvidence{}, false, nil
+}
 
 func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	server := newHTTPServer("127.0.0.1:0", http.NewServeMux())
@@ -38,6 +49,346 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout == 0 {
 		t.Fatal("IdleTimeout must be set")
+	}
+}
+
+func TestWithReferralValidationMountsOnlyValidationRoute(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	disabled := withReferralValidation(base, nil)
+	disabledResponse := httptest.NewRecorder()
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if disabledResponse.Code != http.StatusNoContent {
+		t.Fatalf("disabled validation route unexpectedly mounted: status=%d", disabledResponse.Code)
+	}
+
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/validate", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("validation status=%d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/referrals/reserve", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("reservation route unexpectedly mounted: status=%d", response.Code)
+	}
+}
+
+func TestAppTrackReferralMintReconcilerRunsAfterEnforcementRollback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan struct{}, 1)
+	startAppTrackReferralMintReconciler(ctx, appTrackReferralMintReconcilerFunc(func(context.Context) error {
+		called <- struct{}{}
+		return nil
+	}), zerolog.Nop())
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("referral mint reconciler did not run with enforcement disabled")
+	}
+}
+
+func TestOnboardingStoreRemainsOpenAfterRouteRollback(t *testing.T) {
+	cfg := config.Default().Onboarding
+	cfg.AppTrackRegisterEnabled = false
+	cfg.PostgresDSN = "postgres://provider_onboarding@postgres/onboarding"
+	if !shouldOpenOnboardingStore(cfg) {
+		t.Fatal("configured onboarding authority closed when registration route was disabled")
+	}
+	cfg.PostgresDSN = ""
+	if shouldOpenOnboardingStore(cfg) {
+		t.Fatal("unconfigured disabled onboarding store unexpectedly opened")
+	}
+}
+
+type appTrackReferralMintReconcilerFunc func(context.Context) error
+
+func (f appTrackReferralMintReconcilerFunc) ReconcilePendingAppTrackReferralMints(ctx context.Context) error {
+	return f(ctx)
+}
+
+func TestWithReferralValidationNeverMountsLegacyCredentialPath(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withReferralValidation(base, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/j/invite", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("legacy join route unexpectedly mounted: status=%d", response.Code)
+	}
+}
+
+func TestWithReferralAdvocacyKeepsMutationRoutesAbsentWhenDisabled(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.NotFound(w, nil) })
+	status := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }
+	challenge := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) }
+	verify := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }
+
+	statusOnly := withReferralAdvocacy(base, status, nil, nil)
+	for _, test := range []struct {
+		path string
+		want int
+	}{
+		{path: "/v1/provider/referrals", want: http.StatusOK},
+		{path: "/v1/provider/referrals/x/challenge", want: http.StatusNotFound},
+		{path: "/v1/provider/referrals/x/verify", want: http.StatusNotFound},
+	} {
+		response := httptest.NewRecorder()
+		statusOnly.ServeHTTP(response, httptest.NewRequest(http.MethodPost, test.path, nil))
+		if response.Code != test.want {
+			t.Fatalf("status-only path=%s status=%d want=%d", test.path, response.Code, test.want)
+		}
+	}
+
+	fullyEnabled := withReferralAdvocacy(base, status, challenge, verify)
+	for path, want := range map[string]int{
+		"/v1/provider/referrals":             http.StatusOK,
+		"/v1/provider/referrals/x/challenge": http.StatusCreated,
+		"/v1/provider/referrals/x/verify":    http.StatusAccepted,
+	} {
+		response := httptest.NewRecorder()
+		fullyEnabled.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != want {
+			t.Fatalf("enabled path=%s status=%d want=%d", path, response.Code, want)
+		}
+	}
+}
+
+func TestNewReferralValidationHandlerWiresOperatorRecoveryURL(t *testing.T) {
+	handler := newReferralValidationHandler(nil, auth.ReferralPolicy{}, nil, "  https://access.example.test/waitlist  ", nil)
+	if handler.RequestAccessURL != "https://access.example.test/waitlist" {
+		t.Fatalf("request access URL=%q", handler.RequestAccessURL)
+	}
+	if handler.PublicLimiter == nil || handler.ValidateSlots == nil || handler.SourceIP == nil {
+		t.Fatal("production validation safeguards were not wired")
+	}
+}
+
+func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "::"} {
+		t.Run(host, func(t *testing.T) {
+			addr := listenAddress(host, 8080)
+			tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+			if err != nil {
+				t.Fatalf("ResolveTCPAddr(%q): %v", addr, err)
+			}
+			if tcpAddr.Port != 8080 {
+				t.Fatalf("port=%d want 8080 for %q", tcpAddr.Port, addr)
+			}
+		})
+	}
+}
+
+func TestOperatorMetricsHandlerRequiresOperatorBearer(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := statsmetrics.New(reg)
+	m.IncRegisterSource("app")
+	handler := operatorMetricsHandler("operator-secret", reg)
+
+	for _, tc := range []struct {
+		name   string
+		bearer string
+		want   int
+	}{
+		{name: "missing", want: http.StatusUnauthorized},
+		{name: "gateway token rejected", bearer: "gateway-secret", want: http.StatusUnauthorized},
+		{name: "operator accepted", bearer: "operator-secret", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/admin/metrics", nil)
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status=%d want=%d body=%s", rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.want == http.StatusOK && !strings.Contains(rr.Body.String(), "provider_register_source_total") {
+				t.Fatalf("/admin/metrics missing register counter: %s", rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "base", http.StatusTeapot)
+	})
+	register := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	hardwareEvidence := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", nil)
+	rr := httptest.NewRecorder()
+	disabled.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTeapot {
+		t.Fatalf("disabled route status=%d want base handler 418", rr.Code)
+	}
+	evidenceReq := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", nil)
+	rr = httptest.NewRecorder()
+	disabled.ServeHTTP(rr, evidenceReq)
+	if rr.Code != http.StatusTeapot {
+		t.Fatalf("disabled evidence route status=%d want base handler 418", rr.Code)
+	}
+
+	walletReq := httptest.NewRequest(http.MethodPost, "/v1/provider/wallet", nil)
+	rr = httptest.NewRecorder()
+	disabled.ServeHTTP(rr, walletReq)
+	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), "wallet_change_requires_spec_027") {
+		t.Fatalf("disabled wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
+	}
+
+	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil)
+	rr = httptest.NewRecorder()
+	enabled.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("enabled route status=%d want 204", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	enabled.ServeHTTP(rr, evidenceReq)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("enabled evidence route status=%d want 202", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	enabled.ServeHTTP(rr, walletReq)
+	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), "wallet_change_requires_spec_027") {
+		t.Fatalf("wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
+	}
+}
+
+func TestNginxProviderRoutesBeforeV1CatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	registerRoute := strings.Index(cfg, "location = /v1/providers/register")
+	evidenceRoute := strings.Index(cfg, "location = /v1/providers/hardware-evidence")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if registerRoute < 0 {
+		t.Fatal("missing exact /v1/providers/register route")
+	}
+	if evidenceRoute < 0 {
+		t.Fatal("missing exact /v1/providers/hardware-evidence route")
+	}
+	if catchAll < 0 {
+		t.Fatal("missing /v1/ catch-all route")
+	}
+	if registerRoute > catchAll {
+		t.Fatal("/v1/providers/register route must appear before /v1/ catch-all")
+	}
+	if evidenceRoute > catchAll {
+		t.Fatal("/v1/providers/hardware-evidence route must appear before /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/providers/register;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[registerRoute:catchAll], needle) {
+			t.Fatalf("register route missing %q", needle)
+		}
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/providers/hardware-evidence;",
+		"limit_req zone=ws_provider_rate burst=5 nodelay;",
+		"proxy_set_header Authorization $http_authorization;",
+		"client_max_body_size 128k;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[evidenceRoute:catchAll], needle) {
+			t.Fatalf("hardware evidence route missing %q", needle)
+		}
+	}
+}
+
+func TestNginxWalletRouteBeforeV1CatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v1/provider/wallet")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if route < 0 {
+		t.Fatal("missing exact /v1/provider/wallet route")
+	}
+	if catchAll < 0 {
+		t.Fatal("missing /v1/ catch-all route")
+	}
+	if route > catchAll {
+		t.Fatal("/v1/provider/wallet route must appear before /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/provider/wallet;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[route:catchAll], needle) {
+			t.Fatalf("wallet route missing %q", needle)
+		}
+	}
+}
+
+func TestNginxMalibuAccrualRouteBeforeV1CatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v1/provider/malibu-accrual")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if route < 0 {
+		t.Fatal("missing exact /v1/provider/malibu-accrual route")
+	}
+	if catchAll < 0 {
+		t.Fatal("missing /v1/ catch-all route")
+	}
+	if route > catchAll {
+		t.Fatal("/v1/provider/malibu-accrual route must appear before /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/provider/malibu-accrual;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[route:catchAll], needle) {
+			t.Fatalf("malibu-accrual route missing %q", needle)
+		}
+	}
+}
+
+func TestNginxV2ProviderAliasesExistingWSHandler(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v2/provider")
+	if route < 0 {
+		t.Fatal("missing exact /v2/provider route")
+	}
+	next := strings.Index(cfg[route+1:], "location ")
+	block := cfg[route:]
+	if next >= 0 {
+		block = cfg[route : route+1+next]
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8444/ws/provider;",
+		"proxy_set_header Upgrade $http_upgrade;",
+		"proxy_buffering off;",
+	} {
+		if !strings.Contains(block, needle) {
+			t.Fatalf("/v2/provider route missing %q", needle)
+		}
 	}
 }
 
@@ -68,8 +419,8 @@ func TestSetupCanarySanctionStoreHonorsCanaryEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup disabled canary store: %v", err)
 	}
-	if store != nil {
-		t.Fatal("disabled canary setup returned a store")
+	if store == nil {
+		t.Fatal("disabled canary setup must retain the store for operator recovery")
 	}
 	disabledRegistry.Register(&pool.Provider{
 		ProviderID:     "pinned-a",
@@ -129,7 +480,7 @@ func TestReloadTier2RejectsStartupCatalogFieldChange(t *testing.T) {
 	next.Tier2.CatalogPath = "/tmp/catalog.json"
 	next.Tier2.CatalogPublicKey = "catalog-key"
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || got.ModelHash.Active {
@@ -144,11 +495,107 @@ func TestReloadTier2RejectsStartupOnlyTier2FieldChange(t *testing.T) {
 	next.Tier2.ObserveEnabled = true
 	next.Tier2.EncryptedLegRekeyAfterRequests++
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || got.ModelHash.Active {
 		t.Fatalf("tier2 metadata after rejected reload = %+v", got)
+	}
+}
+
+func TestReloadCoordinatorConfigHotTogglesProofOfWeightsGate(t *testing.T) {
+	defer tier2.ResetForTest()
+	startup, registry, wsServer, buyerServer := reloadTestServers(config.Default())
+	registry.Register(&pool.Provider{
+		ProviderID:     "provider-a",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	autotuneCatalog, err := autotune.ParseCatalog([]byte(`{
+		"version":"release-under-test",
+		"policy_version":"autotune-policy-v1",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"rows":{
+			"model-a":{
+				"model_id":"model-a",
+				"model_revision":"0123456789abcdef0123456789abcdef01234567",
+				"model_sha256":"` + reloadTestHash + `",
+				"min_ram_gb":12,
+				"min_bandwidth_tier":"C",
+				"bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":4500},
+				"runtime_status":"recommendable"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseCatalog: %v", err)
+	}
+
+	next := startup
+	next.ProofOfWeights.RequireAutotuneHelloGate = true
+	next.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	feedDir := t.TempDir()
+	next.AutotuneFeeds.RateCardPath = filepath.Join(feedDir, "rate-card.json")
+	next.AutotuneFeeds.RateCardSigPath = filepath.Join(feedDir, "rate-card.json.sig")
+	next.AutotuneFeeds.DemandRankPath = filepath.Join(feedDir, "demand-rank.json")
+	next.AutotuneFeeds.DemandRankSigPath = filepath.Join(feedDir, "demand-rank.json.sig")
+	next.AutotuneFeeds.AutotuneCandidatesPath = filepath.Join(feedDir, "autotune-candidates.json")
+	next.AutotuneFeeds.AutotuneCandidatesSigPath = filepath.Join(feedDir, "autotune-candidates.json.sig")
+	publicKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+	next.AutotuneFeeds.PublicKeys = map[string]string{"test-key": base64.StdEncoding.EncodeToString(publicKey)}
+	next.Onboarding.AppTrackRegisterEnabled = true
+	next.Referrals.RequireForRegistration = true
+	next.Referrals.Campaign = "prebeta_2026"
+	next.Referrals.CurrentKeyID = "k1"
+	next.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+	next.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.AuthPolicyRequestDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.AuthPolicyApproveDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.HardwareTrustRequestDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.HardwareTrustApproveDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	next.Onboarding.BundleID = "live.streamvc.MacProvider"
+	next.Onboarding.AppleTeamID = "ABCDE12345"
+	next.Onboarding.CoordinatorDomain = "coordinator.streamvc.live"
+	next.Onboarding.ASNPrefixes = map[string]string{"192.0.2.0/24": "AS64512"}
+	next.Auth.OperatorKeys = map[string]string{
+		"alice": "alice-secret-0123456789abcdef0123456789",
+		"bob":   "bob-secret-0123456789abcdef012345678901",
+	}
+	var logs bytes.Buffer
+	reloadCoordinatorConfig(writeReloadConfig(t, next), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{})
+	provider, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider missing after proof_of_weights enable reload")
+	}
+	if !provider.AdmissionEvidenceStale || provider.RoutingEligible() {
+		t.Fatalf("proof_of_weights enable reload must pre-quarantine provider: %+v logs=%s", provider, logs.String())
+	}
+	if changed := registry.SetBenchmarkQuarantine("provider-a", "session-a", true); !changed {
+		t.Fatal("failed to seed benchmark quarantine before telemetry-drift disable reload")
+	}
+
+	next.ProofOfWeights.RequireAutotuneHelloGate = false
+	next.ProofOfWeights.TelemetryDrift.Enabled = false
+	logs.Reset()
+	reloadCoordinatorConfig(writeReloadConfig(t, next), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog, reloadStubAutotuneEvidence{})
+	provider, ok = registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider missing after proof_of_weights disable reload")
+	}
+	if provider.AdmissionEvidenceStale || provider.AdmissionSandboxed || provider.AdmissionCeilingExcluded || !provider.RoutingEligible() {
+		t.Fatalf("proof_of_weights disable reload must clear gate exclusions: %+v logs=%s", provider, logs.String())
+	}
+	if provider.BenchmarkQuarantined {
+		t.Fatalf("telemetry-drift disable reload must clear benchmark quarantine: %+v logs=%s", provider, logs.String())
+	}
+	if !strings.Contains(logs.String(), `"benchmark_quarantines_cleared":1`) {
+		t.Fatalf("reload log did not report cleared benchmark quarantine: %s", logs.String())
 	}
 }
 
@@ -266,7 +713,7 @@ func TestReloadTier2AppliesHotObserveFlag(t *testing.T) {
 	next := startup
 	next.Tier2.ObserveEnabled = true
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	got := fetchReloadTier2Metadata(t, buyerServer)
 	if got.Phase != 0 || !got.ModelHash.Active {
@@ -294,7 +741,7 @@ func TestReloadTier2ReloadsSamePathCatalogContents(t *testing.T) {
 	}
 
 	var logs bytes.Buffer
-	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil)
 
 	if got := tier2.VerifyProviderHash("model-a", reloadOtherHash); got != pool.HashStatusVerified {
 		t.Fatalf("reloaded catalog hash status=%q want %q logs=%s", got, pool.HashStatusVerified, logs.String())
@@ -324,7 +771,7 @@ func TestReloadTier2PreservesPreviousCatalogOnInvalidSamePathReload(t *testing.T
 	}
 
 	var logs bytes.Buffer
-	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, nil)
 
 	if got := tier2.VerifyProviderHash("model-a", reloadTestHash); got != pool.HashStatusVerified {
 		t.Fatalf("preserved catalog hash status=%q want %q logs=%s", got, pool.HashStatusVerified, logs.String())
@@ -334,7 +781,59 @@ func TestReloadTier2PreservesPreviousCatalogOnInvalidSamePathReload(t *testing.T
 	}
 }
 
-func TestReloadTier2ReevaluatesExistingProviderHashes(t *testing.T) {
+func TestReloadTier2RejectsAutotuneBindingConflict(t *testing.T) {
+	defer tier2.ResetForTest()
+	catalogPath := t.TempDir() + "/catalog.json"
+	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
+	if err := os.WriteFile(catalogPath, raw, 0600); err != nil {
+		t.Fatalf("write initial catalog: %v", err)
+	}
+	startup := config.Default()
+	startup.Tier2.CatalogPath = catalogPath
+	startup.Tier2.CatalogPublicKey = publicKey
+	if err := tier2.Configure(startup.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("startup Configure: %v", err)
+	}
+	startup, _, wsServer, buyerServer := reloadTestServers(startup)
+	replacement, _ := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadOtherHash)
+	if err := os.WriteFile(catalogPath, replacement, 0600); err != nil {
+		t.Fatalf("write conflicting catalog: %v", err)
+	}
+	autotuneCatalog, err := autotune.ParseCatalog([]byte(`{
+		"version":"release-under-test",
+		"policy_version":"autotune-policy-v1",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"rows":{
+			"model-a":{
+				"model_id":"model-a",
+				"model_revision":"0123456789abcdef0123456789abcdef01234567",
+				"model_sha256":"` + reloadTestHash + `",
+				"min_ram_gb":12,
+				"min_bandwidth_tier":"C",
+				"bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":4500},
+				"runtime_status":"recommendable"
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseCatalog: %v", err)
+	}
+
+	var logs bytes.Buffer
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.New(&logs), wsServer, buyerServer, autotuneCatalog)
+
+	if got := tier2.VerifyProviderHash("model-a", reloadTestHash); got != pool.HashStatusVerified {
+		t.Fatalf("conflicting reload must preserve prior catalog: status=%q logs=%s", got, logs.String())
+	}
+	if got := tier2.VerifyProviderHash("model-a", reloadOtherHash); got != pool.HashStatusMismatch {
+		t.Fatalf("conflicting reload must not activate drifted hash: status=%q", got)
+	}
+	if !strings.Contains(logs.String(), "tier2 config reload rejected") {
+		t.Fatalf("expected reload rejection log, got %s", logs.String())
+	}
+}
+
+func TestReloadTier2RejectsExistingUntypedProviderHashesWithoutBridge(t *testing.T) {
 	defer tier2.ResetForTest()
 	catalogPath := t.TempDir() + "/catalog.json"
 	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
@@ -365,18 +864,18 @@ func TestReloadTier2ReevaluatesExistingProviderHashes(t *testing.T) {
 	next := startup
 	next.Tier2.ObserveEnabled = true
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
 		t.Fatal("provider missing after reload")
 	}
-	if provider.HashStatus != pool.HashStatusVerified {
-		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusVerified)
+	if provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusInvalid)
 	}
 }
 
-func TestReloadTier2LogsHashStatusTransitions(t *testing.T) {
+func TestReloadTier2LogsUntypedHashInvalidTransition(t *testing.T) {
 	defer tier2.ResetForTest()
 	catalogPath := t.TempDir() + "/catalog.json"
 	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
@@ -410,24 +909,24 @@ func TestReloadTier2LogsHashStatusTransitions(t *testing.T) {
 		t.Fatalf("write replacement catalog: %v", err)
 	}
 
-	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, startup), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
 		t.Fatal("provider missing after reload")
 	}
-	if provider.HashStatus != pool.HashStatusMismatch {
-		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusMismatch)
+	if provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusInvalid)
 	}
 	rawLog := wsLogs.String()
-	if !strings.Contains(rawLog, `"event":"model_hash_mismatch"`) ||
+	if !strings.Contains(rawLog, `"event":"model_hash_invalid"`) ||
 		!strings.Contains(rawLog, `"provider_id":"provider-a"`) ||
 		!strings.Contains(rawLog, `"decision":"exclude"`) {
-		t.Fatalf("reload transition audit log missing mismatch event: %s", rawLog)
+		t.Fatalf("reload transition audit log missing invalid event: %s", rawLog)
 	}
 }
 
-func TestReloadTier2LogsHashRequiredExclusionWhenStatusUnchanged(t *testing.T) {
+func TestReloadTier2LogsMissingAlgorithmInvalidation(t *testing.T) {
 	defer tier2.ResetForTest()
 	catalogPath := t.TempDir() + "/catalog.json"
 	raw, publicKey := signedReloadCatalogFixture(t, time.Now().UTC().Add(time.Hour), reloadTestHash)
@@ -460,20 +959,20 @@ func TestReloadTier2LogsHashRequiredExclusionWhenStatusUnchanged(t *testing.T) {
 	next := startup
 	next.Tier2.RequireHashVerified = true
 
-	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer)
+	reloadTier2Config(writeReloadConfig(t, next), startup.Tier2, zerolog.Nop(), wsServer, buyerServer, nil)
 
 	provider, ok := registry.Resolve("provider-a", "session-a")
 	if !ok {
 		t.Fatal("provider missing after reload")
 	}
-	if provider.HashStatus != pool.HashStatusUncatalogued {
-		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusUncatalogued)
+	if provider.HashStatus != pool.HashStatusInvalid {
+		t.Fatalf("provider hash status after reload=%q want %q", provider.HashStatus, pool.HashStatusInvalid)
 	}
 	rawLog := wsLogs.String()
-	if !strings.Contains(rawLog, `"event":"hash_required_provider_excluded"`) ||
+	if !strings.Contains(rawLog, `"event":"model_hash_invalid"`) ||
 		!strings.Contains(rawLog, `"provider_id":"provider-a"`) ||
-		!strings.Contains(rawLog, `"config_flag":"tier2.require_hash_verified"`) {
-		t.Fatalf("reload audit log missing hash-required exclusion event: %s", rawLog)
+		!strings.Contains(rawLog, `"decision":"exclude"`) {
+		t.Fatalf("reload audit log missing invalid event: %s", rawLog)
 	}
 }
 
@@ -482,7 +981,8 @@ func reloadTestServers(cfg config.Config) (config.Config, *pool.Registry, *provi
 }
 
 func reloadTestServersWithLogger(cfg config.Config, logger zerolog.Logger) (config.Config, *pool.Registry, *providerws.Server, *buyer.Server) {
-	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.OperatorKey = "0123456789abcdefABCDEFghijklmnop"
+	cfg.Auth.GatewayServiceToken = "fedcba9876543210FEDCBAzyxwvutsrq"
 	cfg.Pool.WarmupGateEnabled = false
 	registry := pool.NewRegistry(nil)
 	wsServer := providerws.NewServer(cfg, registry, logger)
@@ -491,7 +991,7 @@ func reloadTestServersWithLogger(cfg config.Config, logger zerolog.Logger) (conf
 		logger,
 		time.Unix(1716768000, 0),
 		buyer.WithTier2Config(cfg.Tier2),
-		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 	)
 	return cfg, registry, wsServer, buyerServer
 }
@@ -517,7 +1017,7 @@ func fetchReloadTier2Metadata(t *testing.T, server *buyer.Server) struct {
 } {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
-	req.Header.Set("Authorization", "Bearer operator-key")
+	req.Header.Set("Authorization", "Bearer fedcba9876543210FEDCBAzyxwvutsrq")
 	rr := httptest.NewRecorder()
 	server.InternalHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {

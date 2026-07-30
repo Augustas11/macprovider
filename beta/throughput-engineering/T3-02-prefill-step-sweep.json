@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "task_id": "T3-02-measurement",
+  "run_date": "2026-07-07",
+  "verdict": "WAIVE",
+  "verdict_reason": "No ≥15% TTFT p50 reduction at 4096-token prefill on Qwen2.5-7B; keep default prefill_step_size=512.",
+  "hardware": {
+    "chip": "Apple M5",
+    "ram_gb": 32,
+    "metallib": "mlx-swift 0.31.6 matched (copied from T0-01 build-mlx-metallib output)",
+    "bench_binary": "phase3-binary/.build/release/macprovider-cli @ e23258b"
+  },
+  "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "bench_params": {
+    "prefill_tokens_target": 4096,
+    "decode_tokens": 32,
+    "runs": 3,
+    "prompt_tokens_actual_p50": 4126
+  },
+  "sweep": [
+    {
+      "prefill_step_size": 512,
+      "ttft_ms_p50": 9363.2,
+      "ttft_ms_p95": 9363.2,
+      "prefill_tps_p50": 440.7,
+      "decode_tps_p50": 20.7,
+      "ttft_delta_vs_512_pct": 0.0,
+      "snapshot": "audits/2026-07-07/bench-snapshots/t3-02-prefill-512.json"
+    },
+    {
+      "prefill_step_size": 1024,
+      "ttft_ms_p50": 9265.6,
+      "ttft_ms_p95": 9265.6,
+      "prefill_tps_p50": 445.3,
+      "decode_tps_p50": 21.0,
+      "ttft_delta_vs_512_pct": -1.0,
+      "snapshot": "audits/2026-07-07/bench-snapshots/t3-02-prefill-1024.json"
+    },
+    {
+      "prefill_step_size": 2048,
+      "ttft_ms_p50": 9533.8,
+      "ttft_ms_p95": 9533.8,
+      "prefill_tps_p50": 432.8,
+      "decode_tps_p50": 21.9,
+      "ttft_delta_vs_512_pct": 1.8,
+      "snapshot": "audits/2026-07-07/bench-snapshots/t3-02-prefill-2048.json"
+    },
+    {
+      "prefill_step_size": 4096,
+      "ttft_ms_p50": 9433.0,
+      "ttft_ms_p95": 9433.0,
+      "prefill_tps_p50": 437.4,
+      "decode_tps_p50": 21.0,
+      "ttft_delta_vs_512_pct": 0.7,
+      "snapshot": "audits/2026-07-07/bench-snapshots/t3-02-prefill-4096.json"
+    }
+  ],
+  "interpretation": "Chunk-size sweep is flat within noise (~±2% TTFT). Likely memory-bandwidth-saturated prefill on M5 at 4k tokens; larger chunks do not reduce wall-clock. Production default remains 512; operators may still experiment via MACPROVIDER_PREFILL_STEP_SIZE for specific models/tiers.",
+  "t0_02_refresh": {
+    "note": "Post-T3 merge sanity check; decode TPS lower than morning T0-02 session (possible thermal throttling after sustained bench load).",
+    "qwen2.5_7b": {
+      "decode_tps_p50": 22.4,
+      "prefill_tps_p50": 342.1,
+      "prior_decode_tps_p50": 27.1,
+      "snapshot": "audits/2026-07-07/bench-snapshots/t0-02-refresh-qwen2.5-7b.json"
+    },
+    "gpt_oss_20b": {
+      "decode_tps_p50": 22.9,
+      "prefill_tps_p50": 261.3,
+      "prior_decode_tps_p50": 26.3,
+      "snapshot": "audits/2026-07-07/bench-snapshots/t0-02-refresh-gpt-oss-20b.json"
+    }
+  }
+}

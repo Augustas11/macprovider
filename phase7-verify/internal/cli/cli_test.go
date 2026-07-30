@@ -461,6 +461,31 @@ func TestUsageBoundaries(t *testing.T) {
 	}
 }
 
+// Issue #126: --coordinator pointing at loopback / RFC1918 / link-local
+// without MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1 MUST exit 64
+// (EX_USAGE), not the default 70 (software). Pinned via the
+// resolver.ErrPrivateCoordinatorDenied sentinel in cli.exitForError so
+// scripts and CI pipelines can distinguish "operator pointed at a bad
+// host" from "verifier crashed".
+//
+// This test temporarily clears the escape-hatch env var that TestMain
+// sets to 1 for other CLI tests; t.Setenv restores it at teardown.
+func TestCLIPrivateCoordinatorExitsUsage(t *testing.T) {
+	t.Setenv("MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR", "")
+	fixture := newCLIFixture(t, makeKey(80), cliNow.Unix())
+	pubkey := base64.StdEncoding.EncodeToString(fixture.pub)
+	args := append(headerArgs("https://127.0.0.1:8080", fixture, "--provider-id", testProviderID), "--pubkey", pubkey)
+
+	stdout, stderr, c := buffersAndCache(t)
+	code := run(args, strings.NewReader(""), stdout, stderr, getenvNone, runConfig{cache: c, now: func() time.Time { return cliNow }})
+	if code != exitUsage {
+		t.Fatalf("exit=%d want=64 (exitUsage) stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR") {
+		t.Fatalf("stderr=%q want mention of MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR env var", stderr.String())
+	}
+}
+
 func TestSingleMatchCacheScannerOverflowRequiresProviderID(t *testing.T) {
 	fixture := newCLIFixture(t, makeKey(50), cliNow.Unix())
 	stdout, stderr, c := buffersAndCache(t)

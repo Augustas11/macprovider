@@ -1,0 +1,496 @@
+// Package invariants holds the 4 hard pass/fail checks the harness
+// enforces in phase A, before any routing-contract addendum exists:
+//
+//	I1  ledger reconciliation drift == 0
+//	I2  no 5xx response without billing settlement (orphan check)
+//	I3  no charged-tokens > delivered-tokens
+//	I4  no silent hang (stream stayed open past threshold with no bytes
+//	    and no terminating error)
+//
+// Each check produces a structured verdict with the evidence it relied
+// on, so triage can re-examine the artifact bundle and judge whether a
+// failure is a real bug or a test-side artifact.
+package invariants
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/augstar/macprovider-network-harness/internal/buyer"
+	"github.com/augstar/macprovider-network-harness/internal/metrics"
+	"github.com/augstar/macprovider-network-harness/internal/reconcile"
+	"github.com/augstar/macprovider-network-harness/internal/scenario"
+)
+
+type Result struct {
+	Checks []Check `json:"checks"`
+}
+
+type Check struct {
+	ID            string   `json:"id"`
+	Title         string   `json:"title"`
+	Passed        bool     `json:"passed"`
+	Skipped       bool     `json:"skipped"`
+	Status        string   `json:"status,omitempty"`
+	Detail        string   `json:"detail"`
+	OffendingIDs  []string `json:"offending_request_ids,omitempty"`
+	EvidenceCount int      `json:"evidence_count,omitempty"`
+}
+
+func (r *Result) AnyFailed() bool {
+	for _, c := range r.Checks {
+		if !c.Passed && !c.Skipped {
+			return true
+		}
+	}
+	return false
+}
+
+// Evaluate runs all 4 invariants. summary is optional reference data;
+// ledger is nil when reconciliation was skipped (no DB paths configured).
+func Evaluate(sc *scenario.Scenario, results []buyer.Result, summary *metrics.Summary, ledger *reconcile.Result) *Result {
+	return &Result{
+		Checks: []Check{
+			checkI1(sc, ledger),
+			checkI2(results, ledger),
+			checkI3(sc, ledger),
+			checkI4(sc, results),
+		},
+	}
+}
+
+// I1 — ledger reconciliation drift must be zero. Verified live
+// 2026-06-27: gateway and coordinator use SEPARATE request_id spaces
+// (a gateway UUID and a coord UUID never overlap), so we correlate by
+// (model, completion_tokens, ts ± window).
+//
+// Since #226 + #229 R4, drift is computed PER MATCHED PAIR (not as
+// aggregate population sums — which false-fired when most gateway
+// settlements landed as SPEC-006 §17.7 fallback outcomes). The
+// reconciler stamps drift_basis="per_matched_pair_v2" so artifact
+// consumers know what algorithm produced the numbers.
+//
+// Drift here means ANY of:
+//   - harness success unmatched on gateway (UnmatchedSuccesses) —
+//     billing-bypass risk
+//   - gateway "ok"-outcome row unmatched on any harness success
+//     (UnmatchedGatewayOKRows) — orphan/leaked settlement or
+//     concurrent buyer traffic
+//   - gateway "ok" matched pair with no coord row (MatchedCoordMissing)
+//     — fallback outcomes legitimately lack coord rows and are NOT
+//     flagged here
+//   - gateway over-billed vs harness across matched pairs
+//     (GatewayOverbillVsHarnessTokens > 0, positive-only sum so a
+//     +N overbill is not hidden by a -N underbill). Underbill alone
+//     is allowed — gateway-side streaming rounding is legitimate.
+//   - gateway and coord disagree on per-pair tokens in EITHER direction
+//     (AbsGatewayCoordinatorMismatchTokens > 0) — both are settlement
+//     systems and must agree on per-request token counts.
+func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
+	c := Check{ID: "I1", Title: "billing-ledger reconciliation drift == 0"}
+	if ledger == nil {
+		c.Skipped = true
+		c.Detail = "reconciliation skipped: target.coordinator_db_path / _ssh not configured"
+		return c
+	}
+	// Fail-closed: reconcile.Run errored. Even if every drift signal
+	// below would be zero, the audit pipeline must NOT silently pass
+	// when reconciliation didn't actually run. R3 audit code HIGH.
+	if ledger.ReconcileError != "" {
+		c.Passed = false
+		c.EvidenceCount = 1
+		c.Detail = "reconcile errored: " + ledger.ReconcileError
+		return c
+	}
+
+	// I1 reads matched-pair drift produced by the reconciler under
+	// drift_basis="per_matched_pair_v2" (#226 + #229 R2). Five signals:
+	//   - harness successes unmatched on gateway (missing settlement)
+	//   - gateway-ok rows unmatched on the harness side (orphan settlement)
+	//   - matched gateway-ok pairs with no coord row (suspicious; fallback
+	//     outcomes legitimately lack coord rows and are excluded upstream)
+	//   - gateway-vs-harness positive overbill across pairs (signed-safe;
+	//     underbill alone is allowed per streaming rounding semantics)
+	//   - gateway-vs-coord absolute mismatch (any direction; both are
+	//     settlement systems and MUST agree on per-pair token counts;
+	//     same #232 corroboration gate applies)
+	gwOverbillVsHarness := ledger.GatewayOverbillVsHarnessTokens
+	absGwCoordMismatch := ledger.AbsGatewayCoordinatorMismatchTokens
+	tolerance := int64(0)
+	maxCompletionDelta := int64(0)
+	requiredGatewayOutcome := ""
+	requiredGatewayTokenSource := ""
+	if sc != nil {
+		tolerance = sc.ChargedDeliveredToleranceTokens
+		maxCompletionDelta = sc.MaxCompletionTokenDelta
+		requiredGatewayOutcome = sc.RequiredGatewayOutcome
+		requiredGatewayTokenSource = sc.RequiredGatewayTokenSource
+	}
+	completionDeltaPairs := completionTokenDeltaViolations(ledger, maxCompletionDelta)
+	gatewayOutcomePairs := gatewayOutcomeViolations(ledger, requiredGatewayOutcome)
+	gatewayTokenSourcePairs := gatewayTokenSourceViolations(ledger, requiredGatewayTokenSource)
+	unmatched := len(ledger.UnmatchedSuccesses)
+	unmatchedGwOK := len(ledger.UnmatchedGatewayOKRows)
+	unmatchedCoord2xx := len(ledger.UnmatchedCoordinator2xxRows)
+	coordMissingOK := len(ledger.MatchedCoordMissing)
+	// Ambiguity — ≥2 exact-id candidates within window+account after
+	// the matcher's filters. Hard I1 signal (PK collision evidence
+	// across accounts, or duplicate settlements within one account).
+	ambiguousGw := len(ledger.AmbiguousExactGatewayIDs)
+	ambiguousCoord := len(ledger.AmbiguousExactCoordIDs)
+
+	driftSignals := 0
+	if unmatched > 0 {
+		driftSignals++
+	}
+	if unmatchedGwOK > 0 {
+		driftSignals++
+	}
+	if unmatchedCoord2xx > 0 {
+		driftSignals++
+	}
+	if coordMissingOK > 0 {
+		driftSignals++
+	}
+	if gwOverbillVsHarness > tolerance {
+		driftSignals++
+	}
+	if len(completionDeltaPairs) > 0 {
+		driftSignals++
+	}
+	if len(gatewayOutcomePairs) > 0 {
+		driftSignals++
+	}
+	if len(gatewayTokenSourcePairs) > 0 {
+		driftSignals++
+	}
+	if absGwCoordMismatch > 0 {
+		driftSignals++
+	}
+	if ambiguousGw > 0 {
+		driftSignals++
+	}
+	if ambiguousCoord > 0 {
+		driftSignals++
+	}
+
+	if driftSignals == 0 {
+		c.Passed = true
+		c.Detail = fmt.Sprintf("reconciled cleanly: harness=%d ok, gw=%d ok, coord=%d 2xx; %d matched pairs, no overbills (per_matched_pair_v2 basis)",
+			ledger.HarnessSuccessful, ledger.GatewayRowsOK, ledger.CoordinatorRows2xx, len(ledger.MatchedSuccesses))
+		return c
+	}
+
+	c.Passed = false
+	c.EvidenceCount = driftSignals
+	var parts []string
+	if unmatched > 0 {
+		parts = append(parts, fmt.Sprintf("%d harness successes unmatched on gateway", unmatched))
+	}
+	if unmatchedGwOK > 0 {
+		parts = append(parts, fmt.Sprintf("%d gateway-ok rows unmatched by any harness success", unmatchedGwOK))
+	}
+	if unmatchedCoord2xx > 0 {
+		parts = append(parts, fmt.Sprintf("%d coord 2xx rows unmatched by any harness success", unmatchedCoord2xx))
+	}
+	if coordMissingOK > 0 {
+		parts = append(parts, fmt.Sprintf("%d gateway-ok matched pairs with no coord row", coordMissingOK))
+	}
+	if gwOverbillVsHarness > tolerance {
+		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness above tolerance %d across %d pair(s)", gwOverbillVsHarness, tolerance, len(ledger.OverbilledPairs)))
+	}
+	if len(completionDeltaPairs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d buyer/gateway completion-token pair(s) exceeded max delta %d", len(completionDeltaPairs), maxCompletionDelta))
+	}
+	if len(gatewayOutcomePairs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d matched pair(s) did not have required gateway outcome %q", len(gatewayOutcomePairs), requiredGatewayOutcome))
+	}
+	if len(gatewayTokenSourcePairs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d matched pair(s) did not have required gateway token source %q", len(gatewayTokenSourcePairs), requiredGatewayTokenSource))
+	}
+	if absGwCoordMismatch > 0 {
+		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
+	}
+	if ambiguousGw > 0 {
+		parts = append(parts, fmt.Sprintf("%d gateway exact-id ambiguities (id collision within window+account)", ambiguousGw))
+	}
+	if ambiguousCoord > 0 {
+		parts = append(parts, fmt.Sprintf("%d coord exact-id ambiguities", ambiguousCoord))
+	}
+	c.Detail = strings.Join(parts, "; ")
+	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedSuccesses...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedGatewayOKRows...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedCoordinator2xxRows...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.OverbilledPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, completionDeltaPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, gatewayOutcomePairs...)
+	c.OffendingIDs = append(c.OffendingIDs, gatewayTokenSourcePairs...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.MatchedCoordMissing...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.GatewayCoordMismatchedPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.AmbiguousExactGatewayIDs...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.AmbiguousExactCoordIDs...)
+	return c
+}
+
+func completionTokenDeltaViolations(ledger *reconcile.Result, maxDelta int64) []string {
+	if ledger == nil || maxDelta <= 0 {
+		return nil
+	}
+	var out []string
+	for _, p := range ledger.MatchedSuccesses {
+		delta := p.GatewayCompletionTokens - p.HarnessCompletionTokens
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta > maxDelta {
+			out = append(out, p.HarnessRequestID)
+		}
+	}
+	return out
+}
+
+func gatewayOutcomeViolations(ledger *reconcile.Result, required string) []string {
+	if ledger == nil || required == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range ledger.MatchedSuccesses {
+		if p.GatewayOutcome != required {
+			out = append(out, p.HarnessRequestID)
+		}
+	}
+	return out
+}
+
+func gatewayTokenSourceViolations(ledger *reconcile.Result, required string) []string {
+	if ledger == nil || required == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range ledger.MatchedSuccesses {
+		if p.GatewayTokenSource != required {
+			out = append(out, p.HarnessRequestID)
+		}
+	}
+	return out
+}
+
+// I2 — no 5xx response without a billing settlement entry on the
+// coordinator side. The gateway should write a settlement row for
+// every response it sent, including 5xx (outcome=upstream_error etc.).
+// Orphan 5xx is the signature of a billing-bypass path or a logging gap.
+//
+// In phase A we only check the gateway side: harness saw a 5xx response,
+// is there a usage_events row for it? Coordinator-side request_log may
+// legitimately omit 5xx that never reached coordinator routing (e.g.,
+// gateway-side quota reject).
+func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
+	c := Check{ID: "I2", Title: "no 5xx response without billing settlement"}
+	var orphans []string
+	var fiveXX int
+	if ledger == nil {
+		for _, r := range results {
+			if r.HTTPStatus >= 500 && r.HTTPStatus < 600 {
+				fiveXX++
+				if r.RequestID != "" {
+					orphans = append(orphans, r.RequestID)
+				} else {
+					orphans = append(orphans, fmt.Sprintf("buyer=%d req=%d", r.BuyerIndex, r.RequestIndex))
+				}
+			}
+		}
+		if fiveXX == 0 {
+			c.Passed = true
+			c.Detail = "no 5xx responses observed"
+			return c
+		}
+		c.Passed = false
+		c.OffendingIDs = orphans
+		c.EvidenceCount = len(orphans)
+		c.Detail = fmt.Sprintf("%d 5xx responses observed but settlement DB not configured", fiveXX)
+		return c
+	}
+	settled := map[string]reconcile.SettlementRequestIdentity{}
+	if ledger.GatewayHasAccountID {
+		for _, row := range ledger.GatewaySettlementRequests {
+			if row.AccountID == "" || row.RequestID == "" {
+				continue
+			}
+			settled[row.AccountID+"|"+row.RequestID] = row
+		}
+	} else {
+		for _, row := range ledger.GatewaySettlementRequests {
+			if row.RequestID == "" {
+				continue
+			}
+			settled[row.RequestID] = row
+		}
+		for _, id := range ledger.GatewaySettlementRequestIDs {
+			if _, ok := settled[id]; !ok {
+				settled[id] = reconcile.SettlementRequestIdentity{RequestID: id}
+			}
+		}
+	}
+	for _, r := range results {
+		if r.HTTPStatus < 500 || r.HTTPStatus >= 600 {
+			continue
+		}
+		fiveXX++
+		if r.RequestID == "" {
+			orphans = append(orphans, fmt.Sprintf("buyer=%d req=%d", r.BuyerIndex, r.RequestIndex))
+			continue
+		}
+		if ledger.GatewayHasAccountID {
+			if ledger.HarnessAccountID == "" {
+				orphans = append(orphans, r.RequestID)
+				continue
+			}
+			row, ok := settled[ledger.HarnessAccountID+"|"+r.RequestID]
+			if !ok || !valid5xxSettlementEvidence(row) {
+				orphans = append(orphans, r.RequestID)
+			}
+			continue
+		}
+		row, ok := settled[r.RequestID]
+		if !ok || !valid5xxSettlementEvidence(row) {
+			orphans = append(orphans, r.RequestID)
+		}
+	}
+	invalidAuditRows := invalidGatewayAuditEvidenceIDs(results, ledger)
+	if fiveXX == 0 && len(invalidAuditRows) == 0 {
+		c.Passed = true
+		c.Detail = "no 5xx responses observed"
+		return c
+	}
+	if len(orphans) == 0 && len(invalidAuditRows) == 0 {
+		c.Passed = true
+		c.Detail = fmt.Sprintf("%d 5xx responses, all have valid gateway settlement/audit rows", fiveXX)
+		return c
+	}
+	c.Passed = false
+	c.OffendingIDs = append(append([]string{}, orphans...), invalidAuditRows...)
+	c.EvidenceCount = len(c.OffendingIDs)
+	c.Detail = fmt.Sprintf("%d 5xx responses without valid gateway settlement/audit evidence; %d invalid gateway audit rows — billing-bypass risk", len(orphans), len(invalidAuditRows))
+	return c
+}
+
+func valid5xxSettlementEvidence(row reconcile.SettlementRequestIdentity) bool {
+	if isRefundedAuditOnlyOutcome(row.Outcome) {
+		return row.TotalTokens == 0 && row.ReservationStatus == "refunded"
+	}
+	if row.ReservationStatus != "" {
+		if row.TotalTokens == 0 {
+			return row.ReservationStatus == "refunded"
+		}
+		return row.ReservationStatus == "settled"
+	}
+	return true
+}
+
+func invalidGatewayAuditEvidenceIDs(results []buyer.Result, ledger *reconcile.Result) []string {
+	invalid := []string{}
+	owned := harnessOwnedRequestIDs(results)
+	for _, row := range ledger.GatewaySettlementRequests {
+		if row.RequestID == "" || !owned[row.RequestID] || !isRefundedAuditOnlyOutcome(row.Outcome) {
+			continue
+		}
+		if ledger.GatewayHasAccountID {
+			if ledger.HarnessAccountID == "" || row.AccountID != ledger.HarnessAccountID {
+				continue
+			}
+		}
+		if valid5xxSettlementEvidence(row) {
+			continue
+		}
+		invalid = append(invalid, row.RequestID)
+	}
+	return invalid
+}
+
+func harnessOwnedRequestIDs(results []buyer.Result) map[string]bool {
+	owned := map[string]bool{}
+	for _, r := range results {
+		if r.RequestID == "" {
+			continue
+		}
+		owned[r.RequestID] = true
+	}
+	return owned
+}
+
+func isRefundedAuditOnlyOutcome(outcome string) bool {
+	return outcome == "no_provider_available" || strings.HasPrefix(outcome, "tier2_")
+}
+
+// I3 — no charged-tokens > delivered-tokens. This consumes the
+// reconciler's actionable GatewayOverbillVsHarnessTokens field rather
+// than raw net drift, so corroborated SPEC-006 fallback prompt-token
+// drift remains diagnostic while uncorroborated overbill still fails.
+//
+// Phase A limitation: when the usage block is provider-reported and
+// differs from the SSE-content count, we may flag false positives.
+// Triage will tell us if that needs a tolerance.
+func checkI3(sc *scenario.Scenario, ledger *reconcile.Result) Check {
+	c := Check{ID: "I3", Title: "no charged-tokens > delivered-tokens"}
+	if ledger == nil {
+		c.Skipped = true
+		c.Detail = "reconciliation skipped: charged-vs-delivered requires gateway settlement rows"
+		return c
+	}
+	tolerance := int64(0)
+	if sc != nil {
+		tolerance = sc.ChargedDeliveredToleranceTokens
+	}
+	if ledger.GatewayOverbillVsHarnessTokens <= tolerance {
+		c.Passed = true
+		c.Detail = fmt.Sprintf("no overcharges observed above tolerance: gateway_overbill_vs_harness=%d tolerance=%d", ledger.GatewayOverbillVsHarnessTokens, tolerance)
+		return c
+	}
+	c.Passed = false
+	c.OffendingIDs = ledger.OverbilledPairs
+	c.EvidenceCount = len(ledger.OverbilledPairs)
+	c.Detail = fmt.Sprintf("gateway charged %d tokens above delivered tolerance %d across %d request(s)", ledger.GatewayOverbillVsHarnessTokens, tolerance, len(ledger.OverbilledPairs))
+	return c
+}
+
+// I4 — silent hang. For each result, if:
+//   - the stream stayed open long enough that (EndUTC - LastByteUTC) exceeds threshold, AND
+//   - the request was streaming, AND
+//   - we did NOT see the terminator, AND
+//   - outcome is "ok"
+//
+// then the buyer was left waiting on dead air without an error. That's
+// the worst-shaped UX failure — buyer thinks something's happening when
+// nothing is. Promote Outcome to "silent_hang" in evidence.
+func checkI4(sc *scenario.Scenario, results []buyer.Result) Check {
+	c := Check{ID: "I4", Title: "no silent hang (open stream, no bytes, no terminator)"}
+	threshold := sc.SilentHangThreshold
+	var offenders []string
+	for _, r := range results {
+		if !r.Stream || r.Outcome != "ok" || r.SawTerminator {
+			continue
+		}
+		if r.LastByteUTC.IsZero() {
+			// Never saw any byte — that's a TTFT failure, classified
+			// under transport_error normally. If outcome=ok with zero
+			// bytes, that's also a silent-hang signature.
+			offenders = append(offenders, r.RequestID)
+			continue
+		}
+		gap := r.EndUTC.Sub(r.LastByteUTC)
+		if gap >= threshold {
+			offenders = append(offenders, r.RequestID)
+		}
+	}
+	if len(offenders) == 0 {
+		c.Passed = true
+		c.Detail = fmt.Sprintf("no silent hangs (threshold=%s)", time.Duration(threshold))
+		return c
+	}
+	c.Passed = false
+	c.OffendingIDs = offenders
+	c.EvidenceCount = len(offenders)
+	c.Detail = fmt.Sprintf("%d streams stayed open past %s without bytes or terminator", len(offenders), time.Duration(threshold))
+	return c
+}

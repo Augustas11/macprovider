@@ -1,0 +1,50 @@
+listen:
+  buyer_port: 8443
+pool:
+  heartbeat_interval_s: 30
+  warmup_gate_enabled: false
+routing:
+  request_timeout_s: 280
+auth:
+  operator_key: env:OPERATOR_KEY
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  credential_bootstrap_mints_per_ip_hour: 8
+  credential_bootstrap_mints_per_id_hour: 3
+  credential_bootstrap_mints_global_hour: 128
+  credential_bootstrap_unconfirmed_max: 64
+  credential_bootstrap_outstanding_max: 64
+  credential_bootstrap_token_ttl_s: 600
+  credential_bootstrap_identity_retention_s: 604800
+providers:
+  - provider_id: mac
+    endpoint_url: ""
+    display_name: Pearl Mac provider
+autotune:
+  public_keys:
+    streamvc-autotune-static-v5: "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
+referrals:
+  require_for_registration: true
+  enable_public_validation: false
+  enable_join_links: false
+  enable_social_invite_bonus: false
+  campaign: prebeta_20260719
+  policy_version: "v1"
+  grandfather_before: ""
+  current_key_id: k1
+  hmac_keys:
+    k1: env:MAL_REFERRAL_HMAC_K1
+  provider_base_uses: 1
+  social_bonus_uses: 2
+  challenge_ttl_s: 900
+  social_verification_dwell_s: 1800
+  join_base_url: "https://malibu.tech/j"
+  x_api_bearer_token: ""
+  request_access_url: ""
+rewards:
+  rate_card:
+    default:
+      prompt_credits_per_mtok: 500000
+      completion_credits_per_mtok: 1000000
+coordinator_advertised_version:
+  latest_binary_version: "1.8.66"
+  required_binary_version: "1.8.33"

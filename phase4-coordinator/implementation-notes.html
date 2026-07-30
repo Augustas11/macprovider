@@ -82,14 +82,16 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     <code>T2.B</code> AEAD failure/session-close logs, and surface
     <code>tier2_aead_decrypt_failed</code> to buyers before or after SSE
     commit as appropriate. The coordinator also tracks encrypted requests per
-    session and session age; when the configured rekey request or age
-    threshold is reached, it removes the provider session, marks the provider
-    unavailable, closes the connection so the provider reconnects with a fresh
-    v2 handshake, and emits a <code>T2.B</code> <code>aead_rekey</code>
-    audit event. If another dispatch arrives while an active encrypted request
-    is still draining after the threshold was reached, the coordinator
-    backpressures the new dispatch and defers the close until the active
-    request completes.</p>
+    session and session age. A rekey-capable provider now rotates in band on the
+    same WebSocket and assigned identity: the coordinator gates new encrypted
+    frames, drains admitted inference and control probes, exchanges fresh
+    X25519 keys, proves both fresh AEAD directions at sequence zero, and
+    atomically installs the new epoch without changing readiness or warm-up
+    state. Waiting buyer dispatches use a bounded context-aware queue. Legacy
+    providers drain and then fail closed through the historical reconnect path.
+    The coordinator emits <code>T2.B</code> <code>aead_rekey</code>,
+    <code>aead_rekey_committed</code>, and <code>aead_rekey_failed</code>
+    audit events.</p>
     <p><strong>Routing and disclosure:</strong> buyer routing now honors
     <code>require_encrypted_leg</code> and
     <code>require_attestation</code> in the same candidate-filtering path as
@@ -164,10 +166,10 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     buyer-facing AEAD failure mapping.
     <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test -race ./internal/ws -run 'TestEncryptedRelay'</code>
     also passes for the touched relay path.
-    The same focused run now covers request-threshold and age-threshold rekey
-    closure, active-request drain protection before rekey close, provider
-    state transition to <code>unavailable</code>, session removal, and
-    <code>aead_rekey</code> audit logging.
+    The same focused run now covers request-threshold and age-threshold in-band
+    rekey, active inference and encrypted-control drain protection, bounded
+    waiters, stable provider readiness/identity, fresh bidirectional proof,
+    fail-closed legacy fallback, and rekey audit logging.
     <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./internal/tier2 ./internal/config ./internal/pool ./internal/buyer</code>
     passes under local <code>httptest</code> listener permission. Broader
     <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>

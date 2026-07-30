@@ -1,0 +1,73 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+index b1b5b52..b8d620c 100644
+--- a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
++++ b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+@@ -642,24 +642,17 @@ actor ControlSocketServer {
+             let capturedFD = fd
+             pusherTask = Task.detached(priority: .userInitiated) {
+                 for await request in stream {
+-                    FileHandle.standardError.write(Data("[idsig] pusher: dispatching request for \(request.providerID)\n".utf8))
+-                    do {
+-                        try Self.writeFrameDirect(
+-                            fd: capturedFD,
+-                            frame: .identitySignatureRequest(
+-                                authAttemptID: request.authAttemptID,
+-                                providerID: request.providerID,
+-                                binaryVersion: request.binaryVersion,
+-                                providerECDHPublicKey: request.providerECDHPublicKey,
+-                                transcriptSHA256: request.transcriptSHA256
+-                            )
++                    try? Self.writeFrameDirect(
++                        fd: capturedFD,
++                        frame: .identitySignatureRequest(
++                            authAttemptID: request.authAttemptID,
++                            providerID: request.providerID,
++                            binaryVersion: request.binaryVersion,
++                            providerECDHPublicKey: request.providerECDHPublicKey,
++                            transcriptSHA256: request.transcriptSHA256
+                         )
+-                        FileHandle.standardError.write(Data("[idsig] pusher: frame written to fd=\(capturedFD)\n".utf8))
+-                    } catch {
+-                        FileHandle.standardError.write(Data("[idsig] pusher: write failed err=\(error)\n".utf8))
+-                    }
++                    )
+                 }
+-                FileHandle.standardError.write(Data("[idsig] pusher: stream ended\n".utf8))
+             }
+         }
+         defer {
+diff --git a/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift b/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift
+index ab67660..4088c4c 100644
+--- a/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift
++++ b/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift
+@@ -92,7 +92,6 @@ public actor IdentitySignatureBridge {
+     /// connected — the caller should proceed WITHOUT the signature and let
+     /// the coordinator's per-provider exemption handle it.
+     public func requestSignature(_ request: Request, timeout: TimeInterval) async -> Response? {
+-        FileHandle.standardError.write(Data("[idsig] bridge: requestSignature listeners=\(listeners.count)\n".utf8))
+         if let existing = pending {
+             existing.continuation.resume(returning: nil)
+             pending = nil
+@@ -108,14 +107,12 @@ public actor IdentitySignatureBridge {
+                 continuation.yield(request)
+             }
+         }
+-        FileHandle.standardError.write(Data("[idsig] bridge: requestSignature returned response=\(response == nil ? "nil" : "value") accepted=\(response?.accepted.description ?? "nil")\n".utf8))
+         return response
+     }
+ 
+     /// Called by `ControlSocket.handleClient` after receiving an
+     /// `identitySignatureResponse` frame from Malibu.app.
+     public func deliverResponse(_ response: Response) {
+-        FileHandle.standardError.write(Data("[idsig] bridge: deliverResponse accepted=\(response.accepted) hasSig=\(response.identitySignature != nil) pending=\(pending != nil)\n".utf8))
+         guard let existing = pending else { return }
+         pending = nil
+         existing.continuation.resume(returning: response)
+@@ -129,7 +126,6 @@ public actor IdentitySignatureBridge {
+         let id = UUID()
+         let stream = AsyncStream<Request> { continuation in
+             listeners[id] = continuation
+-            FileHandle.standardError.write(Data("[idsig] bridge: subscribe id=\(id.uuidString) total_listeners=\(listeners.count) hasPending=\(pending != nil)\n".utf8))
+             if let pending {
+                 continuation.yield(pending.request)
+             }

@@ -182,32 +182,101 @@ func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter
 		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
+	// SPEC-007 v0.5 §5.6 (#245): path-segment MUST carry an `int_`
+	// prefix. Untyped (legacy bare-UUID) calls return
+	// 400 invalid_request_error + session_id_untyped. Envelope shape
+	// matches the gateway §6.4 emit so dashboard/runbook matchers
+	// behave the same across both phases (R1 SEC LOW-1 closure).
+	// The v0.4 deprecation-window log emit is removed; that path is
+	// no longer reachable.
+	stripped, ok := strings.CutPrefix(requestID, "int_")
+	if !ok || stripped == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]any{
+				"type":      "invalid_request_error",
+				"code":      "session_id_untyped",
+				"message":   "path-segment must be int_<request_id> — bare ids rejected per SPEC-007 v0.5",
+				"source":    "coordinator",
+				"retryable": false,
+			},
+		})
+		return
+	}
+	requestID = stripped
 	detail, err := h.store.SessionDetail(ctx, h.db, requestID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) && h.cfg.Explorer.GatewayBaseURL != "" {
-			gateway, status, gwErr := h.fetchGatewayJSONStatus(r, "/admin/explorer/sessions/"+url.PathEscape(requestID))
-			if gwErr == nil && status >= 200 && status < 300 {
-				writeJSON(w, http.StatusOK, map[string]any{
-					"request_id": requestID, "attempts": []any{}, "ledger_rows": []any{},
-					"provider_identity_snapshots": []any{}, "gateway": gateway,
-					"partial": false, "error": nil,
-				})
-				return
-			}
-		}
+		// ISS-212 v0.3 §5.6: path-segment is coordinator-internal
+		// `request_id` ONLY. No coordinator-row → 404. The
+		// pre-v0.3 gateway-only fallback (proxy the raw
+		// path-segment to gateway when SessionDetail returns
+		// ErrNoRows) violated the v0.3 internal-id-only contract
+		// — it allowed operators to paste an arbitrary string and
+		// have it interpreted as a gateway external_request_id,
+		// recreating the path-segment-overload class deferred to
+		// v0.4. ISS-212 R5 code MEDIUM.
 		writeExplorerStorageError(w, err)
 		return
 	}
 	if h.cfg.Explorer.GatewayBaseURL != "" {
-		gateway, err := h.fetchGatewayJSON(r, "/admin/explorer/sessions/"+url.PathEscape(requestID))
-		if err != nil {
-			detail["partial"] = true
-			detail["gateway"] = map[string]any{"error": map[string]any{"code": "gateway_unavailable"}}
+		// ISS-212 v0.3 §5.6 security contract: proxy to the
+		// gateway ONLY when the coordinator-resolved row supplies
+		// BOTH a non-empty external_request_id AND a non-empty
+		// account_id. The gateway lookup uses the composite
+		// (account_id, external_request_id) reconciliation key so
+		// the matching account's row is returned (composite-PK
+		// safe). Falling back to a partial key — unscoped
+		// external_request_id, OR the coordinator-internal id —
+		// would risk the gateway returning an unrelated account's
+		// row that the coordinator would embed under unrelated
+		// coordinator-side data (ISS-212 R3 security MEDIUM; R4
+		// security MEDIUM tightened to "both-or-nothing"). For
+		// legacy / pre-v0.9.1-gateway / direct-buyer rows that
+		// lack either field, the gateway section is marked
+		// "gateway_identity_unavailable" rather than forwarded.
+		external, account := firstAttemptWithBothFields(detail)
+		if external != "" && account != "" {
+			// SPEC-007 §6.4 v0.5 (#245): the gateway REQUIRES the typed
+			// `ext_<external_request_id>` path-segment form. Untyped
+			// calls return 400 session_id_untyped — so the coordinator
+			// MUST send the typed prefix on every proxy.
+			gwPath := "/admin/explorer/sessions/ext_" + url.PathEscape(external)
+			vs := url.Values{}
+			vs.Set("account_id", account)
+			gwQuery := vs.Encode()
+			gateway, status, err := h.fetchGatewayJSONStatusRawQuery(r, gwPath, gwQuery)
+			if err != nil || status < 200 || status >= 300 {
+				detail["partial"] = true
+				detail["gateway"] = map[string]any{"error": map[string]any{"code": "gateway_unavailable"}}
+			} else {
+				detail["gateway"] = gateway
+			}
 		} else {
-			detail["gateway"] = gateway
+			// Composite identity unavailable; do NOT proxy.
+			detail["gateway"] = map[string]any{"error": map[string]any{"code": "gateway_identity_unavailable"}}
 		}
 	}
 	writeJSON(w, http.StatusOK, detail)
+}
+
+// firstAttemptWithBothFields scans coordinator-side attempts and
+// returns the (external_request_id, account_id) tuple from the
+// FIRST single attempt row that supplies BOTH non-empty fields.
+// SPEC-007 v0.3 §5.6 both-or-nothing: the gateway composite key
+// MUST come from a single resolved row — synthesizing it across
+// multiple attempts (e.g. taking external from row A and
+// account_id from row B) would compose a key that doesn't
+// correspond to any real request_log row and could land on an
+// unrelated account's gateway data. ISS-212 R5 code MEDIUM.
+func firstAttemptWithBothFields(detail map[string]any) (external, account string) {
+	attempts, _ := detail["attempts"].([]map[string]any)
+	for _, row := range attempts {
+		ext, _ := row["external_request_id"].(string)
+		acc, _ := row["account_id"].(string)
+		if ext != "" && acc != "" {
+			return ext, acc
+		}
+	}
+	return "", ""
 }
 
 func (h *Handler) handleProviders(ctx context.Context, w http.ResponseWriter) {

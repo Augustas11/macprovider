@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
@@ -85,15 +86,199 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// maxKnownSchemaVersion is the highest schema_migrations.version this
+// binary understands. Version history:
+//
+//	v1 — original schema.
+//	v2 — issue #196: usage_events PK (account_id, request_id).
+//	v3 — issue #210: demo_usage_events PK (demo_token_hash, request_id).
+//	v4 — issue #231: idx_quota_request + idx_concurrency_request so
+//	     the §6.4 ambiguity probe stops full-scanning those tables.
+//	v5 — SPEC-022: usage_events accepts coordinator_observed settlement
+//	     rows after coordinator receipt finality verifies canonical usage.
+//	v6 — SPEC-022 D12: quota_reservations marks receipt-finality holds so
+//	     admin reconciliation does not scan ordinary in-flight reservations.
+//	v7 — SPEC-022 D13: quota_reservations accepts stale_held terminal holds
+//	     for coordinator-missing ambiguity that must release active quota.
+//	v8 — public issuance reservation events for atomic per-IP signup/demo/
+//	     feedback ceilings.
+//	v9 — oauth return_to + oauth_handoffs support.
+//
+// At Open time the store reads the current applied version; if it
+// exceeds this constant the binary is older than the DB and refuses
+// to start, preventing silent data hazards on rollback (e.g., a
+// legacy `WHERE request_id = ?` lookup returning a wrong-identity
+// row once cross-identity collisions exist).
+//
+// Operators rolling back the gateway binary on a DB at a higher
+// version must restore /var/lib/macprovider/gateway.db from the
+// pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
+const maxKnownSchemaVersion = 9
+
 func (s *Store) Migrate(ctx context.Context) error {
+	if err := s.checkSchemaVersionGate(ctx); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
+		return err
+	}
+	// usage_events table + auxiliary DDL (indexes + append-only
+	// triggers) are kept in shared constants so the in-place upgrade
+	// path (ensureUsageEventsCompositePK) creates them with identical
+	// text, preserving sqlite_master byte-equality across fresh
+	// installs and migrated DBs.
+	if _, err := s.db.ExecContext(ctx, usageEventsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, quotaReservationsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, quotaReservationsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if err := s.ensureOAuthStateExpiresAtColumn(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureOAuthStateActionColumn(ctx); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", encodeTime(time.Now().UTC()))
+	if err := s.ensureOAuthStateReturnToColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureOAuthHandoffsTable(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureUsageEventsCompositePK(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureDemoUsageEventsCompositePK(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureUsageEventsCoordinatorObservedSource(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureQuotaSettlementHoldColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureQuotaReservationStaleHeldStatus(ctx); err != nil {
+		return err
+	}
+	// Stamp the schema version. We always insert v1 (preserves
+	// historical behavior for any tooling that checked exactly that
+	// row) AND the post-#196 marker v2. INSERT OR IGNORE keeps it
+	// idempotent on re-run.
+	//
+	// Note: ensureUsageEventsCompositePK ALSO stamps v2 inside its
+	// rebuild transaction so the shape change and the version marker
+	// commit atomically (ISS-196 R4 architect HIGH). The outer v2
+	// insert here is the no-op repair path for new installs and for
+	// DBs that came through Migrate without needing a rebuild.
+	now := encodeTime(time.Now().UTC())
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(5, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(7, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(8, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(9, ?)", now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureOAuthStateExpiresAtColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(oauth_states)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasExpiresAt := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "expires_at" {
+			hasExpiresAt = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasExpiresAt {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE oauth_states SET expires_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at, '+10 minutes') WHERE expires_at = ''`); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_oauth_states_session ON oauth_states(session_id, expires_at);
+		CREATE INDEX IF NOT EXISTS idx_oauth_states_client_ip_expires ON oauth_states(client_ip, expires_at);
+	`)
 	return err
+}
+
+// checkSchemaVersionGate refuses to run Migrate when the DB carries
+// a schema version higher than this binary knows about. Protects
+// against the silent-corruption rollback scenario flagged in the
+// ISS-196 R1 architect HIGH finding: an older binary opening a
+// DB that has already been migrated to a composite-PK shape would
+// run the legacy `WHERE request_id = ?` query and risk returning
+// a wrong-account row once cross-account request_id duplicates
+// exist. Failing closed at Open is the safe choice.
+func (s *Store) checkSchemaVersionGate(ctx context.Context) error {
+	// schema_migrations may not exist yet on a brand-new DB; the
+	// follow-up schemaSQL run creates it. Tolerate the missing-table
+	// case here.
+	var current sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&current)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil
+		}
+		return err
+	}
+	if !current.Valid {
+		return nil
+	}
+	if current.Int64 > maxKnownSchemaVersion {
+		return fmt.Errorf("gateway DB schema_migrations.version=%d exceeds this binary's max-known version %d — refusing to open (issue #196 rollback safety). Restore from pre-deploy snapshot.",
+			current.Int64, maxKnownSchemaVersion)
+	}
+	return nil
 }
 
 // ensureOAuthStateActionColumn handles upgrade-in-place for pre-existing
@@ -128,6 +313,398 @@ func (s *Store) ensureOAuthStateActionColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN action TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+func (s *Store) ensureOAuthStateReturnToColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(oauth_states)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasReturnTo := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "return_to" {
+			hasReturnTo = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasReturnTo {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN return_to TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) ensureOAuthHandoffsTable(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS oauth_handoffs (
+			token_hash BLOB PRIMARY KEY,
+			api_key TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			consumed_at TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_oauth_handoffs_expires ON oauth_handoffs(expires_at);
+	`)
+	return err
+}
+
+// ensureUsageEventsCompositePK upgrades pre-issue-#196 gateway.db files
+// whose `usage_events` table has PRIMARY KEY (request_id) — a global
+// uniqueness constraint that lets a buyer with two accounts collide on
+// the same X-Request-ID after streaming has flushed, escaping
+// settlement. The fix is composite PK (account_id, request_id).
+//
+// New installs land on the composite PK directly via schemaSQL. Old
+// installs need a table rebuild because SQLite cannot ALTER PRIMARY
+// KEY in place. Detection: PRAGMA table_info pk-column count and
+// names.
+//
+// The rebuild runs inside a single deferred-FK transaction so partial
+// state cannot leak. The append-only DELETE/UPDATE triggers and the
+// two secondary indexes ride along with the renamed table per SQLite
+// ALTER TABLE RENAME semantics (verified against the SQLite docs);
+// no manual recreate is needed.
+func (s *Store) ensureUsageEventsCompositePK(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(usage_events)`)
+	if err != nil {
+		return err
+	}
+	type col struct {
+		name string
+		pk   int
+	}
+	var pkCols []col
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if pk > 0 {
+			pkCols = append(pkCols, col{name: name, pk: pk})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// Composite (account_id, request_id) — already migrated.
+	if len(pkCols) == 2 &&
+		((pkCols[0].name == "account_id" && pkCols[1].name == "request_id") ||
+			(pkCols[0].name == "request_id" && pkCols[1].name == "account_id")) {
+		return nil
+	}
+	// Anything other than the legacy single-column (request_id) PK is
+	// an unrecognized shape — bail loudly rather than corrupt data.
+	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+		return fmt.Errorf("usage_events PK shape unrecognized: %+v", pkCols)
+	}
+	// Rebuild. PRAGMA foreign_keys is OFF for the duration so the
+	// drop+rename does not trip cascading FK checks (usage_events is
+	// not a FK target today, but defensive). Restored on exit.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Sequence: legacy → legacy_old (rename), then create the
+	// canonical usage_events with the new PK using its REAL name
+	// from the start. This keeps sqlite_master.sql for usage_events
+	// byte-equal between fresh installs and migrated DBs (an
+	// ALTER...RENAME would store `CREATE TABLE "usage_events"` with
+	// quotes — caught by ISS-196 R2 architect MEDIUM).
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_events RENAME TO usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename legacy usage_events aside: %w", err)
+	}
+	// Use the SAME usageEventsTableDDL the fresh-install path runs so
+	// sqlite_master.sql for usage_events is byte-equal across paths.
+	if _, err := tx.ExecContext(ctx, usageEventsTableDDL); err != nil {
+		return fmt.Errorf("create new usage_events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO usage_events
+			(request_id, account_id, demo_identity, window_date,
+			 prompt_tokens, completion_tokens, total_tokens,
+			 token_source, outcome, created_at)
+		SELECT request_id, account_id, demo_identity, window_date,
+		       prompt_tokens, completion_tokens, total_tokens,
+		       token_source, outcome, created_at
+		FROM usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy usage_events rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy usage_events table: %w", err)
+	}
+	// Recreate the secondary indexes and append-only triggers. DROP
+	// TABLE removed them. The shared usageEventsAuxiliaryDDL constant
+	// is the SAME text Migrate() executes on a fresh install, so the
+	// post-migration sqlite_master entries are byte-for-byte identical
+	// — addresses architect R1 MEDIUM finding.
+	if _, err := tx.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate usage_events index/trigger: %w", err)
+	}
+	// Stamp schema_migrations version 2 inside the SAME transaction as
+	// the rebuild. Without this atomicity, the rebuild could commit but
+	// the version stamp could fail — leaving a composite-PK DB with no
+	// v2 marker, which the next open (or an old binary) would treat as
+	// v1 and proceed against a shape it doesn't understand. ISS-196 R4
+	// architect HIGH.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v2 inside rebuild tx: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ensureDemoUsageEventsCompositePK is the issue #210 sibling of
+// ensureUsageEventsCompositePK. Migrates `demo_usage_events` from
+// PRIMARY KEY (request_id) — pre-existing global uniqueness across
+// all demo identities, exploitable when two demo_token_hash values
+// collide on the same buyer-supplied X-Request-ID — to composite
+// PRIMARY KEY (demo_token_hash, request_id).
+//
+// Same rebuild pattern as the v2 migration: detect legacy shape,
+// rename-aside + create-canonical + copy + drop, stamp v3 inside
+// the same transaction so the shape change and the version marker
+// commit atomically.
+func (s *Store) ensureDemoUsageEventsCompositePK(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(demo_usage_events)`)
+	if err != nil {
+		return err
+	}
+	type col struct {
+		name string
+		pk   int
+	}
+	var pkCols []col
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if pk > 0 {
+			pkCols = append(pkCols, col{name: name, pk: pk})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// Composite (demo_token_hash, request_id) — already migrated.
+	if len(pkCols) == 2 &&
+		((pkCols[0].name == "demo_token_hash" && pkCols[1].name == "request_id") ||
+			(pkCols[0].name == "request_id" && pkCols[1].name == "demo_token_hash")) {
+		return nil
+	}
+	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+		return fmt.Errorf("demo_usage_events PK shape unrecognized: %+v", pkCols)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE demo_usage_events RENAME TO demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename legacy demo_usage_events aside: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
+		return fmt.Errorf("create new demo_usage_events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO demo_usage_events
+			(request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at)
+		SELECT request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at
+		FROM demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy demo_usage_events rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy demo_usage_events table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate demo_usage_events index/trigger: %w", err)
+	}
+	// Stamp v3 inside the same transaction — atomicity per ISS-196 R4.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v3 inside rebuild tx: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ensureUsageEventsCoordinatorObservedSource rebuilds v4 usage_events
+// tables whose CHECK constraint predates SPEC-022 coordinator finality.
+// SQLite cannot ALTER a CHECK constraint in place, so use the same
+// canonical-table rebuild pattern as the PK migrations.
+func (s *Store) ensureUsageEventsCoordinatorObservedSource(ctx context.Context) error {
+	var sqlText string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT sql FROM sqlite_master
+		WHERE type = 'table' AND name = 'usage_events'`).Scan(&sqlText)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(sqlText, "coordinator_observed") {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_events RENAME TO usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename usage_events for coordinator_observed migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, usageEventsTableDDL); err != nil {
+		return fmt.Errorf("create usage_events with coordinator_observed source: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO usage_events
+			(request_id, account_id, demo_identity, window_date,
+			 prompt_tokens, completion_tokens, total_tokens,
+			 token_source, outcome, created_at)
+		SELECT request_id, account_id, demo_identity, window_date,
+		       prompt_tokens, completion_tokens, total_tokens,
+		       token_source, outcome, created_at
+		FROM usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy usage_events rows for coordinator_observed migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy usage_events after coordinator_observed migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate usage_events index/trigger after coordinator_observed migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(5, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v5 inside coordinator_observed migration tx: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ensureQuotaSettlementHoldColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(quota_reservations)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasSettlementHold := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "settlement_hold" {
+			hasSettlementHold = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasSettlementHold {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations ADD COLUMN settlement_hold INTEGER NOT NULL DEFAULT 0 CHECK (settlement_hold IN (0, 1))`); err != nil {
+		return fmt.Errorf("add quota_reservations.settlement_hold: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v6 with settlement_hold column: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ensureQuotaReservationStaleHeldStatus(ctx context.Context) error {
+	var sqlText string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT sql FROM sqlite_master
+		WHERE type = 'table' AND name = 'quota_reservations'`).Scan(&sqlText)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(sqlText, "stale_held") {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations RENAME TO quota_reservations_legacy`); err != nil {
+		return fmt.Errorf("rename quota_reservations for stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, quotaReservationsTableDDL); err != nil {
+		return fmt.Errorf("create quota_reservations with stale_held status: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO quota_reservations
+			(account_id, request_id, window_date, reserved_tokens, settled_tokens,
+			 status, settlement_hold, expires_at, created_at, settled_at)
+		SELECT account_id, request_id, window_date, reserved_tokens, settled_tokens,
+		       status, settlement_hold, expires_at, created_at, settled_at
+		FROM quota_reservations_legacy`); err != nil {
+		return fmt.Errorf("copy quota_reservations rows for stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE quota_reservations_legacy`); err != nil {
+		return fmt.Errorf("drop legacy quota_reservations after stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, quotaReservationsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate quota_reservations indexes after stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(7, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v7 inside stale_held migration tx: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CreateAccount(ctx context.Context, account storage.Account) error {
@@ -339,48 +916,224 @@ func (s *Store) RotateAPIKey(ctx context.Context, oldKeyID, accountID string, ne
 }
 
 func (s *Store) StoreOAuthState(ctx context.Context, state storage.OAuthState) error {
+	return s.StoreOAuthStateWithCap(ctx, state, 0, time.Now().UTC())
+}
+
+func (s *Store) StoreOAuthStateWithCap(ctx context.Context, state storage.OAuthState, maxPerIP int, now time.Time) error {
 	if state.CreatedAt.IsZero() {
-		state.CreatedAt = time.Now().UTC()
+		if now.IsZero() {
+			now = time.Now().UTC()
+		}
+		state.CreatedAt = now.UTC()
 	}
 	if state.ExpiresAt.IsZero() {
 		state.ExpiresAt = state.CreatedAt.Add(10 * time.Minute)
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, client_ip, created_at, expires_at, action)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`,
-		state.StateHash, state.SessionID, state.RedirectURI, state.ClientIP,
-		encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt), state.Action)
-	return err
-}
-
-func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, string, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
-		return "", "", err
+		return err
+	}
+	defer tx.Rollback()
+	if maxPerIP > 0 && state.ClientIP != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM oauth_states
+			WHERE client_ip = ? AND consumed_at = '' AND expires_at > ?`,
+			state.ClientIP, encodeTime(now.UTC())).Scan(&count); err != nil {
+			return err
+		}
+		if count >= maxPerIP {
+			return storage.ErrOAuthStateCap
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, return_to, client_ip, created_at, expires_at, action)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		state.StateHash, state.SessionID, state.RedirectURI, state.ReturnTo,
+		state.ClientIP, encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt), state.Action)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, string, string, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return "", "", "", err
 	}
 	defer tx.Rollback()
 	var redirectURI string
+	var returnTo string
 	var expiresAt string
 	var consumedAt string
 	var action string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT redirect_uri, expires_at, consumed_at, action
+		SELECT redirect_uri, return_to, expires_at, consumed_at, action
 		FROM oauth_states
 		WHERE state_hash = ? AND session_id = ?`,
-		stateHash, sessionID).Scan(&redirectURI, &expiresAt, &consumedAt, &action); err != nil {
+		stateHash, sessionID).Scan(&redirectURI, &returnTo, &expiresAt, &consumedAt, &action); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", storage.ErrNotFound
+			return "", "", "", storage.ErrNotFound
 		}
-		return "", "", err
+		return "", "", "", err
 	}
 	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
-		return "", "", storage.ErrNotFound
+		return "", "", "", storage.ErrNotFound
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE oauth_states SET consumed_at = ? WHERE state_hash = ?`, encodeTime(now.UTC()), stateHash)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return redirectURI, action, tx.Commit()
+	return redirectURI, action, returnTo, tx.Commit()
+}
+
+func (s *Store) StoreOAuthHandoff(ctx context.Context, handoff storage.OAuthHandoff) error {
+	if handoff.CreatedAt.IsZero() {
+		handoff.CreatedAt = time.Now().UTC()
+	}
+	consumedAt := ""
+	if !handoff.ConsumedAt.IsZero() {
+		consumedAt = encodeTime(handoff.ConsumedAt)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO oauth_handoffs(token_hash, api_key, created_at, expires_at, consumed_at)
+		VALUES(?, ?, ?, ?, ?)`,
+		handoff.TokenHash, handoff.APIKey, encodeTime(handoff.CreatedAt), encodeTime(handoff.ExpiresAt), consumedAt)
+	return err
+}
+
+func (s *Store) ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (string, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var apiKey string
+	var expiresAt string
+	var consumedAt string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT api_key, expires_at, consumed_at
+		FROM oauth_handoffs
+		WHERE token_hash = ?`,
+		tokenHash).Scan(&apiKey, &expiresAt, &consumedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", storage.ErrNotFound
+		}
+		return "", err
+	}
+	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
+		return "", storage.ErrNotFound
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE oauth_handoffs SET consumed_at = ? WHERE token_hash = ?`, encodeTime(now.UTC()), tokenHash)
+	if err != nil {
+		return "", err
+	}
+	return apiKey, tx.Commit()
+}
+
+func (s *Store) PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM oauth_handoffs
+		WHERE expires_at <= ?`, encodeTime(now.UTC()))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM oauth_states
+		WHERE expires_at <= ?`, encodeTime(now.UTC()))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) ReservePublicIssuance(ctx context.Context, reservation storage.PublicIssuanceReservation) error {
+	if reservation.Limit <= 0 {
+		return storage.ErrRateLimit
+	}
+	if reservation.CreatedAt.IsZero() {
+		reservation.CreatedAt = time.Now().UTC()
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	windowStart := encodeTime(reservation.WindowStart.UTC())
+	createdAt := encodeTime(reservation.CreatedAt.UTC())
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM public_issuance_events
+		WHERE surface = ? AND created_at < ?`, reservation.Surface, windowStart); err != nil {
+		return err
+	}
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM public_issuance_events
+		WHERE surface = ? AND client_ip = ? AND created_at >= ?`,
+		reservation.Surface, reservation.ClientIP, windowStart).Scan(&count); err != nil {
+		return err
+	}
+
+	legacyCount, err := s.legacyPublicIssuanceCountTx(ctx, tx, reservation.Surface, reservation.ClientIP, windowStart)
+	if err != nil {
+		return err
+	}
+	count += legacyCount
+	if count >= reservation.Limit {
+		return storage.ErrRateLimit
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO public_issuance_events(surface, client_ip, created_at)
+		VALUES(?, ?, ?)`, reservation.Surface, reservation.ClientIP, createdAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) legacyPublicIssuanceCountTx(ctx context.Context, tx *immediateTx, surface, clientIP, windowStart string) (int, error) {
+	var firstReservation sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT MIN(created_at) FROM public_issuance_events
+		WHERE surface = ? AND client_ip = ?`, surface, clientIP).Scan(&firstReservation); err != nil {
+		return 0, err
+	}
+	legacyUpperBound := ""
+	if firstReservation.Valid {
+		legacyUpperBound = firstReservation.String
+	}
+	var query string
+	switch surface {
+	case "signup":
+		query = `SELECT COUNT(*) FROM signup_events WHERE client_ip = ? AND created_at >= ?`
+	case "demo_session":
+		query = `SELECT COUNT(*) FROM demo_session_events WHERE client_ip = ? AND created_at >= ?`
+	default:
+		return 0, nil
+	}
+	args := []any{clientIP, windowStart}
+	if legacyUpperBound != "" {
+		query += ` AND created_at < ?`
+		args = append(args, legacyUpperBound)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) RecordSignupEvent(ctx context.Context, event storage.SignupEvent) error {
@@ -431,6 +1184,17 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	if _, err := reapExpiredReservationsTx(ctx, tx, req.CreatedAt); err != nil {
 		return storage.QuotaDecision{}, err
 	}
+	var existingStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT status FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`,
+		req.AccountID, req.RequestID).Scan(&existingStatus)
+	if err == nil {
+		return storage.QuotaDecision{}, storage.ErrReservationExists
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return storage.QuotaDecision{}, err
+	}
 	used, reserved, err := dailyUsageTx(ctx, tx, req.AccountID, req.WindowDate)
 	if err != nil {
 		return storage.QuotaDecision{}, err
@@ -452,12 +1216,24 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
 		req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt), encodeTime(req.CreatedAt))
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			return storage.QuotaDecision{}, storage.ErrReservationExists
+		}
 		return storage.QuotaDecision{}, err
 	}
 	decision.Admitted = true
 	decision.ReservedTokens += req.RequestedTokens
 	decision.RemainingTokens = max64(0, remaining-req.RequestedTokens)
 	return decision, tx.Commit()
+}
+
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "constraint failed") &&
+		(strings.Contains(msg, "unique") || strings.Contains(msg, "primary key"))
 }
 
 func (s *Store) SettleReservation(ctx context.Context, settlement storage.ReservationSettlement) error {
@@ -477,7 +1253,7 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 		return err
 	}
 	if status != "active" {
-		return fmt.Errorf("reservation %s is %s", settlement.RequestID, status)
+		return fmt.Errorf("%w: reservation %s is %s", storage.ErrReservationTerminal, settlement.RequestID, status)
 	}
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()
@@ -521,7 +1297,13 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 		return err
 	}
 	if status != "active" {
-		return fmt.Errorf("reservation %s is %s", settlement.RequestID, status)
+		// Wraps the sentinel exactly like SettleReservation does. A caller
+		// that CLASSIFIES the error (the #763 journal recovery ladder) must
+		// see a terminal demo reservation as terminal, or it would retry an
+		// already-settled effect forever instead of falling through to the
+		// idempotent usage-event rung. The settle path itself is unaffected:
+		// settleAfterCommit treats every settle error identically.
+		return fmt.Errorf("%w: reservation %s is %s", storage.ErrReservationTerminal, settlement.RequestID, status)
 	}
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()
@@ -589,6 +1371,158 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 	return tx.Commit()
 }
 
+func (s *Store) ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if expiredAt.IsZero() {
+		expiredAt = time.Now().UTC()
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'expired', settled_tokens = 0, settled_at = ?
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		encodeTime(expiredAt.UTC()), accountID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrReservationNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *Store) MarkReservationStaleHeld(ctx context.Context, accountID, requestID string, staleAt time.Time) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if staleAt.IsZero() {
+		staleAt = time.Now().UTC()
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'stale_held', settled_tokens = 0, settled_at = ?, settlement_hold = 1
+		WHERE account_id = ? AND request_id = ? AND status = 'active' AND settlement_hold = 1`,
+		encodeTime(staleAt.UTC()), accountID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrReservationNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *Store) MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`,
+		accountID, requestID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	if status != "active" {
+		return fmt.Errorf("%w: reservation %s is %s", storage.ErrReservationTerminal, requestID, status)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET settlement_hold = 1
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		accountID, requestID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error {
+	if expiresAt.IsZero() {
+		return fmt.Errorf("reservation expiry cannot be zero")
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	expiresAt = expiresAt.UTC()
+	var rawExpiry string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT expires_at FROM quota_reservations
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		accountID, requestID).Scan(&rawExpiry); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	currentExpiry := decodeTime(rawExpiry)
+	if currentExpiry.IsZero() {
+		return fmt.Errorf("reservation %s expiry is invalid", requestID)
+	}
+	newExpiry := currentExpiry
+	if expiresAt.Before(currentExpiry) {
+		newExpiry = expiresAt
+	}
+	if _, err := tx.ExecContext(ctx, `
+			UPDATE quota_reservations
+			SET expires_at = ?, settlement_hold = 1
+			WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		encodeTime(newExpiry), accountID, requestID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) ([]storage.ActiveReservation, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT account_id, request_id, window_date, reserved_tokens, expires_at, created_at
+		FROM quota_reservations
+		WHERE status = 'active' AND settlement_hold = 1
+		ORDER BY expires_at ASC, created_at ASC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]storage.ActiveReservation, 0, limit)
+	for rows.Next() {
+		var reservation storage.ActiveReservation
+		var expiresAt, createdAt string
+		if err := rows.Scan(&reservation.AccountID, &reservation.RequestID, &reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt); err != nil {
+			return nil, err
+		}
+		reservation.ExpiresAt = decodeTime(expiresAt)
+		reservation.CreatedAt = decodeTime(createdAt)
+		out = append(out, reservation)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) AcquireConcurrency(ctx context.Context, req storage.ConcurrencyRequest) (storage.ConcurrencyDecision, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
@@ -648,27 +1582,139 @@ func (s *Store) ReleaseConcurrency(ctx context.Context, accountID, requestID str
 }
 
 func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	_, err := s.insertUsageEventExec(ctx, event, false)
+	return err
+}
+
+// EnsureUsageEvent inserts a usage_events row idempotently — duplicate
+// request_id PKs are absorbed via INSERT OR IGNORE. Used as the
+// SPEC-006 § 17.7 fallback path in chat_proxy.settleAfterCommit when
+// the normal SettleReservation path fails: even if the reservation
+// is missing or in an unexpected state, the buyer-facing usage record
+// MUST exist after bytes have flowed (issue #187).
+//
+// PK-collision verify (ISS-187 R1 code+security MAJOR): historically
+// the gateway `usage_events.request_id` was a GLOBAL primary key,
+// allowing cross-account collisions (issue #196). The schema is now
+// `(account_id, request_id)`, so the only legitimate INSERT OR IGNORE
+// no-op is a same-account retry — typically a SPEC-006 § 17.7 fallback
+// firing again after the primary settle path. EnsureUsageEvent still
+// checks RowsAffected on 0 and verifies the full billing payload
+// (tokens + window + identity) matches; a mismatch returns
+// ErrUsageEventConflict so the caller knows the fallback failed and
+// must refund. With the composite PK the cross-account branch can no
+// longer occur — the verify is retained as defense in depth against
+// same-account payload drift (e.g. two settle paths racing with
+// different token counts).
+func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	// Normalize identically to insertUsageEventExec so the post-insert
+	// payload comparison below reads the same TotalTokens value that
+	// is persisted on disk. Without this, a benign retry that passes
+	// TotalTokens=0 (with prompt+completion set) would compare 0
+	// against the row's normalized prompt+completion sum and
+	// falsely return ErrUsageEventConflict, triggering a wrong
+	// refund. Caught by ISS-196 R2 codex CODE MEDIUM.
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.PromptTokens + event.CompletionTokens
+	}
+	result, err := s.insertUsageEventExec(ctx, event, true)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		return nil
+	}
+	// PK collision. Read the existing row and verify it matches the
+	// incoming event's billing-relevant fields. Mismatch => cross-
+	// account collision, a corrupted prior write, OR a payload
+	// drift (e.g., same account/request_id retrying with a different
+	// token count) — none of which should silently succeed.
+	// R2 code MAJOR: verify the FULL billing payload (tokens + window
+	// + identity), not just identity. Without this, a buyer who can
+	// race two settle paths with different token counts could pin a
+	// low-token row first and then have higher-token settles
+	// silently no-op.
+	var existing struct {
+		AccountID        string
+		DemoIdentity     string
+		WindowDate       string
+		PromptTokens     int64
+		CompletionTokens int64
+		TotalTokens      int64
+		TokenSource      string
+		Outcome          string
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome
+		FROM usage_events WHERE account_id = ? AND request_id = ?`, event.AccountID, event.RequestID).Scan(
+		&existing.AccountID, &existing.DemoIdentity, &existing.WindowDate,
+		&existing.PromptTokens, &existing.CompletionTokens, &existing.TotalTokens,
+		&existing.TokenSource, &existing.Outcome,
+	); err != nil {
+		return err
+	}
+	if existing.AccountID != event.AccountID ||
+		existing.DemoIdentity != event.DemoIdentity ||
+		existing.WindowDate != event.WindowDate ||
+		existing.PromptTokens != event.PromptTokens ||
+		existing.CompletionTokens != event.CompletionTokens ||
+		existing.TotalTokens != event.TotalTokens ||
+		existing.TokenSource != event.TokenSource ||
+		existing.Outcome != event.Outcome {
+		return storage.ErrUsageEventConflict
+	}
+	return nil
+}
+
+// EnsureDemoUsageEvent inserts a demo_usage_events row idempotently
+// — duplicates on the request_id PK silently no-op. The
+// EnsureUsageEvent caller already runs the cross-account payload
+// verify on usage_events, so a benign duplicate here on the
+// demo-side table is not a security regression: an attacker who
+// could pass the usage_events conflict check could already write
+// the demo row legitimately.
+func (s *Store) EnsureDemoUsageEvent(ctx context.Context, event storage.DemoUsageEvent) error {
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO demo_usage_events(request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)`,
+		event.RequestID, event.ClientIP, event.DemoTokenHash, event.WindowDate, event.TotalTokens, encodeTime(event.CreatedAt))
+	return err
+}
+
+func (s *Store) insertUsageEventExec(ctx context.Context, event storage.UsageEvent, idempotent bool) (sql.Result, error) {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
 	if event.PromptTokens < 0 || event.CompletionTokens < 0 || event.TotalTokens < 0 {
-		return fmt.Errorf("usage tokens must be non-negative")
+		return nil, fmt.Errorf("usage tokens must be non-negative")
 	}
 	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
-		return fmt.Errorf("usage token total overflows int64")
+		return nil, fmt.Errorf("usage token total overflows int64")
 	}
 	sum := event.PromptTokens + event.CompletionTokens
 	if event.TotalTokens == 0 {
 		event.TotalTokens = sum
 	} else if event.TotalTokens != sum {
-		return fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+		return nil, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	stmt := `
 		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if idempotent {
+		stmt = `
+		INSERT OR IGNORE INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	}
+	return s.db.ExecContext(ctx, stmt,
 		event.RequestID, event.AccountID, event.DemoIdentity, event.WindowDate, event.PromptTokens, event.CompletionTokens,
 		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt))
-	return err
 }
 
 func normalizeSettlementTokens(settlement *storage.ReservationSettlement) error {
@@ -755,11 +1801,21 @@ func (s *Store) InsertFeedbackEvent(ctx context.Context, event storage.FeedbackE
 }
 
 func (s *Store) ListFeedbackEventsSince(ctx context.Context, since time.Time) ([]storage.FeedbackSummaryEvent, error) {
+	return s.ListFeedbackEventsSinceLimit(ctx, since, 0)
+}
+
+func (s *Store) ListFeedbackEventsSinceLimit(ctx context.Context, since time.Time, limit int) ([]storage.FeedbackSummaryEvent, error) {
+	limitClause := ""
+	args := []any{encodeTime(since)}
+	if limit > 0 {
+		limitClause = " LIMIT ?"
+		args = append(args, limit)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, request_id, account_id, scope, rating, comment, created_at
 		FROM feedback_events
 		WHERE created_at >= ?
-		ORDER BY created_at ASC`, encodeTime(since))
+		ORDER BY created_at DESC`+limitClause, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -891,14 +1947,85 @@ func (s *Store) SetKillSwitch(ctx context.Context, state storage.KillSwitchState
 	if state.UpdatedAt.IsZero() {
 		state.UpdatedAt = time.Now().UTC()
 	}
-	value, err := json.Marshal(struct {
-		DemoOnly     bool `json:"demo_only"`
-		AllPublicAPI bool `json:"all_public_api"`
-	}{DemoOnly: state.DemoOnly, AllPublicAPI: state.AllPublicAPI})
+	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	defer tx.Rollback()
+	if err := func() error {
+		current, err := getKillSwitchTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		state.Version = current.Version + 1
+		return setKillSwitchTx(ctx, tx, state)
+	}(); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CompareAndSwapKillSwitch(ctx context.Context, expectedVersion int64, state storage.KillSwitchState) (bool, error) {
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now().UTC()
+	}
+	applied := false
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err := func() error {
+		current, err := getKillSwitchTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if current.Version != expectedVersion {
+			return nil
+		}
+		state.Version = current.Version + 1
+		if err := setKillSwitchTx(ctx, tx, state); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	}(); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return applied, err
+}
+
+func getKillSwitchTx(ctx context.Context, tx queryer) (storage.KillSwitchState, error) {
+	row := tx.QueryRowContext(ctx, `SELECT value, updated_at FROM runtime_config WHERE key = 'kill_switch'`)
+	var value string
+	var updated string
+	if err := row.Scan(&value, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.KillSwitchState{}, nil
+		}
+		return storage.KillSwitchState{}, err
+	}
+	var state storage.KillSwitchState
+	if err := json.Unmarshal([]byte(value), &state); err != nil {
+		return storage.KillSwitchState{}, err
+	}
+	state.UpdatedAt = decodeTime(updated)
+	return state, nil
+}
+
+func setKillSwitchTx(ctx context.Context, tx execer, state storage.KillSwitchState) error {
+	value, err := json.Marshal(struct {
+		DemoOnly     bool  `json:"demo_only"`
+		AllPublicAPI bool  `json:"all_public_api"`
+		Version      int64 `json:"version"`
+	}{DemoOnly: state.DemoOnly, AllPublicAPI: state.AllPublicAPI, Version: state.Version})
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO runtime_config(key, value, updated_at)
 		VALUES('kill_switch', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
@@ -934,9 +2061,9 @@ func reapExpiredReservationsTx(ctx context.Context, q execer, now time.Time) (in
 		now = time.Now().UTC()
 	}
 	res, err := q.ExecContext(ctx, `
-		UPDATE quota_reservations
-		SET status = 'expired', settled_tokens = 0, settled_at = ?
-		WHERE status = 'active' AND expires_at <= ?`,
+			UPDATE quota_reservations
+			SET status = 'expired', settled_tokens = 0, settled_at = ?
+			WHERE status = 'active' AND settlement_hold = 0 AND expires_at <= ?`,
 		encodeTime(now), encodeTime(now))
 	if err != nil {
 		return 0, err

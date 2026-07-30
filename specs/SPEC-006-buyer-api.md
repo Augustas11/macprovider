@@ -1,7 +1,104 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9 (2026-06-22, SPEC-015 v0.1.3 receipt response-header allowlist absorption)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.2
+**Version:** 0.9.12 (2026-07-15, § 17.2 declared-`supported_models` in "known" — cross-spec 404 reconciliation, runbook item 22)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.12 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
+- § 17.2 clarified: a provider's "seen" model list is the union of its served `model_id` and its declared `supported_models` (SPEC-010 v1.5 R-3.3.4, authoritative; SPEC-002 v1.5.4 R-3.X.6). A declared-but-cold model is therefore *known* → `503 no_provider_available` via § 17.3, not `404 model_not_found`. § 17.3 and § 2.12 name declared models alongside served/seen. Already the shipped coordinator behavior (`ModelKnown()` unions declared `supported_models`; #555); changes no dispatch outcome, only the error code a declared-but-cold request receives. Docs-only. Resolves the SPEC-010 R-3.3.4 carried cross-spec-inconsistency note. **(v0.9.11 is the in-flight item-20 change on PR #594; this v0.9.12 entry sequences after it — merge #594 first.)**
+
+**Change log v0.9.11 (2026-07-14, runbook item 20 — retryability classification + transport symmetry):**
+- § 5.2 abuse-limit exception gains `signup_rate_limited` (gateway): a per-IP daily account-creation cap (`oauth.go createSignupAccount`, `SignupAccountsPerIPPerDay` over a 24h window) that ships **no** `Retry-After`/reset header and sits **outside** the `/v1/chat/completions` 30-RPS account clamp — the same shape as `feedback_rate_limited` / `oauth_state_rate_limited` / `demo_session_rate_limited`. Reclassified from `retryable:true` to `false` (moved from `gatewayRetryableByCode` to `gatewayPermanentCodes`); #548 left it `true` only because the round-3 SECURITY-MEDIUM revert didn't name it. **Buyer-visible envelope change:** the `signup_rate_limited` 429 now carries `retryable:false`. The header-agreement note's "converse does not hold" example was repointed from `signup_rate_limited` to the retryable `502` availability codes (`provider_error` / `upstream_provider_error`), which genuinely carry no `Retry-After` because `setGatewayRetryAfter` attaches one only to `503`/`504` and the fixed-window codes; the note now also records that the capacity-pause codes DO ship `Retry-After: 30` (they are not headerless).
+- § 5.2 Overrides + "Known carried items" (2): the coordinator's **streaming** SSE terminal-error writer now honors the provider-supplied `inference_response_end.retryable` override the **non-streaming** writer (`writeProviderStructuredOutputError`) already did — via new `writeSSEErrorWithRetryable` at the synthesized-terminal-error site — so a buyer sees the identical `retryable` verdict for the same terminal structured-output outcome on both transports. Carried item (2) marked RESOLVED. Mirrors SPEC-019 §8. No settlement/money-path change.
+
+**Change log v0.9.10 (2026-07-14, runbook item 18 — pre-dispatch route_snapshot_failed settlement):**
+- § 17.7 quota-refund matrix gains a `500 route_snapshot_failed` row: a genuine no-provider failure is a **no-charge refund** (was: settled on the prompt estimate — SPEC-022 "Known limitations (A)", now resolved), gated on the coordinator's POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch` marker plus no finality header plus no gateway-retry prior dispatch. The coordinator stamps that marker centrally (`noPriorDispatchResponseWriter`) on any terminal response written while no provider has been **billably credited** for the request. "Credited" is the LEDGER-EXACT signal, not a request-log ordinal: `providerCredited` is set inside `recordRow` the instant a provider-bound billable row persists (`providerAssignedID != "" AND status != 503`), and `dispatchedThisAttempt` (reset per attempt, set before the provider relay) covers the current terminal attempt whose own billing row is recorded AFTER its write on the WS paths — a dispatched attempt whose terminal status is non-503 WILL be billed, so it is left unmarked; a dispatched attempt that terminates 503 (queue-full / relay-unavailable) is NOT billed and stays marked. This replaces the earlier `attemptN == 0` source, which over-counted (incremented on non-billed 503 rows → over-charge) and under-covered (incremented after the terminal WS write → under-charge). The positive-marker design (not absence-of-negative) makes a gateway-first deploy / coordinator rollback safe — an unmarked response settles on the estimate. Two unmarked/settled cases preserve provider work credited in `observe` mode: (1) coordinator-internal failover (marker withheld once a provider is credited); (2) gateway retry of an unmarked earlier response — a provider-dispatched `provider_*` 502 or a `no_provider` 503 from failover exhaustion after a billed attempt (a genuinely cold retried 502/503 is marked and does not poison the refund). § 17.1 notes the coordinator `500 route_snapshot_failed` is passed through verbatim. **Coordinator + gateway behavior change — deploy coordinator first, roll back in reverse.** SPEC-022 item (A) reconciled to resolved.
+
+**Change log v0.9.9 (2026-07-14, SPEC-018 AC-45 gateway-strip reconciliation):**
+- Added `X-MacProvider-Streaming-Mode` to the § 5.4 response-pass-through allowlist (and its outbound-strip-summary duplicate). The coordinator has always set this SPEC-018 AC-45 buyer-visible streaming-mode diagnostic on streaming `200` responses, but the gateway's blanket `X-MacProvider-*` strip removed it before the buyer on `api.streamvc.live`, making AC-45's "header absent" fail condition live in production. The gateway now forwards it, validated against AC-45's closed enum (`incremental` / `buffered_kill_switch` / `buffered_provider_downgrade`) and dropped otherwise (defense-in-depth against header-content injection past the strip). Resolves runbook item 15 / the SPEC-018 v0.2.4 "Known open gap" note. No wire-contract change beyond un-stripping an already-specified header; the header remains observation-only.
+
+**Change log v0.9.8 (2026-07-12, SPEC-024 prefix-cache provider-visibility carve-out):**
+- Narrowed § 1.3 Tier-2 survivability invariant (b): the raw buyer tag / `account_id` remain unrecoverable by the provider (one-way HMAC, non-side-channel-derivable), but the *derived opaque* `conv:` value MAY be provided to the provider in the inference request for provider-local prefix caching (SPEC-004 v0.3.2 FR-SR-2 / SPEC-008 v0.4.1 §2.2). No wire-contract change.
+- **R2-audit reconciliation (2026-07-12, spec-only).** Swept residual text that still forbade the carve-out: the § 1.3 "provider-side caching remains guarded" clause now permits derived-key-scoped provider-local prefix caching; the `DELETE /v1/sticky` lifecycle bullet distinguishes the coordinator sticky **map** (buyer-purgeable) from the **provider-local** KV cache (independent TTL, not buyer-purgeable); the tag-trim step records the shipped Go `strings.TrimSpace` **Unicode** semantics (vs an ASCII-only reimplementation); invariant (b) and § 5.3.1 now disclose **cross-provider linkability**; § 5.3.1 adds a disclosure-completeness MUST-close item for provider receipt/retention. Bumped the SPEC-004 dependency to v0.3.2.
+- **R3-audit reconciliation (2026-07-12, spec-only).** Two residual occurrences fixed: § 5.4.1's tag-trim rule still said "ASCII whitespace" (now Unicode `strings.TrimSpace`, matching § 1.3); and the § 1.3 "buyer-triggered deletion" lifecycle precondition addressed for the not-directly-purgeable provider KV cache.
+- **R4-audit correction (2026-07-12, spec-only).** The R3 buyer-deletion reconciliation **overstated** the control (it claimed `DELETE /v1/sticky` "severs routing" / "halts extension" of the provider cache). Corrected to the honest position: because the derived key is deterministic and post-delete normal selection (SPEC-004 FR-SR-3) can re-route to the same provider and re-populate under the same key, buyer deletion is **neither a direct nor a reliable indirect** provider-cache purge — the provider entry's only dependable bound is its own TTL/LRU. Recorded as a genuine § 1.3 lifecycle-guard residual gap under option (a) (SPEC-024 v0.2 §13 / FR-CI10a), not papered over.
+- **R5-audit correction (2026-07-12, spec-only).** The R4 honesty fix exposed that the § 1.3 terminal "any cache not meeting ALL conditions MUST NOT ship" rule would then forbid the very design option (a) ratifies. Carved that rule for the option-(a) provider-local cache.
+- **R6-audit correction (2026-07-12, spec-only).** The R5 carve-out named only **one** partially-met condition (deletion); the audit noted **disclosure** is a **second** partial residual — the base sticky-affinity disclosure ships and stays hard-required, but the option-(a)-specific extensions (provider receipt/retention/non-purgeability + cross-provider linkability) are not yet disclosed (§ 5.3.1 MUST-close). The carve-out now names **both** residuals as knowingly-accepted/tracked, keeps the base disclosure + all crypto/scoping conditions hard-required, and drops a drifted hard line-number citation.
+
+**Change log v0.9.7 (2026-07-06, issue #375 — gateway per-account admission guard):**
+- Gateway enforces a per-account request-start token bucket before
+  forwarding `/v1/chat/completions` to the coordinator. Default steady
+  rate is `quotas.account_request_rate_per_second: 30` per gateway
+  instance; default
+  authenticated account concurrency is now `quotas.account_concurrency:
+  4`. Both remain operator-configurable in `gateway.yaml`.
+- The request-start token bucket is a non-authoritative abuse-shedding
+  guard. Persistent daily token quota and in-flight concurrency
+  reservations remain storage-backed and authoritative for money-path
+  accounting. Process restart may reset the request-start bucket; it
+  MUST NOT mint quota, bypass auth, or affect settlement.
+- Fast request-start rejection returns `429` with `Retry-After` and
+  OpenAI-compatible `X-RateLimit-*-Requests` headers; the gateway emits a
+  structured log line with `request_id`, `account_id`, `limit_rps`, and
+  `retry_after_s` for operator triage.
+
+**Change log v0.9.6 (2026-07-06, issue #374 — bounded coordinator slot queue):**
+- Non-pinned no-slot routing may use SPEC-002 v1.5.3's bounded
+  coordinator-side pre-dispatch slot queue before returning 503. The
+  queue is not unbounded gateway queueing; it is capped per
+  `provider_id`, FIFO, and deadline-bound.
+- Pinned provider/session requests retain immediate 503 behavior when
+  the pinned target has no free slot.
+- `queue_wait_ms` is a latency diagnostic and refund/billing-neutral:
+  queue dwell does not create token usage, buyer debit, or provider
+  payout by itself; expired queued 503s remain failed/refunded requests.
+
+**Change log v0.9.5 (2026-07-02, issue #295):**
+- § 17.7.1 clause 1 tightened: the standalone envelope now literally forbids the `choices` and `usage` KEYS (regardless of value shape), plus duplicate top-level keys and duplicate immediate `error.*` fields (including `error.code`, `error.type`), plus trailing garbage. Duplicate keys DEEPER inside `error.*` sub-objects (e.g. `error.details.foo.k` twice) are outside the corroboration trust gate and NOT required to reject — no smuggling risk. Earlier "no usage field with non-zero token counts" wording drifted from the gateway's producer-side enforcement and from the #232 harness-side corroboration, opening JSON smuggling shapes (`usage:null`, `usage:{}`, duplicate `choices`/`usage`/`error.code`, non-enumerated usage subfields like `total_tokens`, invalid trailing bytes). Aligned to what the token-level parser and buyer's OpenAI SDK actually see.
+- Dropped hard-coded line-number citation on `writeProviderDisconnectedSSE` reference (function-name reference only, matching clause 4 pattern; line numbers drift as code around them changes).
+
+**Change log v0.9.4 (2026-07-01, SPEC-015 v0.4):**
+- § 1.6 and § 5.3.1 now disclose the SPEC-015 v0.4 / SPEC-022 model-verification limit: v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot, but do not detect a provider falsifying its own loaded-model hash measurement.
+- The `/v1/models tier1_disclosure` example adds `model_verification_limit` so buyer/product surfaces can show the caveat alongside model identity and Tier 2 disclosure text.
+
+**Change log v0.9.3 (2026-06-30, issue #278):**
+- § 7.2 streaming settlement now also clamps the *upward*-correction direction (provider's reported completion_tokens is *under* the gateway's byte-based observation) using the SAME pure-absolute window `2 < overshoot ≤ 20`. In-window upward gaps settle at the provider-reported count with `token_source = "provider_reported"` (the provider's tokenizer is authoritative on its own output when the disagreement is small). Below 2 tokens: still trust the byte estimate (existing behavior, byte-based observation drives settlement). Above 20 tokens: still trust the byte estimate (stream-truncation / zero-report-fraud guard). Clamp window constants `clampFloorTokens=2`, `clampCeilingTokens=20` are shared between both directions — no direction-specific tuning.
+- § 17.7 settlement matrix row 200 and § AC-37 acceptance criteria updated to describe the symmetric clamp shape in both directions.
+- Live surfacing: scenario 07 of the 2026-06-30 v0.4 baseline rerun caught +6 / +7 / +9 / +9 over-bills across 4 of 40 successful streaming pairs on `augustass-macbook-air × Qwen3-32B-4bit` after PR #262 closed the downward channel. Gateway's `ceil(content_bytes / 4)` estimator runs ~7-15% high on English Qwen3-32B output; provider's tokenizer is authoritative. Surfaced as `token_source = "gateway_estimated"` rows that override the (correct) provider report. Fix mirrors PR #262 on the opposite branch of `settleReported`.
+
+**Change log v0.9.2 (2026-06-29, issue #255):**
+- § 7.2 streaming settlement now clamps provider-reported completion_tokens down to the gateway's byte-based observed value when the over-report falls inside the pure-absolute window `2 < overshoot ≤ 20` ("Streaming over-report clamp" subsection). Below 2 tokens: trusted as benign tokenizer noise. Above 20 tokens: trusted as density mismatch (byte-based observation is unreliable on dense content; clamping would risk under-billing). Clamped rows record `token_source = "gateway_estimated"` and preserve provider-reported `prompt_tokens`; gateway emits a structured log line carrying `request_id`, `account_id`, `reported`, `observed`, `overshoot`, `window_floor`, `window_ceiling`, `outcome` for audit triage.
+- § 17.7 settlement matrix row 200 and § AC-37 acceptance criteria updated to reference the new clamp policy.
+- Live surfacing: scenario 07 of the 2026-06-29 v0.3 baseline rerun caught +4 / +5 / +7 over-bills on `air5 × Qwen2.5-Coder-7B-Instruct-4bit`. Provider-side tokenizer counted EOS / chat-template stop tokens that never streamed as delta content.
+
+**Change log v0.9.1 (2026-06-29, issue #211):**
+- Gateway MUST forward `X-MacProvider-Account: <subject.AccountID>` on
+  every forwarded buyer request — both the sticky and non-sticky
+  routing paths. The pre-v0.9.1 gateway emitted this header only
+  inside the sticky-routing conditional, leaving the non-sticky hot
+  path account-blind; the coordinator could not attribute the
+  resulting `request_log` row to the gateway account, breaking the
+  composite `(account_id, external_request_id)` reconciliation key
+  introduced in SPEC-002 v1.5.0. Bearer subjects forward
+  `subject.AccountID = authn.Bearer.AccountID`; demo subjects
+  forward `subject.AccountID = "demo:" + authn.DemoPayload.IP`.
+- Gateway MUST pair `X-MacProvider-Account` with the upstream
+  `Authorization: Bearer <UpstreamCoordinatorBearer>` header on
+  every forward. The coordinator treats `X-MacProvider-Account` as
+  an internal-routing header (see
+  `phase4-coordinator/internal/buyer/server.go`
+  `hasInternalRoutingHeader` / `internalBearerAuthorized` /
+  `selectProviderExcluding`) and rejects buyer-port requests
+  carrying it without the gateway-service-token bearer with
+  `400 invalid_request`. Pre-v0.9.1 only the sticky path set the
+  bearer (because only the sticky path set the account header);
+  v0.9.1 hoists both together. Sticky-specific state — the
+  `X-MacProvider-Internal-Conv` conversation key — remains gated
+  by the sticky conditional and is still suppressed for demo
+  traffic. (Caught by the issue-#211 R1 security audit; without
+  this pairing every non-sticky chat would 400 against any
+  v0.9.x+-aware coordinator.)
+- Dependency bump SPEC-002 v1.3.4 → v1.5.0 to record the
+  coordinator-side composite-key contract.
 
 **Change log v0.9:**
 - SPEC-015 v0.1.3 absorption: adds `X-MacProvider-Receipt` to the
@@ -49,7 +146,7 @@
 - Adds AC-26 through AC-37 for the new security, lifecycle, feedback, capacity, provider-transparency, demo-token, and quota-settlement requirements.
 
 **Change log v0.1:**
-- Initial draft following design exploration in specs/SPEC-006-design.md.
+- Initial draft following design exploration in specs/design/spec-006/SPEC-006-design.md.
 - Locked design choices captured from operator pre-commitments (see Section 2).
 - Defines the separate Go gateway service at phase5-gateway/ and the buyer-facing HTTP surface at https://api.streamvc.live.
 - Defines authentication, key issuance, quota enforcement, usage accounting, feedback capture, status transparency, kill switches, capacity-burst protection, storage contracts, front-door contracts, instrumentation, failure modes, audit categories, and acceptance criteria.
@@ -165,19 +262,19 @@ SPEC-006 v1 explicitly does not specify:
 
 These items belong to v0.2, SPEC-005, SPEC-007, or later specs.
 
-**Provider-side caching remains guarded.** Prompt-result cache, arbitrary provider-side request state retention, or any cache not explicitly covered by this section remains OUT OF SCOPE for v0.8. SPEC-006 v0.8 permits only SPEC-004 v0.2 coordinator-internal sticky affinity, using a gateway-derived `routing_internal.conversation_key` in the reserved `conv:` namespace. Sticky affinity is disabled by default (`routing.sticky_enabled: false`) and MUST NOT change buyer-visible behavior unless an operator explicitly enables it.
+**Provider-side caching remains guarded.** Prompt-result cache, arbitrary provider-side request state retention, or any cache not explicitly covered by this section remains OUT OF SCOPE. SPEC-006 permits SPEC-004 coordinator-internal sticky affinity, using a gateway-derived `routing_internal.conversation_key` in the reserved `conv:` namespace. **(Narrowed, v0.9.8 — SPEC-024 prefix-cache carve-out:)** provider-*local* prefix caching **keyed on that derived `conv:` value** is now additionally permitted (SPEC-024 v0.2 §11–§12; SPEC-004 v0.3.2 FR-SR-2 / SPEC-008 v0.4.1 §2.2). The guard below still applies to it: the derived key remains account-scoped and unforgeable, the provider never learns the raw tag/`account_id`, and the provider cache carries no account dimension of its own (SPEC-024 v0.2 §11). Sticky affinity is disabled by default (`routing.sticky_enabled: false`) and MUST NOT change buyer-visible behavior unless an operator explicitly enables it.
 
 The § 1.3 guard is satisfied for SPEC-004 v0.2 Pillar A only if all of the following remain true:
 
-- The cache is buyer-owned, single-tenant, non-transferable across buyers.
+- The cache is buyer-owned, single-tenant, non-transferable across buyers. **(v0.9.8 precision:)** "buyer-owned" here is the **account-scoping** sense — a cache entry holds exactly one account's data and is non-transferable across buyers — **not** literal buyer custody or deletion-control: the option-(a) provider-local KV is provider-retained and not buyer-purgeable (see the deletion bullet below).
   - v0.8 satisfaction: `routing_internal.conversation_key` MUST be scoped to exactly one authenticated `account_id`. The gateway MUST refuse to derive or forward a conversation key when the request cannot be attributed to one account or when any input attempts to bind the key to more than one account. Cross-account spoofing MUST be structurally impossible at the gateway by deriving the `conv:` value from the authenticated `account_id`, not from buyer-trusted account claims.
-- The cache has explicit lifecycle: creation, eviction, and buyer-triggered deletion.
-  - v0.8 satisfaction: the gateway MUST create a conversation key on an authenticated buyer request that includes a valid `X-MacProvider-Conversation` tag when `routing.sticky_enabled: true`, and MUST NOT create one otherwise. Coordinator eviction is governed by SPEC-004 v0.2 `routing.sticky_ttl_s`, `routing.sticky_max_entries`, TTL expiry, and LRU behavior; the gateway MUST cite that coordinator TTL as the authoritative sticky retention window in buyer-facing disclosure. Buyers MUST be able to trigger account-scoped deletion with `DELETE /v1/sticky`, which is authenticated, idempotent, purges all sticky entries for the caller's account, and returns `{ "purged": true, "entries": N }`.
+- The cache has explicit lifecycle: creation, eviction, and buyer-triggered deletion. **(v0.9.8 — provider-local prefix cache; honest limitation:)** this precondition is fully satisfied only for the **coordinator sticky map** (`DELETE /v1/sticky` purges it directly). It is **NOT** fully satisfied for the **provider-local KV cache**, and v0.2 does not pretend otherwise: because the derived `conv:` key is **deterministic** (same account + tag ⇒ same key, next bullet) and post-deletion **normal** selection (SPEC-004 FR-SR-3) MAY still route to the same provider, that provider can reuse and **re-populate** its entry under the same key after a delete. So buyer deletion is **neither a direct nor a reliable indirect** purge of provider-local state — the provider entry's **only** dependable bound is the provider's own TTL/LRU (SPEC-024 v0.2 §11 FR-CI4). This is a genuine **residual gap in the § 1.3 lifecycle guard under option (a)**, recorded (not papered over) as the SPEC-024 v0.2 §13 / FR-CI10a disclosure-completeness item; closing it would require a provider-side conv-key purge primitive (not shipped).
+  - v0.8 satisfaction: the gateway MUST create a conversation key on an authenticated buyer request that includes a valid `X-MacProvider-Conversation` tag when `routing.sticky_enabled: true`, and MUST NOT create one otherwise. Coordinator eviction is governed by SPEC-004 v0.2 `routing.sticky_ttl_s`, `routing.sticky_max_entries`, TTL expiry, and LRU behavior; the gateway MUST cite that coordinator TTL as the authoritative sticky retention window in buyer-facing disclosure. Buyers MUST be able to trigger account-scoped deletion with `DELETE /v1/sticky`, which is authenticated, idempotent, purges all sticky entries for the caller's account, and returns `{ "purged": true, "entries": N }`. **(v0.9.8 clarification:)** `DELETE /v1/sticky` purges the **coordinator sticky map** only. The **provider-local** prefix-cache entry keyed on the same `conv:` value is a separate store bounded by the provider's own TTL and LRU (SPEC-024 v0.2 §11 FR-CI4, shipped default 900 s); it is **not** buyer-purgeable and is not governed by the coordinator TTL — its reuse-eligibility ends when the provider TTL/eviction lapses, independent of the sticky-map deletion. This lifecycle split is a SPEC-024 v0.2 §13 disclosure-completeness item.
 - Tenant isolation is cryptographically enforced; cache keys include account ID plus per-request entropy.
   - v0.8 satisfaction: the gateway MUST derive the opaque suffix with HMAC-SHA256 over the authenticated `account_id` and buyer-supplied conversation tag; the tag is the buyer-provided per-request entropy for this guard. Two gateway instances MUST derive byte-identical keys for identical inputs and different keys across accounts. The normative algorithm is:
     1. Authenticate the request and obtain canonical `account_id`.
     2. Read the buyer tag from `X-MacProvider-Conversation`.
-    3. Reject tags shorter than 1 byte, longer than 128 bytes after trimming ASCII whitespace, or containing characters outside `[A-Za-z0-9._:-]`.
+    3. Reject tags shorter than 1 byte, longer than 128 bytes after trimming leading/trailing whitespace, or containing characters outside `[A-Za-z0-9._:-]`. **(v0.9.8 byte-fidelity note:)** the shipped gateway trims with Go `strings.TrimSpace`, which strips **Unicode** whitespace (e.g. NBSP `U+00A0`), not only ASCII; a reimplementation that trims only ASCII whitespace can diverge on tags wrapped in Unicode whitespace (accepted+normalized by the shipped gateway, rejected by an ASCII-only trimmer). This affects only within-account tag canonicalization; cross-account isolation is unaffected because `account_id` is inside the HMAC regardless.
     4. Construct `scope = "spec006-v0.8-sticky-conversation-v1"`.
     5. Construct `message = scope || "\n" || account_id || "\n" || buyer_tag`.
     6. Compute `digest = HMAC-SHA256(MACPROVIDER_KEY_HASH_SECRET, message)`.
@@ -186,9 +283,13 @@ The § 1.3 guard is satisfied for SPEC-004 v0.2 Pillar A only if all of the foll
 - Buyer-facing disclosure explicitly states cache existence and retention semantics.
   - v0.8 satisfaction: when and only when `routing.sticky_enabled: true`, the § 1.6 production disclosure, `/v1/models tier1_disclosure.sticky_affinity`, single-page docs, signup flow, and operator-distributed SDK READMEs MUST disclose sticky affinity, the `sticky_ttl_s` retention window, and the privacy tradeoff that related requests are preferentially routed to one provider during that window.
 - The cache survives the Tier 1 to Tier 2 transition with privacy guarantees that match Tier 2 trust controls.
-  - v0.8 satisfaction: sticky semantics MUST NOT depend on plaintext-only provider assumptions. A future SPEC-008 Tier-2 attestation/encryption regime MUST preserve account scoping, TTL expiry, buyer-triggered deletion, and the `conv:` namespace without exposing raw buyer tags or account IDs to providers. Concrete invariants a Tier-2 audit MUST verify survive: (a) `account_id` remains inside the HMAC message and cross-account `conv:` collision remains structurally impossible; (b) the `conv:` value is NOT derivable by the provider from any observable traffic; (c) `DELETE /v1/sticky` remains account-scoped and authenticated; (d) TTL expiry remains coordinator-enforced (not provider-self-reported). Tier-2 work MAY change provider-leg confidentiality, but it MUST NOT weaken any of (a)–(d).
+  - v0.8 satisfaction: sticky semantics MUST NOT depend on plaintext-only provider assumptions. A future SPEC-008 Tier-2 attestation/encryption regime MUST preserve account scoping, TTL expiry, buyer-triggered deletion, and the `conv:` namespace without exposing raw buyer tags or account IDs to providers. Concrete invariants a Tier-2 audit MUST verify survive: (a) `account_id` remains inside the HMAC message and cross-account `conv:` collision remains structurally impossible; (b) **(narrowed, v0.9.8 — SPEC-024 prefix-cache carve-out)** the raw buyer tag and `account_id` remain **unrecoverable** by the provider — the `conv:` value is a one-way account-scoped HMAC and is NOT reconstructable by the provider from side-channel traffic — **but** the *derived opaque `conv:` value* MAY be explicitly provided to the provider in the inference request for provider-local prefix caching (SPEC-024 v0.2 §11–§12; SPEC-004 FR-SR-2 / SPEC-008 §2.2 carve-out); the provider thereby learns a stable per-conversation identifier (the correlation sticky affinity already grants, and — because the key is forwarded on cache misses and re-routes — potentially across more than one provider over the conversation's life) but never the raw values; (c) `DELETE /v1/sticky` remains account-scoped and authenticated (coordinator sticky map only — the provider-local prefix cache has an independent, non-buyer-purgeable TTL, see the lifecycle bullet above and SPEC-024 v0.2 §13); (d) TTL expiry remains coordinator-enforced (not provider-self-reported). Tier-2 work MAY change provider-leg confidentiality, but it MUST NOT weaken (a), (c), or (d), nor the raw-value-unrecoverability half of (b).
 
-Any partial implementation of caching that does not meet ALL of the above MUST NOT ship. This is a forward-looking guard against the H-006 audit finding.
+Any partial implementation of caching that does not meet ALL of the above MUST NOT ship. This is a forward-looking guard against the H-006 audit finding. **(v0.9.8 — option (a) carve-out, resolving the guard-vs-ratification tension:)** this MUST-NOT-ship rule governs the v0.8 **coordinator-internal sticky affinity** in full — all conditions above remain hard requirements for it. For the **option-(a) provider-local prefix cache**, the account-scoping, key-unforgeability, no-independent-account-dimension, and Tier-1→Tier-2 survivability conditions all hold and remain hard-required. **Two conditions are only partially met, and both are knowingly-accepted, operator-ratified (option (a), 2026-07-12), and explicitly tracked — not treated as unmet guards that block shipping:**
+1. **Buyer-triggered deletion** — fully enforced for the coordinator sticky **map** (`DELETE /v1/sticky`); the provider-KV layer has **no** direct buyer purge (deterministic key + post-delete same-provider re-population), bounded only by provider TTL/LRU (see the lifecycle bullet above).
+2. **Buyer-facing disclosure** — the **base** disclosure (sticky affinity exists, the `sticky_ttl_s` retention window, and the preferential-routing/correlation tradeoff) **is** shipped and remains **hard-required**. The **option-(a)-specific extensions** — provider *receipt* and *independent, non-purgeable retention* of the derived identifier, and *cross-provider linkability* — are **not yet** in the shipped buyer disclosure and are tracked as a **MUST-close** completeness item (§ 5.3.1; SPEC-024 v0.2 §13 / FR-CI10a).
+
+Both residuals are recorded (not papered over) as SPEC-024 v0.2 §13 / FR-CI10a disclosure-completeness items; closing them needs a provider-side conv-key purge primitive and the extended disclosure copy (neither shipped). The MUST-NOT-ship rule continues to bar in full any provider-side cache that fails account-scoping, key unforgeability, the no-independent-account-dimension property, or the **base** disclosure obligation.
 
 ### 1.4 Relationship to SPEC-001
 
@@ -211,7 +312,7 @@ SPEC-006 MAY add stricter public gateway limits before forwarding, including `ma
 
 SPEC-002 defines the Phase 4 coordinator.
 
-SPEC-006 layers on top of SPEC-002 v1.1.5.
+SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.12 depends on SPEC-002 v1.5.4 (bounded slot queue plus the account-scoped reconciliation key lineage — see header `Depends on` line and §6 forward-header rule).
 
 SPEC-006 MUST preserve SPEC-002's router-only charter.
 
@@ -233,11 +334,16 @@ SPEC-006 v0.8 is a Tier 1 cooperative inference product. The following propertie
 
 1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
 2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
-3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
-4. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.
-5. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-4.
+3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
+4. **v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot.** They do not detect a provider falsifying its own loaded-model hash measurement.
+5. **Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.** Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
+6. **Pending means quota or balance can remain reserved while receipt verification is incomplete.** Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
+7. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
+8. **Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.**
+9. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
+10. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-9.
 
-These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all five limitations are normative and MUST be preserved in product language, with property 5 conditional on `routing.sticky_enabled: true`.
+These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all ten limitations are normative and MUST be preserved in product language, with property 10 conditional on `routing.sticky_enabled: true`.
 
 Production gate: this disclosure MUST appear in substantively equivalent language in:
 
@@ -246,7 +352,7 @@ Production gate: this disclosure MUST appear in substantively equivalent languag
 - The `/v1/models` response as a top-level `tier1_disclosure` field with the same plaintext-to-provider wording.
 - The README.md of any client SDK distributed by the operator.
 
-When `routing.sticky_enabled: true`, the same appearance points MUST also include the sticky affinity disclosure in property 5. When `routing.sticky_enabled: false`, operators are not required to surface sticky-specific disclosure language beyond `/v1/models tier1_disclosure.sticky_affinity.enabled: false`.
+When `routing.sticky_enabled: true`, the same appearance points MUST also include the sticky affinity disclosure in property 6. When `routing.sticky_enabled: false`, operators are not required to surface sticky-specific disclosure language beyond `/v1/models tier1_disclosure.sticky_affinity.enabled: false`.
 
 ### 1.7 Relationship to SPEC-003
 
@@ -272,7 +378,7 @@ SPEC-006 MUST NOT create buyer-visible payout, earning, donation, or payment pro
 
 SPEC-001 and SPEC-002 are locked and unchanged during SPEC-006-only implementation and fix passes.
 
-SPEC-006 layers on top of SPEC-002 v1.1.5's coordinator.
+SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.4; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
 
 Cross-spec dependencies are read-only references.
 
@@ -292,7 +398,7 @@ Buyer-facing responses MUST NOT include provider hostnames, internal coordinator
 
 The gateway MUST be horizontally scalable from day 1.
 
-The gateway MUST forbid in-process state for rate-limiting, quota, or session data.
+The gateway MUST forbid in-process authoritative quota, concurrency, billing, or session state. Non-authoritative process-local request-start buckets are allowed only for preflight abuse shedding as described in §4.6 and §7.3.
 
 The gateway MUST require data layer abstraction.
 
@@ -454,8 +560,8 @@ The metric MUST be reportable as a 7-day rolling distribution with median (p50) 
 
 ### 2.12 Failure modes
 
-- `404` -- model unknown (model not in any provider's served list).
-- `503` -- model known but no provider available (pool empty or all busy).
+- `404` -- model unknown (model not in any provider's served, declared `supported_models`, or recently-seen list — see § 17.2).
+- `503` -- model known but no provider available (pool empty or all busy; a declared-but-cold model is *known*, so 503 here, not 404).
 - `502` -- selected provider failed mid-request.
 - `504` -- provider exceeded timeout.
 - `401` -- invalid or missing bearer token.
@@ -472,9 +578,11 @@ The metric MUST be reportable as a 7-day rolling distribution with median (p50) 
   - `X-RateLimit-Remaining`
   - `X-RateLimit-Reset`
 
-No long queueing.
+No unbounded queueing.
 
-If no slot is immediately available, return 503.
+For non-pinned requests, the coordinator MAY wait in the bounded
+pre-dispatch slot queue described in section 7.8. If no slot becomes
+available before that deadline, return 503.
 
 Streaming cancellation: when client disconnects mid-SSE, gateway MUST cancel the upstream request to coordinator within 500ms.
 
@@ -712,7 +820,18 @@ Demo traffic MUST NOT bypass account signup issuance limits.
 
 Gateway request handlers MUST be stateless.
 
-The gateway MUST NOT keep in-process rate-limit counters.
+The gateway MUST NOT keep authoritative quota, concurrency, billing, or
+session state in-process.
+
+The gateway MAY keep a best-effort process-local request-start token
+bucket for abuse shedding before coordinator forwarding. That bucket is
+scoped to one gateway instance; multi-replica deployments multiply the
+effective aggregate request-start rate unless they add a shared
+admission layer. The bucket
+MUST be keyed by authenticated `account_id` or demo subject identity,
+MUST NOT be used for billing or settlement, and MUST NOT be the only
+guard for daily quota or in-flight concurrency. Daily quota and
+concurrency remain storage-backed authoritative controls.
 
 The gateway MUST NOT keep in-process quota state.
 
@@ -823,6 +942,10 @@ Known v1 divergences include:
 - No tool execution.
 - Tool fields may be syntactically accepted but are not executed.
 - Strict schema-enforced structured outputs are not guaranteed.
+- Multimodal `messages[].content` parts are not supported in v1. For `system`
+  and `user` messages, text-only structured content arrays are accepted and
+  normalized to a single string; non-text parts such as `image_url` return
+  `unsupported_content_shape`.
 - Provider availability can yield 503 immediately.
 - Model lineup is live-pool dependent.
 - Usage accounting may be gateway-estimated when provider token fields are absent.
@@ -853,7 +976,7 @@ All authenticated API requests MUST accept:
 Authorization: Bearer mp_...
 ```
 
-All applicable responses MUST include:
+All applicable quota responses MUST include:
 
 ```text
 X-RateLimit-Limit
@@ -865,6 +988,14 @@ When the request is authenticated, rate-limit headers describe the account daily
 
 When the request is demo traffic, rate-limit headers describe the demo daily token quota.
 
+When request-start or concurrency admission blocks the request, the gateway MUST return `429`, SHOULD include `Retry-After`, and SHOULD include the OpenAI-compatible request-count headers:
+
+```text
+X-RateLimit-Limit-Requests
+X-RateLimit-Remaining-Requests
+X-RateLimit-Reset-Requests
+```
+
 The gateway MUST include:
 
 ```text
@@ -873,9 +1004,13 @@ X-Request-ID
 
 on all responses.
 
-The gateway MUST generate a UUID v4 `X-Request-ID` per buyer-incoming request and use it as the row key in `usage_events` and `audit_events`.
+The gateway MUST generate a UUID v4 `X-Request-ID` per buyer-incoming request and use it as the `request_id` field in `usage_events` and `audit_events`. **Identity after #196 / SPEC-006 v0.9.1:** `request_id` alone is a correlation/join value, not a unique row identity. The physical primary key of `usage_events` is the composite `(account_id, request_id)`, and the gateway-to-coordinator reconciliation key is the composite `(account_id, external_request_id)` (where `external_request_id` is the inbound `X-Request-ID` carried verbatim across the gateway/coordinator boundary). The same `X-Request-ID` MAY legitimately appear in rows belonging to distinct accounts; reconciliation and uniqueness checks MUST be account-scoped.
 
-The gateway MUST forward `X-Request-ID: <uuid>` to the coordinator on every forwarded buyer request. SPEC-002 v1.1.4 requires the coordinator to honor that ID in `request_log`; this is the cross-service join key for gateway usage/audit events and coordinator routing diagnostics.
+The gateway MUST forward `X-Request-ID: <uuid>` to the coordinator on every forwarded buyer request. SPEC-002 v1.1.4 requires the coordinator to honor that ID in `request_log.external_request_id`; SPEC-002 v1.5.0 adds the composite-key requirement below.
+
+The gateway MUST also forward `X-MacProvider-Account: <subject.AccountID>` on every forwarded buyer request — bearer-authenticated and demo subjects alike, both on the sticky and non-sticky routing paths. The coordinator persists this value into `request_log.account_id`. The composite `(account_id, external_request_id)` is the reconciliation key joining gateway `usage_events` to coordinator `request_log`; the gateway therefore MUST NOT gate `X-MacProvider-Account` on the sticky-routing conditional (pre-v0.9.1 gateways did, leaving the non-sticky hot path account-blind). See SPEC-002 v1.5.0 §7.2 for the coordinator-side contract; the gateway-side composite-PK addendum is recorded in SPEC-007 §6.4 once issue #212 / PR #221 merges (the two PRs are merge-order independent — this pointer describes relative state, not a strict ordering).
+
+The gateway MUST pair `X-MacProvider-Account` with the upstream `Authorization: Bearer <UpstreamCoordinatorBearer>` header on every forward. The coordinator's `selectProviderExcluding` treats `X-MacProvider-Account` as an internal-routing header and `400`s buyer-port requests carrying it without the gateway-service-token bearer. The bearer is therefore hoisted out of the sticky conditional alongside the account header; sticky-specific state (`X-MacProvider-Internal-Conv`) remains sticky-gated.
 
 The gateway MAY accept an inbound `X-Request-ID` only if it is a UUID v4 in 8-4-4-4-12 lowercase or uppercase hex format; otherwise it MUST generate its own.
 
@@ -912,6 +1047,29 @@ Streaming errors after headers are sent MUST be emitted as SSE data frames with 
 
 The gateway MUST install panic recovery middleware that converts unexpected panics into HTTP 500 responses in this OpenAI-shaped error envelope.
 
+**Retryability (`retryable`).** Every coordinator- or gateway-ORIGINATED buyer error envelope (non-streaming JSON body and streaming SSE `error` frame alike) MUST carry a boolean `retryable` field alongside `code`. `retryable` is envelope metadata: for most codes it equals the code's fixed default classification below, but specific codes carry a documented per-response override — see "Overrides" below. A provider-originated error body forwarded verbatim is a documented exception to the MUST — see "Known carried items" (4).
+
+**Retryable (`true`) — the same request may succeed later without changes, grouped by why:**
+
+- Availability/timeout: `no_provider_available`, `provider_error`, `provider_timeout`, `provider_disconnected`, `provider_failed` (coordinator-generated); `coordinator_unavailable`, `upstream_provider_error` (§13.4's error-action table already directs buyers to retry this), `invalid_provider_usage` (gateway-generated).
+- Temporal 429s that ship a machine-readable backoff signal — a `Retry-After` or `X-RateLimit-Reset*` header the buyer can act on: `provisional_quota_exceeded`, `rate_limited` (coordinator); `account_request_rate_exceeded`, `account_concurrency_exceeded`, `demo_concurrency_exceeded`, `quota_exhausted` (gateway).
+- Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
+- Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
+- Route-snapshot durable-store availability: `route_snapshot_failed` — a pre-dispatch store write failure; a retry can succeed once storage recovers.
+- Provider response-shape glitches where a re-attempt (possibly against a different provider) may not repeat the same defect: `malformed_tool_call_final_json`, `provider_stream_downgraded`, `malformed_json_response`, `json_schema_validation_failed`.
+
+**Permanent (`false`) — retrying the identical request cannot succeed:** validation errors (e.g. `invalid_request`, `invalid_json`, `invalid_tools`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, byte/schema-cap and stream-cap violations (e.g. `byte_cap_exceeded`, `request_body_too_large`, `stream_output_exceeded`, the `json_schema_*` cap/shape codes), Tier-2/config lookup failures (e.g. `autotune_feed_not_found`), and auth/admin/oauth-signup client errors. Any code not explicitly classified — on either service — defaults to `retryable: false`.
+
+**Abuse-limit exception (security).** `feedback_rate_limited`, `oauth_state_rate_limited`, `demo_session_rate_limited`, and `signup_rate_limited` (gateway) are 429s from the same `rate_limit_exceeded` family as the temporal 429s above, but are classified `false` rather than true: none ships a `Retry-After`/reset header, and none sits behind the gateway's 30-RPS per-account request clamp the way `/v1/chat/completions` does. Marking them `true` would tell a conforming SDK to auto-retry a 429 against an endpoint with no other throttle — a DoS-amplification risk, not a convenience. (`signup_rate_limited` is a per-IP daily account-creation cap; retrying the identical signup within the 24h window cannot succeed, so it is permanent from the buyer's perspective until the window rolls off — it was reclassified from `true` to `false` alongside its three siblings.) A future header-bearing fix on these paths should flip them to `true` alongside adding the header, not before.
+
+**Header agreement.** A response that ships a positive `Retry-After` or `X-RateLimit-Reset*` header MUST be `retryable: true` — the two signals MUST NOT disagree, since a buyer honoring either one must reach the same conclusion. The converse does not hold in general: `retryable: true` does not by itself obligate a header — the gateway attaches `Retry-After` only to its `503`/`504` retryable responses and the fixed-window codes (`setGatewayRetryAfter` / `gatewayRetryAfterByCode`), so a retryable `502` availability code (e.g. `provider_error`, `upstream_provider_error`) legitimately carries no backoff hint. But the absence of a header on a `rate_limit_exceeded`-family 429 is a signal in the OTHER direction: without a backoff window and without an account-level throttle, that family is classified `false` (see the abuse-limit exception above). Codes with a backoff window materially longer than the generic fast-availability default carry that fixed value instead: `provisional_quota_exceeded` is 3600s; the capacity-pause codes (`public_api_paused`, `demo_paused`, `capacity_signup_closed`) are 30s (vs. 1s for a fast transient blip) — these three DO ship `Retry-After: 30`, so they are not headerless.
+
+**Maintaining this list.** A newly introduced transient/availability code MUST be added to the retryable set on every service that emits it — the coordinator and gateway are separate Go modules with no shared package, so each maintains its own mirrored classification table (`spec018RetryableByCode` / `gatewayRetryableByCode`). Both modules carry a completeness test asserting every code literal an error writer can emit has been explicitly triaged, so an unclassified code fails CI instead of silently shipping a false default — see "Known carried items" (5) for that guard's limits. Buyers SHOULD honor `retryable` when deciding whether to re-issue a failed request.
+
+**Overrides.** SPEC-019's structured-output terminal error carries a provider-reported `retryable` value (`end.Retryable`) that overrides `malformed_json_response` / `json_schema_validation_failed`'s default for that specific response; BOTH the coordinator's non-streaming writer (`writeProviderStructuredOutputError`) and its streaming SSE writer (`writeSSEErrorWithRetryable`, at the synthesized-terminal-error site) honor it, so the two transports agree on the buyer-visible value for the same terminal outcome.
+
+Carried items (mixed carried / resolved): (1) `response_byte_cap_exceeded` has a locked cross-spec disagreement — SPEC-019's error-code table documents it as retryable, while this table and SPEC-018 document it as `false` (SPEC-019 §11 Open questions / audit hooks already tracks this as a v0.1.5 LOCKED drift); this note does not assert a value for it. (2) RESOLVED (runbook item 20): the coordinator's streaming SSE terminal-error writer now honors the `end.Retryable` override the non-streaming writer does — the synthesized-SSE-error site passes `end.Retryable` through `writeSSEErrorWithRetryable`, so both transports agree. (3) A legacy cross-version response body that predates this field entirely (and so omits `retryable`) falls back to the receiving service's own code-based classification rather than a value read from that body; current-to-current traffic is unaffected, since every current writer on both services stamps the field. (4) A provider-originated error body forwarded verbatim (e.g. the coordinator's null-usage provider-error passthrough, `internal/buyer/server.go:2429`; the gateway's receipt-eligible provider-error passthrough, `phase5-gateway/internal/router/chat_proxy.go`'s `passThroughReceiptEligibleProviderError`) is not rewritten to inject `retryable` — the provider, not the coordinator or gateway, authored that envelope, and mutating a verbatim pass-through body would itself be a fidelity bug. Such a body may omit `retryable` entirely; this is a documented exception to the MUST above, not a violation of it. (5) The completeness tests (`TestCoordinatorErrorCodeCompleteness`, `TestGatewayErrorCodeCompleteness`) guard only the current hand-curated code inventory in each test file — they do not parse source at test time and so cannot catch a brand-new write site with a brand-new code by construction; a genuine future-proof guard (AST-based or a compile-time registration requirement) is a separate, unimplemented follow-up.
+
 ### 5.3 `GET /v1/models`
 
 `GET /v1/models` returns public model availability.
@@ -942,6 +1100,27 @@ Response shape:
     "model_identity": "provider_reported",
     "hardware_attestation": "none",
     "tier2_milestone": "future",
+    "model_verification_limit": "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.",
+    "verified_model_settlement": {
+      "included_paid_entrypoints": ["POST /v1/chat/completions"],
+      "excluded_paid_entrypoints": [
+        "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+      ],
+      "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+      "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
+      "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
+      "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+      "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
+      "outcomes": {
+        "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
+        "verified": "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement.",
+        "quarantined": "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault.",
+        "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+      },
+      "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
+      "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+      "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
+    },
     "sticky_affinity": {
       "enabled": false,
       "ttl_seconds": 0,
@@ -967,7 +1146,7 @@ The gateway MUST aggregate providers by case-insensitive model identifier.
 
 The gateway MUST preserve the canonical model ID spelling returned by the coordinator.
 
-The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. The coordinator does NOT cryptographically verify the loaded model weights against a catalog of expected artifact hashes. Buyers SHOULD treat `id` as provider-reported and NOT as a verified integrity claim. A future SPEC-006 or SPEC-008 Tier 2 revision MAY introduce coordinator-managed model catalog plus verified hash policy; until then, model identity verification is out of scope.
+The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. `/v1/models` may also expose catalog-known hash status and settlement-enforced receipt matching for covered enforce-mode traffic. Buyers SHOULD treat `id` as provider-reported and SHOULD NOT treat catalog or settlement fields as hardware attestation, runtime binary attestation, malicious-output prevention, private inference, or detection of a provider falsifying its own loaded-model hash measurement.
 
 The gateway MUST tolerate `/` and `\/` escaped model IDs.
 
@@ -996,6 +1175,27 @@ The `/v1/models` response MUST include a top-level field:
   "model_identity": "provider_reported",
   "hardware_attestation": "none",
   "tier2_milestone": "future",
+  "model_verification_limit": "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.",
+  "verified_model_settlement": {
+    "included_paid_entrypoints": ["POST /v1/chat/completions"],
+    "excluded_paid_entrypoints": [
+      "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+    ],
+    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+    "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
+    "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
+    "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+    "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
+    "outcomes": {
+      "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
+      "verified": "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement.",
+      "quarantined": "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault.",
+      "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+    },
+    "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
+    "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+    "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
+  },
   "sticky_affinity": {
     "enabled": false,
     "ttl_seconds": 0,
@@ -1011,6 +1211,18 @@ Gateway implementations MUST set this field automatically.
 Operator override is forbidden; there MUST be no config opt-out.
 
 The `sticky_affinity` sub-object MUST be present. When `routing.sticky_enabled: false`, implementations MUST return `enabled: false`, `ttl_seconds: 0`, and a description that states no sticky routing is active. When `routing.sticky_enabled: true`, implementations MUST return `enabled: true`, `ttl_seconds` equal to the coordinator's effective SPEC-004 v0.2 `routing.sticky_ttl_s`, and this plain-language privacy tradeoff in substantively equivalent form: "Related requests with the same conversation tag are preferentially routed to one provider for up to this many seconds, so that provider can observe and correlate more of your traffic than under default routing."
+
+**Disclosure-completeness item (v0.9.8, SPEC-024 v0.2 §13 — MUST close).** The
+shipped disclosure above describes preferential routing and correlation, but
+does **not** yet disclose two consequences of the SPEC-024 prefix-cache
+carve-out: (i) the provider **receives** the derived opaque conversation
+identifier and **retains** it in a provider-local KV cache under its own TTL
+that `DELETE /v1/sticky` does not clear; and (ii) because that identifier is
+forwarded on cache misses and re-routes, it MAY reach **more than one**
+provider over a conversation's life (cross-provider linkability). Extending the
+buyer-facing disclosure (this field, `/v1/models tier1_disclosure`, and
+`disclosure.go`) to cover (i)–(ii) is a tracked completeness follow-up; it is
+recorded here as a known gap, not silently omitted.
 
 ### 5.4 `POST /v1/chat/completions`
 
@@ -1054,6 +1266,13 @@ Supported request fields:
 
 `logprobs` is accepted syntactically and forwarded to the provider as part of the request body. SPEC-001 v1.2.2 § 6.4 specifies unknown-field tolerance, so the provider MAY ignore unknown OpenAI-compatible fields including `logprobs`. Behavior is model-dependent; the gateway MUST NOT enforce `logprobs`-specific semantics.
 
+For `system` and `user` messages, `content` MAY be a non-empty JSON string
+or a text-only structured content array such as
+`[{"type":"text","text":"hello"}]`. The buyer boundary MUST normalize
+text-only arrays into a single string before provider dispatch. Multimodal or
+otherwise non-text content parts MUST be rejected with HTTP 400,
+`type: "invalid_request_error"`, and `code: "unsupported_content_shape"`.
+
 Gateway request caps:
 
 - `max_tokens` MUST be capped at `limits.max_tokens_per_request`, default 4096.
@@ -1093,10 +1312,24 @@ The documented response-pass-through allowlist is:
 
 - `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
   receipt-capable providers and forwarded unchanged by the gateway.
+- `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
+  streaming-mode diagnostic set by the coordinator on streaming `200`
+  responses. The gateway MUST forward it only when its value is one of
+  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  or `buffered_provider_downgrade` — and MUST drop any other value rather
+  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  but the allowlist prevents a compromised or misconfigured upstream from
+  smuggling arbitrary header content past the `X-MacProvider-*` strip). The
+  header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
+  negotiation.
 
-The gateway MUST reject immediately with 503 when no provider slot is immediately available.
+The gateway MUST return 503 when no provider slot is available after
+any allowed bounded pre-dispatch slot queue expires.
 
-The gateway MUST NOT queue buyer requests waiting for future capacity.
+The gateway MUST NOT queue buyer requests indefinitely waiting for
+future capacity. Pinned provider or session requests MUST NOT enter the
+bounded slot queue and MUST return 503 when the pinned target has no
+immediately available slot.
 
 Non-streaming success response:
 
@@ -1121,7 +1354,7 @@ Buyer opt-in source:
 
 - Buyers MAY send `X-MacProvider-Conversation: <opaque-tag>` on `POST /v1/chat/completions`.
 - The tag is buyer-chosen and opaque. It is not an account identifier, provider identifier, session ID, or security credential.
-- The gateway MUST trim ASCII whitespace, reject empty tags, reject tags longer than 128 bytes, and reject tags containing characters outside `[A-Za-z0-9._:-]` with HTTP 400, `type: "invalid_request_error"`, and `code: "invalid_conversation_tag"`.
+- The gateway MUST trim leading/trailing whitespace, reject empty tags, reject tags longer than 128 bytes, and reject tags containing characters outside `[A-Za-z0-9._:-]` with HTTP 400, `type: "invalid_request_error"`, and `code: "invalid_conversation_tag"`. **(v0.9.8:)** trimming is Go `strings.TrimSpace` **Unicode**-whitespace semantics (matching § 1.3 step 3 and shipped `chat_proxy.go`), not ASCII-only — a reimplementation that trims only ASCII whitespace diverges on Unicode-whitespace-wrapped tags.
 - The gateway MUST silently ignore the tag when `routing.sticky_enabled: false` (200 OK, no error); it MUST NOT derive or forward a sticky key in the default config. Silent ignore (rather than rejection) lets portable buyer SDKs always include the header without breaking against operators running the default-off posture.
 - The gateway MUST derive the internal `conv:` value with the HMAC-SHA256 algorithm in § 1.3. Gateway-managed deterministic request-shape hashing and gateway-managed sticky cookies are intentionally rejected for v0.8 because they are less explicit, harder to audit, and broaden the auth/session surface.
 
@@ -1169,6 +1402,7 @@ Response shape:
   "quota": {
     "daily_token_limit": 100000,
     "daily_tokens_used": 12000,
+    "daily_tokens_reserved": 0,
     "daily_tokens_remaining": 88000,
     "resets_at": "2026-05-29T00:00:00Z",
     "concurrency_limit": 2,
@@ -1196,6 +1430,26 @@ Response shape:
   "rating": {
     "latest": 3,
     "updated_at": "2026-05-28T02:10:00Z"
+  },
+  "settlement_disclosure": {
+    "included_paid_entrypoints": ["POST /v1/chat/completions"],
+    "excluded_paid_entrypoints": [
+      "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+    ],
+    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+    "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
+    "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
+    "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+    "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
+    "outcomes": {
+      "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
+      "verified": "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement.",
+      "quarantined": "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault.",
+      "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+    },
+    "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
+    "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+    "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
   }
 }
 ```
@@ -1205,6 +1459,12 @@ The response MUST NOT include the full API key.
 The response MAY include a key prefix for identification.
 
 The endpoint MUST provide enough data for the `/account` page to show usage, remaining quota, key status, and rating widget state.
+
+The response MUST include `settlement_disclosure` when SPEC-022 settlement
+labels or reservations are exposed. That disclosure MUST explain pending
+verification reservations, non-verified reservation release/refund behavior,
+and the provider-reported-hash caveat without exposing raw prompts or raw
+outputs.
 
 ### 5.6 `GET /v1/status`
 
@@ -1583,7 +1843,8 @@ Default quotas:
 
 - Account daily total tokens: 100,000.
 - Demo daily total tokens per IP: 1,000.
-- Per-account concurrent requests: 2.
+- Per-account concurrent requests: 4.
+- Per-account request-start rate: 30 requests per second per gateway instance.
 - Per-IP signup issuance per day: 3 accounts.
 - Authenticated max tokens per request: 4,096.
 - Demo max tokens per request: 512 unless configured otherwise.
@@ -1602,6 +1863,8 @@ Quota decisions MAY use preflight estimates before forwarding.
 
 Final usage events MUST record whether token counts were provider-reported or gateway-estimated.
 
+Coordinator-side slot queue wait is routing latency, not token usage or provider billable work. If a coordinator waits for an otherwise eligible provider's `slots_free` to recover before dispatch, the wait MAY be recorded for latency diagnostics, but it MUST NOT create buyer debit, provider payout, prompt tokens, completion tokens, or non-zero usage settlement by itself. Expired queued requests that return 503 remain failed requests under the refund policy below.
+
 Quota enforcement MUST use a reservation ledger to prevent concurrent over-spend.
 
 For each admitted request, the gateway:
@@ -1619,7 +1882,43 @@ Failed reservations MUST expire and be reclaimed by a reaper job within 24 hours
 
 For streaming requests (`stream: true`), the gateway MUST reserve `max_tokens` or the configured per-request cap, whichever is smaller, before forwarding.
 
-On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider.
+On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider, subject to the symmetric streaming clamp policy below.
+
+#### Streaming completion-token symmetric clamp (#255 downward, #278 upward)
+
+The gateway runs two checks on every successful streaming settlement, sharing the SAME pure-absolute clamp window:
+
+- Let `observed = ceil(bytes_emitted_so_far / 4)` (the existing § 7.2 disconnect-fallback heuristic).
+- Let `reported = usage.completion_tokens` (provider's tokenizer count from the final usage chunk).
+- Let `clampFloorTokens = 2`, `clampCeilingTokens = 20` (shared constants; no direction-specific tuning).
+
+**Downward direction (#255, 2026-06-29): provider reported more than observed.**
+
+- Let `overshoot_down = reported - observed`.
+- Clamp DOWN to `observed` iff `clampFloorTokens < overshoot_down ≤ clampCeilingTokens`.
+- In-window: usage event records `token_source = "gateway_estimated"`, preserves provider's reported `prompt_tokens`.
+
+**Upward direction (#278, 2026-06-30): byte-estimator ran higher than reported.**
+
+- Let `overshoot_up = observed - reported`.
+- Clamp UP to `reported` (i.e. trust the provider's tokenizer) iff `clampFloorTokens < overshoot_up ≤ clampCeilingTokens`.
+- In-window: usage event records `token_source = "provider_reported"`, preserves provider's reported `prompt_tokens` AND `completion_tokens`.
+
+**Outside the window the gateway MUST NOT clamp:**
+
+- `overshoot ≤ 2` (either direction): benign tokenizer noise (EOS / chat-template stop tokens that count as completion but never stream as delta content; or sub-byte rounding noise in the `ceil(N/4)` estimator). Existing settlement source applies — downward branch trusts the provider (`provider_reported`); upward branch trusts the byte estimate (`gateway_estimated`).
+- `overshoot > 20` (either direction): too large to be tokenizer noise. Downward: density mismatch — byte-based estimate is unreliable on dense content (CJK, code, short-token text where 1 token < 4 bytes); clamping would risk under-billing the provider for legitimately generated content; trust provider (`provider_reported`). Upward: stream truncation or zero-report-fraud guard — the provider's usage chunk plausibly under-reports content actually generated; trust byte estimate (`gateway_estimated`).
+
+When EITHER clamp fires, the gateway SHOULD emit a structured log line carrying `request_id`, `account_id`, `reported`, `observed`, `overshoot`, `window_floor`, `window_ceiling`, and `outcome` for audit visibility. The log MESSAGE field MUST distinguish direction (e.g. "clamped over-reported" vs "clamped under-reported").
+
+The pure-absolute window is a deliberate trade and applies symmetrically. A percentage-scaled ceiling (50% × observed in earlier #255 drafts) was rejected because it still false-positive-clamped moderate-density legitimate reports (e.g. observed=225 byte-tokens with a legitimate 300-token actual count fell inside a percentage window and got clamped). The fixed 20-token ceiling caps the per-request adversarial exposure at 20 tokens regardless of completion size in EITHER direction, and trusts the more-reliable source for any overshoot large enough to plausibly reflect a real disagreement.
+
+Skim surfaces NOT closed by the clamp (symmetric in both directions):
+
+- `overshoot ≤ 2`: trusted as benign noise. Bounded; no structured-log emission. A provider can over- or under-report by up to 2 tokens per request without triggering the clamp.
+- `overshoot > 20`: trusted as legitimate density / truncation. A provider can over- or under-report by any amount above 20 tokens (bounded only by `max_tokens`) without triggering the clamp.
+
+Only the `3 ≤ overshoot ≤ 20` band (either direction) is both clamped and structured-log-visible for triage. Closing the residual skim surfaces requires a tokenizer-grounded observation (replacing the byte heuristic) — out of scope.
 
 For streaming requests where the buyer disconnects mid-stream, the gateway settles the daily-quota reservation as follows:
 
@@ -1647,6 +1946,8 @@ The docs MUST explain reset behavior.
 
 Rate-limit headers MUST reflect post-decision quota state. For admitted requests this means after reservation; for rejected requests this means after the failed admission decision without subtracting rejected work.
 
+Request-start token buckets are preflight abuse-shedding controls, not quota ledgers. A request rejected by the request-start bucket MUST NOT create a quota reservation, usage event, coordinator request, buyer debit, or provider payout. In v1 the bucket is process-local, so the limit applies per gateway instance rather than globally across all replicas.
+
 ### 7.4 Quota enforcement order
 
 The gateway SHOULD enforce in this order:
@@ -1656,11 +1957,12 @@ The gateway SHOULD enforce in this order:
 3. request body size limit.
 4. auth or demo classification.
 5. account/key status.
-6. signup closed state for signup paths.
-7. per-request caps.
-8. quota availability.
-9. concurrency reservation.
-10. coordinator availability.
+6. request-start rate bucket for chat completions.
+7. signup closed state for signup paths.
+8. per-request caps.
+9. quota availability.
+10. concurrency reservation.
+11. coordinator availability.
 
 ### 7.5 Concurrency
 
@@ -1670,9 +1972,23 @@ The v1 implementation MAY use SQLite transactional reservations.
 
 A reservation MUST expire or be released on request completion, timeout, or cancellation.
 
-If the account has 2 active requests and the cap is 2, the third request MUST return 429.
+If the account has 4 active requests and the cap is 4, the fifth request MUST return 429 by default. Operators MAY tune the cap in `gateway.yaml`.
 
-### 7.6 Quota exhausted response
+### 7.6 Request-start rate exceeded response
+
+When the per-account request-start token bucket is exhausted before the first coordinator attempt, the gateway MUST return 429 before forwarding to the coordinator. If an already-admitted request exhausts the bucket while deciding whether to retry a transient coordinator response, the gateway MUST NOT make the extra retry attempt and MAY relay the current coordinator response.
+
+The error code SHOULD be:
+
+```text
+account_request_rate_exceeded
+```
+
+The response MUST include `Retry-After`.
+
+The gateway SHOULD emit a structured log line with at least `request_id`, `account_id`, `limit_rps`, and `retry_after_s`.
+
+### 7.7 Quota exhausted response
 
 When quota is exhausted, the gateway MUST return 429.
 
@@ -1684,11 +2000,15 @@ quota_exhausted
 
 The response MUST include `X-RateLimit-Reset`.
 
-### 7.7 No long queueing
+### 7.8 Bounded slot queueing
 
-The gateway MUST NOT queue requests waiting for provider slots.
+The gateway MUST NOT queue requests indefinitely waiting for provider slots.
 
-If model is known but no slot is immediately available, return 503.
+For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 750 ms.
+
+If no slot becomes available before the bounded queue deadline, or if the candidate provider leaves `ready` state, return 503.
+
+Pinned provider or session requests MUST NOT enter this queue. If the pinned target has no immediately available slot, return 503.
 
 If the account concurrency cap is reached, return 429.
 
@@ -1751,6 +2071,16 @@ The documented response-pass-through allowlist is:
 
 - `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
   receipt-capable providers and forwarded unchanged by the gateway.
+- `X-MacProvider-Streaming-Mode`, the SPEC-018 AC-45 buyer-visible
+  streaming-mode diagnostic set by the coordinator on streaming `200`
+  responses. The gateway MUST forward it only when its value is one of
+  the three canonical AC-45 values — `incremental`, `buffered_kill_switch`,
+  or `buffered_provider_downgrade` — and MUST drop any other value rather
+  than forward it verbatim (defense-in-depth: the value is coordinator-set,
+  but the allowlist prevents a compromised or misconfigured upstream from
+  smuggling arbitrary header content past the `X-MacProvider-*` strip). The
+  header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
+  negotiation.
 
 The gateway MAY expose a public request ID.
 
@@ -2126,13 +2456,13 @@ The front-door signup flow MUST show a prominent Tier 1 disclosure before the us
 
 The disclosure MUST state, in substantively equivalent language:
 
-> MacProvider Tier 1 is cooperative inference. Buyer prompts and provider responses are processed as plaintext on provider hardware, so providers can technically observe prompts and outputs routed through their machine. Model identity is provider-reported, provider hardware is not attested, and MacProvider Tier 1 does not claim private inference, malicious-provider resistance, or verified model integrity.
+> MacProvider Tier 1 is cooperative inference. Buyer prompts and provider responses are processed as plaintext on provider hardware, so providers can technically observe prompts and outputs routed through their machine. Model identity is provider-reported. Verified model settlement, when enforce-active for covered paid traffic, means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt; it does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.
 
 The signup flow MUST require this disclosure to be visible before key issuance.
 
 When `routing.sticky_enabled: true`, the signup flow MUST also state, in substantively equivalent language: "If you use a conversation tag, related requests may be routed to the same provider for up to the configured sticky TTL, so that provider can observe and correlate more of your traffic than under default routing." Operators running the default `routing.sticky_enabled: false` posture MUST NOT be required to show sticky-specific language.
 
-The signup flow MUST NOT describe Tier 1 as provider-private, attested, encrypted-to-provider, malicious-provider-resistant, or model-integrity-verified.
+The signup flow MUST NOT describe Tier 1 as provider-private, attested, encrypted-to-provider, malicious-provider-resistant, or model-integrity-verified without the provider-reported-hash caveat in the same view.
 
 ---
 
@@ -2214,11 +2544,11 @@ Docs MUST map:
 
 ### 13.5 Tier 1 and model identity caveats
 
-The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; and Tier 1 makes no privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.
+The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; model identity is provider-reported; verified settlement language is constrained by the provider-reported-hash caveat; and Tier 1 makes no private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.
 
 When `routing.sticky_enabled: true`, the single-page docs MUST include a "Sticky affinity" subsection explaining `X-MacProvider-Conversation`, `DELETE /v1/sticky`, the configured `sticky_ttl_s`, and the privacy tradeoff that related requests may be preferentially routed to the same provider during the TTL. When `routing.sticky_enabled: false`, this subsection is optional and, if present, MUST clearly state sticky affinity is disabled.
 
-The single-page docs MUST include a "Model identity caveat" subsection explaining that model `id` is provider-reported, not cryptographically verified.
+The single-page docs MUST include a "Model identity caveat" subsection explaining that model `id` is provider-reported, catalog-known hash status is distinct from settlement enforcement, and neither detects a provider falsifying its own loaded-model hash measurement.
 
 The single-page docs MUST avoid wording that invites buyers to infer provider-private prompts from statements about avoiding AWS, GCP, Azure, or other hyperscalers.
 
@@ -2286,7 +2616,7 @@ The `audit_events` table MUST record:
 - every capacity tier transition, including signal state and audit-event chain.
 - every budget cap mutation.
 
-`usage_events` and `audit_events` MUST use the gateway `X-Request-ID` UUID v4 as the request row key for request-scoped entries. All request-scoped log surfaces that flow through the gateway MUST include the same `X-Request-ID`.
+`usage_events` and `audit_events` MUST use the gateway `X-Request-ID` UUID v4 as the request correlation value for request-scoped entries. The physical row identity is the composite `(account_id, request_id)` (per #196); `request_id` alone is a logical join key, ambiguous on cross-account collisions. All request-scoped log surfaces that flow through the gateway MUST include the same `X-Request-ID`; uniqueness assertions and reconciliation joins MUST be account-scoped.
 
 Events are append-only, immutable, and queryable through `/admin/audit-log` with operator-key authentication.
 
@@ -2378,7 +2708,8 @@ quotas:
   account_daily_tokens: 100000
   demo_daily_tokens_per_ip: 1000
   demo_sessions_per_ip_per_hour: 10
-  account_concurrency: 2
+  account_concurrency: 4
+  account_request_rate_per_second: 30
   signup_accounts_per_ip_per_day: 3
 
 limits:
@@ -2399,6 +2730,12 @@ capacity:
 timeouts:
   coordinator_request_seconds: 300
   streaming_cancel_ms: 500
+
+settlement:
+  reconcile_enabled: true
+  reconcile_interval_s: 30
+  reconcile_batch_limit: 100
+  reconcile_request_timeout_s: 10
 ```
 
 The gateway MUST authenticate `/poolz` requests with `coordinator.operator_key`.
@@ -2519,13 +2856,15 @@ The gateway MUST use:
 - `503` for known model with no provider available, demo paused, public API paused, coordinator unavailable, or no immediate slot.
 - `504` for provider timeout.
 
+A coordinator-issued `500` with `code: "route_snapshot_failed"` (a SPEC-022 pre-dispatch durable route-snapshot write failure — no provider reached) is passed through to the buyer verbatim rather than re-mapped, and is settled per § 17.7 (no charge on a genuine first-attempt failure). See § 17.7 for the cross-attempt exception.
+
 405 Method Not Allowed MUST use `type: "invalid_request_error"` and `code: "method_not_allowed"`.
 
 413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`.
 
 ### 17.2 Model unknown
 
-If a model is not in any provider's served or recently seen model list, return 404.
+If a model is not in any provider's served, **declared** (`supported_models`), or recently seen model list, return 404. **(v0.9.12 clarification — runbook item 22:)** a provider's "seen" model list is the union of its served `model_id` and every model it declared in `supported_models` (SPEC-010 v1.5 R-3.3.4, authoritative; SPEC-002 v1.5.4 R-3.X.6). So a model some connected provider **declares supported but has not warmed** is *known* and falls through to § 17.3's `503 no_provider_available` (retryable), not 404 — matching the shipped `ModelKnown()` gate (#555). This changes no dispatch outcome, only the error code a declared-but-cold request receives (404 → 503).
 
 Code:
 
@@ -2535,7 +2874,7 @@ model_not_found
 
 ### 17.3 Model unavailable
 
-If a model is known but no provider slot is immediately available, return 503.
+If a model is known — served, **declared in `supported_models`**, or recently seen (§ 17.2 / SPEC-010 R-3.3.4) — but no provider slot is available after any allowed bounded pre-dispatch slot queue expires, return 503.
 
 Code:
 
@@ -2587,8 +2926,9 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 
 | Status | Completion tokens | Quota debited | Rationale |
 |---|---:|---|---|
-| 200 | as reported | prompt + completion | Successful work performed |
+| 200 | as reported, subject to § 7.2 symmetric clamp | prompt + completion | Successful work performed; streaming `completion_tokens` symmetric-clamped within `2 < overshoot ≤ 20`: downward (#255) clamps to gateway observed (`token_source = "gateway_estimated"`); upward (#278) clamps to provider reported (`token_source = "provider_reported"`) |
 | 503 | 0 | none | No provider was reached; request never forwarded |
+| 500 `route_snapshot_failed` (pre-dispatch, marked no-prior-dispatch) | 0 | **none** | Coordinator failed to durably persist the SPEC-022 route snapshot before dispatching any provider; no provider was reached. Gateway refunds the reservation, writes a zero-token audit row, and passes the coordinator body through verbatim (item 18) — but **only** when the coordinator sets the POSITIVE `X-MacProvider-Settlement-No-Prior-Dispatch` marker AND the gateway saw no prior provider-billed retry. The coordinator stamps that marker centrally on **any** terminal response written while no provider has been **billably credited** in the request. "Credited" is ledger-exact, derived from two recorder signals rather than a request-log ordinal: `providerCredited` (set inside `recordRow` when a provider-bound billable row persists — `providerAssignedID != "" AND status != 503`; covers every attempt whose billing lands before the write, i.e. coordinator-internal failover attempts) and `dispatchedThisAttempt && terminalStatus != 503` (covers the current terminal attempt, whose own billing row is recorded AFTER its terminal write on the WS paths — a dispatched non-503 terminal WILL be billed, so it is left unmarked; a dispatched 503 terminal is not billed and stays marked). This supersedes the earlier `attemptN == 0` source, which over-counted non-billed 503 rows (over-charge) and incremented after the terminal WS write (under-charge). Requiring the positive marker (not the absence of a negative one) keeps a gateway-first deploy / coordinator rollback safe: an **unmarked** `route_snapshot_failed` settles on the prompt estimate per the 502 rows instead. Two cases are unmarked/settled so provider work credited in `observe` mode is not erased: (1) *coordinator-internal failover* — the marker is withheld on a `route_snapshot_failed` after an earlier credited provider (`providerCredited`); (2) *gateway retry* — the gateway retried an earlier **unmarked** response (a provider-dispatched `provider_*` 502, or a `no_provider` 503 from failover exhaustion after a billed attempt), setting `priorProviderDispatch`. A genuinely cold retried 502/503 is marked, so it does not poison a later refund. A settlement-finality header also disqualifies the refund. **Deploy the coordinator before the gateway; roll back in reverse.** **Carried limitation (documented):** on the coordinator's *write-before-bill* streaming / WS-tunneled terminal paths the marker is decided from the OUTWARD wire status, which can render a non-billable `503` (queue-full / relay-unavailable) as a `502 provider_error`. Such a response is left unmarked, so if the gateway retries it and later receives a `route_snapshot_failed`, it settles the estimate instead of refunding — the SAME behavior as pre-item-18 (where `route_snapshot_failed` was ALWAYS settled), i.e. this multi-attempt edge is pre-existing and NOT worsened by item 18. A fully ledger-exact marker on these paths requires carrying the canonical billing status (not the wire status) across every write-before-bill terminal site, or reordering terminal billing before the write; tracked as a follow-up. |
 | Context cancelled (buyer disconnects mid-reservation) | n/a | none; reservation refunded before return | Gateway MUST exit silently without writing a 500 to the dead connection |
 | Context cancelled (buyer disconnects at concurrency gate) | n/a | none; quota reservation refunded before return | Same as above |
 | SPEC-001 null-usage error (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`) | 0 (NULL) | **none** | Provider was reached but performed no countable work; no buyer debit |
@@ -2604,6 +2944,34 @@ The gateway MUST debit only work the provider actually performed.
 SPEC-001 null-usage errors are distinguished from 502/504 with 0 completion (which DO debit prompt only) because the null-usage error states indicate the provider returned a structured "did not even start work" signal. SPEC-005 v0.3 § 6.9 mirrors this row with zero provider credit. H-005 reconciliation requires both sides to agree: buyer 0, provider 0.
 
 The client-disconnect rows intentionally prefer provider-reported actuals and preserve deterministic estimation as a backward-compatibility fallback for pre-v1.2.4 providers.
+
+#### 17.7.1 Buyer-visible terminal SSE error envelope contract (#232)
+
+**Scope.** This clause applies to streaming fallback settlements whose `usage_events.outcome` is non-`"ok"` AND where the buyer connection remains writable at settle time (the harness-success stream surface — the buyer received an HTTP 2xx, the gateway is mid-stream, settlement happens before the response closes). The contract does NOT apply to client-disconnect rows in §17.7 where the buyer has already left the wire; those settle on the gateway side without a buyer-visible terminal frame by definition.
+
+Streaming fallback settlements in scope MUST emit a buyer-visible OpenAI-style terminal SSE error envelope to the byte stream BEFORE the closing `data: [DONE]` frame (or before EOF for paths that cannot emit `[DONE]`):
+
+```text
+data: {"error": {"message": "...", "type": "...", "code": "<error-code>"}}
+```
+
+Constraints on the envelope:
+
+1. The envelope MUST be a STANDALONE SSE data frame. No `choices` field. No `usage` field. Presence of either key — regardless of value shape (empty array, empty object, `null`, zero token counts) — disqualifies the frame as a terminal envelope. Additionally, top-level JSON keys and the immediate keys of the `error` object MUST be unique; duplicate `choices`, `usage`, `error`, or any immediate `error.code`/`error.type`/other `error.*` field MUST cause a spec-compliant parser to reject the frame. Duplicates deeper inside `error.*` values (e.g. inside `error.details` sub-objects, provider-metadata trees) are NOT normatively required to reject — they carry no smuggling risk against the corroboration trust gate. Trailing bytes after the object (anything other than JSON whitespace up to EOF) MUST cause rejection. (Tightened by #295: literal absence of `choices`/`usage` keys, byte-strict rejection of top-level/`error`-surface duplicates and trailing garbage — earlier "no usage field with non-zero token counts" wording allowed JSON smuggling shapes the buyer's SDK would still see as valid.)
+2. `error.code` MUST be non-empty. The relationship between `error.code` and `usage_events.outcome` is normatively bound:
+   - DEFAULT: `error.code` MUST equal the settled `usage_events.outcome` value. Examples of values where gateway writes both sides identically: `stream_truncated`, `stream_malformed`, `stream_output_exceeded`, `upstream_error`, `provider_timeout`.
+   - PASS-THROUGH EXCLUSION: terminal envelopes the gateway FORWARDS verbatim without writing its own `usage_events` row (the SPEC-019 v0.2 pass-through allow-list, e.g. `response_byte_cap_exceeded`, `malformed_json_response`, `json_schema_validation_failed`, and the provider-emitted `provider_timeout` variant) have no settlement row to match — this mapping clause does not apply to them. Their shape/position rules still apply (per §17.7.1 clauses 1, 3, 4).
+   - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence (gateway writes a `usage_events` row AND the buyer-visible `error.code` is different) that this clause permits explicitly:
+     - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
+   - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
+3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
+4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.
+
+This contract is what the harness reconciler relies on to corroborate the gateway's `usage_events.outcome` label when suppressing fallback pairs from the I1 overbill check (`GatewayOverbillVsHarnessTokens` / `GatewayOverbillVsCoordinatorTokens` / `AbsGatewayCoordinatorMismatchTokens`). Without this clause the gateway's outcome label is a trust gate: a buggy or attacker-controlled gateway could label a real overbill as `stream_truncated` to hide it from I1 (#229 R6 security HIGH → #232).
+
+A fallback row whose buyer never saw the standalone terminal envelope MUST be flagged by the harness as an uncorroborated overbill. Future money-path code paths that intentionally settle as a fallback outcome without emitting the envelope (e.g. a future code path that closes the stream silently) MUST update this SPEC clause with a named exception and version bump — a silent broad escape clause is not permitted.
+
+SPEC-019 structured-output terminal frames inherit this same standalone / last-data-frame / no-content-after rule when settling streaming fallback outcomes (see SPEC-019 for the structured-output specific code list).
 
 ### 17.8 Kill-switch failure mode
 
@@ -3221,9 +3589,9 @@ Branches:
 Expected outcome:
 
 - Concurrent requests cannot oversubscribe the daily quota during the stream.
-- Successful stream returns HTTP 200 with `Content-Type: text/event-stream; charset=utf-8`, emits `data: {json}\n\n` chunks followed by `data: [DONE]`, and settles to provider-reported usage.
-- Branch A releases concurrency and records usage source as provider-reported.
-- Branch B releases concurrency and records usage source as gateway-estimated.
+- Successful stream returns HTTP 200 with `Content-Type: text/event-stream; charset=utf-8`, emits `data: {json}\n\n` chunks followed by `data: [DONE]`, and settles to provider-reported usage subject to the § 7.2 symmetric clamp (#255 downward + #278 upward). The symmetric clamp shares the same `2 < overshoot ≤ 20` pure-absolute window in both directions but settles in opposite directions: downward gaps (reported > observed, in window) clamp DOWN to observed with `token_source = "gateway_estimated"`; upward gaps (observed > reported, in window) clamp UP to reported with `token_source = "provider_reported"`.
+- Branch A releases concurrency and records usage source as `provider_reported` in two cases: (i) NO clamp fires (overshoot ≤ 2 in either direction, or > 20 downward), or (ii) the #278 upward clamp fires in-window (gateway estimate was inflated; provider tokenizer wins).
+- Branch B releases concurrency and records usage source as `gateway_estimated` in two cases: (i) the #255 downward clamp fires in-window (provider over-reported; gateway estimate wins), or (ii) upward case with `overshoot > 20` (likely stream truncation / zero-report fraud; gateway estimate wins).
 - `/v1/usage` returns HTTP 200 with reservation released and daily token fields reflecting settlement.
 
 Verification command:

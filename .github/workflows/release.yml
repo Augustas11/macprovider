@@ -1,64 +1,491 @@
 name: Release macprovider-cli
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       version:
         description: "Release tag, for example v1.2.1"
         required: true
         type: string
+      prerelease:
+        description: "Publish as a prerelease canary and do not mark latest"
+        required: false
+        default: false
+        type: boolean
+      candidate:
+        description: "Build unsigned candidate inputs before the release tag exists"
+        required: false
+        default: false
+        type: boolean
+      promote_run_id:
+        description: "Reuse a previously verified unsigned candidate run instead of rebuilding"
+        required: false
+        default: ""
+        type: string
+      provider_admission_policy:
+        description: "Signed provider admission rollout policy"
+        required: true
+        default: strict_post_migration
+        type: choice
+        options:
+          - bridge_required
+          - strict_post_migration
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build and publish darwin-arm64 release
-    runs-on: macos-15  # Xcode 16+ default. macos-14 ships Xcode 15.x (Swift 5.10); swift-jinja 2.0.0 needs tools v6.0.0.
+  build:
+    name: Build unsigned release inputs from reviewed main
+    # The official Intel macos-15 image contract carries Xcode 16.4 (16F6) at
+    # /Applications/Xcode_16.4.app and macOS SDK 15.5:
+    # https://github.com/actions/runner-images/blob/main/images/macos/macos-15-Readme.md
+    runs-on: macos-15-intel
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release_source.outputs.tag }}
+      commit: ${{ steps.release_source.outputs.commit }}
+      prerelease: ${{ steps.release_source.outputs.prerelease }}
     steps:
       - name: Checkout
-        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # Pinned to actions/checkout v6.0.3. Re-resolve deliberately
         # when upgrading the action rather than trusting a mutable tag.
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
 
-      - name: Resolve version
-        id: version
+      - name: Verify reviewed release source
+        id: release_source
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          VERSION_INPUT: ${{ github.event.inputs.version || '' }}
-          REF_NAME: ${{ github.ref_name }}
+          RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
+          RELEASE_PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
+          RELEASE_CANDIDATE_INPUT: ${{ github.event.inputs.candidate || 'false' }}
+          PROMOTE_RUN_ID_INPUT: ${{ github.event.inputs.promote_run_id || '' }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            tag="$VERSION_INPUT"
-          else
-            tag="$REF_NAME"
+          bash scripts/validate-release-inputs.sh \
+            "$RELEASE_VERSION_INPUT" "$RELEASE_PRERELEASE_INPUT" \
+            "$RELEASE_CANDIDATE_INPUT"
+          case "$PROVIDER_ADMISSION_POLICY_INPUT" in
+            bridge_required|strict_post_migration) ;;
+            *) echo "::error::invalid provider admission rollout policy" >&2; exit 1 ;;
+          esac
+          tag="$RELEASE_VERSION_INPUT"
+          commit="$(git rev-parse HEAD)"
+          absence_policy="--require-existing"
+          if [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]; then
+            absence_policy="--allow-absent"
           fi
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "version must look like v1.2.1" >&2
-            exit 1
+          if [[ -n "$PROMOTE_RUN_ID_INPUT" ]]; then
+            if [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]; then
+              echo "::error::candidate builds cannot promote another candidate run" >&2
+              exit 1
+            fi
+            if [[ ! "$PROMOTE_RUN_ID_INPUT" =~ ^[0-9]+$ ]]; then
+              echo "::error::promote_run_id must be a numeric GitHub Actions run id" >&2
+              exit 1
+            fi
           fi
+          bash scripts/verify-release-source.sh \
+            "$tag" "$commit" origin "$absence_policy"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$RELEASE_PRERELEASE_INPUT" >> "$GITHUB_OUTPUT"
 
-      - name: Select Xcode
+      - name: Verify content-pinned app build inputs
+        shell: bash
+        run: bash scripts/verify-app-build-inputs.sh "${{ steps.release_source.outputs.commit }}"
+
+      - name: Verify release version cohesion
+        shell: bash
+        run: bash scripts/test-coordinator-advertised-version.sh "${{ steps.release_source.outputs.tag }}"
+
+      - name: Select and verify reviewed release toolchain
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          xcodebuild -version
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
+
+      - name: Setup Go for Pearl binaries
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        # Pinned to actions/setup-go v6.5.0. Linux binaries are cross-compiled
+        # without CGO and carried as unsigned inputs into the protected signer.
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: |
+            phase4-coordinator/go.sum
+            phase5-gateway/go.sum
+
+      - name: Seal the Tier-2 verifier toolchain
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_root="$(go env GOROOT)"
+          sudo test ! -e /private/var/macprovider-go-verifier
+          sudo install -d -o root -g wheel -m 0755 /private/var/macprovider-go-verifier
+          sudo cp -a "$source_root/." /private/var/macprovider-go-verifier/
+          sudo chown -R root:wheel /private/var/macprovider-go-verifier
+          sudo chmod -R go-w /private/var/macprovider-go-verifier
+          sudo test -x /private/var/macprovider-go-verifier/bin/go
+
+      - name: Build Pearl linux-amd64 binaries
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          (
+            cd phase4-coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath -buildvcs=true \
+              -ldflags "-s -w -X main.version=$tag" \
+              -o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath -buildvcs=true \
+              -ldflags "-s -w" \
+              -o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+          )
+          (
+            cd phase5-gateway
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath -buildvcs=true \
+              -ldflags "-s -w -X main.version=$tag" \
+              -o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/gateway
+          )
+          file "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" \
+            | tee pearl-file.txt
+          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          strings "$RUNNER_TEMP/coordinator-linux-amd64" > "$RUNNER_TEMP/coordinator-linux-amd64.strings"
+          strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-linux-amd64.strings"
+          grep -Fq "$tag" "$RUNNER_TEMP/coordinator-linux-amd64.strings"
+          grep -Fq "$tag" "$RUNNER_TEMP/gateway-linux-amd64.strings"
+
+      - name: Install reviewed XcodeGen artifact
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/install-pinned-xcodegen.sh "$RUNNER_TEMP/xcodegen-2.45.4"
+
+      - name: Preflight protected OpenSSL seal before tag creation
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="/private/var/macprovider-openssl-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sealed_bin="$(bash scripts/install-sealed-release-openssl.sh "$candidate_root")"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'OPENSSL_BIN=%s\n' "$sealed_bin" >> "$GITHUB_ENV"
 
       - name: Build package
+        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
+        env:
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
           cd phase3-binary/dist
-          ./package.sh "${{ steps.version.outputs.tag }}"
+          CATALOG_RELEASE_REQUIRE_SEALED_GO_VERIFIER=1 \
+            MACPROVIDER_PROVIDER_ADMISSION_POLICY="$PROVIDER_ADMISSION_POLICY_INPUT" \
+            ./package.sh "${{ steps.release_source.outputs.tag }}"
+
+      - name: Build Malibu.app
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd phase3-binary/app
+          "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
+            archive \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO
+          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
+            "$RUNNER_TEMP/Malibu.app"
+
+      - name: Capture unsigned build artifact
+        if: ${{ github.event.inputs.promote_run_id == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          mkdir -p unsigned-release-inputs
+          cp "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" unsigned-release-inputs/
+          python3 "$GITHUB_WORKSPACE/scripts/prepare-malibu-bootstrap-trust-anchor.py" preflight \
+            "$tag" "$RUNNER_TEMP/Malibu.app" \
+            "$GITHUB_WORKSPACE/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+          tar czf unsigned-release-inputs/Malibu.app.tar.gz -C "$RUNNER_TEMP" Malibu.app
+          cp "$RUNNER_TEMP/release-toolchain.json" unsigned-release-inputs/
+          cp "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" unsigned-release-inputs/
+          unsigned_assets=(
+            "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz"
+            unsigned-release-inputs/Malibu.app.tar.gz
+            unsigned-release-inputs/release-toolchain.json
+            unsigned-release-inputs/coordinator-linux-amd64
+            unsigned-release-inputs/coordinator-cli-linux-amd64
+            unsigned-release-inputs/gateway-linux-amd64
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ steps.release_source.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ steps.release_source.outputs.prerelease }}" \
+            unsigned-release-inputs/release-toolchain.json \
+            unsigned-release-inputs/unsigned-release-manifest.json \
+            "${unsigned_assets[@]}"
+
+      - name: Restore promoted unsigned candidate artifact
+        if: ${{ github.event.inputs.promote_run_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_RUN_ID: ${{ github.event.inputs.promote_run_id }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          commit="${{ steps.release_source.outputs.commit }}"
+          prerelease="${{ steps.release_source.outputs.prerelease }}"
+          artifact_name="unsigned-release-${commit}"
+
+          python3 - "$GITHUB_REPOSITORY" "$PROMOTE_RUN_ID" "$commit" <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          repo, run_id, expected_commit = sys.argv[1:4]
+          run = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/actions/runs/{run_id}",
+          ], text=True))
+          if run.get("head_sha") != expected_commit:
+              raise SystemExit(
+                  f"promoted run head_sha {run.get('head_sha')} does not match {expected_commit}"
+              )
+          if run.get("event") != "workflow_dispatch":
+              raise SystemExit("promoted run must be a manual release workflow dispatch")
+          if run.get("status") != "completed":
+              raise SystemExit("promoted run must be completed before production signing")
+          if run.get("conclusion") not in {"cancelled", "success"}:
+              raise SystemExit(
+                  f"promoted run conclusion must be cancelled-at-signing or success, got {run.get('conclusion')}"
+              )
+
+          jobs = json.loads(subprocess.check_output([
+              "gh", "api", f"repos/{repo}/actions/runs/{run_id}/jobs", "--paginate",
+          ], text=True))
+          by_name = {}
+          for job in jobs.get("jobs", []):
+              by_name.setdefault(job.get("name"), []).append(job)
+
+          def require_success(name):
+              if not any(job.get("conclusion") == "success" for job in by_name.get(name, [])):
+                  raise SystemExit(f"promoted run lacks a successful {name} job")
+
+          require_success("Build unsigned release inputs from reviewed main")
+          require_success("Verify unsigned provider runtime on arm64")
+          if any(
+              job.get("conclusion") == "success"
+              for job in by_name.get("Sign and publish reviewed release", [])
+          ):
+              raise SystemExit("promoted candidate run must not have completed production signing")
+          PY
+
+          mkdir -p unsigned-release-inputs
+          gh run download "$PROMOTE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact_name" \
+            --dir unsigned-release-inputs
+
+          unsigned_assets=(
+            "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz"
+            unsigned-release-inputs/Malibu.app.tar.gz
+            unsigned-release-inputs/release-toolchain.json
+            unsigned-release-inputs/coordinator-linux-amd64
+            unsigned-release-inputs/coordinator-cli-linux-amd64
+            unsigned-release-inputs/gateway-linux-amd64
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "$commit" \
+            "$GITHUB_REPOSITORY" "$prerelease" \
+            unsigned-release-inputs/release-toolchain.json \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json" \
+            "${unsigned_assets[@]}"
+          cmp unsigned-release-inputs/unsigned-release-manifest.json \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json"
+
+      - name: Verify staged Pearl Go binaries
+        env:
+          EXPECTED_REVISION: ${{ steps.release_source.outputs.commit }}
+        shell: bash
+        run: |
+          python3 scripts/verify-pearl-go-binaries.py \
+            unsigned-release-inputs/coordinator-linux-amd64 \
+            unsigned-release-inputs/coordinator-cli-linux-amd64 \
+            unsigned-release-inputs/gateway-linux-amd64
+
+      - name: Upload unsigned build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: unsigned-release-${{ steps.release_source.outputs.commit }}
+          path: unsigned-release-inputs/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify_provider_runtime:
+    name: Verify unsigned provider runtime on arm64
+    needs: build
+    # GitHub's macos-15 label is the Apple Silicon image. The protected signer
+    # remains on macos-15-intel for the reviewed OpenSSL bottle.
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout reviewed release commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download unsigned build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-release-${{ needs.build.outputs.commit }}
+          path: ${{ runner.temp }}/unsigned-release-inputs
+
+      - name: Verify exact arm64 provider runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          tag="${{ needs.build.outputs.tag }}"
+          unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
+          unsigned_assets=(
+            "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
+            "$unsigned_dir/Malibu.app.tar.gz"
+            "$unsigned_dir/release-toolchain.json"
+            "$unsigned_dir/coordinator-linux-amd64"
+            "$unsigned_dir/coordinator-cli-linux-amd64"
+            "$unsigned_dir/gateway-linux-amd64"
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ needs.build.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
+            "$unsigned_dir/release-toolchain.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json" \
+            "${unsigned_assets[@]}"
+          cmp "$unsigned_dir/unsigned-release-manifest.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json"
+
+          provider_archive="$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
+          if tar tvzf "$provider_archive" \
+            | awk '{print substr($1,1,1), $0}' \
+            | grep -E '^[lhbcp]' >/dev/null; then
+            echo "::error::unsigned provider artifact contains an unsafe member" >&2
+            exit 1
+          fi
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/provider-runtime.XXXXXX")"
+          cleanup_runtime() {
+            rm -rf "$runtime_dir"
+          }
+          trap cleanup_runtime EXIT
+          tar -xzf "$provider_archive" -C "$runtime_dir" macprovider-cli
+          provider_binary="$runtime_dir/macprovider-cli"
+          test -x "$provider_binary"
+          provider_arches=$(/usr/bin/lipo -archs "$provider_binary")
+          test "$provider_arches" = arm64
+          provider_version="$("$provider_binary" --version)"
+          test "$provider_version" = "${tag#v}"
+
+  sign_publish:
+    name: Sign and publish reviewed release
+    needs: [build, verify_provider_runtime]
+    runs-on: macos-15-intel
+    environment: production-release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout reviewed release commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download unsigned build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: unsigned-release-${{ needs.build.outputs.commit }}
+          path: ${{ runner.temp }}/unsigned-release-inputs
+
+      - name: Restore captured unsigned inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          bash scripts/verify-release-source.sh \
+            "$tag" "${{ needs.build.outputs.commit }}" origin --require-existing
+          unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
+          unsigned_assets=(
+            "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
+            "$unsigned_dir/Malibu.app.tar.gz"
+            "$unsigned_dir/release-toolchain.json"
+            "$unsigned_dir/coordinator-linux-amd64"
+            "$unsigned_dir/coordinator-cli-linux-amd64"
+            "$unsigned_dir/gateway-linux-amd64"
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ needs.build.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
+            "$unsigned_dir/release-toolchain.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json" \
+            "${unsigned_assets[@]}"
+          cmp "$unsigned_dir/unsigned-release-manifest.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json"
+          cp "$RUNNER_TEMP/unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz" \
+            "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
+          cp "$RUNNER_TEMP/unsigned-release-inputs/release-toolchain.json" release-toolchain.json
+          for binary in coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64; do
+            source="$RUNNER_TEMP/unsigned-release-inputs/$binary"
+            test -f "$source"
+            test ! -L "$source"
+            install -m 0755 "$source" "$binary"
+          done
+          tar xzf "$RUNNER_TEMP/unsigned-release-inputs/Malibu.app.tar.gz" -C "$RUNNER_TEMP"
+          test -d "$RUNNER_TEMP/Malibu.app"
+
+      - name: Verify protected GitHub release posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Reverify captured release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/signing-release-toolchain.json"
+          cmp release-toolchain.json "$RUNNER_TEMP/signing-release-toolchain.json"
 
       # SPEC-003 v0.8.2 follow-up: macOS 26.3.1+ tightened launchd's AMFI policy
       # to reject adhoc-signed binaries under `launchctl bootstrap`. Earlier
@@ -75,12 +502,24 @@ jobs:
       # stapler cannot ticket directly. When a Developer ID Installer cert is
       # also present, this step additionally builds, signs, notarizes, staples,
       # and validates a flat pkg delivery container for install.sh to consume.
-      # Once the operator has an Apple Developer Program membership
-      # and populates the required secrets, signing activates automatically.
-      # Until then it is a documented no-op so the workflow still produces a
-      # release (operator can install under earlier macOS or run the binary
-      # outside launchd while the signing pipeline is being set up).
-      - name: Sign + notarize binary (conditional on operator secrets)
+      # Production publication is fail closed: the protected environment must
+      # supply a Developer ID identity and notarization credentials. An
+      # adhoc-signed binary cannot satisfy the fresh-install launchd contract.
+      - name: Seal OpenSSL 3 for protected release verification
+        id: protected_openssl
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-verifier
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Sign + notarize binary
         shell: bash
         env:
           APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
@@ -90,36 +529,22 @@ jobs:
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
-          KEYCHAIN_CREATED=0
           WORK=""
           SIGNING_TMP=""
           NOTARIZE_ZIP=""
-          cleanup_signing_material() {
-            if [ -n "$SIGNING_TMP" ]; then
-              rm -rf "$SIGNING_TMP"
-            fi
-            if [ "$KEYCHAIN_CREATED" = "1" ]; then
-              security delete-keychain build.keychain >/dev/null 2>&1 || true
-            fi
-            if [ -n "$WORK" ]; then
-              rm -rf "$WORK"
-            fi
-          }
-          trap cleanup_signing_material EXIT
 
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.build.outputs.tag }}"
           src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           test -f "$src"
 
           if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
-            echo "::warning::APPLE_DEVELOPER_ID_CERT_P12_BASE64 secret not set;"
-            echo "::warning::shipping adhoc-signed binary. Fresh installs on"
-            echo "::warning::macOS 26.3.1+ will fail launchctl bootstrap until"
-            echo "::warning::the secret is populated. See memory:"
-            echo "::warning::macprovider-launchd-amfi-blocker-macos-26."
-            exit 0
+            echo "::error::APPLE_DEVELOPER_ID_CERT_P12_BASE64 is required for a production release." >&2
+            exit 1
           fi
 
           # Verify the remaining secrets are also present — partial setup
@@ -144,10 +569,10 @@ jobs:
           # Step 1: import .p12 certificate identities into a transient
           # keychain. The Application identity signs the executable; the
           # Installer identity signs the staplable .pkg artifact.
-          KEYCHAIN_PASS=$(openssl rand -hex 16)
+          KEYCHAIN_PASS=$("$OPENSSL_BIN" rand -hex 16)
           SIGNING_TMP=$(mktemp -d)
+          echo "SIGNING_TMP=$SIGNING_TMP" >> "$GITHUB_ENV"
           security create-keychain -p "$KEYCHAIN_PASS" build.keychain
-          KEYCHAIN_CREATED=1
           security default-keychain -s build.keychain
           security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
           security set-keychain-settings -lut 3600 build.keychain
@@ -194,12 +619,45 @@ jobs:
 
           # Extract tarball so we can sign the binary in place, then repack.
           WORK=$(mktemp -d)
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
           tar xzf "$src" -C "$WORK"
           test -x "$WORK/macprovider-cli"
+          test -f "$WORK/compatibility-set.json"
+
+          # Bind the semantic compatibility set before it enters any final
+          # container. The signed payload intentionally omits tar/pkg/dmg
+          # hashes; those enclosing bytes are bound later by checksums.txt.
+          [ -n "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ] || {
+            echo "::error::MACPROVIDER_RELEASE_SIGNING_KEY_PEM is required for the compatibility set." >&2
+            exit 1
+          }
+          COMPATIBILITY_SIGNING_KEY="$SIGNING_TMP/compatibility-signing-key.pem"
+          printf '%s\n' "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$COMPATIBILITY_SIGNING_KEY"
+          chmod 600 "$COMPATIBILITY_SIGNING_KEY"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$WORK/compatibility-set.json" \
+            --payload-directory "$WORK" \
+            --expected-tag "$tag" \
+            --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
+          python3 scripts/compatibility-set-manifest.py sign \
+            --input "$WORK/compatibility-set.json" \
+            --private-key "$COMPATIBILITY_SIGNING_KEY"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$WORK/compatibility-set.json" \
+            --payload-directory "$WORK" \
+            --require-signature \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --expected-tag "$tag" \
+            --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
+          cp "$WORK/compatibility-set.json" phase3-binary/dist/compatibility-set.json
+          rm -f "$COMPATIBILITY_SIGNING_KEY"
 
           codesign --force \
             --options runtime \
             --timestamp \
+            --identifier live.streamvc.macprovider.cli \
             --sign "$SIGNING_ID" \
             "$WORK/macprovider-cli"
 
@@ -207,6 +665,22 @@ jobs:
           # early (e.g. cert expired) without burning notary submission
           # quota.
           codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
+          CLI_REQUIREMENT=$(codesign -d -r- "$WORK/macprovider-cli" 2>&1)
+          printf '%s\n' "$CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+            echo "::error::CLI designated requirement lacks the stable release identifier" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            "$WORK/macprovider-cli" || {
+            echo "::error::CLI designated requirement is not pinned to the release Team ID" >&2
+            exit 1
+          }
+          signed_provider_arches=$(/usr/bin/lipo -archs "$WORK/macprovider-cli")
+          [ "$signed_provider_arches" = arm64 ] || {
+            echo "::error::signed provider binary is not exact arm64" >&2
+            exit 1
+          }
 
           # Step 3: notarize. notarytool needs a zip or dmg, not a raw
           # binary, so wrap the binary in a transient zip for submission
@@ -218,7 +692,7 @@ jobs:
           NOTARIZE_ZIP="$SIGNING_TMP/notary.zip"
           (cd "$WORK" && /usr/bin/ditto -c -k --keepParent macprovider-cli "$NOTARIZE_ZIP")
 
-          xcrun notarytool submit "$NOTARIZE_ZIP" \
+          scripts/notarytool-submit-with-retry.sh "$NOTARIZE_ZIP" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_NOTARY_TEAM_ID" \
@@ -228,9 +702,30 @@ jobs:
           # Step 4: re-tar with the signed + notarized binary.
           # Preserve the same internal layout package.sh produced; the
           # only difference vs the input tarball is that
-          # ./macprovider-cli now carries a real signature chain.
+          # macprovider-cli now carries a real signature chain. Name every
+          # member explicitly so the shipped archive cannot regain an
+          # ambiguous root entry after the unsigned archive was validated.
           rm -f "$src"
-          tar czf "$src" -C "$WORK" .
+          release_archive_members=(
+            macprovider-cli
+            mlx.metallib
+            THIRD-PARTY-NOTICES.txt
+            compatibility-set.json
+            compatibility-set-local
+            catalog-release
+          )
+          release_bundle_count=0
+          for release_bundle in mlx-swift_Cmlx.bundle swift-nio_NIOPosix.bundle; do
+            if [ -d "$WORK/$release_bundle" ]; then
+              release_archive_members+=("$release_bundle")
+              release_bundle_count=$((release_bundle_count + 1))
+            fi
+          done
+          [ "$release_bundle_count" -gt 0 ] || {
+            echo "::error::Signed release payload lacks a SwiftPM resource bundle" >&2
+            exit 1
+          }
+          tar czf "$src" -C "$WORK" "${release_archive_members[@]}"
 
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
           if [ -n "$INSTALLER_ID" ]; then
@@ -245,9 +740,17 @@ jobs:
             mkdir -p "$PKG_ROOT"
             mkdir -p "$PKG_SCRIPTS"
             cp "$WORK/macprovider-cli" "$PKG_ROOT/macprovider-cli"
+            if [ -f "$WORK/mlx.metallib" ]; then
+              cp "$WORK/mlx.metallib" "$PKG_ROOT/mlx.metallib"
+            fi
             find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$PKG_ROOT"/ \;
             if [ -f "$WORK/THIRD-PARTY-NOTICES.txt" ]; then
               cp "$WORK/THIRD-PARTY-NOTICES.txt" "$PKG_ROOT/THIRD-PARTY-NOTICES.txt"
+            fi
+            cp "$WORK/compatibility-set.json" "$PKG_ROOT/compatibility-set.json"
+            cp -R "$WORK/compatibility-set-local" "$PKG_ROOT/compatibility-set-local"
+            if [ -d "$WORK/catalog-release" ]; then
+              cp -R "$WORK/catalog-release" "$PKG_ROOT/catalog-release"
             fi
             printf '%s\n' \
               '#!/bin/sh' \
@@ -268,7 +771,7 @@ jobs:
               "$UNSIGNED_PKG"
             productsign --sign "$INSTALLER_ID" "$UNSIGNED_PKG" "$SIGNED_PKG"
 
-            xcrun notarytool submit "$SIGNED_PKG" \
+            scripts/notarytool-submit-with-retry.sh "$SIGNED_PKG" \
               --apple-id "$APPLE_NOTARY_APPLE_ID" \
               --password "$APPLE_NOTARY_PASSWORD" \
               --team-id "$APPLE_NOTARY_TEAM_ID" \
@@ -281,10 +784,6 @@ jobs:
             echo "::warning::APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 not set; skipping signed/stapled .pkg artifact."
           fi
 
-          # Clean up keychain so secrets do not linger on the runner.
-          cleanup_signing_material
-          trap - EXIT
-
           echo "  binary signed by: $SIGNING_ID"
           echo "  notarization: accepted"
           echo "  stapling: skipped for standalone executable tarball"
@@ -294,11 +793,260 @@ jobs:
             echo "  pkg stapling: validated"
           fi
 
+      - name: Sign + notarize + staple Malibu.app
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/Malibu.app"
+          tag="${{ needs.build.outputs.tag }}"
+
+          if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
+            echo "::error::APPLE_DEVELOPER_ID_CERT_P12_BASE64 is required for Malibu.app." >&2
+            exit 1
+          fi
+          test -d "$APP"
+
+          security list-keychains | grep -q build.keychain || {
+            echo "::error::build.keychain absent; CLI signing step cleanup ran too early." >&2
+            exit 1
+          }
+          [ -n "${WORK:-}" ] && [ -x "$WORK/macprovider-cli" ] || {
+            echo "::error::signed macprovider-cli not available for Malibu.app bundling" >&2
+            exit 1
+          }
+
+          SIGNING_ID=$(security find-identity -v -p codesigning build.keychain \
+                      | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          [ -n "$SIGNING_ID" ] || {
+            echo "::error::No Developer ID Application identity in build.keychain" >&2
+            exit 1
+          }
+
+          # Preflight the restored app before any protected-job bundle writes.
+          # Sparkle 2.6.4 also rejects an update when the old bundle has an
+          # EdDSA key and the new bundle removes it. Inject only the frozen
+          # v1.8.32 trust anchor into the one-time v1.8.39 bridge; no feed,
+          # framework, or app-owned updater returns with it.
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py prepare \
+            "$tag" "$APP" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+
+          cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"
+          chmod 755 "$APP/Contents/MacOS/macprovider-cli"
+          [ -f "$WORK/mlx.metallib" ] || {
+            echo "::error::signed CLI payload lacks mlx.metallib for Malibu.app bundling" >&2
+            exit 1
+          }
+          cp "$WORK/mlx.metallib" "$APP/Contents/MacOS/mlx.metallib"
+          find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' \
+            -exec cp -R {} "$APP/Contents/MacOS"/ \;
+          cp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
+          cmp "$WORK/compatibility-set.json" "$APP/Contents/Resources/compatibility-set.json"
+
+          # Re-verify after bundling and before codesign so copied payloads
+          # cannot introduce a symlink or Sparkle runtime into the target.
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py verify \
+            "$APP" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+          MALIBU_LINKS="$(/usr/bin/otool -L "$APP/Contents/MacOS/Malibu")"
+          if printf '%s\n' "$MALIBU_LINKS" | /usr/bin/grep -F Sparkle >/dev/null; then
+            echo "::error::Malibu bridge must not link a Sparkle runtime" >&2
+            exit 1
+          fi
+
+          # Sign nested copied payloads explicitly before signing the outer
+          # app. Do not use codesign --deep here: the standalone provider CLI
+          # is already signed and must remain byte-identical to the tarball
+          # CLI after it is embedded in Malibu.app.
+          codesign --force \
+            --timestamp \
+            --sign "$SIGNING_ID" \
+            "$APP/Contents/MacOS/mlx.metallib"
+          while IFS= read -r -d '' nested_bundle; do
+            codesign --force \
+              --timestamp \
+              --sign "$SIGNING_ID" \
+              "$nested_bundle"
+          done < <(find "$APP/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -name '*.bundle' -print0)
+
+          SOURCE_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
+          source_cli_sha256="$(shasum -a 256 "$WORK/macprovider-cli" | awk '{print $1}')"
+          codesign --force \
+            --options runtime \
+            --timestamp \
+            --preserve-metadata=identifier \
+            --entitlements phase3-binary/app/Malibu.entitlements \
+            --sign "$SIGNING_ID" \
+            "$APP"
+
+          codesign --verify --strict --verbose=2 --deep "$APP"
+          bundled_cli_sha256="$(shasum -a 256 "$APP/Contents/MacOS/macprovider-cli" | awk '{print $1}')"
+          if [ "$bundled_cli_sha256" != "$source_cli_sha256" ]; then
+            echo "::error::Malibu embedded CLI sha256 differs from standalone CLI" >&2
+            echo "::error::standalone=$source_cli_sha256 embedded=$bundled_cli_sha256" >&2
+            exit 1
+          fi
+          BUNDLED_CLI_REQUIREMENT=$(codesign -d -r- "$APP/Contents/MacOS/macprovider-cli" 2>&1)
+          printf '%s\n' "$BUNDLED_CLI_REQUIREMENT" | grep -F 'identifier "live.streamvc.macprovider.cli"' >/dev/null || {
+            echo "::error::Bundling changed the CLI designated requirement identifier" >&2
+            exit 1
+          }
+          codesign --verify --strict --verbose=2 \
+            -R="identifier \"live.streamvc.macprovider.cli\" and anchor apple generic and certificate leaf[subject.OU] = \"$APPLE_NOTARY_TEAM_ID\"" \
+            "$APP/Contents/MacOS/macprovider-cli" || {
+            echo "::error::Bundled CLI designated requirement is not pinned to the release Team ID" >&2
+            exit 1
+          }
+          test "$SOURCE_CLI_REQUIREMENT" = "$BUNDLED_CLI_REQUIREMENT" || {
+            echo "::error::Bundling changed the CLI designated requirement" >&2
+            exit 1
+          }
+
+          NOTARIZE_ZIP="$RUNNER_TEMP/Malibu-notary.zip"
+          /usr/bin/ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
+
+          scripts/notarytool-submit-with-retry.sh "$NOTARIZE_ZIP" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          rm -f "$NOTARIZE_ZIP"
+
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl -a -vvv -t exec "$APP"
+
+          mkdir -p "phase3-binary/app/dist"
+          DIST_DMG="phase3-binary/app/dist/Malibu-${tag}.dmg"
+
+          # SPEC-025 P2: primary consumer download is a stapled .dmg with an
+          # Applications symlink (Application cert only; no Installer cert).
+          DMG_STAGE="$RUNNER_TEMP/malibu-dmg-stage"
+          mkdir -p "$DMG_STAGE"
+          cp -R "$APP" "$DMG_STAGE/"
+          ln -sf /Applications "$DMG_STAGE/Applications"
+          hdiutil create \
+            -volname "Malibu" \
+            -srcfolder "$DMG_STAGE" \
+            -ov \
+            -format UDZO \
+            "$GITHUB_WORKSPACE/$DIST_DMG"
+          rm -rf "$DMG_STAGE"
+
+          codesign --sign "$SIGNING_ID" --timestamp "$GITHUB_WORKSPACE/$DIST_DMG"
+          scripts/notarytool-submit-with-retry.sh "$GITHUB_WORKSPACE/$DIST_DMG" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$GITHUB_WORKSPACE/$DIST_DMG"
+          xcrun stapler validate "$GITHUB_WORKSPACE/$DIST_DMG"
+
+          # Optional .pkg for operators who prefer a double-click installer.
+          if [ -z "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" ]; then
+            echo "::warning::APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 not set;"
+            echo "::warning::skipping Malibu.app.pkg (Malibu-${tag}.dmg is the primary artifact)."
+          else
+          INSTALLER_ID=$(security find-identity -v build.keychain \
+                        | awk -F'"' '/Developer ID Installer/ {print $2; exit}')
+          [ -n "$INSTALLER_ID" ] || {
+            echo "::error::No Developer ID Installer identity in build.keychain" >&2
+            exit 1
+          }
+
+          APP_PKG_ROOT="$RUNNER_TEMP/malibu-pkg-root"
+          mkdir -p "$APP_PKG_ROOT"
+          cp -R "$APP" "$APP_PKG_ROOT/Malibu.app"
+
+          UNSIGNED_PKG="$RUNNER_TEMP/Malibu-unsigned.pkg"
+          DIST_PKG="phase3-binary/app/dist/Malibu-${tag}.pkg"
+
+          # pkgbuild wraps Malibu.app into a flat installer package.
+          # --install-location "/Applications" makes double-click install
+          # place Malibu.app directly in /Applications with no user
+          # interaction beyond consent.
+          # --identifier is the CFBundleIdentifier of the package, distinct
+          # from the app bundle's tech.malibu.app.
+          pkgbuild \
+            --root "$APP_PKG_ROOT" \
+            --install-location "/Applications" \
+            --identifier tech.malibu.app.installer \
+            --version "${tag#v}" \
+            "$UNSIGNED_PKG"
+
+          productsign --sign "$INSTALLER_ID" \
+            "$UNSIGNED_PKG" "$GITHUB_WORKSPACE/$DIST_PKG"
+
+          # Notarize the .pkg separately from the .app inside — Apple
+          # notary treats the two as distinct submissions.
+          scripts/notarytool-submit-with-retry.sh "$GITHUB_WORKSPACE/$DIST_PKG" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+
+          xcrun stapler staple "$GITHUB_WORKSPACE/$DIST_PKG"
+          xcrun stapler validate "$GITHUB_WORKSPACE/$DIST_PKG"
+          spctl -a -vvv -t install "$GITHUB_WORKSPACE/$DIST_PKG"
+
+          rm -rf "$APP_PKG_ROOT" "$UNSIGNED_PKG"
+          fi
+
+          echo "  Malibu.app signed by: $SIGNING_ID"
+          echo "  Malibu.app notarization: accepted"
+          echo "  Malibu.app stapling: validated"
+          echo "  Malibu-${tag}.dmg notarization: accepted"
+          echo "  Malibu-${tag}.dmg stapling: validated"
+          echo "  Malibu-${tag}.dmg: $DIST_DMG"
+          if [ -f "$GITHUB_WORKSPACE/phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
+            echo "  Malibu.app.pkg signed by: $INSTALLER_ID"
+            echo "  Malibu.app.pkg notarization: accepted"
+            echo "  Malibu.app.pkg stapling: validated"
+            echo "  Malibu.app.pkg: phase3-binary/app/dist/Malibu-${tag}.pkg"
+          fi
+
+      - name: Clean Apple signing material after notarization
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          security delete-keychain build.keychain >/dev/null 2>&1 || true
+          rm -rf "${SIGNING_TMP:-}" "${WORK:-}" 2>/dev/null || true
+
+      - name: Generate one-time Malibu 1.8.32 bootstrap bridge
+        if: needs.build.outputs.tag == 'v1.8.39'
+        shell: bash
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          PRERELEASE_INPUT: ${{ needs.build.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          [ "$PRERELEASE_INPUT" = false ] || {
+            echo "::error::the one-time v1.8.39 Malibu bootstrap must be a stable release" >&2
+            exit 1
+          }
+          [ -n "$SPARKLE_EDDSA_PRIVATE_KEY" ] || {
+            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY is required for the v1.8.39 bootstrap" >&2
+            exit 1
+          }
+          dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
+          bash scripts/generate-malibu-appcast.sh "$tag"
+          python3 scripts/verify-malibu-sparkle-signature.py \
+            "$tag" "$dmg" phase3-binary/app/dist/appcast.xml \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+
       - name: Tier-2 provider artifact preflight
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.build.outputs.tag }}"
           case "$tag" in
             v0.*|v1.0.*|v1.1.*|v1.2.[0-5])
               echo "Skipping Tier-2 provider artifact preflight for pre-B6 tag $tag"
@@ -308,6 +1056,9 @@ jobs:
           PROVIDER_ARTIFACT="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" \
             PROVIDER_VERSION="${tag#v}" \
             PROVIDER_SHA256="" \
+            PROVIDER_RUNTIME_MODE=structural \
+            PROVIDER_EXPECTED_ARCHES=arm64 \
+            PROVIDER_LIPO_BIN=/usr/bin/lipo \
             scripts/check-tier2-provider-artifact.sh
 
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
@@ -328,6 +1079,21 @@ jobs:
               exit 1
             }
             has_binary=0
+            has_catalog_manifest=0
+            has_catalog_keyring=0
+            has_catalog_tier2=0
+            has_catalog_candidates=0
+            has_catalog_candidates_signature=0
+            has_catalog_demand=0
+            has_catalog_demand_signature=0
+            has_catalog_rate_card=0
+            has_catalog_rate_card_signature=0
+            has_compatibility_set=0
+            has_local_install_contract=0
+            has_local_provider_plist=0
+            has_local_updater_metadata=0
+            has_local_watchdog_plist=0
+            has_local_watchdog_script=0
             while IFS= read -r entry; do
               normalized_entry="$entry"
               while :; do
@@ -347,7 +1113,58 @@ jobs:
                 macprovider-cli)
                   has_binary=1
                   ;;
+                mlx.metallib)
+                  ;;
                 THIRD-PARTY-NOTICES.txt)
+                  ;;
+                compatibility-set.json)
+                  has_compatibility_set=$((has_compatibility_set + 1))
+                  ;;
+                compatibility-set-local)
+                  ;;
+                compatibility-set-local/install.sh)
+                  has_local_install_contract=$((has_local_install_contract + 1))
+                  ;;
+                compatibility-set-local/provider-launch-agent.plist.template)
+                  has_local_provider_plist=$((has_local_provider_plist + 1))
+                  ;;
+                compatibility-set-local/updater-rollback.json)
+                  has_local_updater_metadata=$((has_local_updater_metadata + 1))
+                  ;;
+                compatibility-set-local/watchdog-launch-agent.plist.template)
+                  has_local_watchdog_plist=$((has_local_watchdog_plist + 1))
+                  ;;
+                compatibility-set-local/watchdog.sh)
+                  has_local_watchdog_script=$((has_local_watchdog_script + 1))
+                  ;;
+                catalog-release)
+                  ;;
+                catalog-release/release.json)
+                  has_catalog_manifest=$((has_catalog_manifest + 1))
+                  ;;
+                catalog-release/trusted-keys.json)
+                  has_catalog_keyring=$((has_catalog_keyring + 1))
+                  ;;
+                catalog-release/tier2-catalog.json)
+                  has_catalog_tier2=$((has_catalog_tier2 + 1))
+                  ;;
+                catalog-release/autotune-candidates.json)
+                  has_catalog_candidates=$((has_catalog_candidates + 1))
+                  ;;
+                catalog-release/autotune-candidates.json.sig)
+                  has_catalog_candidates_signature=$((has_catalog_candidates_signature + 1))
+                  ;;
+                catalog-release/demand-rank.json)
+                  has_catalog_demand=$((has_catalog_demand + 1))
+                  ;;
+                catalog-release/demand-rank.json.sig)
+                  has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
+                  ;;
+                catalog-release/rate-card.json)
+                  has_catalog_rate_card=$((has_catalog_rate_card + 1))
+                  ;;
+                catalog-release/rate-card.json.sig)
+                  has_catalog_rate_card_signature=$((has_catalog_rate_card_signature + 1))
                   ;;
                 *.bundle|*.bundle/*)
                   ;;
@@ -363,6 +1180,21 @@ jobs:
               echo "::error::$label does not contain macprovider-cli" >&2
               exit 1
             }
+            [ "$has_catalog_manifest" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/release.json" >&2; exit 1; }
+            [ "$has_catalog_keyring" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/trusted-keys.json" >&2; exit 1; }
+            [ "$has_catalog_tier2" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/tier2-catalog.json" >&2; exit 1; }
+            [ "$has_catalog_candidates" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json" >&2; exit 1; }
+            [ "$has_catalog_candidates_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json.sig" >&2; exit 1; }
+            [ "$has_catalog_demand" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json" >&2; exit 1; }
+            [ "$has_catalog_demand_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json.sig" >&2; exit 1; }
+            [ "$has_catalog_rate_card" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/rate-card.json" >&2; exit 1; }
+            [ "$has_catalog_rate_card_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/rate-card.json.sig" >&2; exit 1; }
+            [ "$has_compatibility_set" -eq 1 ] || { echo "::error::$label must contain exactly one compatibility-set.json" >&2; exit 1; }
+            [ "$has_local_install_contract" -eq 1 ] || { echo "::error::$label must contain exactly one compatibility-set-local/install.sh" >&2; exit 1; }
+            [ "$has_local_provider_plist" -eq 1 ] || { echo "::error::$label must contain exactly one provider launchd template" >&2; exit 1; }
+            [ "$has_local_updater_metadata" -eq 1 ] || { echo "::error::$label must contain exactly one updater rollback metadata file" >&2; exit 1; }
+            [ "$has_local_watchdog_plist" -eq 1 ] || { echo "::error::$label must contain exactly one watchdog launchd template" >&2; exit 1; }
+            [ "$has_local_watchdog_script" -eq 1 ] || { echo "::error::$label must contain exactly one watchdog script" >&2; exit 1; }
             if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
               echo "::error::$label contains unsafe link or device members" >&2
               exit 1
@@ -394,9 +1226,9 @@ jobs:
             exit 1
           fi
 
-          pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
-          if [ "$pkg_version" != "${tag#v}" ]; then
-            echo "::error::provider package version mismatch: got $pkg_version want ${tag#v}" >&2
+          pkg_provider_arches=$(/usr/bin/lipo -archs "$pkg_expand_dir/Payload/macprovider-cli")
+          if [ "$pkg_provider_arches" != arm64 ]; then
+            echo "::error::provider package binary is not exact arm64" >&2
             exit 1
           fi
 
@@ -404,47 +1236,304 @@ jobs:
           PROVIDER_ARTIFACT="$pkg_payload_tar" \
             PROVIDER_VERSION="${tag#v}" \
             PROVIDER_SHA256="" \
+            PROVIDER_RUNTIME_MODE=structural \
+            PROVIDER_EXPECTED_ARCHES=arm64 \
+            PROVIDER_LIPO_BIN=/usr/bin/lipo \
             scripts/check-tier2-provider-artifact.sh
+
+          tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" \
+            -C "$tar_payload_dir" compatibility-set.json
+          cmp "$tar_payload_dir/compatibility-set.json" \
+            "$pkg_expand_dir/Payload/compatibility-set.json"
+
+      - name: Verify Malibu release cryptographic bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
+          provider_tarball="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
+          test -f "$dmg"
+          test -f "$provider_tarball"
+          bash scripts/verify-malibu-release-artifacts.sh "$dmg" --provider-tarball "$provider_tarball"
+          if [ "$tag" = v1.8.39 ]; then
+            appcast="phase3-binary/app/dist/appcast.xml"
+            test -f "$appcast"
+            python3 scripts/verify-malibu-sparkle-signature.py \
+              "$tag" "$dmg" "$appcast" \
+              scripts/dist/malibu-v1.8.32-sparkle-public-key
+            bash scripts/test-coordinator-advertised-version.sh "$tag"
+          elif [ -e phase3-binary/app/dist/appcast.xml ]; then
+            echo "::error::legacy appcast must exist only for v1.8.39" >&2
+            exit 1
+          fi
 
       - name: Prepare release assets
         id: assets
         shell: bash
         env:
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy || 'strict_post_migration' }}
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.build.outputs.tag }}"
           src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
+          app_src="phase3-binary/app/dist/Malibu-${tag}.pkg"
+          app_dmg_src="phase3-binary/app/dist/Malibu-${tag}.dmg"
+          appcast_src="phase3-binary/app/dist/appcast.xml"
           tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
           pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
+          app_asset="Malibu-${tag}.pkg"
+          app_dmg_asset="Malibu-${tag}.dmg"
+          appcast_asset="appcast.xml"
+          coordinator_asset="coordinator-linux-amd64"
+          coordinator_cli_asset="coordinator-cli-linux-amd64"
+          gateway_asset="gateway-linux-amd64"
+          pearl_metadata="pearl-release.json"
+          pearl_metadata_sig="pearl-release.json.sig"
+          compatibility_manifest="compatibility-set.json"
+          compatibility_artifact_index="compatibility-artifact-index.json"
+          catalog_manifest_src="phase3-binary/catalog/autotune/release.json"
+          catalog_keys_src="phase3-binary/catalog/autotune/trusted-keys.json"
+          catalog_tier2_src="phase3-binary/catalog/autotune/tier2-catalog.json"
+          catalog_candidates_src="phase3-binary/dist/static/autotune-candidates.json"
+          catalog_candidates_sig_src="phase3-binary/dist/static/autotune-candidates.json.sig"
+          catalog_demand_src="phase3-binary/dist/static/demand-rank.json"
+          catalog_demand_sig_src="phase3-binary/dist/static/demand-rank.json.sig"
+          catalog_rate_card_src="phase3-binary/dist/static/rate-card.json"
+          catalog_rate_card_sig_src="phase3-binary/dist/static/rate-card.json.sig"
           test -f "$src"
+          test -f "$coordinator_asset"
+          test -f "$coordinator_cli_asset"
+          test -f "$gateway_asset"
           if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
             echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
             exit 1
           fi
+          release_signing_key="$(mktemp "$RUNNER_TEMP/release-signing-private.XXXXXX.pem")"
+          cleanup_release_signing_key() {
+            rm -f "$release_signing_key"
+          }
+          trap cleanup_release_signing_key EXIT
           cp "$src" "$tar_asset"
-          release_assets=("$tar_asset")
+          release_assets=("$tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
+          cp "$catalog_manifest_src" release.json
+          cp "$catalog_keys_src" trusted-keys.json
+          cp "$catalog_tier2_src" tier2-catalog.json
+          cp "$catalog_candidates_src" autotune-candidates.json
+          cp "$catalog_candidates_sig_src" autotune-candidates.json.sig
+          cp "$catalog_demand_src" demand-rank.json
+          cp "$catalog_demand_sig_src" demand-rank.json.sig
+          cp "$catalog_rate_card_src" rate-card.json
+          cp "$catalog_rate_card_sig_src" rate-card.json.sig
+          catalog_assets=(
+            release.json
+            trusted-keys.json
+            tier2-catalog.json
+            autotune-candidates.json
+            autotune-candidates.json.sig
+            demand-rank.json
+            demand-rank.json.sig
+            rate-card.json
+            rate-card.json.sig
+          )
+          release_assets+=("${catalog_assets[@]}")
+          compatibility_manifest_src="phase3-binary/dist/compatibility-set.json"
+          test -f "$compatibility_manifest_src"
+          cp "$compatibility_manifest_src" "$compatibility_manifest"
+          compatibility_extract="$(mktemp -d "$RUNNER_TEMP/compatibility-release.XXXXXX")"
+          tar -xzf "$src" -C "$compatibility_extract"
+          cmp "$compatibility_manifest" "$compatibility_extract/compatibility-set.json"
+          python3 scripts/compatibility-set-manifest.py validate \
+            --input "$compatibility_manifest" \
+            --payload-directory "$compatibility_extract" \
+            --require-signature \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --expected-tag "$tag" \
+            --expected-commit "${{ needs.build.outputs.commit }}" \
+            --expected-provider-admission-policy "$PROVIDER_ADMISSION_POLICY_INPUT"
+          release_assets+=("$compatibility_manifest")
+          rm -rf "$compatibility_extract"
           if [ -f "$pkg_src" ]; then
             cp "$pkg_src" "$pkg_asset"
             release_assets+=("$pkg_asset")
           fi
+          test -f "$app_dmg_src"
+          cp "$app_dmg_src" "$app_dmg_asset"
+          release_assets+=("$app_dmg_asset")
+          if [ "$tag" = v1.8.39 ]; then
+            [ "${{ needs.build.outputs.prerelease }}" = false ] || {
+              echo "::error::v1.8.39 bootstrap cannot be a prerelease" >&2
+              exit 1
+            }
+            test -f "$appcast_src"
+            cp "$appcast_src" "$appcast_asset"
+            release_assets+=("$appcast_asset")
+          elif [ -e "$appcast_src" ]; then
+            echo "::error::legacy appcast must exist only for v1.8.39" >&2
+            exit 1
+          fi
+          if [ -f "$app_src" ]; then
+            cp "$app_src" "$app_asset"
+            release_assets+=("$app_asset")
+          fi
+          coordinator_sha="$(shasum -a 256 "$coordinator_asset" | awk '{print $1}')"
+          coordinator_cli_sha="$(shasum -a 256 "$coordinator_cli_asset" | awk '{print $1}')"
+          gateway_sha="$(shasum -a 256 "$gateway_asset" | awk '{print $1}')"
+          RELEASE_TAG="$tag" \
+          RELEASE_COMMIT="${{ needs.build.outputs.commit }}" \
+          COORDINATOR_SHA="$coordinator_sha" \
+          COORDINATOR_CLI_SHA="$coordinator_cli_sha" \
+          GATEWAY_SHA="$gateway_sha" \
+          python3 - <<'PY'
+          import json
+          import hashlib
+          import os
+
+          tag = os.environ["RELEASE_TAG"]
+          catalog_manifest = json.load(open("release.json", encoding="utf-8"))
+          catalog_names = (
+              "release.json",
+              "trusted-keys.json",
+              "tier2-catalog.json",
+              "autotune-candidates.json",
+              "autotune-candidates.json.sig",
+              "demand-rank.json",
+              "demand-rank.json.sig",
+              "rate-card.json",
+              "rate-card.json.sig",
+          )
+          catalog_files = {
+              name: hashlib.sha256(open(name, "rb").read()).hexdigest()
+              for name in catalog_names
+          }
+          rollout_mode = os.environ["PROVIDER_ADMISSION_POLICY_INPUT"]
+          if rollout_mode == "bridge_required":
+              rollout = {
+                  "mode": rollout_mode,
+                  "enforce_provider_admission": False,
+                  "bridge_duration_s": 86400,
+              }
+          elif rollout_mode == "strict_post_migration":
+              rollout = {
+                  "mode": rollout_mode,
+                  "enforce_provider_admission": True,
+                  "bridge_duration_s": 0,
+              }
+          else:
+              raise SystemExit("unsupported provider admission rollout policy")
+          metadata = {
+              "schema_version": 1,
+              "release_lane": "pearl_runtime_catalog",
+              "repository": "Augustas11/macprovider",
+              "tag": tag,
+              "release_version": tag.removeprefix("v"),
+              "commit": os.environ["RELEASE_COMMIT"],
+              "architecture": "linux-amd64",
+              "provider_advertised_version": tag.removeprefix("v"),
+              "provider_admission_rollout": rollout,
+              "components": {
+                  "coordinator": {
+                      "asset": "coordinator-linux-amd64",
+                      "sha256": os.environ["COORDINATOR_SHA"],
+                      "embedded_version": tag,
+                  },
+                  "gateway": {
+                      "asset": "gateway-linux-amd64",
+                      "sha256": os.environ["GATEWAY_SHA"],
+                      "embedded_version": tag,
+                  },
+              },
+              "catalog": {
+                  "release_id": catalog_manifest["release_id"],
+                  "policy_version": catalog_manifest["policy_version"],
+                  "files": catalog_files,
+              },
+              "operator_artifacts": {
+                  "coordinator_cli": {
+                      "asset": "coordinator-cli-linux-amd64",
+                      "sha256": os.environ["COORDINATOR_CLI_SHA"],
+                  },
+              },
+          }
+          with open("pearl-release.json", "w", encoding="utf-8") as output:
+              json.dump(metadata, output, sort_keys=True, separators=(",", ":"))
+              output.write("\n")
+          PY
+          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
+          chmod 600 "$release_signing_key"
+          "$OPENSSL_BIN" dgst -sha256 -sign "$release_signing_key" \
+            -out "$pearl_metadata_sig" "$pearl_metadata"
+          "$OPENSSL_BIN" dgst -sha256 \
+            -verify ops/pearl-updater/release-signing-public.pem \
+            -signature "$pearl_metadata_sig" "$pearl_metadata"
+          release_assets+=("$pearl_metadata" "$pearl_metadata_sig")
+          artifact_index_arguments=(
+            --artifact "provider_cli=$tar_asset"
+            --artifact "malibu_app=$app_dmg_asset"
+            --artifact "coordinator=$coordinator_asset"
+            --artifact "coordinator_cli=$coordinator_cli_asset"
+            --artifact "gateway=$gateway_asset"
+            --artifact "compatibility_manifest=$compatibility_manifest"
+            --artifact "catalog_manifest=release.json"
+            --artifact "catalog_trusted_keys=trusted-keys.json"
+            --artifact "catalog_tier2=tier2-catalog.json"
+            --artifact "catalog_candidates=autotune-candidates.json"
+            --artifact "catalog_candidates_signature=autotune-candidates.json.sig"
+            --artifact "catalog_demand=demand-rank.json"
+            --artifact "catalog_demand_signature=demand-rank.json.sig"
+            --artifact "catalog_rate_card=rate-card.json"
+            --artifact "catalog_rate_card_signature=rate-card.json.sig"
+            --artifact "pearl_metadata=$pearl_metadata"
+            --artifact "pearl_metadata_signature=$pearl_metadata_sig"
+          )
+          python3 scripts/compatibility-artifact-index.py build \
+            --output "$compatibility_artifact_index" \
+            --compatibility-manifest "$compatibility_manifest" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$tag" \
+            --commit "${{ needs.build.outputs.commit }}" \
+            "${artifact_index_arguments[@]}"
+          python3 scripts/compatibility-artifact-index.py validate \
+            --input "$compatibility_artifact_index" \
+            --compatibility-manifest "$compatibility_manifest" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$tag" \
+            --commit "${{ needs.build.outputs.commit }}" \
+            "${artifact_index_arguments[@]}"
+          python3 scripts/build-release-discovery-head.py \
+            --sequence "$GITHUB_RUN_ID" \
+            --attempt "$GITHUB_RUN_ATTEMPT" \
+            --compatibility-manifest "$compatibility_manifest" \
+            --target-artifact-index "$compatibility_artifact_index" \
+            --private-key "$release_signing_key" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --openssl "$OPENSSL_BIN" \
+            --output macprovider-release-discovery.json \
+            --signature macprovider-release-discovery.json.sig
+          release_assets+=("$compatibility_artifact_index")
+          release_assets+=(macprovider-release-discovery.json macprovider-release-discovery.json.sig)
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ needs.build.outputs.commit }}" "$GITHUB_REPOSITORY" \
+            "${{ needs.build.outputs.prerelease }}" release-toolchain.json \
+            release-provenance.json "${release_assets[@]}"
+          release_assets+=(release-provenance.json)
           : > checksums.txt
           for release_asset in "${release_assets[@]}"; do
             shasum -a 256 "$release_asset" >> checksums.txt
           done
           printf "%s\n" "${release_assets[@]}" > release-assets.txt
-          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > release-signing-private.pem
-          chmod 600 release-signing-private.pem
-          openssl dgst -sha256 -sign release-signing-private.pem -out checksums.txt.sig checksums.txt
-          rm -f release-signing-private.pem
+          "$OPENSSL_BIN" dgst -sha256 -sign "$release_signing_key" \
+            -out checksums.txt.sig checksums.txt
           echo "asset=$tar_asset" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release notes
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.build.outputs.tag }}"
           if [ -f CHANGELOG.md ]; then
             cp CHANGELOG.md release-notes.md
           else
@@ -458,31 +1547,392 @@ jobs:
           a stapled .pkg asset in addition to the compatibility tarball.
           EOF
           fi
+          if [ -f "phase3-binary/app/dist/Malibu-${tag}.dmg" ]; then
+            cat >> release-notes.md <<EOF
 
-      - name: Publish GitHub Release
+          **Malibu.app (CLI wrapper)** — this release ships a Developer ID-signed,
+          notarized, and stapled \`Malibu-${tag}.dmg\`. Open the disk image, drag
+          Malibu.app to Applications, and launch. First run drives install.sh
+          onboarding with no terminal setup; Malibu monitors the launchd provider.
+          The launchd-managed CLI owns signed compatibility-set updates and replaces
+          Malibu.app only as one member of the same atomic transaction.
+          EOF
+            if [ "$tag" = v1.8.39 ]; then
+              cat >> release-notes.md <<EOF
+
+          Malibu 1.8.32 installations receive this exact DMG through a one-time,
+          EdDSA-signed compatibility appcast. Malibu 1.8.39 contains no Sparkle
+          dependency, runtime, or feed; it retains only the frozen 1.8.32 public
+          key needed for trust continuity. Subsequent updates are CLI-owned.
+          EOF
+            fi
+          elif [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
+            cat >> release-notes.md <<EOF
+
+          **Malibu.app (App-track provider onboarding)** - this release also
+          ships a Developer ID-signed, notarized, and stapled Malibu.app.pkg
+          for the SPEC-026 browserless one-click provider onboarding flow.
+          Download Malibu-${tag}.pkg and double-click to install Malibu.app
+          to /Applications. First launch drives the whole registration ->
+          autotune -> download -> live flow with no browser and no CLI setup.
+          EOF
+          fi
+
+      - name: Require an advancing immutable discovery head
+        if: needs.build.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.build.outputs.tag }}"
+          commit="${{ needs.build.outputs.commit }}"
+          previous="$RUNNER_TEMP/previous-discovery"
+          mkdir "$previous"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > "$previous/release.json"
+          read -r previous_tag previous_commit < <(
+            python3 - "$previous/release.json" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = release.get("tag_name")
+          commit = release.get("target_commitish")
+          if not isinstance(tag, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+              raise SystemExit("latest public release does not have a stable semantic tag")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("latest public release is not bound to an exact commit")
+          if release.get("draft") is not False or release.get("prerelease") is not False:
+              raise SystemExit("latest public release is not stable")
+          if release.get("immutable") is not True:
+              raise SystemExit("latest public release is not immutable")
+          print(tag, commit)
+          PY
+          )
+          python3 - "$previous/release.json" "$previous/assets.tsv" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          required = {
+              "compatibility-artifact-index.json",
+              "macprovider-release-discovery.json",
+              "macprovider-release-discovery.json.sig",
+          }
+          rows = []
+          for name in sorted(required):
+              matches = [asset for asset in release.get("assets", []) if asset.get("name") == name]
+              if len(matches) != 1 or type(matches[0].get("id")) is not int:
+                  raise SystemExit(f"latest immutable release does not have one numeric asset ID for {name}")
+              rows.append(f"{name}\t{matches[0]['id']}\n")
+          pathlib.Path(sys.argv[2]).write_text("".join(rows), encoding="ascii")
+          PY
+          while IFS=$'\t' read -r name asset_id; do
+            gh api -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$previous/$name"
+          done < "$previous/assets.tsv"
+          previous_sequence="$(python3 - "$previous/macprovider-release-discovery.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          sequence = value.get("signed", {}).get("release_sequence")
+          if type(sequence) is not int or sequence <= 0:
+              raise SystemExit("prior signed discovery sequence is invalid")
+          print(sequence)
+          PY
+          )"
+          python3 scripts/verify-release-discovery-transport.py \
+            --head "$previous/macprovider-release-discovery.json" \
+            --signature "$previous/macprovider-release-discovery.json.sig" \
+            --artifact-index "$previous/compatibility-artifact-index.json" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "release-discovery-v1-$previous_sequence" \
+            --target-tag "$previous_tag" \
+            --target-commit "$previous_commit" \
+            --allow-expired \
+            --openssl "$OPENSSL_BIN" >/dev/null
+          candidate_sequence="$(python3 - macprovider-release-discovery.json <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          sequence = value.get("signed", {}).get("release_sequence")
+          if type(sequence) is not int or sequence <= 0:
+              raise SystemExit("candidate signed discovery sequence is invalid")
+          print(sequence)
+          PY
+          )"
+          transport_tag="release-discovery-v1-$candidate_sequence"
+          verified_sequence="$(python3 scripts/verify-release-discovery-transport.py \
+            --head macprovider-release-discovery.json \
+            --signature macprovider-release-discovery.json.sig \
+            --artifact-index compatibility-artifact-index.json \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "$transport_tag" \
+            --target-tag "$tag" \
+            --target-commit "$commit" \
+            --minimum-sequence "$previous_sequence" \
+            --openssl "$OPENSSL_BIN")"
+          [[ "$verified_sequence" == "$candidate_sequence" ]]
+          printf '%s\n' "$transport_tag" > discovery-transport-tag.txt
+
+      - name: Create verified draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          release_commit="${{ needs.build.outputs.commit }}"
+          bash scripts/verify-release-source.sh \
+            "$tag" "$release_commit" origin --require-existing
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
           release_assets=()
           while IFS= read -r release_asset; do
             [ -n "$release_asset" ] && release_assets+=("$release_asset")
           done < release-assets.txt
+          bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
+            checksums.txt checksums.txt.sig release-provenance.json \
+            "$GITHUB_REPOSITORY" "$tag" "$release_commit" \
+            "${release_assets[@]}"
           gh release create "$tag" \
             "${release_assets[@]}" \
             checksums.txt \
             checksums.txt.sig \
             --title "macprovider-cli $tag" \
             --notes-file release-notes.md \
-            --latest
+            --target "$release_commit" \
+            --verify-tag \
+            --draft
+          gh release view "$tag" \
+            --json databaseId,isDraft,tagName,targetCommitish > draft-release-cli.json
+          python3 scripts/verify-release-draft-identity.py cli \
+            draft-release-cli.json "$tag" "$release_commit" > draft-release-id.txt
+
+      - name: Verify draft release assets by numeric ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          release_commit="${{ needs.build.outputs.commit }}"
+          release_id="$(cat draft-release-id.txt)"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::captured draft release id is invalid" >&2
+            exit 1
+          }
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > draft-release-api.json
+          python3 scripts/verify-release-draft-identity.py api \
+            draft-release-api.json "$tag" "$release_commit" --release-id "$release_id" >/dev/null
+          release_assets=()
+          while IFS= read -r release_asset; do
+            [ -n "$release_asset" ] && release_assets+=("$release_asset")
+          done < release-assets.txt
+          python3 scripts/capture-release-publication.py --draft --notes-file release-notes.md \
+            draft-release-api.json release-provenance.json draft-publication-manifest.json \
+            "${release_assets[@]}" checksums.txt checksums.txt.sig
+
+      - name: Publish only the revalidated numeric draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+          PRERELEASE_INPUT: ${{ needs.build.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          commit="${{ needs.build.outputs.commit }}"
+          release_id="$(cat draft-release-id.txt)"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::captured draft release id is invalid" >&2
+            exit 1
+          }
+          case "$PRERELEASE_INPUT" in
+            true)
+              make_latest=false
+              ;;
+            false)
+              make_latest=true
+              ;;
+            *)
+              echo "::error::validated prerelease state was lost" >&2
+              exit 1
+              ;;
+          esac
+          release_assets=()
+          while IFS= read -r release_asset; do
+            [ -n "$release_asset" ] && release_assets+=("$release_asset")
+          done < release-assets.txt
+
+          # This is the final public-transition gate: repeat every mutable
+          # source, tag, repository-posture, numeric-ID, and asset assertion
+          # directly before changing draft=false.
+          bash scripts/verify-release-source.sh \
+            "$tag" "$commit" origin --require-existing
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
+            checksums.txt checksums.txt.sig release-provenance.json \
+            "$GITHUB_REPOSITORY" "$tag" "$commit" \
+            "${release_assets[@]}"
+          gh release view "$tag" \
+            --json databaseId,isDraft,tagName,targetCommitish > final-draft-cli.json
+          python3 scripts/verify-release-draft-identity.py cli \
+            final-draft-cli.json "$tag" "$commit" --release-id "$release_id" >/dev/null
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > final-draft-by-id.json
+          python3 scripts/verify-release-draft-identity.py api \
+            final-draft-by-id.json "$tag" "$commit" --release-id "$release_id" >/dev/null
+          python3 scripts/capture-release-publication.py --draft --notes-file release-notes.md \
+            final-draft-by-id.json release-provenance.json final-draft-manifest.json \
+            "${release_assets[@]}" checksums.txt checksums.txt.sig
+
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false \
+            -F prerelease="$PRERELEASE_INPUT" \
+            -f make_latest="$make_latest" > published-release-api.json
+
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > immutable-release-by-id.json
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > immutable-release-by-tag.json
+          if [ "$PRERELEASE_INPUT" = false ]; then
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/latest" > stable-latest-release.json
+          else
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/latest" > stable-latest-release.json ||
+              printf '%s\n' '{}' > stable-latest-release.json
+          fi
+          python3 scripts/verify-published-release.py \
+            "$release_id" "$PRERELEASE_INPUT" \
+            immutable-release-by-id.json immutable-release-by-tag.json \
+            stable-latest-release.json
+          python3 scripts/capture-release-publication.py --notes-file release-notes.md \
+            immutable-release-by-id.json release-provenance.json publication-manifest.json \
+            "${release_assets[@]}" checksums.txt checksums.txt.sig
+          cmp final-draft-manifest.json publication-manifest.json
+
+      - name: Publish one append-only immutable discovery transport
+        if: needs.build.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          commit="${{ needs.build.outputs.commit }}"
+          transport_tag="$(cat discovery-transport-tag.txt)"
+          [[ "$transport_tag" =~ ^release-discovery-v1-[1-9][0-9]*$ ]]
+
+          remote_tag="$(git ls-remote --tags origin "$transport_tag")"
+          [ -z "$remote_tag" ] || {
+            echo "::error::append-only discovery tag already exists" >&2
+            exit 1
+          }
+          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$RUNNER_TEMP/releases-before-discovery.json"
+          python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$transport_tag" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if any(
+              isinstance(release, dict) and release.get("tag_name") == sys.argv[2]
+              for page in pages if isinstance(page, list)
+              for release in page
+          ):
+              raise SystemExit("append-only discovery release already exists")
+          PY
+
+          notes="$RUNNER_TEMP/discovery-notes.md"
+          printf 'Signed append-only discovery transport for %s.\n' "$tag" > "$notes"
+          gh release create "$transport_tag" \
+            compatibility-artifact-index.json \
+            macprovider-release-discovery.json \
+            macprovider-release-discovery.json.sig \
+            --title "macprovider signed release discovery" \
+            --notes-file "$notes" \
+            --target "$commit" \
+            --draft \
+            --prerelease \
+            --latest=false
+          transport_id="$(gh release view "$transport_tag" --json databaseId --jq .databaseId)"
+          [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+            -F draft=false -F prerelease=true -f make_latest=false \
+            > "$RUNNER_TEMP/discovery-published.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+            > "$RUNNER_TEMP/discovery-immutable.json"
+          python3 scripts/verify-release-discovery-transport.py \
+            --release-json "$RUNNER_TEMP/discovery-immutable.json" \
+            --head macprovider-release-discovery.json \
+            --signature macprovider-release-discovery.json.sig \
+            --artifact-index compatibility-artifact-index.json \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "$transport_tag" \
+            --target-tag "$tag" \
+            --target-commit "$commit" \
+            --require-immutable \
+            --openssl "$OPENSSL_BIN" >/dev/null
+
+      - name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl
+        if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'
+        env:
+          MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
+          MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$MALIBU_DOWNLOAD_SSH_KEY" ] || {
+            echo "::error::MALIBU_DOWNLOAD_SSH_KEY is required for bridge publication" >&2
+            exit 1
+          }
+          key_file="$(mktemp "$RUNNER_TEMP/malibu-download-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
+          tag="${{ needs.build.outputs.tag }}"
+          bash scripts/publish-malibu-latest-dmg.sh \
+            publication-manifest.json "Malibu-${tag}.dmg" appcast.xml \
+            compatibility-artifact-index.json checksums.txt checksums.txt.sig \
+            release-provenance.json
 
       - name: Verify published Tier-2 Release assets
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.build.outputs.tag }}"
           case "$tag" in
             v0.*|v1.0.*|v1.1.*|v1.2.[0-5])
               echo "Skipping Tier-2 published release verifier for pre-B6 tag $tag"
@@ -492,4 +1942,18 @@ jobs:
           GITHUB_REPO="${{ github.repository }}" \
             DOWNLOAD_ATTEMPTS=6 \
             DOWNLOAD_RETRY_SLEEP=5 \
+            PROVIDER_RUNTIME_MODE=structural \
+            PROVIDER_EXPECTED_ARCHES=arm64 \
+            PROVIDER_LIPO_BIN=/usr/bin/lipo \
             scripts/verify-tier2-provider-release.sh --tag "$tag"
+
+      - name: Verify anonymous signed discovery for stable release
+        if: needs.build.outputs.prerelease == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/verify-anonymous-release-discovery.sh \
+            "${{ needs.build.outputs.tag }}" \
+            "${{ needs.build.outputs.commit }}" \
+            "${{ needs.build.outputs.tag }}" \
+            "$(cat discovery-transport-tag.txt)"

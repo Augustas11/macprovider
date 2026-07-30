@@ -1,0 +1,15 @@
+[Unit]
+Description=Raise a critical local alert for failed Pearl updater unit %i
+
+[Service]
+Type=oneshot
+User=macprovider
+Group=macprovider
+ExecStart=/usr/local/sbin/macprovider-pearl-updater-alert %i
+TimeoutStartSec=30s
+UMask=0077
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+NoNewPrivileges=true

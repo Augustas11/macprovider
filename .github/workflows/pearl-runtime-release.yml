@@ -1,0 +1,378 @@
+name: Release Pearl runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Runtime release tag, for example v1.8.66"
+        required: true
+        type: string
+      prerelease:
+        description: "Runtime-only releases are always GitHub prereleases and never latest"
+        required: false
+        default: true
+        type: boolean
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  sign_publish_runtime:
+    name: Sign and publish Pearl runtime release
+    runs-on: macos-15-intel
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout reviewed runtime source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify reviewed runtime source
+        id: release_source
+        shell: bash
+        env:
+          RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
+          RELEASE_PRERELEASE_INPUT: "true"
+        run: |
+          set -euo pipefail
+          bash scripts/validate-release-inputs.sh \
+            "$RELEASE_VERSION_INPUT" "$RELEASE_PRERELEASE_INPUT" false
+          tag="$RELEASE_VERSION_INPUT"
+          commit="$(git rev-parse HEAD)"
+          bash scripts/verify-release-source.sh \
+            "$tag" "$commit" origin --require-existing
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$RELEASE_PRERELEASE_INPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go for Pearl binaries
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: |
+            phase4-coordinator/go.sum
+            phase5-gateway/go.sum
+
+      - name: Select and verify reviewed release toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          bash scripts/verify-release-toolchain.sh release-toolchain.json
+
+      - name: Seal OpenSSL 3 for protected runtime signing
+        id: protected_openssl
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-pearl-runtime
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
+
+      - name: Verify protected GitHub release posture before runtime signing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Build Pearl linux-amd64 runtime pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          (
+            cd phase4-coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath -buildvcs=true \
+              -ldflags "-s -w -X main.version=$tag" \
+              -o "$GITHUB_WORKSPACE/coordinator-linux-amd64" ./cmd/coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath -buildvcs=true \
+              -ldflags "-s -w" \
+              -o "$GITHUB_WORKSPACE/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+          )
+          (
+            cd phase5-gateway
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath -buildvcs=true \
+              -ldflags "-s -w -X main.version=$tag" \
+              -o "$GITHUB_WORKSPACE/gateway-linux-amd64" ./cmd/gateway
+          )
+          file coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 | tee pearl-file.txt
+          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          strings coordinator-linux-amd64 > coordinator-linux-amd64.strings
+          strings gateway-linux-amd64 > gateway-linux-amd64.strings
+          grep -Fq "$tag" coordinator-linux-amd64.strings
+          grep -Fq "$tag" gateway-linux-amd64.strings
+          python3 scripts/verify-pearl-go-binaries.py \
+            coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64
+
+      - name: Sign Pearl runtime metadata and checksums
+        id: assets
+        shell: bash
+        env:
+          MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          commit="${{ steps.release_source.outputs.commit }}"
+          if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
+            echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
+            exit 1
+          fi
+          release_signing_key="$(mktemp "$RUNNER_TEMP/release-signing-private.XXXXXX.pem")"
+          cleanup_release_signing_key() {
+            rm -f "$release_signing_key"
+          }
+          trap cleanup_release_signing_key EXIT
+          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
+          chmod 600 "$release_signing_key"
+          coordinator_sha="$(shasum -a 256 coordinator-linux-amd64 | awk '{print $1}')"
+          coordinator_cli_sha="$(shasum -a 256 coordinator-cli-linux-amd64 | awk '{print $1}')"
+          gateway_sha="$(shasum -a 256 gateway-linux-amd64 | awk '{print $1}')"
+          RELEASE_TAG="$tag" \
+          RELEASE_COMMIT="$commit" \
+          COORDINATOR_SHA="$coordinator_sha" \
+          COORDINATOR_CLI_SHA="$coordinator_cli_sha" \
+          GATEWAY_SHA="$gateway_sha" \
+          python3 - <<'PY'
+          import json
+          import os
+
+          tag = os.environ["RELEASE_TAG"]
+          rollout = {
+              "mode": "strict_post_migration",
+              "enforce_provider_admission": True,
+              "bridge_duration_s": 0,
+          }
+          metadata = {
+              "schema_version": 1,
+              "release_lane": "pearl_runtime",
+              "repository": "Augustas11/macprovider",
+              "tag": tag,
+              "release_version": tag.removeprefix("v"),
+              "commit": os.environ["RELEASE_COMMIT"],
+              "architecture": "linux-amd64",
+              "provider_admission_rollout": rollout,
+              "components": {
+                  "coordinator": {
+                      "asset": "coordinator-linux-amd64",
+                      "sha256": os.environ["COORDINATOR_SHA"],
+                      "embedded_version": tag,
+                  },
+                  "gateway": {
+                      "asset": "gateway-linux-amd64",
+                      "sha256": os.environ["GATEWAY_SHA"],
+                      "embedded_version": tag,
+                  },
+              },
+              "catalog": None,
+              "operator_artifacts": {
+                  "coordinator_cli": {
+                      "asset": "coordinator-cli-linux-amd64",
+                      "sha256": os.environ["COORDINATOR_CLI_SHA"],
+                  },
+              },
+          }
+          with open("pearl-release.json", "w", encoding="utf-8") as output:
+              json.dump(metadata, output, sort_keys=True, separators=(",", ":"))
+              output.write("\n")
+          PY
+          "$OPENSSL_BIN" dgst -sha256 -sign "$release_signing_key" \
+            -out pearl-release.json.sig pearl-release.json
+          "$OPENSSL_BIN" dgst -sha256 \
+            -verify ops/pearl-updater/release-signing-public.pem \
+            -signature pearl-release.json.sig pearl-release.json
+          release_assets=(
+            coordinator-linux-amd64
+            coordinator-cli-linux-amd64
+            gateway-linux-amd64
+            pearl-release.json
+            pearl-release.json.sig
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "$commit" "$GITHUB_REPOSITORY" \
+            "${{ steps.release_source.outputs.prerelease }}" release-toolchain.json \
+            release-provenance.json "${release_assets[@]}"
+          release_assets+=(release-provenance.json)
+          : > checksums.txt
+          for release_asset in "${release_assets[@]}"; do
+            shasum -a 256 "$release_asset" >> checksums.txt
+          done
+          "$OPENSSL_BIN" dgst -sha256 -sign "$release_signing_key" \
+            -out checksums.txt.sig checksums.txt
+          printf "%s\n" "${release_assets[@]}" > release-assets.txt
+
+      - name: Prepare runtime release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          cat > release-notes.md <<EOF
+          # Pearl runtime $tag
+
+          Signed Pearl coordinator/gateway runtime bundle. This release lane
+          intentionally excludes provider app, Malibu.app, catalog, and
+          static-feed assets.
+          EOF
+
+      - name: Create verified draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          commit="${{ steps.release_source.outputs.commit }}"
+          bash scripts/verify-release-source.sh "$tag" "$commit" origin --require-existing
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          release_assets=()
+          while IFS= read -r release_asset; do
+            [ -n "$release_asset" ] && release_assets+=("$release_asset")
+          done < release-assets.txt
+          bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
+            checksums.txt checksums.txt.sig release-provenance.json \
+            "$GITHUB_REPOSITORY" "$tag" "$commit" \
+            "${release_assets[@]}"
+          gh release create "$tag" \
+            "${release_assets[@]}" \
+            checksums.txt \
+            checksums.txt.sig \
+            --title "Pearl runtime $tag" \
+            --notes-file release-notes.md \
+            --target "$commit" \
+            --verify-tag \
+            --draft
+          gh release view "$tag" \
+            --json databaseId,isDraft,tagName,targetCommitish > draft-release-cli.json
+          python3 scripts/verify-release-draft-identity.py cli \
+            draft-release-cli.json "$tag" "$commit" > draft-release-id.txt
+
+      - name: Publish only the revalidated numeric draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
+          PRERELEASE_INPUT: ${{ steps.release_source.outputs.prerelease }}
+          RELEASE_POSTURE_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          commit="${{ steps.release_source.outputs.commit }}"
+          release_id="$(cat draft-release-id.txt)"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::captured draft release id is invalid" >&2
+            exit 1
+          }
+          case "$PRERELEASE_INPUT" in
+            true|false) make_latest=false ;;
+            *) echo "::error::validated prerelease state was lost" >&2; exit 1 ;;
+          esac
+          release_assets=()
+          while IFS= read -r release_asset; do
+            [ -n "$release_asset" ] && release_assets+=("$release_asset")
+          done < release-assets.txt
+          bash scripts/verify-release-source.sh "$tag" "$commit" origin --require-existing
+          GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
+            bash scripts/verify-github-release-posture.sh \
+              "$GITHUB_REPOSITORY" production-release 28995904
+          bash scripts/verify-release-checksums.sh \
+            --openssl "$OPENSSL_BIN" \
+            checksums.txt checksums.txt.sig release-provenance.json \
+            "$GITHUB_REPOSITORY" "$tag" "$commit" \
+            "${release_assets[@]}"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > final-draft-api.json
+          python3 scripts/verify-release-draft-identity.py api \
+            final-draft-api.json "$tag" "$commit" --release-id "$release_id" >/dev/null
+          python3 scripts/capture-release-publication.py --draft --runtime-only \
+            --notes-file release-notes.md --expected-title "Pearl runtime $tag" \
+            final-draft-api.json release-provenance.json final-draft-manifest.json \
+            "${release_assets[@]}" checksums.txt checksums.txt.sig
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > stable-latest-before.json
+          python3 - stable-latest-before.json <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          latest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          latest_id = latest.get("id")
+          if type(latest_id) is not int or latest_id <= 0:
+              raise SystemExit("stable latest endpoint before publication did not return a positive release id")
+          PY
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false \
+            -F prerelease=true \
+            -f make_latest="$make_latest" > published-release-api.json
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > immutable-release-by-id.json
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > immutable-release-by-tag.json
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" > stable-latest-after.json
+          python3 scripts/capture-release-publication.py --runtime-only \
+            --notes-file release-notes.md --expected-title "Pearl runtime $tag" \
+            immutable-release-by-id.json release-provenance.json publication-manifest-by-id.json \
+            "${release_assets[@]}" checksums.txt checksums.txt.sig
+          python3 scripts/capture-release-publication.py --runtime-only \
+            --notes-file release-notes.md --expected-title "Pearl runtime $tag" \
+            immutable-release-by-tag.json release-provenance.json publication-manifest-by-tag.json \
+            "${release_assets[@]}" checksums.txt checksums.txt.sig
+          cmp final-draft-manifest.json publication-manifest-by-id.json
+          cmp final-draft-manifest.json publication-manifest-by-tag.json
+          python3 - "$release_id" "$PRERELEASE_INPUT" \
+            immutable-release-by-id.json immutable-release-by-tag.json \
+            stable-latest-before.json stable-latest-after.json <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release_id = int(sys.argv[1])
+          prerelease = sys.argv[2] == "true"
+          by_id = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
+          by_tag = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
+          latest_before = json.loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
+          latest_after = json.loads(pathlib.Path(sys.argv[6]).read_text(encoding="utf-8"))
+          for label, release in (("numeric", by_id), ("tag", by_tag)):
+              if release.get("id") != release_id:
+                  raise SystemExit(f"{label} release lookup differs from captured numeric id")
+              if release.get("draft") is not False or release.get("immutable") is not True:
+                  raise SystemExit(f"{label} release is not public and immutable")
+              if release.get("prerelease") is not prerelease:
+                  raise SystemExit(f"{label} release prerelease state differs from validated input")
+          if latest_after.get("id") == release_id:
+              raise SystemExit("runtime-only release unexpectedly resolves through the stable latest endpoint")
+          latest_before_id = latest_before.get("id")
+          latest_after_id = latest_after.get("id")
+          if type(latest_before_id) is not int or latest_before_id <= 0:
+              raise SystemExit("stable latest endpoint before publication did not return a positive release id")
+          if type(latest_after_id) is not int or latest_after_id <= 0:
+              raise SystemExit("stable latest endpoint after publication did not return a positive release id")
+          if latest_before_id != latest_after_id:
+              raise SystemExit("runtime-only release changed the stable latest endpoint")
+          PY
+          scripts/verify-pearl-runtime-release.sh \
+            --tag "$tag" \
+            --expected-commit "$commit" \
+            --repository "$GITHUB_REPOSITORY"

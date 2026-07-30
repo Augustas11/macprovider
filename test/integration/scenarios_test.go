@@ -3,6 +3,7 @@ package integration
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -84,6 +85,20 @@ func TestHappyPathChatCompletion(t *testing.T) {
 	}
 }
 
+func TestGatewayGitHubOAuthDisabledRoutesReturn404(t *testing.T) {
+	s := newScenario(t, scenarioOpts{seedAccount: false})
+	for _, path := range []string{"/auth/github/start", "/auth/github/callback"} {
+		resp, err := http.Get(s.gatewayBaseURL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status=%d want 404", path, resp.StatusCode)
+		}
+	}
+}
+
 // TestInternalBearerWrongTokenRejected pins the auth boundary directly
 // at the SERVICE-TO-SERVICE endpoint the gateway calls (/internal/routing
 // on the provider port, mounted by InternalHandler at buyer/server.go:388-393).
@@ -153,6 +168,166 @@ func TestSpec015ReceiptEnabledCrossServiceHeaderVerifies(t *testing.T) {
 			t.Fatalf("buyer response exposed %s=%q", header, got)
 		}
 	}
+}
+
+func TestSpec015V04SettlementReceiptCrossServiceVerifies(t *testing.T) {
+	s := newScenario(t, scenarioOpts{seedAccount: true, settlementReceiptProvider: true})
+
+	status, headers, body := s.chatRequest(nil, fmt.Sprintf(`{
+		"model":%q,
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"SPEC-015 v0.4 settlement receipt"}]
+	}`, settlementFixtureModelID))
+	if status != http.StatusOK {
+		t.Fatalf("non-streaming chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("buyer response exposed non-streaming v0.4 receipt header %q", got)
+	}
+
+	status, headers, body = s.chatRequest(nil, fmt.Sprintf(`{
+		"model":%q,
+		"max_tokens":32,
+		"stream":true,
+		"messages":[{"role":"user","content":"SPEC-015 v0.4 streaming settlement receipt"}]
+	}`, settlementFixtureModelID))
+	if status != http.StatusOK {
+		t.Fatalf("streaming chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("buyer response exposed streaming v0.4 receipt header %q", got)
+	}
+	if !strings.Contains(string(body), "hello ") || !strings.Contains(string(body), "from fake provider") || !strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("streaming body missing provider content or DONE marker: %s", string(body))
+	}
+
+	verdicts := waitForSettlementVerdicts(t, s, 2)
+	if len(verdicts) != 2 {
+		t.Fatalf("settlement verdict count=%d want 2", len(verdicts))
+	}
+	for i, verdict := range verdicts {
+		if verdict.ProviderID != s.providerID {
+			t.Fatalf("verdict[%d].provider_id=%q want %q", i, verdict.ProviderID, s.providerID)
+		}
+		if verdict.ReceiptPresent != 1 || !verdict.ReceiptVersion.Valid || verdict.ReceiptVersion.String != "4" {
+			t.Fatalf("verdict[%d] receipt present/version=%d/%v want present v4", i, verdict.ReceiptPresent, verdict.ReceiptVersion)
+		}
+		if verdict.ReceiptResult != "valid" || verdict.SettlementOutcome != "verified" || verdict.Reason != "verified_settlement" || verdict.Closed != 1 {
+			t.Fatalf("verdict[%d]=%s/%s reason=%s closed=%d want valid/verified verified_settlement closed",
+				i, verdict.ReceiptResult, verdict.SettlementOutcome, verdict.Reason, verdict.Closed)
+		}
+		if !verdict.ModelHash.Valid || verdict.ModelHash.String != s.modelHash {
+			t.Fatalf("verdict[%d].model_hash=%v want %s", i, verdict.ModelHash, s.modelHash)
+		}
+		if verdict.BuyerDebitOutcome != "no_money_movement_step5" ||
+			verdict.ProviderSettlementOutcome != "no_money_movement_step5" ||
+			verdict.PayoutExclusionOutcome != "excluded_until_spec022_verified" {
+			t.Fatalf("verdict[%d] money outcomes=%s/%s/%s want no-money step5 + payout exclusion",
+				i, verdict.BuyerDebitOutcome, verdict.ProviderSettlementOutcome, verdict.PayoutExclusionOutcome)
+		}
+	}
+}
+
+func TestSpec022V04StreamingSettlementReconcilerE2E(t *testing.T) {
+	s := newScenario(t, scenarioOpts{
+		seedAccount:                        true,
+		settlementReceiptProvider:          true,
+		settlementEnforceMode:              true,
+		settlementReconcileIntervalSeconds: 1,
+	})
+	const requestID = "77777777-7777-4777-8777-777777777777"
+
+	status, headers, body := s.chatRequest(map[string]string{"X-Request-ID": requestID}, fmt.Sprintf(`{
+		"model":%q,
+		"max_tokens":32,
+		"stream":true,
+		"messages":[{"role":"user","content":"SPEC-022 local e2e streaming settlement receipt"}]
+	}`, settlementFixtureModelID))
+	if status != http.StatusOK {
+		t.Fatalf("streaming chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-Request-ID"); got != requestID {
+		t.Fatalf("gateway X-Request-ID=%q want %q", got, requestID)
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("buyer response exposed streaming v0.4 receipt header %q", got)
+	}
+	if !strings.Contains(string(body), "hello ") || !strings.Contains(string(body), "from fake provider") || !strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("streaming body missing provider content or DONE marker: %s", string(body))
+	}
+
+	verdicts := waitForSettlementVerdicts(t, s, 1)
+	if len(verdicts) != 1 {
+		t.Fatalf("settlement verdict count=%d want 1", len(verdicts))
+	}
+	verdict := verdicts[0]
+	if verdict.RequestID == "" || verdict.RequestID == requestID {
+		t.Fatalf("verdict.request_id=%q want non-empty coordinator-internal request id distinct from gateway request id %q", verdict.RequestID, requestID)
+	}
+	if verdict.ProviderID != s.providerID {
+		t.Fatalf("verdict.provider_id=%q want %q", verdict.ProviderID, s.providerID)
+	}
+	if verdict.ReceiptPresent != 1 || !verdict.ReceiptVersion.Valid || verdict.ReceiptVersion.String != "4" {
+		t.Fatalf("receipt present/version=%d/%v want present v4", verdict.ReceiptPresent, verdict.ReceiptVersion)
+	}
+	if verdict.ReceiptResult != "valid" || verdict.SettlementOutcome != "verified" || verdict.Reason != "verified_settlement" || verdict.Closed != 1 {
+		t.Fatalf("verdict=%s/%s reason=%s closed=%d want valid/verified verified_settlement closed",
+			verdict.ReceiptResult, verdict.SettlementOutcome, verdict.Reason, verdict.Closed)
+	}
+	if !verdict.ModelHash.Valid || verdict.ModelHash.String != s.modelHash {
+		t.Fatalf("verdict.model_hash=%v want %s", verdict.ModelHash, s.modelHash)
+	}
+
+	usage, reservation := waitForSpec022GatewaySettlement(t, s, requestID)
+	if usage.Outcome != "spec022_verified" || usage.TokenSource != "coordinator_observed" {
+		t.Fatalf("usage outcome/source=%s/%s want spec022_verified/coordinator_observed", usage.Outcome, usage.TokenSource)
+	}
+	if usage.PromptTokens != 8 || usage.CompletionTokens != 12 || usage.TotalTokens != 20 {
+		t.Fatalf("usage tokens prompt/completion/total=%d/%d/%d want 8/12/20",
+			usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+	}
+	if reservation.Status != "settled" || reservation.SettledTokens != 20 || reservation.SettlementHold != 1 {
+		t.Fatalf("reservation=%+v want settled 20-token held reservation", reservation)
+	}
+}
+
+func waitForSettlementVerdicts(t *testing.T, s *scenario, want int) []settlementReceiptVerdictRow {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var latest []settlementReceiptVerdictRow
+	for time.Now().Before(deadline) {
+		latest = s.readSettlementReceiptVerdicts()
+		if len(latest) >= want {
+			return latest
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return latest
+}
+
+func waitForSpec022GatewaySettlement(t *testing.T, s *scenario, requestID string) (usageEventRow, quotaReservationRow) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var latestReservation quotaReservationRow
+	for time.Now().Before(deadline) {
+		usage, ok := s.readUsageEvent(requestID)
+		reservation, reservationOK := s.readQuotaReservation(requestID)
+		if reservationOK {
+			latestReservation = reservation
+		}
+		if ok && reservationOK && reservation.Status == "settled" {
+			return usage, reservation
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	usage, usageOK := s.readUsageEvent(requestID)
+	reservation, reservationOK := s.readQuotaReservation(requestID)
+	if reservationOK {
+		latestReservation = reservation
+	}
+	t.Fatalf("gateway settlement for request %s not settled before deadline: usage_found=%v usage=%+v reservation_found=%v reservation=%+v latest_reservation=%+v",
+		requestID, usageOK, usage, reservationOK, reservation, latestReservation)
+	return usageEventRow{}, quotaReservationRow{}
 }
 
 func TestInternalBearerWrongTokenRejected(t *testing.T) {
@@ -238,33 +413,30 @@ func TestInternalBearerServiceTokenAccepted(t *testing.T) {
 	}
 }
 
-// TestInternalBearerOperatorKeyFallbackAccepted pins the M3-2 / SECU-4
-// dual-credential bridge: the coordinator MUST still accept the legacy
-// operator_key on /internal/* during the cutover. This is the codex
-// security audit's required-fallback behavior (PR #73). Coordinator
-// configured with both operator_key and gateway_service_token; gateway
-// sends the operator key.
+// TestInternalBearerOperatorKeyRejectedPostCutover pins the M3-2 / SECU-4
+// post-cutover contract (PR #87 item 3, after its tracked gate): the coordinator
+// MUST reject the legacy operator_key on /internal/* — the dual-credential
+// bridge is gone, gateway_service_token is the only accepted credential.
 //
-// Without this scenario, a regression that flipped
-// GatewayInternalBearerMatches to "service-token only" would silently
-// break every not-yet-upgraded operator's gateway. That's the exact
-// transition-state failure mode the audit cited.
-func TestInternalBearerOperatorKeyFallbackAccepted(t *testing.T) {
+// This test inverts the pre-cutover TestInternalBearerOperatorKeyFallbackAccepted:
+// a regression that re-introduced the operator_key fallback would silently
+// re-open the cutover-defeating dual-credential path the audit was closing.
+func TestInternalBearerOperatorKeyRejectedPostCutover(t *testing.T) {
 	s := newScenario(t, scenarioOpts{skipProvider: true})
 
 	req, err := http.NewRequest(http.MethodGet, s.coordProvURL+"/internal/routing", nil)
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	// Operator key — the legacy half of the dual-credential bridge.
+	// Operator key — formerly the legacy fallback, now REJECTED post-cutover.
 	req.Header.Set("Authorization", "Bearer "+s.operatorKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("operator-key /internal/routing got status=%d want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("operator-key /internal/routing got status=%d want 401 (post-cutover reject)", resp.StatusCode)
 	}
 }
 
@@ -344,6 +516,11 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 
 	const totalRequests = 6
 	for i := 0; i < totalRequests; i++ {
+		// Post-#762 the gateway coalesces byte-identical id-less requests
+		// (replay, one dispatch). This test needs six real dispatches to
+		// exercise sticky forwarding, so each request opts out with a
+		// distinct client-supplied X-Request-ID — the documented bypass.
+		headers["X-Request-ID"] = fmt.Sprintf("11111111-1111-4111-8111-%012d", i)
 		status, _, respBody := s.chatRequest(headers, body)
 		if status != http.StatusOK {
 			t.Fatalf("sticky chat %d status=%d body=%s", i, status, string(respBody))
@@ -426,58 +603,18 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 	}
 }
 
-// TestGatewayOperatorKeyFallbackEndToEnd pins the M3-2 / SECU-4
-// transition state: a gateway configured with NO coordinator.service_token
-// falls back to operator_key on its upstream /internal/* calls, AND
-// the coordinator accepts it via the operator_key branch of
-// GatewayInternalBearerMatches. This is the gap that the security
-// auditor flagged on iteration 1: the prior fallback scenario only
-// proved coordinator-side acceptance via a direct curl, not the
-// gateway's actual fallback behavior under sticky-routed traffic.
-//
-// Without this scenario, a regression that broke
-// UpstreamCoordinatorBearer's fallback would silently fail every
-// not-yet-cutover-completed operator's gateway — exactly the failure
-// mode the M3-2 dual-credential bridge was designed to prevent.
-func TestGatewayOperatorKeyFallbackEndToEnd(t *testing.T) {
-	emptyServiceToken := ""
-	s := newScenario(t, scenarioOpts{
-		seedAccount:         true,
-		stickyEnabled:       true,
-		gatewayServiceToken: &emptyServiceToken,
-		captureCoordLogs:    true,
-	})
-
-	headers := map[string]string{
-		"X-MacProvider-Conversation": "conv-operator-fallback",
-	}
-	status, _, body := s.chatRequest(headers, `{
-		"model":"llama-3.2-3b-instruct",
-		"max_tokens":32,
-		"messages":[{"role":"user","content":"hi"}]
-	}`)
-	if status != http.StatusOK {
-		t.Fatalf("fallback chat status=%d body=%s", status, string(body))
-	}
-
-	// Audit-log assertion (M3-2 cutover-watch contract): the coordinator
-	// MUST have emitted at least one `event=internal_bearer_accepted
-	// key=operator_key` line for an /internal/* path during this run.
-	// This is exactly the line the operator greps for in OPS.md to
-	// watch the cutover (see audits/2026-06-10/MILESTONE_3_PHASE23_HANDOFF.md
-	// item 5). A regression that mislabeled the credential class (or
-	// stopped emitting the line entirely) would silently break cutover
-	// monitoring; this assertion catches it.
-	deadline := time.Now().Add(3 * time.Second)
-	line := s.coordLogBuf.awaitContains(deadline,
-		`"event":"internal_bearer_accepted"`,
-		`"key":"operator_key"`,
-	)
-	if line == "" {
-		t.Fatalf("expected internal_bearer_accepted key=operator_key log line; got none. captured lines: %v",
-			s.coordLogBuf.snapshot())
-	}
-}
+// (Removed by PR #87 item 3 after its tracked cutover gate.)
+// TestGatewayOperatorKeyFallbackEndToEnd previously pinned the gateway
+// upstream falling back to operator_key when coordinator.service_token
+// was empty. With the legacy fallback removed:
+//   - phase5-gateway/internal/config/config.go Validate() now REJECTS an
+//     empty coordinator.service_token (the gateway can't even boot).
+//   - phase4-coordinator/internal/auth/tokens.go GatewayInternalBearerMatches
+//     only accepts gateway_service_token (the operator_key fallback path
+//     is gone).
+// The post-cutover reject contract is locked in by
+// TestInternalBearerOperatorKeyRejectedPostCutover above; the service-token
+// success path stays covered by TestServiceTokenAuditLogClass below.
 
 // TestServiceTokenAuditLogClass pins the symmetric audit-log assertion
 // for the service_token branch: when both credentials are configured

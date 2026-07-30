@@ -1,0 +1,65 @@
+# 06_cold_start_race.yaml — buyer fires a prompt while THIS Mac's
+# provider has just restarted but Qwen3-32B isn't yet reloaded.
+#
+# Local chaos via launchctl. No SSH required.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Per SPEC-001 FR-17, a provider declares slots_free in hello and
+#    updates via heartbeat. Between hello (sent on WS connect) and first
+#    inference, is the provider routable?
+#  - Only this Mac serves Qwen3-32B, so the buyer can't get rerouted to
+#    a warm peer.
+#  - Behavior options:
+#      (a) queued until model loads
+#      (b) 503 no_provider_available (no candidate has slots_free > 0)
+#      (c) routed and times out on first byte
+#      (d) silent hang (I4 catches)
+#  - PHASE B TRIAGE: should the network define a "ready" state distinct
+#    from "connected" so cold providers aren't routable until model_load
+#    completes? Today: no explicit ready signal.
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+name: cold_start_race
+description: |
+  Restart this Mac's provider at t=0. At t=2s a buyer fires a chat
+  completion for Qwen3-32B-4bit. Captures whether the network queues,
+  errors, or hangs while the model loads.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - One of: (a) 503 no_provider_available, (b) HTTP 200 with elevated
+     TTFT (cold-start latency), (c) timeout, (d) silent hang.
+   - I4 fires only on (d) — the worst outcome and most triage-worthy.
+   - PHASE B TRIAGE: decide on a "ready" state for routability.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: false
+  pattern: constant
+  initial_delay: 2s
+  requests_per_buyer: 1
+
+duration: 120s
+request_timeout: 90s
+silent_hang_threshold: 45s
+
+prompts:
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Reply with exactly the word: warmth."
+    max_tokens: 32
+
+chaos_events:
+  - at: 0s
+    description: "Kill local provider to force a cold start"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  # Buyer fleet waits initial_delay=2s, then fires while the 32B model
+  # is still expected to be reloading. The 90s request_timeout / 120s
+  # duration give the cold start ~110s of room.

@@ -63,6 +63,26 @@ it returns empty rather than the matching account's token). So pinning
 must explicitly call `gh auth token -u Augustas11` to bypass gh's
 active-account state.
 
+## Worktree isolation: don't edit the canonical checkout
+
+For any implementation, audit, release, or other write-heavy task in this
+repo, do not work directly in `/Users/augstar/macprovider-poc`. Start from a
+fresh sibling worktree off the intended base, usually `origin/main`, unless the
+user explicitly says to use the current checkout:
+
+```bash
+git status -sb
+git worktree list
+git fetch origin
+git worktree add ../macprovider-<topic> -b fix/<topic> origin/main
+cd ../macprovider-<topic>
+```
+
+Do all edits, tests, commits, pushes, PR work, and merge follow-up inside that
+task worktree. Do not reuse or mutate another active session's branch/worktree
+silently. For audits, start from `origin/main` and audit merged code unless the
+user names a different base.
+
 ## PR workflow: don't develop on local `main`
 
 Money-path and security-sensitive changes (billing, payouts, gateway,
@@ -139,8 +159,97 @@ intent and bringing in the idempotency-key feature added during
 review. Backup branch `backup-main-pre-merge-20260604` preserves the
 pre-merge tip in case of regression.
 
+## PR governance declaration gate (don't panic when it's red)
+
+Every PR runs the `spec-index` workflow's `check` job
+(`scripts/check_spec_pr_declaration.py`), which requires the **PR body** to
+contain exactly one `SPEC-GOVERNANCE-DECLARATION-BEGIN` /
+`SPEC-GOVERNANCE-DECLARATION-END` block wrapping a
+`schema_version: "spec-pr-governance-v1"` JSON payload. Omit it and that
+job goes red with `PR body must contain exactly one ...DECLARATION-BEGIN/END`.
+
+**This `check` is advisory, not a merge blocker.** The `main` ruleset
+requires only the **`ci-required`** status context (the aggregation job at
+the bottom of `.github/workflows/ci.yml`; it does *not* `needs:` spec-index)
+plus **1 approving review**. A red `spec-index / check` does not block merge.
+
+Fill the block honestly when a spec fits (real example, PR #713):
+
+```
+SPEC-GOVERNANCE-DECLARATION-BEGIN
+{
+  "schema_version": "spec-pr-governance-v1",
+  "behavior_change": "yes",          // "none" or "yes"
+  "contract_change": "none",         // "yes" if you touch AUTHORITY.json,
+                                     // CONFORMANCE.json, or a canonical SPEC-NNN
+  "specs": ["SPEC-020"],
+  "requirements": ["SPEC-020-R001"],
+  "authority_domains": ["provider-autoupdate"],
+  "arbitration": ["CODE_BUG"],
+  "tests": ["scripts/test-catalog-release.sh"],
+  "journeys": ["not-required"],
+  "issue": "https://github.com/Augustas11/macprovider/issues/608"
+}
+SPEC-GOVERNANCE-DECLARATION-END
+```
+
+Rules: `behavior_change: "none"` is allowed **only** for governance-only
+paths (`specs/**`, the `check_spec_*`/`gen_spec_index` scripts,
+`schemas/spec-*`, `.github/CODEOWNERS`, `.github/workflows/spec-index.yml`,
+`beta/DECISION_CRITERIA.md`, `docs/spec-governance-foundation.md`,
+`docs/spec-history/**`). Any **other** changed path is "non-governance" and
+rejects `"none"` — it must be `"yes"` with ≥1 each of specs / requirements /
+authority_domains / arbitration / tests / journeys, all validated against
+`specs/AUTHORITY.json` and `specs/CONFORMANCE.json`.
+
+**Infra/CI-only PRs (e.g. a `ci.yml` tweak) have no honest declaration:**
+`ci.yml` is a non-governance path but no authority domain governs CI, so
+`"none"` is rejected and `"yes"` has no real spec to cite. Do **not**
+fabricate a spec link. Either merge past the advisory red (state in the PR
+body that `check` is non-required) or bundle the CI change into a
+spec-linked PR (how #713 shipped its `ci.yml` edit). Do not relax `ci.yml`
+into the governance-only allowlist to dodge this — that regime looks
+deliberate.
+
+## Release verification: workflow green is not production proof
+
+For every provider CLI release that ships both a standalone provider tarball
+and Malibu.app, the release contract is the installer/updater contract, not
+just GitHub Actions success.
+
+Rules:
+
+1. The `macprovider-cli` inside Malibu.app must be byte-identical to the
+   `macprovider-cli` inside the standalone provider tarball after all signing,
+   notarization, stapling, and packaging steps. Compare SHA-256 bytes, not
+   only `--version`, codesign requirement text, Gatekeeper, or notarization.
+2. Do not use recursive app signing (`codesign --force --deep`) on a bundle
+   after copying in the already-signed standalone provider CLI. Sign nested
+   code explicitly first, sign the outer app without `--deep`, then verify the
+   app with `codesign --verify --deep`.
+3. Do not mark a release production-verified until the updater path from the
+   previous stable version accepts it. `embedded_cli_mismatch` is a correct
+   fail-closed updater rejection, not a warning to bypass.
+4. Candidate workflow green is only candidate evidence. Final release proof
+   must come from immutable release assets after publication/download, with
+   signatures/checksums verified and the updater invariant exercised.
+5. If a public immutable release violates these invariants, do not patch the
+   release in place. Keep coordinator recommendation on the previous stable
+   version and cut a new release with matching artifacts.
+
+Keep product-specific smoke tests separate from release packaging proof. For
+example, Buzz/null-tool-schema verification proves the product fix; it does
+not prove the updater or Malibu packaging invariants above.
+
+Runbook: `docs/runbooks/provider-cli-release-verification.md`.
+
 ## Other repo conventions worth remembering
 
+- Every implementation slice must pass the audit loop before being treated as
+  done. This applies to full implementations and step/deliverable/checkpoint
+  implementations alike: run the three Codex audit lanes (code, security,
+  architect) and keep fixing/re-auditing until all three report 0 CRITICAL,
+  0 HIGH, and 0 MEDIUM findings. LOW/INFO findings may be carried explicitly.
 - Spec corpus lives in `specs/`. House style: `BUILD_SPEC_*`, `AUDIT_SPEC_*`,
   `FIX_SPEC_*_VX_Y` naming for prompts; `SPEC-NNN-*.md` for normative
   documents.

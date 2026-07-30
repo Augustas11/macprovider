@@ -78,6 +78,10 @@ func TestSelfServeProvisionalTokenMintedOnHelloAck(t *testing.T) {
 	if len(ack.AssignedProviderToken) != 64 {
 		t.Fatalf("assigned_provider_token len = %d, want 64 hex chars: %q", len(ack.AssignedProviderToken), ack.AssignedProviderToken)
 	}
+	// Runbook item 23: the coordinator propagates its admission verdict.
+	if ack.AuthState != string(pool.AuthSelfMinted) {
+		t.Fatalf("hello_ack auth_state = %q, want %q (self-minted admission)", ack.AuthState, pool.AuthSelfMinted)
+	}
 
 	// The cleartext returned to the binary MUST validate through the
 	// same store and resolve back to the declared provider_id.
@@ -276,6 +280,10 @@ func TestSelfServeProvisionalTokenNotMintedWhenBearerValidated(t *testing.T) {
 	if ack.AssignedProviderToken != "" {
 		t.Fatalf("assigned_provider_token = %q, want empty when bearer validated", ack.AssignedProviderToken)
 	}
+	// Runbook item 23: bearer-validated admission propagates auth_state.
+	if ack.AuthState != string(pool.AuthBearerValidated) {
+		t.Fatalf("hello_ack auth_state = %q, want %q (bearer-validated admission)", ack.AuthState, pool.AuthBearerValidated)
+	}
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
@@ -403,29 +411,15 @@ func TestSelfServeProvisionalTokenMintFailureFailsClosed(t *testing.T) {
 	}
 }
 
-// SPEC-003 v0.8.4 FR-C9.4 unused-token self-heal — when an active row
-// exists for a provider_id but its last_used_at IS NULL (never
-// authenticated), the coordinator MUST revoke that row and mint a
-// fresh token for the incoming tokenless connect instead of
-// rejecting. Closes the deploy-gap lockout class that hit `air5` on
-// the 2026-06-12 production deploy: a provider minted a token under
-// the new coordinator but reconnected before consuming the ack
-// frame, and v0.8.2's blanket TOFU policy locked them out
-// indefinitely. The codex MAJOR-1 credential-capture vector that
-// v0.8.1 closed requires the attacker to have authenticated at
-// least once (which sets last_used_at) — an unused row carries no
-// live credential, so self-heal does not weaken the security model.
-// Pre-v0.8.3 this test asserted strict rejection; the new contract
-// is in DECISION_CRITERIA Entry 67.
-func TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused(t *testing.T) {
+// Wave 2 token custody: a tokenless reconnect must not revoke or replace any
+// active provider token row, even one that has never authenticated. Mutation
+// requires proof of the existing bearer or an operator recovery path.
+func TestSelfServeProvisionalTokenRejectsWhenExistingTokenUnused(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	// Seed: a legitimate provider self-minted on a prior connect but
-	// never used the token (the deploy-gap pattern: minted, persisted
-	// or not, but ack-frame not consumed by the old binary in flight).
 	seedRecord, seedCleartext, err := store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
 	if err != nil {
 		t.Fatalf("seed unused token: %v", err)
@@ -436,9 +430,6 @@ func TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused(t *testing.T)
 	h := selfServeHarness(t, store)
 	defer h.HTTP.Close()
 
-	// The same provider_id reconnects tokenless (binary lost the
-	// ack-frame's assigned_provider_token across a coordinator
-	// restart, or never persisted it). Self-heal should kick in.
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
 		t.Fatalf("dial tokenless reconnect: %v", err)
@@ -448,78 +439,31 @@ func TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused(t *testing.T)
 		t.Fatalf("write hello: %v", err)
 	}
 
-	// Self-heal path: the ack frame should arrive normally with a NEW
-	// assigned_provider_token, not a close frame.
-	payload, op, err := wsutil.ReadServerData(conn)
+	frame, err := gobwas.ReadFrame(conn)
 	if err != nil {
-		t.Fatalf("read self-heal ack: %v", err)
+		t.Fatalf("read tokenless existing-token close: %v", err)
 	}
-	if op != gobwas.OpText {
-		t.Fatalf("op = %v, want text (self-heal ack), not close (legacy strict reject)", op)
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
 	}
-	var ack providerws.HelloAck
-	if err := json.Unmarshal(payload, &ack); err != nil {
-		t.Fatalf("ack json: %v", err)
-	}
-	if ack.Type != "hello_ack" {
-		t.Fatalf("ack type = %q, want hello_ack", ack.Type)
-	}
-	if ack.AssignedProviderToken == "" {
-		t.Fatalf("assigned_provider_token empty in self-heal hello_ack: %#v", ack)
-	}
-	if ack.AssignedProviderToken == seedCleartext {
-		t.Fatalf("self-heal ack returned the SAME cleartext as the seed; expected a freshly minted token")
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
 	}
 
-	// DB invariant: the seed row is revoked, exactly one active row
-	// remains (the fresh mint), and the fresh row resolves to the
-	// declared provider_id.
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("token rows after self-heal = %d, want 2 (revoked seed + fresh mint): %#v", len(records), records)
+	if len(records) != 1 {
+		t.Fatalf("token rows after reject = %d, want original only: %#v", len(records), records)
 	}
-	var seedRow, freshRow *auth.TokenRecord
-	for i := range records {
-		r := records[i]
-		if r.ID == seedRecord.ID {
-			cp := r
-			seedRow = &cp
-		} else {
-			cp := r
-			freshRow = &cp
-		}
+	if records[0].ID != seedRecord.ID || records[0].RevokedAt.Valid {
+		t.Fatalf("seed row mutated after reject: %#v", records[0])
 	}
-	if seedRow == nil || freshRow == nil {
-		t.Fatalf("could not classify rows: seed=%v fresh=%v records=%#v", seedRow, freshRow, records)
-	}
-	if !seedRow.RevokedAt.Valid {
-		t.Fatalf("seed row should be revoked after self-heal; revoked_at=%v", seedRow.RevokedAt)
-	}
-	if freshRow.RevokedAt.Valid {
-		t.Fatalf("fresh row should be active after self-heal; revoked_at=%v", freshRow.RevokedAt)
-	}
-	if freshRow.ProviderID != "claimed-provider" {
-		t.Fatalf("fresh row provider_id = %q, want claimed-provider", freshRow.ProviderID)
-	}
-	providerID, ok, err := store.ValidateToken(context.Background(), ack.AssignedProviderToken)
+	providerID, ok, err := store.ValidateToken(context.Background(), seedCleartext)
 	if err != nil || !ok || providerID != "claimed-provider" {
-		t.Fatalf("self-heal token validation: id=%q ok=%v err=%v (want claimed-provider true nil)", providerID, ok, err)
-	}
-
-	// Composition with PR #69 (v0.8.4 fix-pass): the self-healed
-	// session is admitted with a freshly-minted token, so its
-	// AuthState MUST be AuthSelfMinted — fully routable, no
-	// quarantine. The bearer-less duplicate path is for the
-	// IssueToken race-loss case, not the self-heal path.
-	provider, ok := h.Registry.Resolve("claimed-provider", ack.AssignedID)
-	if !ok {
-		t.Fatalf("registry has no entry for assigned_id %q after self-heal", ack.AssignedID)
-	}
-	if provider.AuthState != pool.AuthSelfMinted {
-		t.Fatalf("self-heal auth_state = %q, want %q (self-mint must mark routable, not quarantined)", provider.AuthState, pool.AuthSelfMinted)
+		t.Fatalf("original token validation after reject: id=%q ok=%v err=%v", providerID, ok, err)
 	}
 }
 
@@ -926,14 +870,9 @@ func TestProviderTokenBootstrapRejectsTokenlessUsedTokenOnAuthResponseV2(t *test
 	}
 }
 
-// SPEC-003 v0.8.4 — v2 mirror of TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused.
-// The composed self-heal contract MUST hold across the v2 ECDH path
-// too: a tokenless v2 connect declaring a provider_id whose active row
-// has last_used_at IS NULL self-heals (revoke + remint), and the
-// auth_response carries the fresh token. Also forces retainSpec010=true
-// via SPEC-010 catalog fields so the R-7.9.7 defer's terminal-path
-// release is exercised — AuthAttemptCount MUST return to 0.
-func TestSelfServeProvisionalTokenSelfHealsOnAuthResponseV2WithRetentionCleanup(t *testing.T) {
+// V2 mirrors the Wave 2 custody rule and still releases retained auth-attempt
+// state on the fail-closed terminal path.
+func TestSelfServeProvisionalTokenRejectsExistingUnusedTokenOnAuthResponseV2WithRetentionCleanup(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -961,8 +900,8 @@ func TestSelfServeProvisionalTokenSelfHealsOnAuthResponseV2WithRetentionCleanup(
 	}
 	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
 	// SPEC-010 catalog fields force retainSpec010=true so the auth-attempt
-	// retention store reserves an entry. ANY terminal path (including
-	// successful self-heal mint) must release it via the R-7.9.7 defer.
+	// retention store reserves an entry. ANY terminal path must release it via
+	// the R-7.9.7 defer.
 	initial := validAuthInitial("v2-selfheal", providerPublic)
 	initial["supported_models"] = []string{
 		"mlx-community/Qwen2.5-7B-Instruct-4bit",
@@ -974,49 +913,34 @@ func TestSelfServeProvisionalTokenSelfHealsOnAuthResponseV2WithRetentionCleanup(
 	}
 	challenge := readAuthChallenge(t, conn)
 	writeAuthProof(t, conn, challenge, "v2-selfheal", nil)
-	response := readAuthResponse(t, conn)
 
-	if response.Status != "accepted" {
-		t.Fatalf("v2 auth_response.status = %q, want accepted (self-heal mints fresh token): %+v", response.Status, response)
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read v2 tokenless existing-token close: %v", err)
 	}
-	if response.AssignedProviderToken == "" {
-		t.Fatalf("v2 assigned_provider_token empty; want freshly-minted token from self-heal: %+v", response)
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
 	}
-	if response.AssignedProviderToken == seedCleartext {
-		t.Fatalf("v2 self-heal returned the SAME cleartext as the seed; expected a freshly minted token")
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
 	}
 
-	// DB invariant: seed row revoked, fresh row active.
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
-	if len(records) != 2 {
-		t.Fatalf("token rows after v2 self-heal = %d, want 2: %#v", len(records), records)
+	if len(records) != 1 || records[0].ID != seedRecord.ID || records[0].RevokedAt.Valid {
+		t.Fatalf("token rows after v2 reject = %#v, want original active row only", records)
 	}
-	for _, r := range records {
-		if r.ID == seedRecord.ID && !r.RevokedAt.Valid {
-			t.Fatalf("v2 seed row should be revoked after self-heal: %#v", r)
-		}
-		if r.ID != seedRecord.ID && r.RevokedAt.Valid {
-			t.Fatalf("v2 fresh row should be active after self-heal: %#v", r)
-		}
-	}
-
-	provider, ok := h.Registry.Resolve("v2-selfheal", response.AssignedID)
-	if !ok {
-		t.Fatalf("registry has no entry for assigned_id %q after v2 self-heal", response.AssignedID)
-	}
-	if provider.AuthState != pool.AuthSelfMinted {
-		t.Fatalf("v2 self-heal auth_state = %q, want %q (self-mint is routable)", provider.AuthState, pool.AuthSelfMinted)
+	providerID, ok, err := store.ValidateToken(context.Background(), seedCleartext)
+	if err != nil || !ok || providerID != "v2-selfheal" {
+		t.Fatalf("original v2 token validation after reject: id=%q ok=%v err=%v", providerID, ok, err)
 	}
 
 	// The R-7.9.7 defer MUST release the retention entry on EVERY
-	// terminal path — including successful self-heal. Without the
-	// release, AuthAttemptCount stays at 1 and (with enough connects)
-	// reaches the 1024 bound and locks out legitimate provisional
-	// connects.
+	// terminal path.
 	if got := h.Provider.AuthAttemptCount(); got != 0 {
-		t.Fatalf("auth-attempt retention count = %d, want 0 (self-heal terminal path must release the entry — R-7.9.7 defer)", got)
+		t.Fatalf("auth-attempt retention count = %d, want 0", got)
 	}
 }

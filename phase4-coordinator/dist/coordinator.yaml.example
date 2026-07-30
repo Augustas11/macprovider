@@ -1,13 +1,40 @@
-# Template for production coordinator config — Pearl VPS deployment.
-# Copy to coordinator.yaml and fill in the operator_key. Real coordinator.yaml
-# is gitignored because it contains a secret.
+# Annotated reference for the coordinator config — Pearl VPS deployment.
 #
-# Generate operator_key with:  openssl rand -hex 32
+# The tracked authoritative production config is
+# `phase4-coordinator/dist/coordinator.yaml`; this file is a heavily-
+# commented reference for operators and future audits. All secret-shaped
+# values (operator_key, gateway_service_token, postgres_dsn, etc.) MUST
+# be `env:NAME` runtime indirections resolved from
+# `/etc/macprovider/*.env` — NEVER commit an inline secret to either
+# file. `catalog_public_key` is the ed25519 PUBLIC trust anchor and is
+# safe (and required) to keep committed verbatim.
+#
+# Generate a fresh operator_key with:  openssl rand -hex 32
+# (Store it in `/etc/macprovider/coordinator.env`, reference as
+# `operator_key: env:OPERATOR_KEY`.)
 
 listen:
   buyer_port: 8443
   provider_port: 8444
   bind_address: "127.0.0.1"
+
+coordinator:
+  # Require gateway-supplied internal bearer auth plus X-MacProvider-Account
+  # before accepting buyer chat completions directly on the coordinator.
+  require_gateway_context: true
+
+proxy:
+  # Production sits behind nginx on localhost — the default
+  # ["127.0.0.0/8", "::1/128"] is correct. The coordinator parses
+  # X-Forwarded-For / X-Real-IP only when r.RemoteAddr falls in one
+  # of these CIDRs; for any other peer the forwarded headers are
+  # IGNORED so an attacker on the open internet cannot spoof their
+  # bucket key. If you move the coordinator behind a remote LB,
+  # ADD the LB's CIDR here — do NOT widen to non-actual-proxy
+  # ranges. Issue #125.
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
 
 pool:
   heartbeat_interval_s: 30
@@ -19,7 +46,7 @@ pool:
   heartbeat_miss_threshold_s: 90
   wake_gap_threshold_s: 120
   warmup_fallback_s: 60
-  warmup_gate_enabled: true
+  warmup_gate_enabled: false
   warmup_gate_timeout_s: 90
   warmup_gate_max_tokens: 2
   degraded_backoff_s: 30
@@ -27,24 +54,42 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  # OPoI v0 canary liveness (disabled here — production template).
+  # For staging/lab rollout use coordinator.opoi-v0-staging.yaml overlay.
+  # See ops/runbooks/opoi-challenge-implementation.md §2 before enabling.
   canary_enabled: false
-  canary_interval_s: 300
-  canary_timeout_s: 30
-  canary_max_tokens: 8
-  canary_failure_threshold: 3
-  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
+  canary_interval_s: 300        # 5 min staging; use 600 for initial production
+  canary_timeout_s: 120
+  canary_max_tokens: 32
+  canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  canary_cold_start_grace_s: 0  # >0 waives the wall-time latency gates
+                                # (max_ttft_ms + min_sustained_tps; probes are
+                                # non-streaming) for N s after connect (cold
+                                # load). Nonce-correctness always enforced; a
+                                # graced probe is neutral + forces the next
+                                # probe enforced. Only meaningful with
+                                # canary_latency_enforcement=enforce.
+  canary_latency_enforcement: observe  # observe (default) | enforce. The
+                                # wall-time latency gates are unreliable on a
+                                # non-streaming canary; observe logs breaches
+                                # without sanctioning. Nonce gate always enforced.
+                                # Startup-only (SIGHUP reloads tier2/billing, not
+                                # pool) — a restart is required to change it.
+  # OPoI v0 challenge bank reference (enable in staging overlay, not here).
+  # Every entry must contain {nonce} in both prompt and expected.
   # canary_challenges:
-  #   - prompt: "<private operator challenge prompt containing {nonce}>"
-  #     expected: "<private expected answer containing {nonce}>"
+  #   - prompt: "Reply with exactly: CANARY-{nonce}"
+  #     expected: "CANARY-{nonce}"
+  #   - prompt: "What is the code {nonce}? Reply with only the code."
+  #     expected: "{nonce}"
 
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  # C2 (SPEC-002 FR-P11a): keep STRICTLY BELOW the gateway's
-  # timeouts.coordinator_request_seconds (default 300) so the coordinator's
-  # relay-timeout fires first and is provider-attributable. check-deploy-config.sh
-  # warns if this ordering is violated.
-  request_timeout_s: 280
+  # C2 (SPEC-002 FR-P11a, #760/#784): keep this at least as high as the
+  # gateway's timeouts.stream_ceiling_max_seconds so the coordinator does not
+  # truncate healthy long streams before the gateway streaming ceiling fires.
+  request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
   tiebreak_randomize: false
@@ -66,10 +111,16 @@ routing:
   model_classes: {}
 
 provider_http:
-  timeout_s: 300  # 5 min provider HTTP forwarding timeout
+  # Must cover the gateway streaming ceiling for HTTP-forwarded providers.
+  timeout_s: 900
 
 limits:
   max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
+relay:
+  # Maximum request bytes the coordinator will keep buffered for a provider
+  # websocket relay before dropping the in-flight request.
+  max_request_buffer_bytes: 16777216
 
 auth:
   # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
@@ -78,12 +129,18 @@ auth:
   # of YAML on disk (M3-2 / DEVE-7):
   #   operator_key: env:OPERATOR_KEY
   operator_key: "REPLACE_ME_WITH_RANDOM_HEX_64"
-  # Optional service-to-service credential the gateway uses for upstream
-  # admin calls (M3-2 / SECU-4). When set, the coordinator accepts EITHER
-  # operator_key OR gateway_service_token on internal-bearer endpoints,
-  # so operator_key can be rotated independently. Leave unset to preserve
-  # pre-bridge behavior.
-  #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Required service-to-service credential for /internal/* gateway calls.
+  # It must differ from operator_key and every operator_keys entry.
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Per-actor operator keys for TWO-PERSON control (SPEC-026 provider-auth-policy
+  # AND MALIBU trust-promotion /admin/trust-promotion/{request,approve}). The
+  # acting operator identity is bound to the MATCHED key, so dual-control requires
+  # at least TWO entries with DISTINCT, non-empty secrets; the trust-promotion
+  # route fails closed (503 dual_control_unavailable) otherwise. Do NOT rename an
+  # operator id while it has a pending promotion (the actor identity would change).
+  #   operator_keys:
+  #     spec026_a: env:OPERATOR_AUTH_POLICY_A
+  #     spec026_b: env:OPERATOR_AUTH_POLICY_B
   require_provider_tokens: true # Production/provider WS public exposure must require provider tokens.
   # Public onboarding escape hatch: permit a first tokenless provisional
   # provider to receive and persist its own provider_token. Tokenless reconnects
@@ -99,18 +156,227 @@ logging:
   level: "info"
   format: "json"
 
+# SPEC-023 signed recommendation feeds served on the buyer mux at
+# /v1/rate-card(+ .sig), /v1/demand-rank(+ .sig), and
+# /v1/autotune-candidates(+ .sig). Paths point at literal signed bytes on disk.
+# Empty paths disable that feed (404). Deploy installs fresh files from
+# phase3-binary/dist/static/ into /opt/macprovider/autotune/.
+autotune:
+  # Strict is the durable default. To open the migration bridge, set false and
+  # set provider_admission_bridge_deadline to an RFC3339 timestamp <=24h away.
+  enforce_provider_admission: true
+  # provider_admission_bridge_deadline: "2026-07-11T18:00:00Z"
+  public_keys:
+    streamvc-autotune-static-v4: "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+    streamvc-autotune-static-v5: "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
+  rate_card_path: "/opt/macprovider/autotune/rate-card.json"
+  rate_card_sig_path: "/opt/macprovider/autotune/rate-card.json.sig"
+  demand_rank_path: "/opt/macprovider/autotune/demand-rank.json"
+  demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
+  autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
+  autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+
+# Rewards / rate-card configuration (Entry 92 v2 pricing thesis; Wave 1 hot-reload surface).
+#
+# Sample below documents the Wave 1 2-row canary pattern that shipped 2026-07-01
+# (Entry 96 in beta/DECISION_CRITERIA.md). Fill in your own per-model rows using
+# the same schema. Absent block → coord falls through to code defaults
+# (`default` at 500k prompt / 1M completion credits = $0.50/$1.00 per Mtok
+# via stats_rollup.usd_per_million_credits=1.0).
+#
+# KEY NORMALIZATION: row keys must match phase4-coordinator/internal/billing/
+# formula.go::normalizeModelKey() output for buyer strings you expect. Examples:
+#   mlx-community/Qwen3-32B-4bit          → `qwen3-32b`
+#   mlx-community/gpt-oss-20b-MXFP4-Q8    → `openai/gpt-oss-20b`
+#   mlx-community/Meta-Llama-3.1-8B-Instruct-4bit → `meta-llama/llama-3.1-8b-instruct`
+# The normalization allowlist covers namespaces {mlx-community, openai, google,
+# meta-llama, nvidia, qwen}; unknown namespaces do NOT normalize.
+#
+# HOT RELOAD: coordinator supports SIGHUP-driven reload of this block. The
+# deploy-pearl-vps.sh script's config-drift check will refuse the deploy if
+# local + live diverge; pass ALLOW_CONFIG_DRIFT=1 to acknowledge intentional
+# yaml overwrite (money-path safety net).
+#
+# UNITS: credits_per_mtok — 1M credits = $1.00 at
+# stats_rollup.usd_per_million_credits=1.0. To price a $0.100/M completion
+# rate, set completion_credits_per_mtok: 100000.
+#
+# rewards:
+#   global_multiplier: 1.0
+#   provider_share: 0.90
+#   # Prefix-cache hit pricing should typically start near 25% of prompt pricing.
+#   # If omitted, prompt_cache_hit_credits_per_mtok defaults to prompt_credits_per_mtok.
+#   rate_card:
+#     default:                                # MUST be present per config validator
+#       prompt_credits_per_mtok: 500000       # $0.50/M — code-default fallback
+#       prompt_cache_hit_credits_per_mtok: 125000 # $0.125/M prefix-cache hit
+#       completion_credits_per_mtok: 1000000  # $1.00/M — code-default fallback
+#     qwen3-32b:                              # Wave 1 v0.1 — Entry 92 v2 target
+#       prompt_credits_per_mtok: 110000       # $0.110/M
+#       prompt_cache_hit_credits_per_mtok: 27500 # $0.0275/M prefix-cache hit
+#       completion_credits_per_mtok: 220000   # $0.220/M — 21% undercut of $0.28 market
+#     openai/gpt-oss-20b:                     # Wave 1 v0.1
+#       prompt_credits_per_mtok: 50000        # $0.050/M
+#       prompt_cache_hit_credits_per_mtok: 12500 # $0.0125/M prefix-cache hit
+#       completion_credits_per_mtok: 100000   # $0.100/M — 23% undercut of $0.13 WandB
+#     qwen3-coder-30b-a3b-instruct:           # Wave 1 v0.2 (Entry 97) — developer coding MoE
+#       prompt_credits_per_mtok: 117500       # $0.1175/M
+#       prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
+#       completion_credits_per_mtok: 235000   # $0.235/M — RESEARCH_227 developer-coding target
+#     nemotron-3-nano-30b-a3b:                # v4 pivot — RESEARCH_227 broad-fleet lane, 20% undercut vs $0.200/M OpenRouter cheapest
+#       prompt_credits_per_mtok: 80000        # $0.080/M
+#       prompt_cache_hit_credits_per_mtok: 20000 # $0.020/M prefix-cache hit
+#       completion_credits_per_mtok: 160000   # $0.160/M
+#     meta-llama/llama-3.1-8b-instruct:       # Wave 1 v0.2 — broad-compatibility 8B
+#       prompt_credits_per_mtok: 13500        # $0.0135/M
+#       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+#       completion_credits_per_mtok: 27000    # $0.027/M — cheapest publicly-served 8B
+#     meta-llama/llama-3.2-3b-instruct:       # Entry 116 — 8 GB M-Base onboarding row
+#       prompt_credits_per_mtok: 13500        # $0.0135/M
+#       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+#       completion_credits_per_mtok: 27000    # $0.027/M
+#     qwen2.5-coder-32b-instruct:             # Wave 1 v0.2 — M-Max/Ultra only per admission
+#       prompt_credits_per_mtok: 425000       # $0.425/M
+#       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
+#       completion_credits_per_mtok: 850000   # $0.850/M — RESEARCH_227 dev-coding premium
+#
+# EXPECTED-LOG-NOISE PATTERN (Entry 96 note): the coord journal at every
+# restart emits a burst of `event=rate_card_normalized ... matched=default`
+# events. These are provider pool-check queries firing before the
+# `Rewards.RateCard` map finishes loading from yaml — the requests fall
+# through to the code-default row. Post-startup requests correctly hit the
+# configured rows (log will show `matched=<key>` e.g. `matched=qwen3-32b`).
+# Do NOT treat the startup-burst `matched=default` as a live-buyer bug.
+
+# SPEC-005 v0.4 §11.5 launch-gate item 10. Quarantine resolution
+# `/admin/ledger/quarantine/{id}/force-void` admin surface is
+# default-OFF — operators MUST flip this flag deliberately after
+# verifying §13.2 reload + audit semantics. SIGHUP-driven flips
+# emit a `billing_config_flag_changed` audit row.
+billing:
+  quarantine_resolution_force_void_enabled: false
+
 tier2:
   # SPEC-008 catalog-based hash verification. Operator-controlled,
   # observation-only by default per beta/DECISION_CRITERIA Entry 80.
   # Uncomment + populate to enable.
-  #   catalog_path: "/etc/macprovider/catalog.signed.json"
-  #   catalog_public_key: "<43-char base64url-unpadded ed25519 pubkey>"
+  #   catalog_path: "/opt/macprovider/autotune/current/tier2-catalog.json" # deploy-pearl-vps.sh requires this exact release-bound path (#244/#608)
+  #   # The tracked authoritative production value lives in coordinator.yaml
+  #   # and MUST match this reference — any byte-for-byte diff flags a rotation:
+  #   catalog_public_key: "IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ"
   #   require_hash_verified: false
+  #   # Optional bounded migration for clients that omit model_hash_algorithm.
+  #   # Missing values remain untyped and are never compared. Production uses
+  #   # env:MODEL_HASH_LEGACY_UNTIL so the deploy preflight requires an
+  #   # operator-selected future RFC3339 deadline without committing a stale
+  #   # date. Remove the field after the observed legacy count reaches zero.
+  #   model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL
   #
   # SPEC-015 v0.3 §M.4 — public absolute base URL the coordinator
   # advertises as `catalog_url` / `catalog_pubkey_url` in /poolz.
   # When empty, /poolz falls back to scheme + request Host. For Pearl:
   public_catalog_base_url: "https://coordinator.streamvc.live"
+
+# SPEC-017 Network Stats API.
+#
+# Production `dist/coordinator.yaml` enables this block for
+# https://www.malibu.tech/network/. Keep this example disabled unless you
+# have applied the SPEC-017 migrations and provisioned role-specific Postgres
+# DSNs in /etc/macprovider/coordinator.env.
+stats:
+  enabled: false
+  # Required when enabled=true:
+  # reader_dsn: env:STATS_READER_DSN
+  # rollup_dsn: env:STATS_ROLLUP_DSN
+  partner_keys:
+    last_used_at_updates_enabled: false
+    # Production deploys should set this to
+    # /opt/macprovider/spec017-signoff.txt before issuing partner keys.
+    # Leave unset in staging fixtures.
+    # production_signoff_path: "/opt/macprovider/spec017-signoff.txt"
+    # Required only when last_used_at_updates_enabled=true:
+    # writer_dsn: env:STATS_PARTNER_KEYS_WRITER_DSN
+  rollup:
+    backfill_mode: "full"
+    late_events_retention_days: 90
+    usd_per_million_credits: 1.0
+    drift_threshold_ratio: 0.005
+    nightly_rebuild_hour_utc: 9
+    late_events_lookback_hours: 48
+  cors:
+    access_control_max_age_seconds: 60
+    partner_origin_allowlist:
+      - "https://www.malibu.tech"
+      - "https://malibu.tech"
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
+# SPEC-MALIBU-EMISSION-LEDGER — bootstrap $MALIBU accrual (default-off).
+# Requires migration 012 on the stats/rewards Postgres DB before enable.
+malibu_emission:
+  enabled: false
+  # writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+  tick_interval_seconds: 900
+  provider_daily_cap_malibu: 25
+  wallet_daily_cap_malibu: 100
+  # Defaults to storage.db_path when unset (SPEC-016 payout address mirror source).
+  # sqlite_payout_db_path: "/var/lib/macprovider/coordinator.db"
+  wallet_mirror_interval_seconds: 300
+  unlock_eval_interval_seconds: 3600
+  max_serializable_retries: 5
+  # Optional Base USDC dual-RPC URLs for E2 wallet-balance unlock checks (SPEC-026 §5.2).
+  # base_usdc_balance_rpc_urls: []
+
+# Auto-update recommendation surface. The coordinator forwards
+# `latest_binary_version` as `recommended_binary_version` in its
+# `hello_ack` / `auth_response` frame.
+#
+# S-H1 (2026-07-15) — CAPABILITY-GATED server-side. The recommendation is
+# emitted ONLY to providers that declare a `compatibility_set_id` in their
+# hello (v1.8.33+), whose CLI-owned updater performs full signed
+# compatibility-set transactions. Pre-compatibility-set providers (<=1.8.32)
+# never receive it: their shipped default binary-only autoupdater would
+# otherwise self-swap into a mixed install, bypassing the authorized
+# operator-assisted full-installer recovery path. The operator-assisted full
+# installer is the ONLY sanctioned upgrade path for that legacy cohort
+# (DECISION_CRITERIA Entry 161). Providers whose auto-update trust-state gate
+# accepts the coordinator (pinned tier, OR provisional + operator opt-in via
+# `auto_update_accept_provisional: true` on the provider config — added
+# 2026-07-03 to unblock self-service providers from being trust-orphaned
+# from fixes) AND that pass the capability gate will fetch + install the target.
+#
+# WHEN THIS BLOCK IS UNSET the field is omitted from the wire frame and
+# providers receive no recommendation → auto-update never fires. This
+# block was silently missing from Pearl's `/opt/macprovider/coordinator.yaml`
+# at the 2026-07-03 KV-cache detection cutover: `air5` sat on v1.7.0 while
+# v1.7.9 was already released, because coord had nothing to advertise.
+# Landing it in the checked-in example prevents re-discovery on a fresh
+# clone deploy.
+#
+# `required_binary_version` (optional) hard-rejects providers below the
+# version, closing WS with 4004 version_unsupported. It is a hard admission
+# floor, not an autoupdate target, and is NOT subject to the S-H1 capability
+# gate. Use for security fixes that must not be optional. Leave unset for
+# advisory releases. CLIs carrying the #767 handler surface the close as an
+# upgrade directive and STOP reconnecting; older builds retry forever, which
+# is why the floor must be chosen below the deployed fleet.
+#
+# `per_model_required_binary_version` (optional, issue #768) is a PER-MODEL
+# ROUTING floor, not an admission floor: a below-floor provider stays
+# connected (so it can still self-update) but is excluded from public
+# routing, from the self-route / hard-pin preflight path, and from the
+# warm-pool candidate gates. It sits beside the per-model HARDWARE tier gate
+# (the signed autotune candidate catalog's min_ram_gb / min_bandwidth_tier
+# rows), which answers "is this box big enough" but never "is this build new
+# enough for the engine this model needs". Unset = no floors = byte-identical
+# routing. Keys match model_id case-insensitively; values must be bare
+# numeric versions or the coordinator refuses to start.
+coordinator_advertised_version:
+  latest_binary_version: "1.8.67"
+  # required_binary_version: "1.7.0"
+  # per_model_required_binary_version:
+  #   "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "1.8.60"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
 # may connect MUST be listed here). Edit this list locally — DO NOT

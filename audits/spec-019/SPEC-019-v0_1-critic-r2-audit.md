@@ -1,0 +1,91 @@
+**Verdict:** FIX REQUIRED
+**Tally:** C/H/M/m/Q = 0/2/3/1/1
+
+## Closure verified
+
+For each r1 critic finding, status against v0.1.1 (`ffce39d`):
+
+- r1 C-1 (strict-mode `required` ⊇ `properties` parity): **CLOSED** — §3 (lines 400-404) adds the normative rule "Under `strict:true`, an object schema's `required` array MUST contain every key in `properties`" with error code `json_schema_strict_requires_all_properties_required`; AC-7 (lines 173-176) asserts it.
+- r1 H-1 (receipt-vs-validation ordering): **CLOSED** — §5 (lines 499-504) is normative: "a success receipt MUST NOT be emitted, a sticky success route MUST NOT be written, and no provider-positive billing row MUST be created until post-hoc structured-output validation has completed and returned success." AC-26 (lines 298-309) asserts the order-of-operations regression including validator exceptions / resource aborts / recursion overflow.
+- r1 H-2 (empty-content classification): **CLOSED** — §5 (lines 506-511) explicitly classifies the empty string after stop-token filtering as `malformed_json_response` with `FaultBreakerQualifying`. AC-18 (lines 240-243) asserts. Error-codes table line 545 lists "empty content" as a `malformed_json_response` trigger.
+- r1 H-3 (schema-depth cap missing): **CLOSED** — §6 (lines 576-580) sets `json_schema_max_depth = 32` enforced at provider AND coordinator with error code `json_schema_too_deep`. AC-12 (lines 203-204) asserts boundary at both layers. §7 (line 607) echoes the coordinator obligation.
+- r1 H-4 (response-cap pre-parse fail-closed): **CLOSED** — §6 (lines 584-590) explicitly says the response cap is "enforced on the raw UTF-8 bytes emitted by inference, before JSON parsing or schema validation runs" and reuses the SPEC-018 `response_byte_cap_exceeded` code. AC-19 (lines 245-248) asserts the order.
+- r1 H-5 (renderer concurrency / per-request schema cache contamination): **CLOSED** — §4 (lines 467-469) states "the structured-output renderer MUST be stateless across requests in v0.1.0. No schema cache (in-process, per-connection, or per-family) is permitted." AC-23 (lines 276-278) asserts the concurrent-request fixture.
+- r1 H-6 (composite render rule + separator with SPEC-018): **CLOSED for ordering** — §4 (lines 452-465) prescribes a 3-step sequence (build schema-adjusted ChatMessage → ToolPromptRenderer.renderMessages → UserInput with unchanged tools). AC-22 (lines 271-274) asserts byte-equivalent fixture. The literal `\n\n` separator demand from r1 H-6 is implicit via "deterministic order" and "byte-equivalent" assertions; see fresh finding F-1 below for a residual ambiguity in the 3-step sequence wording.
+- r1 M-1 (receipt-of-defaulted-strict idempotency): **CLOSED** — §9 (lines 684-691) is normative: "the receipt prompt hash is computed over the raw `response_format` JSON value as received in the request body. Defaulted-but-absent fields, notably `strict` defaulting to `true`, are NOT folded into the hash."
+- r1 M-2 (const/enum type-conformance code): **CLOSED** — §3 (lines 406-408) adds the rule + code `json_schema_invalid_const_or_enum_type` with JSON-pointer `param`. AC-8 (lines 178-180) asserts.
+- r1 M-3 (NFC/NFD byte-comparison): **CLOSED** — §3 (lines 410-412) is normative: "Property names are compared by raw UTF-8 byte sequence. No Unicode normalization is applied." AC-9 (lines 184-187) asserts the byte-distinct NFC vs NFD fixture.
+- r1 M-4 (schema-vs-message composition with SPEC-018) is folded into H-6 closure above.
+- r1 M-5 (body-byte preservation under inbound content-encoding): **not addressed** — see fresh finding F-3 below (regression carried forward from r1; downgraded MEDIUM still).
+- r1 m-1 (`strict` parser-type asymmetry): **not addressed** — minor, can stay open as Q.
+- r1 m-2 (AC-12 numeric hash-stability RFC 8785): **not addressed** — minor, can stay open.
+- r1 Q-1 (`n != 1` interaction with `json_schema`): **not addressed** — Q-class.
+- r1 Q-2 (error envelope leakage of attacker-controlled strings): **not addressed** — Q-class.
+
+Closure summary: 10 of 10 actionable C/H/M closed; one regression carried (M-5) is restated as fresh finding F-3 because it survived the absorption pass and remains real.
+
+## Fresh findings
+
+### Finding 1: `json_schema_invalid_name` error code has no acceptance criterion — dead-weight code OR untestable rule
+- Severity: HIGH
+- Location: SPEC-019 §3 (lines 414-418), §5 error-codes table (line 542), §8 (line 653)
+- Issue: §3 introduces a rule that `json_schema.name` outside `[A-Za-z0-9_]+` max 64 ASCII chars returns HTTP 400 `json_schema_invalid_name`. The error code is listed in the §5 table (line 542) and the §8 pre-inference-failure list (line 653). But **no AC asserts this code**. Every other §3 validation rule has an AC: rejected keyword → AC-5, additionalProperties → AC-6, all-properties-required → AC-7, const/enum type → AC-8, byte cap → AC-10/11, depth cap → AC-12. `json_schema_invalid_name` is the only schema-validation code in the table without an AC. Compounding: §3 wording calls the constraint "Recommended" (line 416) rather than "MUST", but then says names outside the set "**return** HTTP 400" (line 417). Two competent implementers will read this as either (a) recommended-but-optional constraint with no testable behavior, or (b) mandatory constraint that earned its error code and table row. Without an AC, IMPL audits cannot prove parity at provider AND coordinator (cf. §7 line 604 which lists "valid per §3" as a coordinator obligation — but with no testable AC, what does "valid per §3" mean for this rule?).
+- Recommendation: Add an AC under §2 "Request validation" group: "AC-Nx. `json_schema.name` containing characters outside `[A-Za-z0-9_]` or exceeding 64 raw UTF-8 bytes returns HTTP 400 `json_schema_invalid_name`, `param:"response_format.json_schema.name"`, at both provider parser AND coordinator." AND change §3 line 416 wording from "Recommended constraint" to "Required constraint" (MUST), removing the "Recommended:" hedge. Either keep the code with a normative MUST and AC, or drop the code from the table.
+
+### Finding 2: `json_schema.name` regex `[A-Za-z0-9_]+` rejects valid OpenAI/Vercel SDK names containing dashes — SDK parity break
+- Severity: HIGH
+- Location: SPEC-019 §3 (line 416-417), AC-30 (lines 336-343), AC-31 (lines 344-349)
+- Issue: OpenAI's documented `response_format.json_schema.name` constraint is "**a-z, A-Z, 0-9, underscores, and dashes, with a maximum length of 64**." SPEC-019 §3 uses `[A-Za-z0-9_]+` — **excluding the hyphen `-`**. A buyer sending an OpenAI-valid name like `extract-user-profile` or `MyApp-Schema-v2` (lawful per OpenAI; common in Vercel AI SDK because Zod schema names are user-chosen and routinely include dashes) will be rejected by SPEC-019 with `json_schema_invalid_name`. The same request hitting OpenAI's `gpt-4o-2024-08-06` endpoint (the AC-30 golden fixture) would succeed. This breaks the parity AC-30 asserts ("The macprovider response parses into the same `pydantic` model as the OpenAI `gpt-4o-2024-08-06` golden fixture"): the macprovider request returns 400 BEFORE inference; the OpenAI request returns a 200 pydantic-parseable response. AC-30 cannot pass for any fixture whose name contains a dash. The fixture name in AC-30 happens to be `Person` (no dash) so the AC text doesn't immediately fail, but ANY buyer using the documented OpenAI character set is locked out. This is exactly the kind of "OpenAI strict-mode contract parity" break that r1 critic C-1 was about, at a different surface. Codex r1 lanes likely did not catch this because they accepted the §3 regex as authoritative without cross-checking the OpenAI documented charset.
+- Recommendation: Change §3 line 417 from `[A-Za-z0-9_]+` to `[A-Za-z0-9_-]+` (add hyphen). This matches the documented OpenAI constraint exactly. Update the AC introduced under F-1 to assert dash is accepted, e.g., `{"name":"my-extracted-record","schema":...}` succeeds.
+
+### Finding 3: Body-byte preservation under inbound content-encoding still undefined — r1 M-5 carryover
+- Severity: MEDIUM
+- Location: SPEC-019 AC-10, AC-11 (lines 191-201), AC-28 (lines 320-326)
+- Issue: r1 critic M-5 raised that AC-11 says the schema cap is computed over "raw UTF-8 bytes ... as it appears in the request body, including insignificant whitespace inside that value" but the gateway reads the inbound body via `io.LimitReader` and forwards `body` from `chat_proxy.go:102-117`. If the inbound transport applies `Content-Encoding: gzip` or `br`, `r.Body` will already be the decoded form. v0.1.1 did NOT amend AC-11 or AC-28 to address this. The SPEC implicitly assumes both layers see byte-identical bodies but transport-layer choices can drift this. The provider's schema-byte counter and the coordinator's schema-byte counter (AC-27 says they must "share a helper or byte-for-byte equivalent tests") must compute identical results from the same byte source. If the gateway content-decodes inbound gzip but the coordinator re-reads from a different network plane, both see different bytes.
+- Recommendation: Add to §6: "The byte count for `json_schema_max_bytes` is computed over the decoded request body after any inbound transport content-encoding (e.g. `Content-Encoding: gzip`, `br`) is stripped. Provider and coordinator MUST count over the same decoded byte stream." Add a fixture to AC-11 exercising gzipped inbound request at schema bytes near boundary.
+
+### Finding 4: Composite render sequence in §4 contradicts what ToolPromptRenderer.renderMessages actually does for non-multi-turn-tool requests
+- Severity: MEDIUM
+- Location: SPEC-019 §4 (lines 452-465)
+- Issue: §4 composite render rule applies "when both `tools` and `response_format:json_schema` are present" and prescribes "Pass to `ToolPromptRenderer.renderMessages` for tool prompt template rendering" at step 2. But `ToolPromptRenderer.renderMessages` at `phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift:6-12` short-circuits to `messages.map(\.mlxMessage)` when `containsMultiTurnToolData` is false (no `tool`-role messages and no `assistant.toolCalls`). A buyer sending a FIRST-turn request with `tools` (declaration only, no tool history yet) and `response_format:json_schema` triggers the composite rule per §4 but `ToolPromptRenderer.renderMessages` returns a no-op pass-through — no "tool prompt template rendering" actually runs. The 3-step sequence reads as if SPEC-018 multi-turn rendering ALWAYS runs in the composite case, which is false. The IMPL author who follows §4 literally will be confused: the SPEC says step 2 does X, but step 2 only does X conditionally. The SPEC-018 §10d.1 multi-turn rendering only fires when there is history; a first-turn request with `tools` declared but never called yet skips the SPEC-018 mutation entirely, which means the schema-injected system message in step 1 lands directly into MLX preparation without any SPEC-018 interaction.
+- Recommendation: Reword §4 composite rule to: "Step 2 invokes `ToolPromptRenderer.renderMessages`, which is a no-op pass-through when no `tool`-role messages and no `assistant.toolCalls` are present in `messages` (first-turn `tools` declaration only). When multi-turn tool history IS present, the renderer rewrites assistant and tool messages per SPEC-018 §10d.1. The schema-instruction system message inserted in step 1 is preserved unchanged across either branch." Make the conditional explicit.
+
+### Finding 5: Schema-depth = 32 counting rule is ambiguous between schema-node depth and instance-JSON depth
+- Severity: MEDIUM
+- Location: SPEC-019 §6 (lines 576-580), AC-12 (lines 203-204)
+- Issue: §6 says "`json_schema_max_depth = 32`. Schemas exceeding 32 nested levels at parse time return HTTP 400 `json_schema_too_deep`. **Depth is counted at every level (`properties[*]`, `items`, nested `items`/`properties`)**." This wording is ambiguous between (a) **schema-node depth** — counting JSON nesting of the schema document itself, where `{"type":"object","properties":{"a":{"type":"object","properties":{...}}}}` increments depth by 2 per level (one for `properties`, one for the value), and (b) **instance-implied depth** — counting how deep an output instance can go, where the same example increments by 1 per level. AC-13 (output depth ≤ 32) is unambiguously JSON nesting of the output instance. AC-12 inherits the §6 ambiguity. Two competent implementers will pick differently:
+  - Interpretation A: schema doc JSON depth 32 → 33 fails. A 16-level schema-and-properties chain hits cap.
+  - Interpretation B: each step (properties → next object value) counts as 1, so a 32-level chain hits cap.
+  Provider/coordinator parity (AC-27) requires identical counting; SPEC silence here forces guess-and-test.
+- Recommendation: Clarify §6 to: "Depth is counted as the maximum number of nested schema OBJECTS reachable from the root via `properties[*]`, `items`, and child schema slots. A scalar leaf is depth 1. A `{type:object, properties:{a:{type:string}}}` is depth 2. The JSON document depth of the schema as written may be roughly 2× this value due to the `properties` indirection; the depth cap is over schema-object-nesting, not raw JSON nesting of the schema document." Add a worked example AC fixture in AC-12 showing depth 32 = exactly N nested objects.
+
+### Finding 6: SPEC-006 amendment §7 names two new pass-through codes but does not specify gateway settlement reason for them
+- Severity: minor
+- Location: SPEC-019 §7 (lines 624-634), `phase5-gateway/internal/router/chat_proxy.go:317-327`
+- Issue: §7 amends SPEC-006 to add `malformed_json_response` and `json_schema_validation_failed` to the gateway-pass-through detail-code allow-list. The current gateway pass-through helper is `isNullUsageProviderError` (`chat_proxy.go:601-607`) which covers `error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal` — all **null-usage** errors. SPEC-019 codes are NOT null-usage; they have `inference_ran:true, settlement_ran:true` and require billing/settlement. The current normalization-path (chat_proxy.go:317-327) calls `settleBeforeResponse(..., "upstream_error")` before writing a normalized 502. For SPEC-019 pass-through codes, since `settlement_ran:true` at the provider/coordinator, what does the gateway do for settlement? Does it skip `settleBeforeResponse` (because coordinator already settled)? Or call with a new reason? The SPEC names the codes but does not specify the gateway-side settlement wiring.
+- Recommendation: Add to §7: "For `malformed_json_response` and `json_schema_validation_failed`, the gateway MUST NOT call its own pre-write settlement (`settleBeforeResponse`) because the coordinator has already recorded a `FaultBreakerQualifying` billing row per §8. The gateway forwards the body byte-preservingly and emits the response with the provider's HTTP status (502) and error envelope intact." Also clarify whether `copyReceiptEligibleHeaders` (existing helper at the pass-through path) applies.
+
+### Finding 7: Q — `json_schema_invalid_name` 64-char limit unit is unspecified (chars vs bytes)
+- Severity: Q
+- Location: SPEC-019 §3 (lines 416-418)
+- Issue: §3 says "max 64 ASCII chars matching `[A-Za-z0-9_]+`". Because the regex is ASCII-only, chars and bytes are equivalent here — but the SPEC elsewhere is meticulous about "raw UTF-8 bytes" (e.g., AC-10/11 schema cap). For internal hygiene, declaring "64 raw UTF-8 bytes" (which collapses to chars in the ASCII subset) keeps the SPEC's units consistent and forestalls debate if the charset later widens to include non-ASCII. Low-stakes hygiene.
+- Recommendation: Optional: change §3 line 416-417 to "max 64 raw UTF-8 bytes". Functionally identical under the ASCII regex constraint.
+
+## Verdict justification
+
+R1 absorption is excellent on every critic finding that was actionable: 10 of 10 C/H/M-class critic findings are closed with normative SPEC text + asserting ACs. The reshape introduced a clean §5 error-codes table, restructured ACs into 12 logical categories, and added normative §5 ordering for receipt-vs-validation. This is genuinely tight work.
+
+That said, three blind-spots survived AND the reshape created two new ones, putting the gate above 0/0/0:
+
+- **F-1 (HIGH)**: `json_schema_invalid_name` is in the table and §3 but has no AC. The §3 wording says "Recommended" but the error code is mandatory. A code without an AC is dead weight; a "Recommended" rule that returns an HTTP 400 is internally contradictory. Adding the AC AND tightening the wording closes the issue.
+- **F-2 (HIGH)**: The `[A-Za-z0-9_]+` regex omits the hyphen `-` that OpenAI's documented schema-name charset allows. AC-30 / AC-31 SDK parity ACs cannot pass for ANY buyer using the documented OpenAI character set if their name contains a dash. This is a 1-character SPEC fix (`-]+` not `]+`) with high consequence.
+- **F-3 (MEDIUM)**: r1 M-5 content-encoding body-byte preservation carried forward unaddressed. Real coordinator/provider parity hole.
+- **F-4 (MEDIUM)**: §4 composite render rule references `ToolPromptRenderer.renderMessages` which is conditional, not unconditional. The 3-step sequence wording over-specifies what step 2 does in the first-turn-tools case.
+- **F-5 (MEDIUM)**: §6 schema-depth counting rule is ambiguous between schema-node JSON depth and instance-implied depth. AC-27 provider/coordinator parity requires identical counters.
+- **F-6 (minor)**: §7 gateway pass-through amendment names codes but does not specify settlement wiring.
+- **F-7 (Q)**: minor unit-consistency hygiene.
+
+Closure quality is high (zero regressions detected on the 10 absorbed critic findings); the residual fresh findings are net-new blind-spots discovered while reading v0.1.1, not regressions from v0.1.0. F-1 and F-2 are HIGH because they directly break SDK parity (AC-30 / AC-31) and create internally contradictory normative text. F-3 / F-4 / F-5 are MEDIUM because they create ambiguity that two competent implementers will resolve differently. F-6 is minor implementation hint; F-7 is hygiene.
+
+**One more r2 round will close all 6 actionable items in a single absorption pass.** F-1 + F-2 together amount to ~3 lines of SPEC change. F-3 / F-4 / F-5 / F-6 are each 2-4 lines. Total churn ~20 lines; no architectural rework.
+

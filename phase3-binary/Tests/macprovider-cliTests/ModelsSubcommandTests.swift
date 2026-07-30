@@ -53,6 +53,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let command = try ModelsListCommand.parse([
             "--ctl-socket-path", socketPath.path,
             "--model", "old-model",
+            "--supported-models", "old-model",
         ])
 
         let capture = await captureOutput {

@@ -1,0 +1,352 @@
+# Production coordinator config — Pearl VPS deployment (159.223.165.194)
+# Binds loopback only; nginx terminates TLS at coordinator.streamvc.live
+# and reverse-proxies /v1/* to buyer_port and /ws/provider + /admin/* + /poolz
+# + /healthz to provider_port.
+
+listen:
+  buyer_port: 8443
+  provider_port: 8444
+  bind_address: "127.0.0.1"
+
+coordinator:
+  # Require gateway-supplied internal bearer auth plus X-MacProvider-Account
+  # before accepting buyer chat completions directly on the coordinator.
+  require_gateway_context: true
+  #
+  # Live Pearl overlays supply exact compatibility_set.target_id / accepted_ids.
+  # Optional temporary #610 first-hop bootstrap (not buyer-serving):
+  #
+  #   compatibility_set:
+  #     target_id: "Augustas11/macprovider:vX.Y.Z@<40-hex>"
+  #     accepted_ids:
+  #       - "<target_id>"
+  #       - "<rollback_set_id>"
+  #     first_hop_bridge_ids:
+  #       - "Augustas11/macprovider:v1.8.48@b84b430aad74574e8a37bc052fe4f9863d0c0ce8"
+  #
+  # Bridge-only sessions receive recommended_compatibility_set_id=target_id so
+  # public CLI 1.8.48 can persist admission and run ordinary
+  # `macprovider-cli update`, then are marked catalog_admission_mode=update_bridge
+  # (never RoutingEligible). See ops/runbooks/entry-610-first-hop-recovery.md.
+
+pool:
+  heartbeat_interval_s: 30
+  disconnect_grace_period_s: 30
+  # Liveness threshold (any inbound frame, not just heartbeats). 90s tolerates
+  # a provider busy with a long single-slot generation that cannot heartbeat
+  # mid-inference; its response chunks count as activity. See SPEC-002.
+  heartbeat_miss_threshold_s: 90
+  wake_gap_threshold_s: 120
+  degraded_backoff_s: 30
+  degraded_max_retries: 3
+  degraded_probe_after_502: true
+  warmup_fallback_s: 60
+  # 2026-07-28 / #784: align the checked-in Pearl template with the live
+  # overlay's resolved posture. Re-enable only through a fresh live-pool
+  # survey + normal deploy path.
+  warmup_gate_enabled: false
+  warmup_gate_timeout_s: 90
+  warmup_gate_max_tokens: 2
+  breaker_failure_threshold: 2
+  breaker_window_s: 120
+  # OPoI v0 canaries: NOT enabled on Pearl yet. Validate on staging first.
+  # Use coordinator.opoi-v0-staging.yaml overlay; see ops/runbooks/opoi-challenge-implementation.md §2.4.
+
+routing:
+  preflight_threshold_tokens: 4096
+  preflight_timeout_s: 5
+  # #760/#784: the gateway streaming ceiling is 900s; keep the coordinator
+  # request wall at least that high or healthy long streams are truncated here
+  # before the gateway ceiling can fire.
+  request_timeout_s: 900
+  failover_enabled: true
+  failover_timeout_s: 5
+  # PR #302 (2026-07-01) — sticky conversation affinity via X-MacProvider-Conversation.
+  # StickyTTLS + StickyMaxEntries defaults live in code (1800s / 10000 entries).
+  # Enabled on Pearl directly after #302 landed; restored here 2026-07-02 after
+  # ALLOW_CONFIG_DRIFT=1 SPEC-023 deploy stripped the live-only value.
+  sticky_enabled: true
+
+provider_http:
+  # #760/#784 twin wall: must cover the gateway streaming ceiling.
+  timeout_s: 900
+
+limits:
+  max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
+relay:
+  # Maximum request bytes the coordinator will keep buffered for a provider
+  # websocket relay before dropping the in-flight request.
+  max_request_buffer_bytes: 16777216
+
+auth:
+  # Operator bearer token for /poolz and /admin/*.
+  # Resolved from /etc/macprovider/coordinator.env on Pearl; do not inline.
+  operator_key: env:OPERATOR_KEY
+  # Required gateway-to-coordinator service credential; resolved from the same
+  # env file and distinct from all operator credentials.
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Public provider websocket admission must fail closed. Existing providers
+  # must carry a top-level provider_token persisted by the macprovider binary.
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+  # Receipt-key-authenticated credential recovery is deliberately short-lived
+  # and bounded per source/identity, globally per hour, and across live
+  # unconfirmed custody bindings. Expired bindings remain exact-key recoverable
+  # for the retention window below. Operators enumerate them with
+  # coordinator-cli list-bootstrap-identities and tombstone abandoned bindings
+  # with coordinator-cli revoke-bootstrap-identity.
+  credential_bootstrap_mints_per_ip_hour: 8
+  credential_bootstrap_mints_per_id_hour: 3
+  credential_bootstrap_mints_global_hour: 128
+  credential_bootstrap_unconfirmed_max: 64
+  credential_bootstrap_outstanding_max: 64
+  credential_bootstrap_token_ttl_s: 600
+  # Never-admitted receipt identities remain recoverable for seven days after
+  # token expiry. Confirmed identities and operator tombstones are permanent.
+  credential_bootstrap_identity_retention_s: 604800
+  operator_keys:
+    spec026_a: env:OPERATOR_AUTH_POLICY_A
+    spec026_b: env:OPERATOR_AUTH_POLICY_B
+
+# Pre-beta referral admission. Fresh provider-registration mint surfaces are
+# invite-gated so a sanctioned operator cannot wash identity by self-registering
+# a new provider_id. Public validation/join/social exposure remains off unless
+# a controlled activation explicitly enables it.
+referrals:
+  require_for_registration: true
+  enable_public_validation: false
+  enable_join_links: false
+  enable_social_invite_bonus: false
+  campaign: "prebeta_20260719"
+  policy_version: "v1"
+  grandfather_before: ""
+  current_key_id: "k1"
+  hmac_keys:
+    k1: env:MAL_REFERRAL_HMAC_K1
+  provider_base_uses: 1
+  social_bonus_uses: 2
+  challenge_ttl_s: 900
+  social_verification_dwell_s: 1800
+  join_base_url: "https://malibu.tech/j"
+  x_api_bearer_token: ""
+  request_access_url: ""
+
+# SPEC-007 v0.2 — internal read-only operator explorer.
+# Reuses auth.operator_key (D15). Disable by setting enabled: false.
+# Mounted at /admin/explorer/ on provider_port (8444); already proxied by nginx.
+explorer:
+  enabled: true
+  bind_path: "/admin/explorer/"
+  gateway_base_url: ""           # set to gateway internal URL to enable buyer panels
+  gateway_timeout_ms: 1500
+  query_timeout_ms: 3000
+  poll_min_interval_seconds: 5
+  activity_max_window_days: 7
+  activity_default_window_hours: 24
+  buyers_max_window_days: 31
+  buyers_default_window_hours: 168
+  ledger_max_window_days: 31
+  ledger_default_window_hours: 168
+  sessions_max_window_days: 7
+  sessions_default_window_hours: 24
+  settlements_max_window_days: 180
+  settlements_default_window_hours: 720
+  requests_per_minute_cap: 60
+
+# SPEC-017 Network Stats API — public surface consumed by
+# https://www.malibu.tech/network/. These DSNs are resolved from
+# /etc/macprovider/coordinator.env by systemd; never inline them in YAML.
+stats:
+  enabled: true
+  reader_dsn: env:STATS_READER_DSN
+  rollup_dsn: env:STATS_ROLLUP_DSN
+  partner_keys:
+    # Optional last_used_at writes remain disabled for public Malibu stats.
+    # If this is flipped to true, add stats.partner_keys.writer_dsn and
+    # provision STATS_PARTNER_KEYS_WRITER_DSN in coordinator.env first.
+    last_used_at_updates_enabled: false
+    production_signoff_path: "/opt/macprovider/spec017-signoff.txt"
+  rollup:
+    # Full backfill avoids guessing a partial cutover timestamp and lets
+    # Malibu render all-time totals once the SPEC-017 tables are migrated.
+    backfill_mode: "full"
+    late_events_retention_days: 90
+    usd_per_million_credits: 1.0
+    drift_threshold_ratio: 0.005
+    nightly_rebuild_hour_utc: 9
+    late_events_lookback_hours: 48
+  cors:
+    access_control_max_age_seconds: 60
+    partner_origin_allowlist:
+      - "https://www.malibu.tech"
+      - "https://malibu.tech"
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
+onboarding:
+  app_track_register_enabled: true
+  postgres_dsn: env:ONBOARDING_POSTGRES_DSN
+  auth_policy_request_dsn: env:ONBOARDING_AUTH_POLICY_REQUEST_DSN
+  auth_policy_approve_dsn: env:ONBOARDING_AUTH_POLICY_APPROVE_DSN
+  auth_policy_cutover_dsn: env:ONBOARDING_AUTH_POLICY_CUTOVER_DSN
+  hardware_trust_request_dsn: env:ONBOARDING_HARDWARE_TRUST_REQUEST_DSN
+  hardware_trust_approve_dsn: env:ONBOARDING_HARDWARE_TRUST_APPROVE_DSN
+  bundle_id: "tech.malibu.app"
+  apple_team_id: env:APPLE_TEAM_ID
+  coordinator_domain: "coordinator.streamvc.live"
+  asn_prefixes:
+    "0.0.0.0/0": "AS0"
+    "::/0": "AS0"
+
+storage:
+  db_path: "/var/lib/macprovider/coordinator.db"
+  snapshot_interval_s: 300
+  request_log_retention_days: 90
+
+logging:
+  level: "info"
+  format: "json"
+
+# SPEC-023 signed recommendation feeds — buyer mux /v1/rate-card,
+# /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
+# Deploy refreshes from
+# phase3-binary/dist/static/ on each Pearl run.
+autotune:
+  # Strict is the durable checked-in posture. For a staged rollout, set false
+  # only together with provider_admission_bridge_deadline no more than 24h in
+  # the future; the coordinator excludes metadata-free sessions at expiry.
+  enforce_provider_admission: true
+  public_keys:
+    streamvc-autotune-static-v4: "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+    streamvc-autotune-static-v5: "vpTgWfvvrnbc1QhdTAxULFisoDU7jQ4mB1yZIHIGjBA="
+  rate_card_path: "/opt/macprovider/autotune/current/rate-card.json"
+  rate_card_sig_path: "/opt/macprovider/autotune/current/rate-card.json.sig"
+  demand_rank_path: "/opt/macprovider/autotune/current/demand-rank.json"
+  demand_rank_sig_path: "/opt/macprovider/autotune/current/demand-rank.json.sig"
+  autotune_candidates_path: "/opt/macprovider/autotune/current/autotune-candidates.json"
+  autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
+
+# Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
+# Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.
+# Keys must match Wave 0b normalizeModelKey() output (phase4-coordinator/internal/billing/formula.go).
+#   mlx-community/Qwen3-32B-4bit          → normalized to `qwen3-32b`
+#   mlx-community/gpt-oss-20b-MXFP4-Q8    → normalized to `openai/gpt-oss-20b`
+# `default` row preserved for fall-through on unmatched buyer strings.
+rewards:
+  global_multiplier: 1.0
+  provider_share: 0.90
+  # Prefix-cache hit pricing is shown at 25% of prompt pricing.
+  # Omitted prompt_cache_hit_credits_per_mtok values default to prompt_credits_per_mtok.
+  rate_card:
+    default:
+      prompt_credits_per_mtok: 500000        # $0.50/M (preserved code default)
+      prompt_cache_hit_credits_per_mtok: 125000 # $0.125/M prefix-cache hit
+      completion_credits_per_mtok: 1000000   # $1.00/M (preserved code default)
+    qwen3-32b:
+      prompt_credits_per_mtok: 110000        # $0.110/M
+      prompt_cache_hit_credits_per_mtok: 27500 # $0.0275/M prefix-cache hit
+      completion_credits_per_mtok: 220000    # $0.220/M (Entry 92 v2 target, 21% undercut vs $0.28/M market)
+    openai/gpt-oss-20b:
+      prompt_credits_per_mtok: 50000         # $0.050/M
+      prompt_cache_hit_credits_per_mtok: 12500 # $0.0125/M prefix-cache hit
+      completion_credits_per_mtok: 100000    # $0.100/M (Entry 92 v2 target, 23% undercut vs $0.13/M WandB)
+    qwen3-coder-30b-a3b-instruct:            # v3 expansion 2026-07-01 (Entry 97) — developer coding MoE lane
+      prompt_credits_per_mtok: 117500        # $0.1175/M
+      prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
+      completion_credits_per_mtok: 235000    # $0.235/M (RESEARCH_227 developer-coding target, MoE-small-active)
+    nemotron-3-nano-30b-a3b:                 # v4 pivot — RESEARCH_227 broad-fleet lane, 20% undercut vs $0.200/M OpenRouter cheapest
+      prompt_credits_per_mtok: 80000         # $0.080/M
+      prompt_cache_hit_credits_per_mtok: 20000 # $0.020/M prefix-cache hit
+      completion_credits_per_mtok: 160000    # $0.160/M
+    google-gemma-4-26b-a4b-it:               # P1-02 — Gemma-4 MoE broad-fleet lane (RESEARCH_227 rank ~20)
+      prompt_credits_per_mtok: 60000         # $0.060/M
+      prompt_cache_hit_credits_per_mtok: 15000 # $0.015/M prefix-cache hit
+      completion_credits_per_mtok: 240000    # $0.240/M (20% undercut vs $0.300/M OpenRouter)
+    gemma-4-26b-a4b-it:                      # P1-02 alias — mlx-community/google/ buyer strings normalize here
+      prompt_credits_per_mtok: 60000         # $0.060/M
+      prompt_cache_hit_credits_per_mtok: 15000 # $0.015/M prefix-cache hit
+      completion_credits_per_mtok: 240000    # $0.240/M (same credits as google-gemma-4-26b-a4b-it)
+    meta-llama/llama-3.1-8b-instruct:        # v3 expansion — low-tier / broad-compatibility row
+      prompt_credits_per_mtok: 13500         # $0.0135/M
+      prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+      completion_credits_per_mtok: 27000     # $0.027/M (RESEARCH_227 target, cheapest publicly-served 8B)
+    qwen3-8b:                                # P2-02 — small-dense lane (matches Llama 3.1 8B pricing)
+      prompt_credits_per_mtok: 13500         # $0.0135/M
+      prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+      completion_credits_per_mtok: 27000     # $0.027/M
+    meta-llama/llama-3.2-3b-instruct:        # Entry 116 — 8 GB M-Base onboarding row (SPEC-003 parity)
+      prompt_credits_per_mtok: 13500         # $0.0135/M (same small-dense lane as Llama 3.1 8B)
+      prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+      completion_credits_per_mtok: 27000     # $0.027/M
+    qwen2.5-coder-32b-instruct:              # v3 expansion — M-Max/Ultra only per Entry 92 admission gate
+      prompt_credits_per_mtok: 425000        # $0.425/M
+      prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
+      completion_credits_per_mtok: 850000    # $0.850/M (RESEARCH_227 dev-coding premium, dense 32B UX painful on M-base)
+
+# Admission tier (SPEC-002 v1.1.2 § 7.1 amendment to F-2).
+# Pinned providers are enumerated below in `providers:`. Provisional
+# providers connect dynamically (curl-install path) up to these caps.
+admission:
+  provisional_admission_rate_per_hour: 10
+  provisional_pool_max: 100
+  provisional_quota_per_hour: 100
+  provisional_tier_weight: 0.3
+
+tier2:
+  catalog_path: /opt/macprovider/autotune/current/tier2-catalog.json
+  catalog_public_key: IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ
+  require_hash_verified: true
+  # SPEC-015 v0.3 §M.4 — absolute base URL the coordinator advertises
+  # as `catalog_url` / `catalog_pubkey_url` in /poolz when a catalog
+  # is effectively active. Empty → falls back to scheme + request Host.
+  # Entry 191: physical snapshot-manifest providers are release-bound and
+  # hash verification is enforced fail-closed.
+  public_catalog_base_url: "https://coordinator.streamvc.live"
+
+# Enumerated PINNED providers (SPEC-002 v1.0.4 Finding F-2: every pinned
+# provider_id MUST be listed here). Pearl's owned Mac stays WS-tunneled by
+# leaving endpoint_url empty; unlisted providers remain provisional and are
+# admitted dynamically per `admission` config above.
+providers:
+  - provider_id: "mac"
+    endpoint_url: ""
+    display_name: "Pearl Mac provider"
+
+# Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
+#
+# S-H1 (2026-07-15): `latest_binary_version` is CAPABILITY-GATED server-side.
+# It is emitted as `recommended_binary_version` (autoupdate target) ONLY to
+# providers that declare a `compatibility_set_id` in their hello (v1.8.33+,
+# whose CLI-owned updater performs full signed compatibility-set transactions).
+# Pre-compatibility-set providers (<=1.8.32) never receive it — their default
+# binary-only autoupdater would otherwise self-swap into a mixed install. The
+# operator-assisted full installer is the ONLY sanctioned upgrade path for that
+# legacy cohort (DECISION_CRITERIA Entry 161). Setting this value does not, and
+# must not, re-arm the legacy binary-only updater.
+#
+# `required_binary_version` (issue #767) is the HARD admission floor: a hello
+# below it is closed with 4004 version_unsupported. Prior to #767 it was set
+# nowhere in prod, so seam 5's floor existed only in code.
+#
+# WHY 1.8.33 and not something higher: 1.8.33 is the first release that
+# declares a `compatibility_set_id` in its hello — the boundary this file
+# already documents above. Everything at or below 1.8.32 is the legacy
+# pre-compatibility-set cohort that (a) receives no autoupdate
+# recommendation by design, and (b) cannot satisfy the live Pearl overlay's
+# `coordinator.compatibility_set.accepted_ids` gate because it sends no set
+# id at all. So the floor fences nobody who is currently admissible; it makes
+# the already-true rejection explicit and machine-readable instead of leaving
+# a legacy build to fail later, opaquely, on catalog admission.
+#
+# It is deliberately far below the current release (1.8.67) and below the
+# #610 first-hop bridge build (1.8.48, which is additionally exempt from the
+# floor by construction — see prepareProviderAdmission's firstHopOnly skip),
+# so raising it is a separate, deliberate act. Raise it only in lockstep with
+# a fleet-wide upgrade: a below-floor CLI carrying the #767 handler stops
+# reconnecting and tells its operator to upgrade, and one without it
+# reconnect-loops.
+coordinator_advertised_version:
+  latest_binary_version: "1.8.67"
+  required_binary_version: "1.8.33"

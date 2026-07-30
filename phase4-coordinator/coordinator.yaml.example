@@ -3,6 +3,24 @@ listen:
   provider_port: 8444
   bind_address: "127.0.0.1"
 
+coordinator:
+  # Require gateway-supplied internal bearer auth plus X-MacProvider-Account
+  # before accepting buyer chat completions directly on the coordinator.
+  require_gateway_context: true
+
+proxy:
+  # CIDR ranges whose X-Forwarded-For / X-Real-IP headers the
+  # coordinator honors when deriving the per-source rate-limit key for
+  # /v1/pool/check, /v1/receipt-keys/*, and /catalog/*. Default is
+  # loopback-only — production sits behind nginx on localhost. Add the
+  # proxy's CIDR(s) here ONLY if you front the coordinator with a
+  # non-loopback reverse proxy; expanding to non-actual-proxy CIDRs
+  # lets attackers in those CIDRs spoof their bucket key via
+  # X-Forwarded-For. Issue #125.
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
 pool:
   heartbeat_interval_s: 30
   disconnect_grace_period_s: 30
@@ -13,7 +31,7 @@ pool:
   heartbeat_miss_threshold_s: 90
   wake_gap_threshold_s: 120
   warmup_fallback_s: 60
-  warmup_gate_enabled: true
+  warmup_gate_enabled: false
   warmup_gate_timeout_s: 90
   warmup_gate_max_tokens: 2
   degraded_backoff_s: 30
@@ -21,20 +39,52 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
-  canary_enabled: false
-  canary_interval_s: 300
-  canary_timeout_s: 30
-  canary_max_tokens: 8
-  canary_failure_threshold: 3
-  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
-  # canary_challenges:
-  #   - prompt: "<private operator challenge prompt containing {nonce}>"
-  #     expected: "<private expected answer containing {nonce}>"
+  # OPoI v0 canary liveness — see ops/runbooks/opoi-challenge-implementation.md §2.
+  # Production deploy uses coordinator.opoi-v0-staging.yaml overlay for lab validation
+  # before enabling on Pearl. Keep canary_enabled: true in dev/staging; false in dist/coordinator.yaml.
+  canary_enabled: true
+  canary_interval_s: 300        # 5 min; use 600 on production initially
+  canary_timeout_s: 120
+  canary_max_tokens: 32
+  canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  canary_cold_start_grace_s: 300 # waive wall-time latency gates (max_ttft_ms +
+                                 # min_sustained_tps) 300s after connect; nonce
+                                 # always enforced, graced probe neutral+enforced-next
+                                 # (only meaningful when canary_latency_enforcement=enforce)
+  # canary_latency_enforcement controls whether the wall-time latency gates
+  # (max_ttft_ms / min_sustained_tps) SANCTION or are observe-only. Canary probes
+  # are non-streaming (stream:false), so these metrics are structurally unreliable
+  # (measured TTFT/TPS swing widely for the same healthy provider). Default
+  # "observe": a latency breach on a nonce-correct probe is LOGGED
+  # (provider canary latency breach observed) but does NOT fail the canary. Set
+  # "enforce" only if you have validated the metric is stable for your providers.
+  # The nonce-correctness gate is ALWAYS enforced in both modes. NOTE: like all
+  # pool.* canary settings this is read at startup only — SIGHUP reloads tier2 /
+  # billing config, NOT the pool block, so changing this requires a coordinator
+  # restart to take effect.
+  canary_latency_enforcement: observe
+  # OPoI v0 challenge bank — every entry must contain {nonce} in both prompt and expected.
+  # Rotate or extend periodically; keep deployment-specific for model security.
+  canary_challenges:
+    - prompt: "Reply with exactly: CANARY-{nonce}"
+      expected: "CANARY-{nonce}"
+    - prompt: "What is the code {nonce}? Reply with only the code."
+      expected: "{nonce}"
+  # W3 optional — per-model challenge banks with latency gates. When a provider's
+  # active model_id matches a key, canaries use that bank instead of canary_challenges.
+  # model_class_challenges:
+  #   qwen3-coder-30b-a3b-instruct:
+  #     - prompt: "Reply with exactly: CANARY-{nonce}"
+  #       expected: "CANARY-{nonce}"
+  #       max_ttft_ms: 3500
+  #       min_sustained_tps: 20
 
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  request_timeout_s: 280
+  # Keep at least as high as the gateway streaming ceiling so healthy long
+  # streams are not truncated at the coordinator.
+  request_timeout_s: 900
   failover_enabled: true
   failover_timeout_s: 5
   tiebreak_randomize: false
@@ -49,10 +99,15 @@ routing:
   model_classes: {}
 
 provider_http:
-  timeout_s: 300  # 5 min provider HTTP forwarding timeout
+  timeout_s: 900  # covers the gateway streaming ceiling
 
 limits:
   max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
+relay:
+  # Maximum request bytes the coordinator will keep buffered for a provider
+  # websocket relay before dropping the in-flight request.
+  max_request_buffer_bytes: 16777216
 
 ws:
   write_buffer_size: 64
@@ -69,6 +124,12 @@ admission:
   provisional_tier_weight: 0.3
   provisional_retention_days: 30
 
+autotune:
+  # Strict is the durable default. A migration bridge requires false plus an
+  # RFC3339 provider_admission_bridge_deadline no more than 24 hours away.
+  enforce_provider_admission: true
+  # provider_admission_bridge_deadline: "2026-07-11T18:00:00Z"
+
 # tier2:
 #   # SPEC-008 §4.3 — observation gate; default false preserves Tier-1.
 #   observe_enabled: false
@@ -77,6 +138,11 @@ admission:
 #   catalog_path: ""                # path to signed catalog JSON; empty = no catalog
 #   catalog_public_key: ""          # Ed25519 public key, base64url-unpadded; required with catalog_path
 #   require_hash_verified: false    # route only hash_verified providers when true
+#   # Bounded migration only: missing model_hash_algorithm remains untyped and
+#   # is never compared. Point this at a non-secret, operator-selected future
+#   # RFC3339 deadline, observe model_hash_algorithm_legacy_bridge, and remove
+#   # the field after the legacy count reaches zero. Empty/expired fails closed.
+#   model_hash_legacy_until: env:MODEL_HASH_LEGACY_UNTIL
 #
 #   # SPEC-008 §11.1 — Pillar B keys; present for forward compatibility only in Phase 1.
 #   require_encrypted_leg: false
@@ -91,6 +157,14 @@ admission:
 #   attestation_max_age_s: 600
 #   attestation_formats:
 #     - "apple-managed-device-attestation-acme-v1"
+#     # Phase 1 (P1-B): SE P-256 self-signed attestation. No MDA root required.
+#     # Coordinator verifies the SE blob signature and binding; sets
+#     # attestation_tier=self_signed on the pool entry. Observe-only until Phase 4.
+#     - "macprovider-se-p256-v1"
+#   # Phase 1 liveness config keys (P1-C, not yet implemented):
+#   # se_liveness_interval_s: 300
+#   # se_liveness_timeout_s: 30
+#   # se_liveness_max_failures: 3
 #
 #   # SPEC-008 §11.1 — Pillar D relay controls; disabled by default to preserve Tier-1 behavior.
 #   behavioral_safety_enabled: false
@@ -102,8 +176,17 @@ admission:
 #   response_time_anomaly_factor: 5.0
 #   response_time_anomaly_min_ms: 10000
 
+# S-H1 (2026-07-15): `latest_binary_version` is CAPABILITY-GATED server-side.
+# It is emitted as `recommended_binary_version` (autoupdate target) ONLY to
+# providers that declare a `compatibility_set_id` in their hello (v1.8.33+,
+# whose CLI-owned updater performs full signed compatibility-set transactions).
+# Pre-compatibility-set providers (<=1.8.32) never receive it — their default
+# binary-only autoupdater would otherwise self-swap into a mixed install. The
+# operator-assisted full installer is the ONLY sanctioned upgrade path for that
+# legacy cohort (DECISION_CRITERIA Entry 161). `required_binary_version` is a
+# hard admission floor, not an autoupdate target, and is unaffected by the gate.
 coordinator_advertised_version:
-  latest_binary_version: "1.2.6"
+  latest_binary_version: "1.8.67"
   required_binary_version: ""
 
 auth:
@@ -119,14 +202,10 @@ auth:
   # Indirected form (production):
   #   operator_key: env:OPERATOR_KEY
   operator_key: "change-me"
-  # gateway_service_token is the optional service-to-service credential
-  # the gateway uses when calling internal/admin coordinator endpoints
-  # (M3-2 / SECU-4). When set, the coordinator accepts EITHER
-  # operator_key OR gateway_service_token on the internal-bearer auth
-  # path, letting the operator key be rotated independently of the live
-  # upstream credential. Leave unset to preserve pre-bridge behavior
-  # (operator_key is the sole accepted credential).
-  #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Required service-to-service credential for gateway calls to
+  # /internal/*. It must differ from operator_key and every operator_keys
+  # entry. Production should use env indirection.
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Disable only for isolated local development.
   # Public onboarding escape hatch. Keep false for local/invite-only configs;
   # set true only when clean tokenless provisional installs should self-mint.
@@ -144,15 +223,20 @@ logging:
 rewards:
   global_multiplier: 1.0
   provider_share: 0.90
+  # Prefix-cache hits should typically price below uncached prompt tokens.
+  # A 25% value is the recommended starting point when discounted cache billing is enabled.
   rate_card:
     default:
       prompt_credits_per_mtok: 500000
+      prompt_cache_hit_credits_per_mtok: 125000
       completion_credits_per_mtok: 1000000
     "mlx-community/Qwen2.5-7B-Instruct-4bit":
       prompt_credits_per_mtok: 1000000
+      prompt_cache_hit_credits_per_mtok: 250000
       completion_credits_per_mtok: 2000000
     "mlx-community/Llama-3.2-3B-Instruct-4bit":
       prompt_credits_per_mtok: 500000
+      prompt_cache_hit_credits_per_mtok: 125000
       completion_credits_per_mtok: 1000000
 
 settlement:
@@ -161,7 +245,19 @@ settlement:
   startup_reconcile_window_hours: 24
   nightly_reconcile_window_days: 7
   recovery_grace_seconds: 30
+  # SPEC-022 receipt pending-deadline (distinct from recovery_grace_seconds
+  # above): how long after request terminal state a settlement receipt may
+  # still arrive before the row deadline-quarantines under enforce mode.
+  # Default 300, max 900.
+  pending_deadline_seconds: 300
   job_enabled: true
+
+# SPEC-005 v0.4 §11.5 launch-gate item 10. Quarantine resolution
+# `/admin/ledger/quarantine/{id}/force-void` admin surface is
+# default-OFF — operators MUST flip this flag deliberately after
+# verifying §13.2 reload + audit semantics.
+billing:
+  quarantine_resolution_force_void_enabled: false
 
 endpoints:
   provider_earnings:
