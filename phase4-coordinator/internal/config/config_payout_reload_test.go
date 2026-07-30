@@ -124,3 +124,31 @@ payout:
 		t.Fatalf("non-payout namespaces must still resolve env: sentinels; got %q", cfg.Auth.OperatorKey)
 	}
 }
+
+// TestLoadForSIGHUPReloadKeepsNonPayoutStrictness locks the merge-audit
+// r3 code HIGH closure: stripping payout must not relax validation of
+// any OTHER namespace. A map[string]interface{} round-trip would
+// resolve an unquoted date-like scalar into time.Time and re-emit it
+// RFC3339-normalized, letting the reload accept a deadline string that
+// startup Load rejects. The node-level strip must keep such scalars
+// byte-identical, so Load and LoadForSIGHUPReload agree.
+func TestLoadForSIGHUPReloadKeepsNonPayoutStrictness(t *testing.T) {
+	t.Setenv("PAYOUT_RELOAD_TEST_OP_KEY", "0123456789abcdefABCDEFghijklmnop")
+
+	cfgPath := writeYAML(t, "coordinator.yaml", `
+auth:
+  operator_key: env:PAYOUT_RELOAD_TEST_OP_KEY
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
+tier2:
+  model_hash_legacy_until: 2026-07-19
+`)
+
+	_, loadErr := Load(cfgPath)
+	_, reloadErr := LoadForSIGHUPReload(cfgPath)
+	if (loadErr == nil) != (reloadErr == nil) {
+		t.Fatalf("Load and LoadForSIGHUPReload disagree on non-payout strictness: load=%v reload=%v", loadErr, reloadErr)
+	}
+	if loadErr == nil {
+		t.Fatal("test premise broken: startup Load accepted bare-date model_hash_legacy_until")
+	}
+}

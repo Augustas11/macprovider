@@ -1566,21 +1566,34 @@ func LoadForSIGHUPReload(path string) (Config, error) {
 	// subtree BEFORE typed decode. Resetting cfg.Payout after a typed
 	// unmarshal is not enough — a type-malformed payout.* scalar (e.g. a
 	// non-numeric cancel_max_tip_multiplier) would fail the Config decode
-	// itself and reject the whole reload before any reset runs. Decode
-	// generically, drop the payout key, then decode the filtered document
-	// into the typed Config.
-	var raw map[string]interface{}
-	if err := yaml.Unmarshal(b, &raw); err != nil {
+	// itself and reject the whole reload before any reset runs.
+	//
+	// Merge-audit r3 (code HIGH): the strip must happen at the yaml.Node
+	// level, NOT via a map[string]interface{} decode + re-marshal — that
+	// round-trip resolves unquoted timestamp-like scalars (2026-07-19)
+	// into time.Time and re-emits them RFC3339-normalized, so the reload
+	// would ACCEPT deadline strings (tier2.model_hash_legacy_until,
+	// referrals.grandfather_before) that startup Load rejects. Removing
+	// the payout mapping entry from the parsed node tree leaves every
+	// other scalar byte-identical to what Load would see.
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
 		return Config{}, fmt.Errorf("base config %s: %w", path, err)
 	}
-	delete(raw, "payout")
-	filtered, err := yaml.Marshal(raw)
-	if err != nil {
-		return Config{}, fmt.Errorf("base config %s: re-marshal without payout: %w", path, err)
+	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
+		m := doc.Content[0]
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if m.Content[i].Value == "payout" {
+				m.Content = append(m.Content[:i], m.Content[i+2:]...)
+				break
+			}
+		}
 	}
 	cfg := Default()
-	if err := yaml.Unmarshal(filtered, &cfg); err != nil {
-		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+	if len(doc.Content) > 0 {
+		if err := doc.Decode(&cfg); err != nil {
+			return Config{}, fmt.Errorf("base config %s: %w", path, err)
+		}
 	}
 	// Belt-and-braces: the payout namespace stays at defaults regardless
 	// of what the document contained.
