@@ -3056,7 +3056,7 @@ func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) 
 		controlReply = s.directControlReply(conn)
 	}
 	for {
-		s.setReadDeadline(conn, s.cfg.HeartbeatMissThreshold())
+		s.setReadDeadline(conn, s.providerReadTimeout(providerID, assignedID))
 		payload, op, err := s.readClientData(conn, controlReply)
 		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
@@ -5286,6 +5286,9 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 		if s.now().Sub(last) <= threshold {
 			continue
 		}
+		if s.providerHasActiveRelay(providerID, assignedID) {
+			continue
+		}
 		s.log.Warn().
 			Str("provider_id", providerID).
 			Dur("gap", s.now().Sub(last)).
@@ -5305,6 +5308,39 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 		_ = conn.Close()
 		return
 	}
+}
+
+func (s *Server) providerReadTimeout(providerID, assignedID string) time.Duration {
+	provider, ok := s.pool.Resolve(providerID, assignedID)
+	if !ok {
+		return s.cfg.HeartbeatMissThreshold()
+	}
+	if s.providerHasActiveRelay(providerID, assignedID) {
+		return s.activeRelayReadTimeout(provider)
+	}
+	return s.providerLivenessThreshold(provider)
+}
+
+func (s *Server) extendProviderReadDeadlineForActive(provider pool.Provider) {
+	session, ok := s.storedSessionFor(provider.ProviderID, provider.AssignedID)
+	if !ok || !session.hasActive() {
+		return
+	}
+	s.setReadDeadline(session.conn, s.activeRelayReadTimeout(provider))
+}
+
+func (s *Server) providerHasActiveRelay(providerID, assignedID string) bool {
+	session, ok := s.storedSessionFor(providerID, assignedID)
+	return ok && session.hasActive()
+}
+
+func (s *Server) activeRelayReadTimeout(provider pool.Provider) time.Duration {
+	threshold := s.providerLivenessThreshold(provider)
+	requestTimeout := time.Duration(s.cfg.Routing.RequestTimeoutS) * time.Second
+	if requestTimeout > threshold {
+		return requestTimeout
+	}
+	return threshold
 }
 
 func (s *Server) providerLivenessThreshold(provider pool.Provider) time.Duration {
