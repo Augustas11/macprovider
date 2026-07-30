@@ -340,7 +340,7 @@ providers:
 # the already-true rejection explicit and machine-readable instead of leaving
 # a legacy build to fail later, opaquely, on catalog admission.
 #
-# It is deliberately far below the current release (1.8.66) and below the
+# It is deliberately far below the current release (1.8.67) and below the
 # #610 first-hop bridge build (1.8.48, which is additionally exempt from the
 # floor by construction — see prepareProviderAdmission's firstHopOnly skip),
 # so raising it is a separate, deliberate act. Raise it only in lockstep with
@@ -348,5 +348,5 @@ providers:
 # reconnecting and tells its operator to upgrade, and one without it
 # reconnect-loops.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.66"
+  latest_binary_version: "1.8.67"
   required_binary_version: "1.8.33"
