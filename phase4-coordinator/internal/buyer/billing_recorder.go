@@ -535,9 +535,29 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	}
 	billableInput := observedInput
 	billableOutput := observedOutput
-	if in.PromptTokenUpperBound != nil && billableInput > *in.PromptTokenUpperBound {
-		billableInput = *in.PromptTokenUpperBound
-	}
+	// The settlement evidence tuple must mirror what an honest provider signs in
+	// its receipt, because tupleUsageMatchesLedger requires the coordinator's
+	// ExpectedUsage to EXACTLY equal the provider receipt's 5 usage fields for
+	// EVERY terminal state (settlement_verifier.go), and SPEC-015 (receipts
+	// terminal-state table) fixes billable_input_tokens == observed_input_tokens
+	// for the fully consumed prompt (== for normal_done; the delivered prefix on
+	// positive-money partial/error states also bills the whole input).
+	//
+	// The prompt-token upper bound is a byte-heuristic (len(body)/4, see
+	// estimateTokens) anti-inflation cap for the buyer LEDGER money amount
+	// (billing.boundProviderReportedPromptTokens). It MUST NOT be applied to the
+	// settlement evidence here: the provider cannot reproduce the coordinator's
+	// len(body)/4 value, so capping billable_input below observed_input produces a
+	// tuple no honest receipt can match -> usage_mismatch -> quarantine of EVERY
+	// settlement for models whose chat-template tokenization exceeds len(body)/4
+	// (Llama-3.2/3.1, gpt-oss). This is evidence-only and changes no credited
+	// amount: verified settlement credit sync re-bounds billable to the ledger
+	// prompt (syncVerifiedReceiptLedgerCreditForAttemptTx) and the ledger prompt is
+	// itself independently capped in the hot path.
+	//
+	// Byte-estimated usage is not settlement-capable (UsageCrossChecked is false),
+	// and non-normal_done zero-prefix attempts bill nothing: both zero billable
+	// below, which is what an honest provider also reports for those cases.
 	if usageSource == billing.UsageSourceByteEstimated {
 		billableInput = 0
 		billableOutput = 0
