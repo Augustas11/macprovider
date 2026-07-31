@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 version: v0.8.7
-status: PR by ERIK
+status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-29
 
