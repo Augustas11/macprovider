@@ -54,14 +54,30 @@ not a long soak. The watched-rollout window below closes that gap.
 
 1. **Deploy the base config** to Pearl per the coordinator deploy runbook
    (build from the merged commit; `/opt/macprovider/coordinator.yaml` picks up the
-   `settlement:` block). Coordinator restart applies it. Follow
-   `docs/runbooks/provider-cli-release-verification.md` deploy discipline (build
-   from the intended commit, clean `dist/`).
-2. **Confirm the mode is live:**
+   `settlement:` block). Follow `docs/runbooks/provider-cli-release-verification.md`
+   deploy discipline (build from the intended commit, clean `dist/`).
+   The Pearl deploy script defaults to **preserving** the live base config, so
+   explicitly confirm the base file now carries the `settlement:` block before
+   restarting — do not assume the deploy overwrote it.
+2. **Validate BEFORE restart** (loads base + overlay exactly as the service does,
+   validates, and exits non-zero on any error — a bad merge never reaches a live
+   restart):
    ```
-   ssh pearl "grep -A1 '^settlement:' /opt/macprovider/coordinator.yaml"
-   ssh pearl "journalctl -u macprovider-coordinator -n 50 | grep -i settlement"
+   ssh pearl "/opt/macprovider/coordinator \
+     --config /opt/macprovider/coordinator.yaml \
+     --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
+     --validate-config && echo VALIDATE_OK"
    ```
+   Then restart: `ssh pearl "sudo systemctl restart macprovider-coordinator"`.
+3. **Confirm the EFFECTIVE mode is enforce.** There is no merged-config dump flag
+   and the coordinator does not log the mode at boot, so check both layers — the
+   overlay wins, so a stale overlay `observe` would silently defeat the base:
+   ```
+   ssh pearl "echo BASE:;    grep -A1 '^settlement:' /opt/macprovider/coordinator.yaml; \
+              echo OVERLAY:; grep -A2 '^settlement:' /etc/macprovider/coordinator.pearl-overlays.yaml || echo '(no settlement stanza in overlay -> base wins)'"
+   ```
+   Effective mode is `enforce` only if the base shows `enforce` AND the overlay
+   has no `verified_model_settlement_mode` overriding it.
 3. **Watch for 30–60 min** (fire keep-warm + organic traffic across all models):
    - Buyer-facing errors / 5xx rate on `api.streamvc.live` — must not rise.
    - `route_snapshot_failed` / enforce-reject count — expect ~0.
@@ -78,23 +94,44 @@ not a long soak. The watched-rollout window below closes that gap.
 
 ## Rollback (instant, no redeploy)
 
-Overlay keys win over base, so revert without touching the deployed binary/base:
+Overlay keys win over base, so revert to `observe` via the overlay without
+touching the deployed binary/base.
+
+**Do NOT `tee -a` a `settlement:` block onto the overlay.** If the overlay
+already has a `settlement:` key (or you run the rollback twice), YAML load fails
+with `mapping key "settlement" already defined` *before* the coordinator can
+start — the rollback would fail closed. Use this idempotent merge instead
+(pyyaml 6.0.1 is present on Pearl), which loads the overlay, sets only the one
+key, and writes it back atomically — safe to run any number of times:
 
 ```bash
-# on Pearl
-sudo tee -a /etc/macprovider/coordinator.pearl-overlays.yaml >/dev/null <<'YAML'
-settlement:
-  verified_model_settlement_mode: observe
-YAML
-# validate then restart (Pearl launches base + this overlay)
-sudo systemctl restart macprovider-coordinator
-ssh pearl "journalctl -u macprovider-coordinator -n 30 | grep -i settlement"
+ssh pearl 'sudo python3 - <<"PY"
+import yaml, os, tempfile
+p = "/etc/macprovider/coordinator.pearl-overlays.yaml"
+d = yaml.safe_load(open(p)) or {}
+d.setdefault("settlement", {})["verified_model_settlement_mode"] = "observe"
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
+with os.fdopen(fd, "w") as f:
+    yaml.safe_dump(d, f, default_flow_style=False, sort_keys=False)
+os.replace(tmp, p)            # atomic
+print("overlay set settlement.verified_model_settlement_mode=observe")
+PY'
+# Validate BEFORE restart (never restart on an invalid merge):
+ssh pearl "/opt/macprovider/coordinator \
+  --config /opt/macprovider/coordinator.yaml \
+  --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
+  --validate-config && echo VALIDATE_OK"
+ssh pearl "sudo systemctl restart macprovider-coordinator"
+# Confirm effective mode is now observe (overlay overrides base):
+ssh pearl "grep -A2 '^settlement:' /etc/macprovider/coordinator.pearl-overlays.yaml"
 ```
 
 Trigger rollback if any of: buyer 5xx rate rises, enforce-reject count is
 non-trivial (> ~1%), or a new quarantine reason appears on `normal_done`.
-Then investigate before re-attempting. Remove the overlay stanza once the base
-is reverted or the issue is fixed.
+Then investigate before re-attempting. Once the base is reverted or the issue is
+fixed, remove the `settlement` key from the overlay with the same idempotent
+merge (set it back, or `del d["settlement"]`) — never hand-edit to avoid the
+duplicate-key trap.
 
 ## After a stable window
 
