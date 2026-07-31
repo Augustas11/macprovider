@@ -653,6 +653,71 @@ func TestHandleHardwareEvidenceReturnsExistingReplayBeforeProviderRateLimit(t *t
 	}
 }
 
+func TestHandleHardwareEvidenceReturnsSameIdentityReplayBeforeProviderRateLimit(t *testing.T) {
+	now := time.Date(2026, 7, 31, 13, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(validHardwareEvidenceBody(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence HardwareEvidenceRequest
+	if err := json.Unmarshal(body, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	evidenceSHA, _, err := canonicalEvidenceSHA(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := &fakeStatsDB{
+		identityReplayFound: true,
+		identityReplayRecord: HardwareEvidenceJobRecord{
+			JobID:       43,
+			Status:      hardwareEvidenceJobPending,
+			EvidenceSHA: evidenceSHA,
+			Replay:      true,
+		},
+	}
+	handler := testRegisterHandler(stats, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	handler.Now = func() time.Time { return now }
+	handler.HardwareEvidenceProviderRateLimiter = denyLimiter{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"status":"existing"`) || !strings.Contains(rr.Body.String(), `"evidence_sha":"`+evidenceSHA+`"`) {
+		t.Fatalf("body=%s, want existing replay with submitted evidence sha", rr.Body.String())
+	}
+	if stats.evidenceProviderID != "" {
+		t.Fatal("same-identity replay inserted a new verification job")
+	}
+	if stats.identityReplayProviderID != "mac" ||
+		stats.identityReplayHash != evidence.Hardware.HardwareIdentityHash ||
+		stats.identityReplaySHA != evidenceSHA {
+		t.Fatalf("unexpected identity replay lookup provider=%q hash=%q sha=%q",
+			stats.identityReplayProviderID, stats.identityReplayHash, stats.identityReplaySHA)
+	}
+}
+
+func TestHardwareEvidenceResponseStatusMarksStoreReplayExisting(t *testing.T) {
+	evidenceSHA := strings.Repeat("e", 64)
+	status, accepted := hardwareEvidenceResponseStatus(HardwareEvidenceJobRecord{
+		JobID:       42,
+		EvidenceSHA: evidenceSHA,
+		Status:      hardwareEvidenceJobPending,
+		Replay:      true,
+	}, false, evidenceSHA)
+	if !accepted || status != hardwareEvidenceResponseExisting {
+		t.Fatalf("status=%q accepted=%v, want existing accepted replay", status, accepted)
+	}
+}
+
 func TestHandleHardwareEvidenceRejectsReboundOrStaleBenchmarkBindings(t *testing.T) {
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -1379,6 +1444,12 @@ type fakeStatsDB struct {
 	existingEvidenceRecord     HardwareEvidenceJobRecord
 	existingEvidenceFound      bool
 	existingEvidenceErr        error
+	identityReplayProviderID   string
+	identityReplayHash         string
+	identityReplaySHA          string
+	identityReplayRecord       HardwareEvidenceJobRecord
+	identityReplayFound        bool
+	identityReplayErr          error
 	prepareErr                 error
 	prepared                   bool
 	preparedErr                error
@@ -1472,6 +1543,13 @@ func (f *fakeStatsDB) ExistingHardwareVerificationJob(ctx context.Context, provi
 	f.existingEvidenceProviderID = providerID
 	f.existingEvidenceSHA = evidenceSHA
 	return f.existingEvidenceRecord, f.existingEvidenceFound, f.existingEvidenceErr
+}
+
+func (f *fakeStatsDB) ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx context.Context, providerID, hardwareIdentityHash, responseEvidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
+	f.identityReplayProviderID = providerID
+	f.identityReplayHash = hardwareIdentityHash
+	f.identityReplaySHA = responseEvidenceSHA
+	return f.identityReplayRecord, f.identityReplayFound, f.identityReplayErr
 }
 
 type fakeAppAttestVerifier struct {

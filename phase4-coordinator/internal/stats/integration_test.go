@@ -40,6 +40,7 @@ package stats_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -1653,6 +1654,99 @@ RETURNING id`, tc.providerID, tc.status, tc.decisionReason, tc.evidenceSHA).Scan
 			record.Status != tc.status || record.DecisionReason != tc.decisionReason {
 			t.Fatalf("loaded %s record = %+v found=%v", tc.status, record, found)
 		}
+	}
+}
+
+func TestHardwareEvidenceSameIdentityReplayBypassesAdmissionCap(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	store, err := onboarding.OpenPGStore(fx.roleDSN(roleProviderOnboard))
+	if err != nil {
+		t.Fatalf("open onboarding store: %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	const providerID = "p-update-admission"
+	sameHash := strings.Repeat("c", 64)
+	changedHash := strings.Repeat("d", 64)
+	oldEvidenceSHA := strings.Repeat("a", 64)
+	oldEvidenceJSON := fmt.Sprintf(`{"hardware":{"hardware_identity_hash":%q}}`, sameHash)
+	var oldJobID int64
+	if err := adminDB.QueryRowContext(ctx, `
+INSERT INTO hardware_verification_jobs (
+    provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+    bandwidth_tier, os_version, binary_version, benchmark_count,
+    max_sustained_tps, generated_at, decision_reason, evidence, evidence_sha256
+) VALUES (
+    $1, 'autotune', 'waiting_trust', 'Apple M5', 'apple m5', 32,
+    'C', '15.5', '1.8.67', 1, 42.5, now(),
+    'hardware-verifier.v2:trust_missing', $2::jsonb, $3
+)
+RETURNING id`, providerID, oldEvidenceJSON, oldEvidenceSHA).Scan(&oldJobID); err != nil {
+		t.Fatalf("seed waiting trust row: %v", err)
+	}
+
+	generatedAt := time.Date(2026, 7, 31, 13, 0, 0, 0, time.UTC)
+	evidence := hardwareEvidenceRequestForIntegration(providerID, sameHash, "1.8.68", generatedAt)
+	record, err := store.InsertHardwareVerificationJob(ctx, providerID, evidence, generatedAt)
+	if err != nil {
+		t.Fatalf("same hardware replay insert: %v", err)
+	}
+	if record.JobID != oldJobID || record.Status != "waiting_trust" || !record.Replay {
+		t.Fatalf("same hardware record=%+v, want old waiting_trust replay job %d", record, oldJobID)
+	}
+	if record.EvidenceSHA == oldEvidenceSHA || len(record.EvidenceSHA) != 64 {
+		t.Fatalf("replay evidence sha=%q, want submitted payload sha distinct from old row", record.EvidenceSHA)
+	}
+	var jobCount int
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM hardware_verification_jobs WHERE provider_id = $1`,
+		providerID,
+	).Scan(&jobCount); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobCount != 1 {
+		t.Fatalf("job count=%d, want replay without new job", jobCount)
+	}
+
+	changedEvidence := hardwareEvidenceRequestForIntegration(providerID, changedHash, "1.8.68", generatedAt)
+	if _, err := store.InsertHardwareVerificationJob(ctx, providerID, changedEvidence, generatedAt); !errors.Is(err, onboarding.ErrHardwareEvidenceRateLimited) {
+		t.Fatalf("changed hardware error=%v, want rate limited", err)
+	}
+}
+
+func hardwareEvidenceRequestForIntegration(providerID, hardwareIdentityHash, binaryVersion string, generatedAt time.Time) onboarding.HardwareEvidenceRequest {
+	return onboarding.HardwareEvidenceRequest{
+		SchemaVersion:          "hardware_evidence.autotune.v1",
+		ProviderID:             providerID,
+		GeneratedAt:            generatedAt.Format(time.RFC3339),
+		CandidateCatalogSHA256: strings.Repeat("b", 64),
+		RecommendedModel:       "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+		Hardware: onboarding.HardwareEvidenceHardware{
+			Chip:                 "Apple M5",
+			MemoryGB:             32,
+			BandwidthTier:        "C",
+			Detected:             true,
+			OSVersion:            "15.5",
+			BinaryVersion:        binaryVersion,
+			HardwareIdentityHash: hardwareIdentityHash,
+		},
+		Benchmarks: []onboarding.HardwareEvidenceBenchmark{{
+			ModelKey:                "qwen-7b",
+			ModelID:                 "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+			SustainedTPS:            42.5,
+			TTFTMS:                  1200,
+			SwapDetected:            false,
+			ThermalThrottleDetected: false,
+			ArtifactSHA256:          strings.Repeat("e", 64),
+			CandidateCatalogSHA256:  strings.Repeat("b", 64),
+			BenchmarkID:             "bench-1",
+			GeneratedAt:             generatedAt.Format(time.RFC3339),
+			BinaryVersion:           binaryVersion,
+			HardwareIdentityHash:    hardwareIdentityHash,
+		}},
 	}
 }
 

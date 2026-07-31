@@ -60,8 +60,8 @@ type HardwareEvidenceHardware struct {
 }
 
 type HardwareEvidenceBenchmark struct {
-	ModelKey                string  `json:"model_key"`
-	ModelID                 string  `json:"model_id"`
+	ModelKey string `json:"model_key"`
+	ModelID  string `json:"model_id"`
 	// ModelArtifactPath is the resolved local load path actually probed (#745 AC-4).
 	ModelArtifactPath       string  `json:"model_artifact_path,omitempty"`
 	SustainedTPS            float64 `json:"sustained_tps"`
@@ -82,6 +82,11 @@ type HardwareEvidenceJobRecord struct {
 	EvidenceSHA    string
 	Status         string
 	DecisionReason string
+	Replay         bool
+}
+
+type hardwareVerificationJobQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 // InsertHardwareVerificationJob queues provider-authenticated evidence for the
@@ -126,6 +131,14 @@ SELECT id, status, decision_reason
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return HardwareEvidenceJobRecord{}, err
+	}
+
+	existing, found, err := existingActiveHardwareVerificationJobForHardwareIdentity(ctx, tx, providerID, evidence.Hardware.HardwareIdentityHash, evidenceSHA)
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+	if found {
+		return existing, nil
 	}
 
 	var recentJobs int
@@ -207,6 +220,40 @@ LIMIT 1`,
 	}
 	record.EvidenceSHA = evidenceSHA
 	return record, nil
+}
+
+func (s *PGStore) ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx context.Context, providerID, hardwareIdentityHash, responseEvidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
+	if s == nil || s.db == nil {
+		return HardwareEvidenceJobRecord{}, false, errors.New("onboarding postgres store is nil")
+	}
+	return existingActiveHardwareVerificationJobForHardwareIdentity(ctx, s.db, providerID, hardwareIdentityHash, responseEvidenceSHA)
+}
+
+func existingActiveHardwareVerificationJobForHardwareIdentity(ctx context.Context, queryer hardwareVerificationJobQueryer, providerID, hardwareIdentityHash, responseEvidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
+	hardwareIdentityHash = strings.TrimSpace(hardwareIdentityHash)
+	if !isLowerSHA256(hardwareIdentityHash) || !isLowerSHA256(responseEvidenceSHA) {
+		return HardwareEvidenceJobRecord{}, false, nil
+	}
+	var existing HardwareEvidenceJobRecord
+	err := queryer.QueryRowContext(ctx, `
+SELECT id, status, decision_reason
+  FROM hardware_verification_jobs
+ WHERE provider_id = $1
+   AND status IN ('pending', 'waiting_trust')
+   AND evidence #>> '{hardware,hardware_identity_hash}' = $2
+ ORDER BY submitted_at DESC, id DESC
+ LIMIT 1`, providerID, hardwareIdentityHash).Scan(&existing.JobID, &existing.Status, &existing.DecisionReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HardwareEvidenceJobRecord{}, false, nil
+	}
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, false, err
+	}
+	// Echo the submitted payload SHA so strict clients can treat the
+	// same-hardware replay as successful without creating a new job.
+	existing.EvidenceSHA = responseEvidenceSHA
+	existing.Replay = true
+	return existing, true, nil
 }
 
 func (s *PGStore) ExistingHardwareVerificationJob(ctx context.Context, providerID, evidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
@@ -309,6 +356,24 @@ func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if identityReplayStore, ok := h.StatsDB.(interface {
+		ExistingActiveHardwareVerificationJobForHardwareIdentity(context.Context, string, string, string) (HardwareEvidenceJobRecord, bool, error)
+	}); ok {
+		existing, found, lookupErr := identityReplayStore.ExistingActiveHardwareVerificationJobForHardwareIdentity(ctx, providerID, req.Hardware.HardwareIdentityHash, evidenceSHA)
+		if lookupErr != nil {
+			writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")
+			return
+		}
+		if found {
+			status, accepted := hardwareEvidenceResponseStatus(existing, false, evidenceSHA)
+			if !accepted {
+				writeJSONError(w, http.StatusConflict, "evidence_replay_not_accepted", "existing hardware identity evidence is not in an accepted replay state")
+				return
+			}
+			writeHardwareEvidenceResponse(w, status, providerID, existing)
+			return
+		}
+	}
 	if h.HardwareEvidenceProviderRateLimiter != nil && !h.HardwareEvidenceProviderRateLimiter.Allow(providerID) {
 		w.Header().Set("Retry-After", "600")
 		writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence provider rate limit exceeded")
@@ -342,6 +407,7 @@ func hardwareEvidenceResponseStatus(record HardwareEvidenceJobRecord, replay boo
 	if record.JobID <= 0 || record.EvidenceSHA != expectedEvidenceSHA || !isLowerSHA256(record.EvidenceSHA) {
 		return "", false
 	}
+	replay = replay || record.Replay
 	switch record.Status {
 	case hardwareEvidenceJobPending:
 		if replay {
