@@ -950,6 +950,8 @@ Q11: How to represent model quality and buyer-acceptance scores without creating
 
 Q12: Whether minimum provider coverage targets should become an active recommendation input once provider-count telemetry exists.
 
+Q13: Adaptive `N` for oMLX-seeded promotion. Replace fixed `N = 3` with a minimum and maximum of verified provider autotune runs, promoting once a one-sided ~95% lower confidence bound on sustained TPS clears the provisional gate. If unmet after 7 runs, the row remains `listed`.
+
 ## 14. Differentiation framing
 
 macprovider's provider-install UX sits in a gap left by most decentralized GPU networks. Vast, RunPod, io.net, Akash, Aethir, Render, and Bittensor generally expose raw capacity, bids, node eligibility, subnet incentives, or buyer-selected workloads; their public provider flows do not show an installer-time recommendation that says "given this hardware, run this model to earn the most." That difference follows from their market structure: the buyer brings a container, manifest, render job, or subnet task, while the provider supplies capacity or competes under a protocol.
