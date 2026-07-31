@@ -918,7 +918,11 @@ advisory gate from verified provider measurements, change
 
 ### 12.1 K/N threshold justification
 
-The `RESEARCH_231` prompt asked for cells that are “statistically reliable enough” to inform catalog rows, and explicitly required conservative calibration: p25-based gate slack, uncertainty bands, and advisory-only treatment until macprovider repros the result. `RESEARCH_231` follows that rubric by treating `n >= 10` 4k/4bit normalized cells as decision-grade and `n >= 3` as directional only after duplicate collapse and outlier trimming. We adopt `K = 10` because it is the smallest bucket size the research path treats as stable enough to support percentile-based seeding under the prompt’s conservative policy. We adopt `N = 3` because the prompt keeps oMLX in the advisory role only; promotion must therefore wait for repeated verified-provider measurements, and three runs is the minimum practical multi-run threshold that blocks single-run noise without turning promotion into a drag on usable rows.
+The `RESEARCH_231` prompt asked for cells that are "statistically reliable enough" to inform catalog rows, and explicitly required conservative calibration: p25-based gate slack, uncertainty bands, and advisory-only treatment until macprovider repros the result. `RESEARCH_231` therefore treats `n >= 10` normalized oMLX cells as decision-grade after duplicate collapse and outlier trimming. We adopt `K = 10` because it directly matches the research memo's minimum sample size for percentile-based seeding.
+
+`N` serves a different purpose than `K`. Whereas `K` measures agreement across independent oMLX community benchmark cells, `N` counts repeated verified provider autotune measurements on eligible hardware before replacing provisional oMLX evidence with verified-provider evidence. The purpose of `N` is to reduce the likelihood that a single anomalous benchmark run (for example due to transient system load, thermal state, or other run-to-run variability) determines promotion of a catalog row.
+
+Therefore `N = 3` is adopted as a conservative verification policy rather than a value derived from the oMLX dataset. One run cannot distinguish a repeatable result from a transient outlier, while two runs provide no tie-break when they disagree. Three independent verified provider autotune measurements provide a majority-consistency check before promotion while keeping verification operationally practical.
 
 ## 13. Open questions / v0.2 candidates
 
