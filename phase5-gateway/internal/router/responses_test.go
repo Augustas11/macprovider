@@ -104,6 +104,138 @@ func TestResponsesNonStreamingTranslatesThroughChatPipeline(t *testing.T) {
 	}
 }
 
+func TestResponsesCodex0146DefaultToolsAreFlattened(t *testing.T) {
+	var capturedBody map[string]any
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_codex_tools",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_codex_0146_tools")
+
+	resp := postResponses(t, h, key, `{
+		"model":"llama",
+		"input":"hi",
+		"include":["reasoning.encrypted_content"],
+		"reasoning":{"summary":"auto"},
+		"parallel_tool_calls":false,
+		"store":false,
+		"tools":[
+			{"type":"function","name":"exec_command","description":"Run a command","parameters":{"type":"object"},"strict":true},
+			{"type":"function","name":"write_stdin","description":"Write to a command","parameters":{"type":"object"},"strict":true},
+			{"type":"function","name":"update_plan","description":"Update the plan","parameters":{"type":"object"},"strict":true},
+			{"type":"function","name":"request_user_input","description":"Ask for user input","parameters":{"type":"object"},"strict":true},
+			{"type":"function","name":"view_image","description":"View an image","parameters":{"type":"object"},"strict":true},
+			{"type":"namespace","name":"multi_agent_v1","tools":[
+				{"type":"function","name":"close_agent","description":"Close an agent","parameters":{"type":"object"},"strict":true},
+				{"type":"function","name":"resume_agent","description":"Resume an agent","parameters":{"type":"object"},"strict":true},
+				{"type":"function","name":"send_input","description":"Send input to an agent","parameters":{"type":"object"},"strict":true},
+				{"type":"function","name":"spawn_agent","description":"Spawn an agent","parameters":{"type":"object"},"strict":true},
+				{"type":"function","name":"wait_agent","description":"Wait for an agent","parameters":{"type":"object"},"strict":true}
+			]},
+			{"type":"function","name":"get_goal","description":"Get the current goal","parameters":{"type":"object"},"strict":true},
+			{"type":"function","name":"create_goal","description":"Create a goal","parameters":{"type":"object"},"strict":true},
+			{"type":"function","name":"update_goal","description":"Update the goal","parameters":{"type":"object"},"strict":true},
+			{"type":"web_search","external_web_access":true}
+		]
+	}`, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if parallelToolCalls, ok := capturedBody["parallel_tool_calls"].(bool); !ok || parallelToolCalls {
+		t.Fatalf("forwarded parallel_tool_calls=%v want false", capturedBody["parallel_tool_calls"])
+	}
+	if _, ok := capturedBody["include"]; ok {
+		t.Fatalf("forwarded Responses include control: %v", capturedBody["include"])
+	}
+	if _, ok := capturedBody["reasoning"]; ok {
+		t.Fatalf("forwarded Responses reasoning control: %v", capturedBody["reasoning"])
+	}
+	tools := capturedBody["tools"].([]any)
+	wantNames := []string{
+		"exec_command",
+		"write_stdin",
+		"update_plan",
+		"request_user_input",
+		"view_image",
+		"close_agent",
+		"resume_agent",
+		"send_input",
+		"spawn_agent",
+		"wait_agent",
+		"get_goal",
+		"create_goal",
+		"update_goal",
+	}
+	if len(tools) != len(wantNames) {
+		t.Fatalf("forwarded tool count=%d want %d tools=%v", len(tools), len(wantNames), tools)
+	}
+	gotNames := make(map[string]bool, len(tools))
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		if tool["type"] != "function" {
+			t.Fatalf("forwarded non-function tool: %v", tool)
+		}
+		fn := tool["function"].(map[string]any)
+		name := fn["name"].(string)
+		if name == "multi_agent_v1" || name == "web_search" {
+			t.Fatalf("forwarded dropped tool %q in %v", name, tools)
+		}
+		if fn["parameters"].(map[string]any)["type"] != "object" {
+			t.Fatalf("tool parameters not preserved for %q: %v", name, fn)
+		}
+		gotNames[name] = true
+	}
+	for _, name := range wantNames {
+		if !gotNames[name] {
+			t.Fatalf("missing forwarded tool %q in %v", name, tools)
+		}
+	}
+}
+
+func TestResponsesUnknownHostedToolTypeIsAcceptedAndDropped(t *testing.T) {
+	var capturedBody map[string]any
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_unknown_hosted_tool",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_unknown_hosted_tool")
+
+	resp := postResponses(t, h, key, `{
+		"model":"llama",
+		"input":"hi",
+		"store":false,
+		"tools":[{"type":"future_hosted_tool","name":"future_search"}]
+	}`, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if _, ok := capturedBody["tools"]; ok {
+		t.Fatalf("forwarded tools for dropped hosted tool: %v", capturedBody["tools"])
+	}
+}
+
 func TestResponsesNonStreamingLengthFinishReasonIsIncomplete(t *testing.T) {
 	adapter := newResponsesAdapter(httptest.NewRecorder(), "23232323-2323-4232-8232-232323232323", nil)
 	adapter.model = "llama"
@@ -139,15 +271,11 @@ func TestResponsesRejectsUnsupportedStateBeforeReservation(t *testing.T) {
 	}{
 		{name: "store_true", body: `{"model":"llama","input":"hi","store":true}`, code: "unsupported_parameter"},
 		{name: "previous_response_id", body: `{"model":"llama","input":"hi","store":false,"previous_response_id":"resp_123"}`, code: "unsupported_parameter"},
-		{name: "hosted_tool", body: `{"model":"llama","input":"hi","store":false,"tools":[{"type":"web_search_preview"}]}`, code: "unsupported_parameter"},
 		{name: "multimodal_content", body: `{"model":"llama","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.invalid/a.png"}]}],"store":false}`, code: "invalid_request"},
 		{name: "legacy_response_format", body: `{"model":"llama","input":"hi","store":false,"response_format":{"type":"json_object"}}`, code: "unsupported_parameter"},
 		{name: "conversation", body: `{"model":"llama","input":"hi","store":false,"conversation":{"id":"conv_123"}}`, code: "unsupported_parameter"},
-		{name: "include", body: `{"model":"llama","input":"hi","store":false,"include":["file_search_call.results"]}`, code: "unsupported_parameter"},
 		{name: "background", body: `{"model":"llama","input":"hi","store":false,"background":true}`, code: "unsupported_parameter"},
 		{name: "truncation_auto", body: `{"model":"llama","input":"hi","store":false,"truncation":"auto"}`, code: "unsupported_parameter"},
-		{name: "reasoning", body: `{"model":"llama","input":"hi","store":false,"reasoning":{"effort":"low"}}`, code: "unsupported_parameter"},
-		{name: "parallel_tool_calls_false", body: `{"model":"llama","input":"hi","store":false,"parallel_tool_calls":false}`, code: "unsupported_parameter"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

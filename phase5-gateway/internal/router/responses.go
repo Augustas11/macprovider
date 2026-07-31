@@ -250,7 +250,7 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 	if err := validateResponsesTools(req.Tools); err != nil {
 		return nil, err
 	}
-	if err := validateResponsesControls(req.Conversation, req.Include, req.Truncation, req.Background, req.Reasoning, req.ParallelToolCalls, req.ResponseFormat); err != nil {
+	if err := validateResponsesControls(req.Conversation, req.Truncation, req.Background, req.ResponseFormat); err != nil {
 		return nil, err
 	}
 	textFormat, chatResponseFormat, textErr := responsesTextConfigToChatResponseFormat(req.Text)
@@ -269,14 +269,20 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 	if req.MaxOutputTokens != nil {
 		chat["max_tokens"] = *req.MaxOutputTokens
 	}
-	if len(req.Tools) > 0 {
-		chat["tools"] = responsesToolsToChatTools(req.Tools)
+	chatTools := responsesToolsToChatTools(req.Tools)
+	if len(chatTools) > 0 {
+		chat["tools"] = chatTools
 	}
 	if req.ToolChoice != nil {
-		chat["tool_choice"] = responsesToolChoiceToChatToolChoice(req.ToolChoice)
+		if toolChoice, ok := responsesToolChoiceToChatToolChoice(req.ToolChoice, chatTools); ok {
+			chat["tool_choice"] = toolChoice
+		}
 	}
 	if len(chatResponseFormat) > 0 {
 		chat["response_format"] = json.RawMessage(chatResponseFormat)
+	}
+	if parallelToolCalls, ok := req.ParallelToolCalls.(bool); ok {
+		chat["parallel_tool_calls"] = parallelToolCalls
 	}
 	if req.Temperature != nil {
 		chat["temperature"] = req.Temperature
@@ -436,47 +442,24 @@ func responsesContentToText(v any) string {
 }
 
 func validateResponsesTools(tools []map[string]any) *responsesTranslationError {
-	for i, tool := range tools {
-		typ, _ := tool["type"].(string)
-		if typ == "function" {
-			continue
-		}
-		if typ == "" {
-			typ = "unknown"
-		}
-		return &responsesTranslationError{
-			code:    "unsupported_parameter",
-			param:   fmt.Sprintf("tools[%d].type", i),
-			message: fmt.Sprintf("Responses tool type %q is not supported", typ),
-		}
-	}
+	// Responses clients may send hosted or namespace tool declarations that this
+	// local Chat Completions provider cannot execute. Translation flattens usable
+	// function tools and drops the rest instead of rejecting the whole turn.
 	return nil
 }
 
-func validateResponsesControls(conversation, include json.RawMessage, truncation *string, background *bool, reasoning, parallelToolCalls any, responseFormat json.RawMessage) *responsesTranslationError {
+func validateResponsesControls(conversation json.RawMessage, truncation *string, background *bool, responseFormat json.RawMessage) *responsesTranslationError {
 	if len(bytes.TrimSpace(responseFormat)) > 0 && !jsonRawIsNull(responseFormat) {
 		return &responsesTranslationError{code: "unsupported_parameter", param: "response_format", message: "response_format is not supported on /v1/responses; use text.format"}
 	}
 	if len(bytes.TrimSpace(conversation)) > 0 && !jsonRawIsEmptyValue(conversation) {
 		return &responsesTranslationError{code: "unsupported_parameter", param: "conversation", message: "conversation is not supported; send the full input with store:false"}
 	}
-	if len(bytes.TrimSpace(include)) > 0 && !jsonRawIsEmptyValue(include) {
-		return &responsesTranslationError{code: "unsupported_parameter", param: "include", message: "include is not supported"}
-	}
 	if background != nil && *background {
 		return &responsesTranslationError{code: "unsupported_parameter", param: "background", message: "background:true is not supported"}
 	}
 	if truncation != nil && *truncation != "" && *truncation != "disabled" {
 		return &responsesTranslationError{code: "unsupported_parameter", param: "truncation", message: "Only truncation:\"disabled\" is supported"}
-	}
-	if !jsonLikeEmpty(reasoning) {
-		return &responsesTranslationError{code: "unsupported_parameter", param: "reasoning", message: "reasoning controls are not supported"}
-	}
-	if !jsonLikeEmpty(parallelToolCalls) {
-		if enabled, ok := parallelToolCalls.(bool); ok && enabled {
-			return nil
-		}
-		return &responsesTranslationError{code: "unsupported_parameter", param: "parallel_tool_calls", message: "Only default parallel_tool_calls behavior is supported"}
 	}
 	return nil
 }
@@ -568,32 +551,104 @@ func cloneMap(in map[string]any) map[string]any {
 
 func responsesToolsToChatTools(tools []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(tools))
-	for _, tool := range tools {
-		if typ, _ := tool["type"].(string); typ != "function" {
-			continue
-		}
+	usedNames := make(map[string]struct{}, len(tools))
+	var addFunction func(tool map[string]any, namespace string)
+	addFunction = func(tool map[string]any, namespace string) {
 		fn := map[string]any{}
 		for _, key := range []string{"name", "description", "parameters", "strict"} {
 			if value, ok := tool[key]; ok {
 				fn[key] = value
 			}
 		}
+		name, _ := fn["name"].(string)
+		if name != "" {
+			finalName := name
+			if _, exists := usedNames[finalName]; exists {
+				// Chat function names must be unique; keep Codex's original names
+				// unless a real collision forces a namespace-derived prefix.
+				if namespace != "" {
+					finalName = namespace + "_" + name
+				}
+				finalName = uniqueResponsesToolName(finalName, usedNames)
+				fn["name"] = finalName
+			}
+			usedNames[finalName] = struct{}{}
+		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	for _, tool := range tools {
+		switch typ, _ := tool["type"].(string); typ {
+		case "function":
+			addFunction(tool, "")
+		case "namespace":
+			namespace, _ := tool["name"].(string)
+			for _, nested := range responsesNestedTools(tool["tools"]) {
+				if nestedType, _ := nested["type"].(string); nestedType == "function" {
+					addFunction(nested, namespace)
+				}
+			}
+		}
 	}
 	return out
 }
 
-func responsesToolChoiceToChatToolChoice(choice any) any {
+func responsesNestedTools(v any) []map[string]any {
+	switch typed := v.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if tool, ok := item.(map[string]any); ok {
+				out = append(out, tool)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func uniqueResponsesToolName(name string, used map[string]struct{}) string {
+	candidate := name
+	for i := 2; ; i++ {
+		if _, exists := used[candidate]; !exists {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s_%d", name, i)
+	}
+}
+
+func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (any, bool) {
+	if len(tools) == 0 {
+		if s, ok := choice.(string); ok && (s == "auto" || s == "none") {
+			return choice, true
+		}
+		return nil, false
+	}
 	m, ok := choice.(map[string]any)
 	if !ok {
-		return choice
+		return choice, true
 	}
 	if typ, _ := m["type"].(string); typ == "function" {
 		if name, _ := m["name"].(string); name != "" {
-			return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+			if !responsesChatToolsContainName(tools, name) {
+				return nil, false
+			}
+			return map[string]any{"type": "function", "function": map[string]any{"name": name}}, true
 		}
 	}
-	return choice
+	return choice, true
+}
+
+func responsesChatToolsContainName(tools []map[string]any, name string) bool {
+	for _, tool := range tools {
+		fn, _ := tool["function"].(map[string]any)
+		if got, _ := fn["name"].(string); got == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, error) {
