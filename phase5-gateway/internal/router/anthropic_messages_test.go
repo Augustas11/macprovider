@@ -48,7 +48,7 @@ func TestAnthropicMessagesNonStreamingTranslatesThroughBilledChatPath(t *testing
 		"max_tokens":32,
 		"system":[{"type":"text","text":"system prompt"}],
 		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],
-		"tools":[{"name":"lookup","description":"Lookup things","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],
+		"tools":[{"type":"custom","name":"lookup","description":"Lookup things","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],
 		"tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true},
 		"metadata":{"user_id":"u"},
 		"stop_sequences":["STOP"],
@@ -169,6 +169,8 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 			"cache_control is not supported"},
 		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
 			"cache_control is not supported"},
+		"hosted tool type": {`{"model":"claude","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`,
+			"web_search_20250305"},
 		"numeric model": {`{"model":7,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
 			"model must be a string"},
 		"string max tokens": {`{"model":"claude","max_tokens":"8","messages":[{"role":"user","content":"hi"}]}`,
@@ -283,6 +285,87 @@ func TestAnthropicMessagesNonStreamingInvalidProviderResponseSettlesParsedUsage(
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_bad_provider")
 	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
 		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
+	}
+}
+
+func TestAnthropicMessagesNonStreamingRejectsToolFinishWithoutToolCalls(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_tool_finish_empty","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"tool_calls"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_tool_finish_empty")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"code":"invalid_provider_response"`) {
+		t.Fatalf("unexpected error body=%s", resp.Body.String())
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_tool_finish_empty")
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
+	}
+}
+
+func TestAnthropicMessagesNonStreamingToolArgumentsNullBecomesEmptyInput(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_null_args","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"toolu_null","type":"function","function":{"name":"lookup","arguments":"null"}}]},"finish_reason":"tool_calls"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_null_args")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var anth map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
+		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
+	}
+	content := anth["content"].([]any)
+	toolUse := content[0].(map[string]any)
+	input, ok := toolUse["input"].(map[string]any)
+	if !ok || input == nil || len(input) != 0 {
+		t.Fatalf("tool_use input=%#v want empty object", toolUse["input"])
+	}
+}
+
+func TestAnthropicMessagesNonStreamingContentFilterMapsToRefusal(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_content_filter","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"cannot comply"},"finish_reason":"content_filter"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_content_filter")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var anth map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
+		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
+	}
+	if anth["stop_reason"] != "refusal" {
+		t.Fatalf("stop_reason=%v want refusal body=%s", anth["stop_reason"], resp.Body.String())
 	}
 }
 
@@ -792,6 +875,68 @@ func TestAnthropicMessagesStreamingTerminalOutputExceededEmitsMessageStop(t *tes
 	}
 }
 
+func TestAnthropicMessagesStreamingGatewayOutputExceededRetryReplays(t *testing.T) {
+	var upstreamHits int
+	stream := `data: {"id":"chatcmpl_gateway_cap","model":"claude-stream","choices":[{"delta":{"content":"visible "},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_gateway_cap","choices":[{"delta":{"content":"overflow"},"finish_reason":null}]}`
+	stream += "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_gateway_cap_replay")
+
+	body := `{"model":"claude-stream","max_tokens":1,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	first := postAnthropicMessages(t, h, key, body, nil)
+	second := postAnthropicMessages(t, h, key, body, nil)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("codes first=%d second=%d bodies:\n%s\n%s", first.Code, second.Code, first.Body.String(), second.Body.String())
+	}
+	if second.Header().Get("X-MacProvider-Dedupe") != "replay" {
+		t.Fatalf("second response did not replay; header=%q body=%s", second.Header().Get("X-MacProvider-Dedupe"), second.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits=%d want 1", upstreamHits)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replayed cap stream differs:\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	if strings.Contains(second.Body.String(), "event: error") || !strings.Contains(second.Body.String(), `"stop_reason":"max_tokens"`) || !strings.Contains(second.Body.String(), "event: message_stop") {
+		t.Fatalf("replayed cap stream was not a clean max_tokens terminal:\n%s", second.Body.String())
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_gateway_cap_replay")
+	if snap.usageRows != 1 || snap.settledRows != 1 || snap.activeRows != 0 {
+		t.Fatalf("settlement snapshot=%+v want one settled usage row", snap)
+	}
+}
+
+func TestAnthropicMessagesStreamingContentFilterMapsToRefusal(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_content_filter","model":"claude-stream","choices":[{"delta":{"content":"cannot comply"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_stream_content_filter","choices":[{"delta":{},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\ndata: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_content_filter")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if strings.Contains(body, "event: error") || !strings.Contains(body, `"stop_reason":"refusal"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("content_filter stream did not close as refusal:\n%s", body)
+	}
+}
+
 func TestAnthropicMessagesStreamingUnknownTerminalErrorSettlesInvalidProviderResponse(t *testing.T) {
 	stream := `data: {"id":"chatcmpl_unknown_terminal","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
 	stream += "\n\n" + `data: {"error":{"message":"provider failed","type":"api_error","code":"upstream_provider_error","retryable":true}}`
@@ -1008,6 +1153,29 @@ func TestAnthropicMessagesStreamingRejectsLegacyFunctionCallDelta(t *testing.T) 
 		t.Fatalf("legacy function_call stream did not fail closed:\n%s", body)
 	}
 	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_function_call")
+	if outcome != "invalid_provider_response" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source=%s/%s want invalid_provider_response/gateway_estimated", outcome, source)
+	}
+}
+
+func TestAnthropicMessagesStreamingRejectsToolFinishWithoutToolCalls(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_tool_finish_empty","model":"claude-stream","choices":[{"delta":{"content":"done"},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\ndata: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_tool_finish_empty")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	body := resp.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"invalid_provider_response"`) {
+		t.Fatalf("tool_calls finish without tool calls did not fail closed:\n%s", body)
+	}
+	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_tool_finish_empty")
 	if outcome != "invalid_provider_response" || source != "gateway_estimated" {
 		t.Fatalf("usage outcome/source=%s/%s want invalid_provider_response/gateway_estimated", outcome, source)
 	}

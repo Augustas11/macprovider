@@ -219,6 +219,10 @@ func (a *anthropicMessagesAdapter) drainDedupeCapture() []byte {
 	return out
 }
 
+func (a *anthropicMessagesAdapter) dedupeCleanSSEError(code string) bool {
+	return a.stream && anthropicTerminalErrorCodeIsLengthTruncation(code)
+}
+
 func (a *anthropicMessagesAdapter) finish() {
 	if a.replayBody {
 		return
@@ -882,7 +886,7 @@ func anthropicToolResultContentToChatText(v any, isError bool) (string, error) {
 func anthropicToolsToChatTools(tools []map[string]any) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(tools))
 	for i, tool := range tools {
-		if typ, _ := tool["type"].(string); typ != "" {
+		if typ, _ := tool["type"].(string); typ != "" && typ != "custom" {
 			return nil, fmt.Errorf("tools[%d].type %q is not supported", i, typ)
 		}
 		name, _ := tool["name"].(string)
@@ -975,7 +979,11 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 	model := firstNonEmpty(chat.Model, a.model)
 	content := []map[string]any{}
 	choice := chat.Choices[0]
-	stopReason, err := anthropicStopReasonStrict(choice.FinishReason, len(choice.Message.ToolCalls) > 0)
+	hasToolCalls := len(choice.Message.ToolCalls) > 0
+	if choice.FinishReason == "tool_calls" && !hasToolCalls {
+		return nil, fmt.Errorf("finish_reason %q requires at least one tool call", choice.FinishReason)
+	}
+	stopReason, err := anthropicStopReasonStrict(choice.FinishReason, hasToolCalls)
 	if err != nil {
 		return nil, err
 	}
@@ -999,6 +1007,9 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 			}
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
 				return nil, err
+			}
+			if input == nil {
+				input = map[string]any{}
 			}
 		}
 		id := strings.TrimSpace(tc.ID)
@@ -1137,7 +1148,7 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		a.emitToolCallDelta(tc.index, tc.id, tc.name, tc.arguments)
 	}
 	if finish := anthropicStringFromAny(chunk.Choices[0].FinishReason); finish != "" {
-		if _, err := anthropicStopReasonStrict(finish, false); err != nil {
+		if _, err := anthropicStopReasonStrict(finish, a.hasStreamToolUse()); err != nil {
 			a.emitInvalidProviderResponse(err.Error())
 			return
 		}
@@ -1152,6 +1163,15 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		a.finished = true
 	}
 	a.flush()
+}
+
+func (a *anthropicMessagesAdapter) hasStreamToolUse() bool {
+	for _, tc := range a.toolCalls {
+		if tc != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *anthropicMessagesAdapter) emitTextDelta(text string) {
@@ -1438,6 +1458,8 @@ func anthropicStopReason(reason string, hasToolUse bool) string {
 		return "max_tokens"
 	case "stop_sequence":
 		return "stop_sequence"
+	case "content_filter":
+		return "refusal"
 	default:
 		return "end_turn"
 	}
@@ -1445,7 +1467,12 @@ func anthropicStopReason(reason string, hasToolUse bool) string {
 
 func anthropicStopReasonStrict(reason string, hasToolUse bool) (string, error) {
 	switch reason {
-	case "stop", "length", "stop_sequence", "tool_calls":
+	case "stop", "length", "stop_sequence", "content_filter":
+		return anthropicStopReason(reason, hasToolUse), nil
+	case "tool_calls":
+		if !hasToolUse {
+			return "", fmt.Errorf("finish_reason %q requires at least one tool call", reason)
+		}
 		return anthropicStopReason(reason, hasToolUse), nil
 	default:
 		return "", fmt.Errorf("finish_reason %q is not supported", reason)

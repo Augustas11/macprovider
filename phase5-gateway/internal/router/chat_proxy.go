@@ -2968,6 +2968,10 @@ type transformedDedupeCapture interface {
 	drainDedupeCapture() []byte
 }
 
+type cleanSSEErrorDedupeTransformer interface {
+	dedupeCleanSSEError(code string) bool
+}
+
 // armDedupeCapture starts recording the buyer-visible body, up to limit bytes.
 func (sw *statusWriter) armDedupeCapture(limit int) {
 	sw.captureArmed = true
@@ -3009,6 +3013,18 @@ func poisonDedupeCapture(w http.ResponseWriter) {
 	if sw, ok := w.(*statusWriter); ok {
 		sw.poisoned = true
 	}
+}
+
+func sseErrorDedupePoisonRequired(w http.ResponseWriter, code string) bool {
+	if sw, ok := w.(*statusWriter); ok {
+		if transformed, ok := sw.ResponseWriter.(cleanSSEErrorDedupeTransformer); ok {
+			return !transformed.dedupeCleanSSEError(code)
+		}
+	}
+	if transformed, ok := w.(cleanSSEErrorDedupeTransformer); ok {
+		return !transformed.dedupeCleanSSEError(code)
+	}
+	return true
 }
 
 func (sw *statusWriter) WriteHeader(code int) {
@@ -3090,7 +3106,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	// #762: an SSE error frame means this 200 stream is NOT a complete
 	// answer. Poison the dedupe capture so an identical id-less retry gets a
 	// fresh dispatch instead of replaying a truncated generation.
-	poisonDedupeCapture(w)
+	if sseErrorDedupePoisonRequired(w, code) {
+		poisonDedupeCapture(w)
+	}
 	// H1: SSE error frames carry retryable too, classified by the same
 	// gatewayRetryableByCode table writeError uses. Headers are already
 	// flushed by the time an SSE frame is emitted (the stream started as

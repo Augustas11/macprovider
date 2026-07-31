@@ -95,10 +95,10 @@ index 216ae74e..e61910f3 100644
  
 diff --git a/phase5-gateway/internal/router/anthropic_messages.go b/phase5-gateway/internal/router/anthropic_messages.go
 new file mode 100644
-index 00000000..6989f590
+index 00000000..ed95dbe9
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages.go
-@@ -0,0 +1,1994 @@
+@@ -0,0 +1,2045 @@
 +package router
 +
 +import (
@@ -149,6 +149,7 @@ index 00000000..6989f590
 +	streamInvalid      *anthropicMessagesTranslationError
 +	streamOutcome      string
 +	terminalStopReason string
++	stopSequence       *string
 +	finished           bool
 +	replayBody         bool
 +	writeErr           error
@@ -403,7 +404,7 @@ index 00000000..6989f590
 +	}
 +	for key, value := range raw {
 +		switch key {
-+		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p":
++		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata":
 +		case "top_k":
 +			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "top_k is not supported"}
 +		case "thinking", "anthropic_beta":
@@ -477,11 +478,14 @@ index 00000000..6989f590
 +		chat["tools"] = tools
 +	}
 +	if req.ToolChoice != nil {
-+		toolChoice, err := anthropicToolChoiceToChatToolChoice(req.ToolChoice)
++		toolChoice, parallelToolCalls, err := anthropicToolChoiceToChatToolChoice(req.ToolChoice)
 +		if err != nil {
 +			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: err.Error()}
 +		}
 +		chat["tool_choice"] = toolChoice
++		if parallelToolCalls != nil {
++			chat["parallel_tool_calls"] = *parallelToolCalls
++		}
 +	}
 +	translated, err := json.Marshal(chat)
 +	if err != nil {
@@ -526,6 +530,11 @@ index 00000000..6989f590
 +	if v, ok := raw["stop_sequences"]; ok {
 +		if err := anthropicValidateRawStringArray(v, "stop_sequences"); err != nil {
 +			return err
++		}
++	}
++	if v, ok := raw["metadata"]; ok && !anthropicRawIsNull(v) {
++		if _, err := anthropicRawObject(v); err != nil {
++			return fmt.Errorf("metadata must be an object")
 +		}
 +	}
 +	return nil
@@ -605,7 +614,7 @@ index 00000000..6989f590
 +		if err != nil {
 +			return fmt.Errorf("tool_choice must be an object")
 +		}
-+		if err := anthropicRejectUnknownKeys(m, "tool_choice", "type", "name"); err != nil {
++		if err := anthropicRejectUnknownKeys(m, "tool_choice", "type", "name", "disable_parallel_tool_use"); err != nil {
 +			return err
 +		}
 +		if v, ok := m["type"]; ok {
@@ -615,6 +624,11 @@ index 00000000..6989f590
 +		}
 +		if v, ok := m["name"]; ok {
 +			if err := anthropicValidateRawString(v, "tool_choice.name"); err != nil {
++				return err
++			}
++		}
++		if v, ok := m["disable_parallel_tool_use"]; ok {
++			if err := anthropicValidateRawBool(v, "tool_choice.disable_parallel_tool_use"); err != nil {
 +				return err
 +			}
 +		}
@@ -990,27 +1004,32 @@ index 00000000..6989f590
 +	return out, nil
 +}
 +
-+func anthropicToolChoiceToChatToolChoice(choice any) (any, error) {
++func anthropicToolChoiceToChatToolChoice(choice any) (any, *bool, error) {
 +	m, ok := choice.(map[string]any)
 +	if !ok {
-+		return nil, fmt.Errorf("tool_choice must be an object")
++		return nil, nil, fmt.Errorf("tool_choice must be an object")
++	}
++	var parallelToolCalls *bool
++	if disableParallel, _ := m["disable_parallel_tool_use"].(bool); disableParallel {
++		v := false
++		parallelToolCalls = &v
 +	}
 +	typ, _ := m["type"].(string)
 +	switch typ {
 +	case "", "auto":
-+		return "auto", nil
++		return "auto", parallelToolCalls, nil
 +	case "any":
-+		return "required", nil
++		return "required", parallelToolCalls, nil
 +	case "none":
-+		return "none", nil
++		return "none", parallelToolCalls, nil
 +	case "tool":
 +		name, _ := m["name"].(string)
 +		if strings.TrimSpace(name) == "" {
-+			return nil, fmt.Errorf("tool_choice.name is required")
++			return nil, nil, fmt.Errorf("tool_choice.name is required")
 +		}
-+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}, nil
++		return map[string]any{"type": "function", "function": map[string]any{"name": name}}, parallelToolCalls, nil
 +	default:
-+		return nil, fmt.Errorf("tool_choice.type %q is not supported", typ)
++		return nil, nil, fmt.Errorf("tool_choice.type %q is not supported", typ)
 +	}
 +}
 +
@@ -1038,7 +1057,8 @@ index 00000000..6989f590
 +					} `json:"function"`
 +				} `json:"tool_calls"`
 +			} `json:"message"`
-+			FinishReason string `json:"finish_reason"`
++			FinishReason string  `json:"finish_reason"`
++			StopSequence *string `json:"stop_sequence"`
 +		} `json:"choices"`
 +	}
 +	if err := json.Unmarshal(body, &chat); err != nil {
@@ -1104,7 +1124,7 @@ index 00000000..6989f590
 +		"content":       content,
 +		"model":         model,
 +		"stop_reason":   stopReason,
-+		"stop_sequence": nil,
++		"stop_sequence": anthropicStopSequence(choice.FinishReason, choice.StopSequence),
 +		"usage": anthropicUsage{
 +			InputTokens:  chat.Usage.PromptTokens,
 +			OutputTokens: chat.Usage.CompletionTokens,
@@ -1134,6 +1154,13 @@ index 00000000..6989f590
 +		return
 +	}
 +	if typ, code, msg, retryable, ok := anthropicStandaloneStreamErrorFromOpenAIData(data); ok {
++		if anthropicTerminalErrorCodeIsLengthTruncation(code) {
++			a.finishReason = anthropicFinishReasonFromTerminalErrorCode(code)
++			a.streamOutcome = anthropicStreamOutcomeFromTerminalErrorCode(code)
++			a.terminalStopReason = anthropicStopReason(a.finishReason, false)
++			a.emitTerminalMessageStop()
++			return
++		}
 +		a.emitSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg, "code": code, "retryable": retryable}})
 +		a.finishReason = anthropicFinishReasonFromTerminalErrorCode(code)
 +		a.streamOutcome = anthropicStreamOutcomeFromTerminalErrorCode(code)
@@ -1157,6 +1184,7 @@ index 00000000..6989f590
 +		Choices []struct {
 +			Delta        map[string]any `json:"delta"`
 +			FinishReason any            `json:"finish_reason"`
++			StopSequence *string        `json:"stop_sequence"`
 +		} `json:"choices"`
 +	}
 +	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -1219,6 +1247,9 @@ index 00000000..6989f590
 +			return
 +		}
 +		a.finishReason = finish
++		if chunk.Choices[0].StopSequence != nil {
++			a.stopSequence = chunk.Choices[0].StopSequence
++		}
 +		a.finished = true
 +	}
 +	a.flush()
@@ -1377,7 +1408,7 @@ index 00000000..6989f590
 +		"type": "message_delta",
 +		"delta": map[string]any{
 +			"stop_reason":   stopReason,
-+			"stop_sequence": nil,
++			"stop_sequence": anthropicStopSequence(a.finishReason, a.stopSequence),
 +		},
 +		"usage": usage,
 +	})
@@ -1522,6 +1553,13 @@ index 00000000..6989f590
 +	}
 +}
 +
++func anthropicStopSequence(finishReason string, matched *string) any {
++	if finishReason != "stop_sequence" || matched == nil {
++		return nil
++	}
++	return *matched
++}
++
 +func anthropicFinishReasonFromTerminalErrorCode(code string) string {
 +	switch code {
 +	case "stream_output_exceeded", "stream_truncated", "response_byte_cap_exceeded":
@@ -1529,6 +1567,10 @@ index 00000000..6989f590
 +	default:
 +		return "stop"
 +	}
++}
++
++func anthropicTerminalErrorCodeIsLengthTruncation(code string) bool {
++	return anthropicFinishReasonFromTerminalErrorCode(code) == "length"
 +}
 +
 +func anthropicStreamOutcomeFromTerminalErrorCode(code string) string {
@@ -1818,9 +1860,6 @@ index 00000000..6989f590
 +	if err != nil {
 +		return fmt.Errorf("provider response must be an object")
 +	}
-+	if err := anthropicRejectUnknownKeys(root, "provider response", "id", "object", "created", "model", "system_fingerprint", "usage", "choices"); err != nil {
-+		return err
-+	}
 +	if choicesRaw, ok := root["choices"]; ok {
 +		var choices []json.RawMessage
 +		if err := json.Unmarshal(choicesRaw, &choices); err != nil {
@@ -1840,9 +1879,6 @@ index 00000000..6989f590
 +	root, err := anthropicRawObject(raw)
 +	if err != nil {
 +		return fmt.Errorf("Upstream provider returned malformed stream data")
-+	}
-+	if err := anthropicRejectUnknownKeys(root, "stream chunk", "id", "object", "created", "model", "system_fingerprint", "usage", "choices"); err != nil {
-+		return err
 +	}
 +	if choicesRaw, ok := root["choices"]; ok {
 +		var choices []json.RawMessage
@@ -1867,7 +1903,10 @@ index 00000000..6989f590
 +		return fmt.Errorf("%s must be an object", path)
 +	}
 +	if streaming {
-+		if err := anthropicRejectUnknownKeys(choice, path, "index", "delta", "finish_reason", "logprobs"); err != nil {
++		if err := anthropicRejectUnknownKeys(choice, path, "index", "delta", "finish_reason", "stop_sequence", "logprobs"); err != nil {
++			return err
++		}
++		if err := anthropicValidateProviderStopSequenceRaw(choice, path); err != nil {
 +			return err
 +		}
 +		if deltaRaw, ok := choice["delta"]; ok && !anthropicRawIsNull(deltaRaw) {
@@ -1886,7 +1925,10 @@ index 00000000..6989f590
 +		}
 +		return nil
 +	}
-+	if err := anthropicRejectUnknownKeys(choice, path, "index", "message", "finish_reason", "logprobs"); err != nil {
++	if err := anthropicRejectUnknownKeys(choice, path, "index", "message", "finish_reason", "stop_sequence", "logprobs"); err != nil {
++		return err
++	}
++	if err := anthropicValidateProviderStopSequenceRaw(choice, path); err != nil {
 +		return err
 +	}
 +	if messageRaw, ok := choice["message"]; ok && !anthropicRawIsNull(messageRaw) {
@@ -1901,6 +1943,15 @@ index 00000000..6989f590
 +			if err := anthropicValidateProviderToolCallsRaw(path+".message.tool_calls", toolCallsRaw); err != nil {
 +				return err
 +			}
++		}
++	}
++	return nil
++}
++
++func anthropicValidateProviderStopSequenceRaw(choice map[string]json.RawMessage, path string) error {
++	if raw, ok := choice["stop_sequence"]; ok && !anthropicRawIsNull(raw) {
++		if err := anthropicValidateRawString(raw, path+".stop_sequence"); err != nil {
++			return err
 +		}
 +	}
 +	return nil
@@ -2095,10 +2146,10 @@ index 00000000..6989f590
 +}
 diff --git a/phase5-gateway/internal/router/anthropic_messages_test.go b/phase5-gateway/internal/router/anthropic_messages_test.go
 new file mode 100644
-index 00000000..5c4360cf
+index 00000000..6b10c452
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages_test.go
-@@ -0,0 +1,1503 @@
+@@ -0,0 +1,1559 @@
 +package router
 +
 +import (
@@ -2133,7 +2184,7 @@ index 00000000..5c4360cf
 +		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
 +			t.Fatalf("decode upstream request: %v", err)
 +		}
-+		body := `{"id":"chatcmpl_123","object":"chat.completion","created":1,"model":"claude-3-5-sonnet-latest",` +
++		body := `{"id":"chatcmpl_123","object":"chat.completion","created":1,"model":"claude-3-5-sonnet-latest","service_tier":"default",` +
 +			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
 +			`"choices":[{"index":0,"message":{"role":"assistant","content":"done","tool_calls":[{"id":"toolu_lookup","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"tool_calls"}]}`
 +		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
@@ -2150,7 +2201,8 @@ index 00000000..5c4360cf
 +		"system":[{"type":"text","text":"system prompt"}],
 +		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],
 +		"tools":[{"name":"lookup","description":"Lookup things","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],
-+		"tool_choice":{"type":"tool","name":"lookup"},
++		"tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true},
++		"metadata":{"user_id":"u"},
 +		"stop_sequences":["STOP"],
 +		"temperature":0.2
 +	}`
@@ -2183,6 +2235,10 @@ index 00000000..5c4360cf
 +	if choice["type"] != "function" || choice["function"].(map[string]any)["name"] != "lookup" {
 +		t.Fatalf("tool_choice not translated: %v", choice)
 +	}
++	assertChatRequestField(t, upstreamBody, "parallel_tool_calls", false)
++	if _, ok := upstreamBody["metadata"]; ok {
++		t.Fatalf("metadata was forwarded to chat request: %v", upstreamBody["metadata"])
++	}
 +
 +	var anth map[string]any
 +	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
@@ -2205,6 +2261,32 @@ index 00000000..5c4360cf
 +	}
 +}
 +
++func TestAnthropicMessagesNonStreamingIncludesMatchedStopSequence(t *testing.T) {
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		body := `{"id":"chatcmpl_stopseq","object":"chat.completion","created":1,"model":"claude",` +
++			`"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},` +
++			`"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop_sequence","stop_sequence":"STOP"}]}`
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
++	})}
++	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_nonstream_stop_sequence")
++
++	resp := postAnthropicMessages(t, h, "", `{"model":"claude","max_tokens":8,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Api-Key": key})
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	var anth map[string]any
++	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
++		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
++	}
++	if anth["stop_reason"] != "stop_sequence" || anth["stop_sequence"] != "STOP" {
++		t.Fatalf("stop reason/sequence=%v/%v want stop_sequence/STOP body=%s", anth["stop_reason"], anth["stop_sequence"], resp.Body.String())
++	}
++}
++
 +func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing.T) {
 +	var upstreamHits int
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -2222,7 +2304,6 @@ index 00000000..5c4360cf
 +		want string
 +	}{
 +		"image":             {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]}]}`, "image content is not supported"},
-+		"metadata":          {`{"model":"claude","max_tokens":8,"metadata":{"user_id":"u"},"messages":[{"role":"user","content":"hi"}]}`, "metadata is not supported"},
 +		"unknown top-level": {`{"model":"claude","max_tokens":8,"container":"c","messages":[{"role":"user","content":"hi"}]}`, "container is not supported"},
 +		"empty thinking":    {`{"model":"claude","max_tokens":8,"thinking":{},"messages":[{"role":"user","content":"hi"}]}`, "Anthropic beta features are not supported"},
 +		"top_k":             {`{"model":"claude","max_tokens":8,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`, "top_k is not supported"},
@@ -2238,8 +2319,6 @@ index 00000000..5c4360cf
 +			"input must be an object"},
 +		"nested cache control": {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
 +			"cache_control is not supported"},
-+		"tool choice unsupported field": {`{"model":"claude","max_tokens":8,"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"messages":[{"role":"user","content":"hi"}]}`,
-+			"disable_parallel_tool_use is not supported"},
 +		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
 +			"cache_control is not supported"},
 +		"numeric model": {`{"model":7,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
@@ -2717,6 +2796,31 @@ index 00000000..5c4360cf
 +	}
 +}
 +
++func TestAnthropicMessagesStreamingIncludesMatchedStopSequence(t *testing.T) {
++	stream := `data: {"id":"chatcmpl_stream_stopseq","model":"claude-stream","choices":[{"delta":{"content":"done"},"finish_reason":null}]}`
++	stream += "\n\n" + `data: {"id":"chatcmpl_stream_stopseq","choices":[{"delta":{},"finish_reason":"stop_sequence","stop_sequence":"STOP"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
++	stream += "\n\n"
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
++	})}
++	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_stop_sequence")
++
++	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`, nil)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	got := resp.Body.String()
++	delta := anthropicStreamPayloadForEvent(t, got, "message_delta")
++	payload, _ := delta["delta"].(map[string]any)
++	if payload["stop_reason"] != "stop_sequence" || payload["stop_sequence"] != "STOP" {
++		t.Fatalf("stream stop reason/sequence=%v/%v want stop_sequence/STOP\n%s", payload["stop_reason"], payload["stop_sequence"], got)
++	}
++}
++
 +func TestAnthropicMessagesStreamingWithoutUsageReportsFallbackSettlementUsage(t *testing.T) {
 +	stream := `data: {"id":"chatcmpl_no_usage","model":"claude-stream","choices":[{"delta":{"content":"done"},"finish_reason":null}]}`
 +	stream += "\n\n" + `data: {"id":"chatcmpl_no_usage","choices":[{"delta":{},"finish_reason":"stop"}]}`
@@ -2828,8 +2932,11 @@ index 00000000..5c4360cf
 +		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 +	}
 +	body := resp.Body.String()
-+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"stream_output_exceeded"`) || !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
-+		t.Fatalf("terminal output-exceeded frame did not close Anthropic stream:\n%s", body)
++	if strings.Contains(body, "event: error") || strings.Contains(body, `"code":"stream_output_exceeded"`) {
++		t.Fatalf("terminal output-exceeded frame emitted Anthropic error:\n%s", body)
++	}
++	if !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
++		t.Fatalf("terminal output-exceeded frame did not close as max_tokens:\n%s", body)
 +	}
 +	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
 +	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
