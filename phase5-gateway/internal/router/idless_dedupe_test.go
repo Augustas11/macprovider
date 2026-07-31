@@ -978,17 +978,18 @@ func TestIdlessDedupeIndex_WaiterCapAndContextExpiry(t *testing.T) {
 }
 
 func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
-	base := idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
+	base := idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
 	cases := map[string]string{
-		"same inputs":         idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other account":       idlessRequestFingerprint("acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other demo token":    idlessRequestFingerprint("acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
-		"other conversation":  idlessRequestFingerprint("acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),
-		"retry hint present":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", "1", []byte(`{"a":1}`)),
-		"other retry hint":    idlessRequestFingerprint("acct", "demo-hash", "thread-1", "2", []byte(`{"a":1}`)),
-		"other body":          idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":2}`)),
-		"whitespace in body":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a": 1}`)),
-		"field-shifted parts": idlessRequestFingerprint("acc", "tdemo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"same inputs":         idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other protocol":      idlessRequestFingerprint("anthropic-messages", "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other account":       idlessRequestFingerprint("openai-chat", "acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other demo token":    idlessRequestFingerprint("openai-chat", "acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
+		"other conversation":  idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),
+		"retry hint present":  idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-1", "1", []byte(`{"a":1}`)),
+		"other retry hint":    idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-1", "2", []byte(`{"a":1}`)),
+		"other body":          idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-1", "", []byte(`{"a":2}`)),
+		"whitespace in body":  idlessRequestFingerprint("openai-chat", "acct", "demo-hash", "thread-1", "", []byte(`{"a": 1}`)),
+		"field-shifted parts": idlessRequestFingerprint("openai-chat", "acc", "tdemo-hash", "thread-1", "", []byte(`{"a":1}`)),
 	}
 	for name, got := range cases {
 		if name == "same inputs" {

@@ -74,8 +74,11 @@ func TestCORSPreflight(t *testing.T) {
 	if got := resp.Header().Get("Access-Control-Max-Age"); got != "3600" {
 		t.Fatalf("max-age=%q", got)
 	}
-	if !strings.Contains(resp.Header().Get("Access-Control-Allow-Headers"), "X-Demo-Token") {
-		t.Fatalf("allow-headers=%q", resp.Header().Get("Access-Control-Allow-Headers"))
+	allowHeaders := resp.Header().Get("Access-Control-Allow-Headers")
+	for _, want := range []string{"Anthropic-Beta", "Anthropic-Version", "X-Api-Key", "X-Demo-Token"} {
+		if !strings.Contains(allowHeaders, want) {
+			t.Fatalf("allow-headers=%q missing %s", allowHeaders, want)
+		}
 	}
 }
 
