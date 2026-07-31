@@ -53,49 +53,73 @@ not a long soak. The watched-rollout window below closes that gap.
 
 ## Rollout (watched, single window)
 
-1. **Deploy the base config** to Pearl per the coordinator deploy runbook
-   (build from the merged commit; `/opt/macprovider/coordinator.yaml` picks up the
-   `settlement:` block). Follow `docs/runbooks/provider-cli-release-verification.md`
-   deploy discipline (build from the intended commit, clean `dist/`).
-   The Pearl deploy script defaults to **preserving** the live base config, so
-   explicitly confirm the base file now carries the `settlement:` block before
-   restarting — do not assume the deploy overwrote it.
-2. **Validate BEFORE restart** (loads base + overlay exactly as the service does,
-   validates, and exits non-zero on any error — a bad merge never reaches a live
-   restart). Validation MUST run as the `macprovider` service user WITH the
-   service env file sourced, or it fails on unresolved `env:OPERATOR_KEY` (the
-   coordinator resolves `env:` refs from `/etc/macprovider/coordinator.env`,
-   loaded by the unit's `EnvironmentFile`):
-   ```
-   ssh pearl 'sudo -u macprovider bash -lc "set -a; . /etc/macprovider/coordinator.env; set +a; \
-     /opt/macprovider/coordinator \
-       --config /opt/macprovider/coordinator.yaml \
-       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
-       --validate-config && echo VALIDATE_OK"'
-   ```
-   Then restart: `ssh pearl "sudo systemctl restart macprovider-coordinator"`.
-3. **Confirm the EFFECTIVE mode is enforce.** There is no merged-config dump flag
-   and the coordinator does not log the mode at boot, so check both layers — the
-   overlay wins, so a stale overlay `observe` would silently defeat the base:
-   ```
-   ssh pearl "echo BASE:;    grep -A1 '^settlement:' /opt/macprovider/coordinator.yaml; \
-              echo OVERLAY:; grep -A2 '^settlement:' /etc/macprovider/coordinator.pearl-overlays.yaml || echo '(no settlement stanza in overlay -> base wins)'"
-   ```
-   Effective mode is `enforce` only if the base shows `enforce` AND the overlay
-   has no `verified_model_settlement_mode` overriding it.
-3. **Watch for 30–60 min** (fire keep-warm + organic traffic across all models):
-   - Buyer-facing errors / 5xx rate on `api.streamvc.live` — must not rise.
-   - `route_snapshot_failed` / enforce-reject count — expect ~0.
-   - New `usage_mismatch` or other quarantine reasons — expect 0 on `normal_done`.
-   - Watch query (run every ~10 min):
-     ```sql
-     SELECT settlement_outcome, reason, COUNT(*)
-     FROM settlement_receipt_verdicts
-     WHERE received_at_unix_ms > (strftime('%s','now','-30 minutes')*1000)
-     GROUP BY 1,2 ORDER BY 3 DESC;
-     ```
-4. **Success criteria:** over the window, `normal_done` stays 100% verified,
-   enforce-reject stays ≈0, no buyer-visible error increase. Then the flip stands.
+**Step 1 — Install the `settlement:` block into the live Pearl base config.** The
+tracked `phase4-coordinator/dist/coordinator.yaml` is the reviewed source of
+truth (and any future clean deploy carries it), but `deploy-pearl-vps.sh`
+defaults to `preserve-live` and its `apply-tracked` mode **aborts on tracked/live
+base drift** — which already exists — so a normal deploy will NOT push this
+one-field change. Use the idempotent base merge below, which preserves the live
+file's owner/group/mode (same shape as the rollback, safe to re-run). The heredoc
+body must stay column-aligned as shown (unindented) — Python is whitespace-sensitive:
+
+```bash
+ssh pearl 'sudo python3 - <<"PY"
+import yaml, os, stat, tempfile
+p = "/opt/macprovider/coordinator.yaml"
+st = os.stat(p)
+d = yaml.safe_load(open(p)) or {}
+d.setdefault("settlement", {})["verified_model_settlement_mode"] = "enforce"
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
+os.fchown(fd, st.st_uid, st.st_gid); os.fchmod(fd, stat.S_IMODE(st.st_mode))
+with os.fdopen(fd, "w") as f:
+    yaml.safe_dump(d, f, default_flow_style=False, sort_keys=False)
+os.replace(tmp, p)
+print("base set settlement.verified_model_settlement_mode=enforce")
+PY'
+```
+
+**Step 2 — Validate BEFORE restart** (loads base + overlay exactly as the service
+does, validates, exits non-zero on any error — a bad merge never reaches a live
+restart). Validation MUST run as the `macprovider` service user WITH the service
+env file sourced, or it fails on unresolved `env:OPERATOR_KEY` (the coordinator
+resolves `env:` refs from `/etc/macprovider/coordinator.env`, loaded by the
+unit's `EnvironmentFile`):
+
+```bash
+ssh pearl 'sudo -u macprovider bash -lc "set -a; . /etc/macprovider/coordinator.env; set +a; \
+  /opt/macprovider/coordinator \
+    --config /opt/macprovider/coordinator.yaml \
+    --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
+    --validate-config && echo VALIDATE_OK"'
+ssh pearl "sudo systemctl restart macprovider-coordinator"
+```
+
+**Step 3 — Confirm the EFFECTIVE mode is enforce.** There is no merged-config
+dump flag and the coordinator does not log the mode at boot, so check both layers
+— the overlay wins, so a stale overlay `observe` would silently defeat the base:
+
+```bash
+ssh pearl "echo BASE:;    grep -A1 '^settlement:' /opt/macprovider/coordinator.yaml; \
+           echo OVERLAY:; grep -A2 '^settlement:' /etc/macprovider/coordinator.pearl-overlays.yaml || echo '(no settlement stanza in overlay -> base wins)'"
+```
+
+Effective mode is `enforce` only if the base shows `enforce` AND the overlay has
+no `verified_model_settlement_mode` overriding it.
+
+**Step 4 — Watch for 30–60 min** (keep-warm + organic traffic across all models):
+- Buyer-facing errors / 5xx rate on `api.streamvc.live` — must not rise.
+- `route_snapshot_failed` / enforce-reject count — expect ~0.
+- New `usage_mismatch` or other quarantine reasons — expect 0 on `normal_done`.
+- Watch query (run every ~10 min):
+  ```sql
+  SELECT settlement_outcome, reason, COUNT(*)
+  FROM settlement_receipt_verdicts
+  WHERE received_at_unix_ms > (strftime('%s','now','-30 minutes')*1000)
+  GROUP BY 1,2 ORDER BY 3 DESC;
+  ```
+
+**Success criteria:** over the window, `normal_done` stays 100% verified,
+enforce-reject stays ≈0, no buyer-visible error increase. Then the flip stands.
 
 ## Rollback (instant, no redeploy)
 
@@ -143,6 +167,17 @@ Then investigate before re-attempting. Once the base is reverted or the issue is
 fixed, remove the `settlement` key from the overlay with the same idempotent
 merge (set it back, or `del d["settlement"]`) — never hand-edit to avoid the
 duplicate-key trap.
+
+## Base blast radius (non-Pearl deployments)
+
+The `settlement:` block lives in the base `dist/coordinator.yaml`, so any OTHER
+deployment that layers an overlay on this base and does not itself set
+`settlement.verified_model_settlement_mode` inherits `enforce`. Committed
+OPoI / Malibu-emission / PoW staging overlays currently do not set it. This is
+harmless to Pearl and to any environment whose providers are settlement-capable,
+but a staging/local environment with non-settlement-capable providers would see
+pre-dispatch `route_snapshot_failed` (buyer-visible transient 500) until it opts
+out with `settlement: { verified_model_settlement_mode: observe }` in its overlay.
 
 ## After a stable window
 
