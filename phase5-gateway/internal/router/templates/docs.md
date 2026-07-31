@@ -84,6 +84,7 @@ Primary buyer endpoints:
 | Method | Path | Auth |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | Bearer API key or browser demo token |
+| `POST` | `/v1/messages` | Bearer API key or `x-api-key`, when experimental Anthropic Messages compatibility is enabled |
 | `POST` | `/v1/responses` | Bearer API key or browser demo token; available when the Responses compatibility flag is enabled |
 | `GET` | `/v1/models` | Bearer API key or demo token |
 | `GET` | `/v1/status` | Public |
@@ -99,6 +100,32 @@ Text-only structured `messages[].content` arrays are accepted for `system` and
 Multimodal parts such as `image_url` are not supported in v1 and return
 `unsupported_content_shape`.
 
+Covered paid settlement claims are limited to `POST /v1/chat/completions` and,
+when enabled, the `/v1/messages` facade that translates through the same path.
+Buyer cancel, gateway timeout, provider error, or upstream disconnect can
+create a partial charge only when a settlement-capable receipt binds the
+delivered output prefix and partial usage.
+
+### Anthropic Messages compatibility
+
+`POST /v1/messages` is an experimental, default-off compatibility facade for
+Anthropic Messages clients. When enabled by the operator, supported text and
+client-tool requests are translated into the existing
+`POST /v1/chat/completions` path and Anthropic-shaped responses are translated
+back to Message JSON or SSE events. Billing, quota, sticky routing,
+cancellation, request IDs, and id-less retry replay are the same gateway path as
+chat completions.
+
+Supported request features are `model`, `system` text, `messages[]` text,
+assistant `tool_use`, user `tool_result`, `tools[].input_schema`,
+`max_tokens`, `stream`, `tool_choice`, `stop_sequences`, `temperature`, and
+`top_p`. Unsupported Anthropic features such as image/document/file content,
+server tools, beta headers, thinking, and `top_k` return Anthropic-shaped
+errors before provider dispatch.
+
+When the feature is enabled, settlement disclosures include both
+`POST /v1/chat/completions` and `POST /v1/messages` as covered paid entrypoints.
+When disabled, `/v1/messages` is not mounted.
 Covered paid settlement claims are limited to `POST /v1/chat/completions`, plus `POST /v1/responses` when the Responses compatibility flag is enabled. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.
 
 ### Responses API
@@ -153,7 +180,7 @@ Both streaming and non-streaming chat completions are supported. Request timeout
 2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
 3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
 4. v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.
-5. Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout. Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
+5. Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout. Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
 6. Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
 7. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage. Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
 8. Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.
@@ -171,7 +198,7 @@ Found a bug? Contact the operator through the project channel where you received
 
 ## Errors
 
-Errors use the OpenAI envelope shape:
+OpenAI-compatible endpoints use the OpenAI envelope shape:
 
 ```json
 {
@@ -179,6 +206,21 @@ Errors use the OpenAI envelope shape:
     "message": "Missing bearer token",
     "type": "authentication_error",
     "code": "missing_bearer_token"
+  }
+}
+```
+
+`POST /v1/messages` uses an Anthropic-shaped error envelope, with gateway
+`code` and `retryable` metadata preserved:
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "Anthropic beta features are not supported",
+    "code": "unsupported_content_shape",
+    "retryable": false
   }
 }
 ```

@@ -240,7 +240,8 @@ type ExplorerConfig struct {
 }
 
 type FeaturesConfig struct {
-	ResponsesAPIEnabled bool `yaml:"responses_api_enabled"`
+	ResponsesAPIEnabled      bool `yaml:"responses_api_enabled"`
+	AnthropicMessagesEnabled bool `yaml:"anthropic_messages_enabled"`
 }
 
 func Default() Config {
@@ -348,7 +349,7 @@ func Default() Config {
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Retry503: Retry503Config{Enabled: true, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
 		Explorer: ExplorerConfig{Enabled: false},
-		Features: FeaturesConfig{ResponsesAPIEnabled: false},
+		Features: FeaturesConfig{ResponsesAPIEnabled: false, AnthropicMessagesEnabled: false},
 	}
 }
 

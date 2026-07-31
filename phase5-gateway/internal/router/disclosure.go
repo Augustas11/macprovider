@@ -216,7 +216,7 @@ const modelVerificationLimitDisclosure = "v0.4 settlement receipts verify the pr
 const settlementModelIdentityDisclosure = "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately."
 const settlementModelIdentityCaveatDisclosure = "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement."
 const settlementObserveModeDisclosure = "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout."
-const settlementEnforceModeDisclosure = "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
+const settlementEnforceModeDisclosure = "Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
 const settlementPendingReservationDisclosure = "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation."
 const settlementPendingOutcomeDisclosure = "pending: receipt verification is still incomplete and the reservation is not final usage."
 const settlementVerifiedOutcomeDisclosure = "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement."
@@ -226,12 +226,17 @@ const settlementPartialChargeDisclosure = "Buyer cancel, gateway timeout, provid
 const settlementStreamingFailoverDisclosure = "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above."
 const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
 
-func makeVerifiedModelSettlementDisclosure(includeResponses ...bool) verifiedModelSettlementDisclosure {
+func makeVerifiedModelSettlementDisclosure(includeResponses, includeAnthropicMessages bool) verifiedModelSettlementDisclosure {
 	included := []string{"POST /v1/chat/completions"}
-	enforceMode := settlementEnforceModeDisclosure
-	if len(includeResponses) > 0 && includeResponses[0] {
+	if includeResponses {
 		included = append(included, "POST /v1/responses")
-		enforceMode = "Enforce mode may settle only covered paid POST /v1/chat/completions and POST /v1/responses attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
+	}
+	if includeAnthropicMessages {
+		included = append(included, "POST /v1/messages")
+	}
+	enforceMode := settlementEnforceModeDisclosure
+	if includeResponses || includeAnthropicMessages {
+		enforceMode = "Enforce mode may settle only covered paid " + strings.Join(included, ", ") + " attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
 	}
 	return verifiedModelSettlementDisclosure{
 		IncludedPaidEntrypoints: included,
@@ -311,7 +316,7 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 		HardwareAttestation:     "none",
 		Tier2Milestone:          "future",
 		ModelVerificationLimit:  modelVerificationLimitDisclosure,
-		VerifiedModelSettlement: makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled),
+		VerifiedModelSettlement: makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled, s.cfg.Features.AnthropicMessagesEnabled),
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",
