@@ -300,7 +300,7 @@ rewards:
 # 100% verified across all providers/models (203/203 Llama-3.2-3B, 29/29
 # Qwen3-8B, 28/28 Qwen3-Coder-30B) and 0 usage_mismatch network-wide, with a
 # measured enforce-dispatch rejection risk of 1/267 successful requests (0.4%,
-# a no-charge/refund path, not a user-facing error). See the rollout runbook
+# a no-charge/refund path, though the buyer may see a transient HTTP 500). See the rollout runbook
 # ops/runbooks/settlement-enforce-rollout.md.
 #
 # Instant rollback WITHOUT a redeploy: set

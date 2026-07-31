@@ -21,7 +21,7 @@ Pearl DB sweep (`/var/lib/macprovider/coordinator.db`, window ≥ 2026-07-31 05:
 | Air5 (Qwen3-8B) | 29 / 29 verified |
 | M5 (Qwen3-Coder-30B) | 28 / 28 verified |
 | Non-verified receipts | 7 total, all `buyer_cancel`/`provider_error` (nothing to settle) |
-| Enforce-dispatch rejection risk | **1 / 267 successful requests (0.4%)** lacked a route snapshot; that path is no-charge/refund, not a user-facing 500 |
+| Enforce-dispatch rejection risk | **1 / 267 successful requests (0.4%)** lacked a route snapshot; that path is no-charge/refund but the buyer may see a transient HTTP 500 |
 
 Sample caveat: ~267 requests over ~11h, Qwen families only ~30 each; green signal,
 not a long soak. The watched-rollout window below closes that gap.
@@ -32,7 +32,8 @@ not a long soak. The watched-rollout window below closes that gap.
    receipt key, provider model identity ≠ signed admission row, or catalog
    material not `HashStatusVerified`), enforce returns an error instead of
    silently skipping. First-attempt `route_snapshot_failed` is treated by the
-   gateway as no-charge (reservation refunded, body passed through verbatim —
+   gateway as no-charge (reservation refunded, body passed through verbatim, but
+   the buyer may see a transient HTTP 500 —
    no provider billed). Buyers are **not** charged for a rejected dispatch.
 2. **Credit upgrade:** the verified-receipt → billable-credit path
    (`internal/billing/settlement_receipts.go:296-360`) requires
@@ -61,12 +62,16 @@ not a long soak. The watched-rollout window below closes that gap.
    restarting — do not assume the deploy overwrote it.
 2. **Validate BEFORE restart** (loads base + overlay exactly as the service does,
    validates, and exits non-zero on any error — a bad merge never reaches a live
-   restart):
+   restart). Validation MUST run as the `macprovider` service user WITH the
+   service env file sourced, or it fails on unresolved `env:OPERATOR_KEY` (the
+   coordinator resolves `env:` refs from `/etc/macprovider/coordinator.env`,
+   loaded by the unit's `EnvironmentFile`):
    ```
-   ssh pearl "/opt/macprovider/coordinator \
-     --config /opt/macprovider/coordinator.yaml \
-     --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
-     --validate-config && echo VALIDATE_OK"
+   ssh pearl 'sudo -u macprovider bash -lc "set -a; . /etc/macprovider/coordinator.env; set +a; \
+     /opt/macprovider/coordinator \
+       --config /opt/macprovider/coordinator.yaml \
+       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
+       --validate-config && echo VALIDATE_OK"'
    ```
    Then restart: `ssh pearl "sudo systemctl restart macprovider-coordinator"`.
 3. **Confirm the EFFECTIVE mode is enforce.** There is no merged-config dump flag
@@ -106,21 +111,27 @@ key, and writes it back atomically — safe to run any number of times:
 
 ```bash
 ssh pearl 'sudo python3 - <<"PY"
-import yaml, os, tempfile
+import yaml, os, stat, tempfile
 p = "/etc/macprovider/coordinator.pearl-overlays.yaml"
+st = os.stat(p)                                   # preserve owner/group/mode
 d = yaml.safe_load(open(p)) or {}
 d.setdefault("settlement", {})["verified_model_settlement_mode"] = "observe"
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p))
+os.fchown(fd, st.st_uid, st.st_gid)               # keep root:macprovider ...
+os.fchmod(fd, stat.S_IMODE(st.st_mode))           # ... and 0640 (mkstemp is 0600 root:root)
 with os.fdopen(fd, "w") as f:
     yaml.safe_dump(d, f, default_flow_style=False, sort_keys=False)
-os.replace(tmp, p)            # atomic
+os.replace(tmp, p)                                # atomic
 print("overlay set settlement.verified_model_settlement_mode=observe")
 PY'
-# Validate BEFORE restart (never restart on an invalid merge):
-ssh pearl "/opt/macprovider/coordinator \
-  --config /opt/macprovider/coordinator.yaml \
-  --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
-  --validate-config && echo VALIDATE_OK"
+# Validate BEFORE restart (as the service user, with env sourced — never
+# restart on an invalid merge, and note plain root/no-env validation fails on
+# env:OPERATOR_KEY):
+ssh pearl 'sudo -u macprovider bash -lc "set -a; . /etc/macprovider/coordinator.env; set +a; \
+  /opt/macprovider/coordinator \
+    --config /opt/macprovider/coordinator.yaml \
+    --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
+    --validate-config && echo VALIDATE_OK"'
 ssh pearl "sudo systemctl restart macprovider-coordinator"
 # Confirm effective mode is now observe (overlay overrides base):
 ssh pearl "grep -A2 '^settlement:' /etc/macprovider/coordinator.pearl-overlays.yaml"
