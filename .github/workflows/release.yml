@@ -1916,8 +1916,8 @@ jobs:
             --require-immutable \
             --openssl "$OPENSSL_BIN" >/dev/null
 
-      - name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl
-        if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'
+      - name: Publish Malibu download bridge to Pearl
+        if: needs.build.outputs.prerelease == 'false'
         env:
           MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
           MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
@@ -1935,10 +1935,42 @@ jobs:
           chmod 600 "$key_file"
           export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
           tag="${{ needs.build.outputs.tag }}"
-          bash scripts/publish-malibu-latest-dmg.sh \
-            publication-manifest.json "Malibu-${tag}.dmg" appcast.xml \
-            compatibility-artifact-index.json checksums.txt checksums.txt.sig \
-            release-provenance.json
+          if [ "$tag" = v1.8.39 ]; then
+            # Frozen one-time bootstrap bridge: uses its own generated appcast and
+            # carries no acceptance-candidate.
+            bash scripts/publish-malibu-latest-dmg.sh \
+              publication-manifest.json "Malibu-${tag}.dmg" appcast.xml \
+              compatibility-artifact-index.json checksums.txt checksums.txt.sig \
+              release-provenance.json '' ''
+            exit 0
+          fi
+          # Generalized stable promotions serve the committed frozen legacy
+          # Sparkle bridge appcast (scripts/dist/malibu-frozen-bridge-appcast.xml)
+          # and REQUIRE the signed acceptance-candidate produced by
+          # acceptance-candidate.yml (schema macprovider.acceptance-candidate.v1,
+          # channel acceptance). That artifact only exists ~24h post-build after
+          # the acceptance soak, so it is not present in this build-time job.
+          # Build-time therefore never auto-publishes an un-accepted release; the
+          # operator runs the promotion after acceptance:
+          #   bash scripts/publish-malibu-latest-dmg.sh \
+          #     publication-manifest.json "Malibu-${tag}.dmg" \
+          #     scripts/dist/malibu-frozen-bridge-appcast.xml \
+          #     compatibility-artifact-index.json checksums.txt checksums.txt.sig \
+          #     release-provenance.json \
+          #     acceptance-candidate.json acceptance-candidate.json.sig
+          # TODO(operator): wire the acceptance-candidate.yml run artifact into a
+          # dedicated acceptance-triggered promotion workflow to fully automate
+          # this hand-off.
+          if [ -f acceptance-candidate.json ] && [ -f acceptance-candidate.json.sig ]; then
+            bash scripts/publish-malibu-latest-dmg.sh \
+              publication-manifest.json "Malibu-${tag}.dmg" \
+              scripts/dist/malibu-frozen-bridge-appcast.xml \
+              compatibility-artifact-index.json checksums.txt checksums.txt.sig \
+              release-provenance.json \
+              acceptance-candidate.json acceptance-candidate.json.sig
+          else
+            echo "::notice::skipping build-time Malibu download promotion for ${tag}: signed acceptance-candidate not present; run publish-malibu-latest-dmg.sh after acceptance"
+          fi
 
       - name: Verify published Tier-2 Release assets
         shell: bash

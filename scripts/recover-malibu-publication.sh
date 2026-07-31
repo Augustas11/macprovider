@@ -177,7 +177,8 @@ python3 "$repo_root/scripts/capture-release-publication.py" \
 bash "$repo_root/scripts/publish-malibu-latest-dmg.sh" \
   "$manifest" "$work/Malibu-v1.8.39.dmg" "$work/appcast.xml" \
   "$work/compatibility-artifact-index.json" "$work/checksums.txt" \
-  "$work/checksums.txt.sig" "$work/release-provenance.json"
+  "$work/checksums.txt.sig" "$work/release-provenance.json" \
+  '' ''
 
 printf '[recover-malibu-publication] ok: immutable release %s republished to Pearl\n' \
   "$release_id"

@@ -754,7 +754,7 @@ for requirement in (
 ):
     if requirement not in pearl_bridge:
         raise SystemExit(f"Pearl bootstrap publication omits {requirement}")
-if publish.find("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") < publish.find(
+if publish.find("Publish Malibu download bridge to Pearl") < publish.find(
     "cmp final-draft-manifest.json publication-manifest.json"
 ):
     raise SystemExit("Pearl bridge must publish only after immutable GitHub publication")

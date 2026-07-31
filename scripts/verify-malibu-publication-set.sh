@@ -33,21 +33,38 @@ print(value.get("repository", ""), value.get("tag", ""), value.get("commit", "")
 PY
 )"
 read -r expected_repository expected_tag expected_commit <<< "$expected_identity"
-[[ "$expected_tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
+[[ "$expected_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "publication tag is invalid"
+frozen_bridge_appcast="$repo_root/scripts/dist/malibu-frozen-bridge-appcast.xml"
+if [[ "$expected_tag" == v1.8.39 ]]; then
+  frozen_appcast=false
+else
+  # Non-v1.8.39 download promotions ship the committed frozen legacy Sparkle
+  # bridge appcast, which is NOT part of the per-release signed provenance, so
+  # it is excluded from checksum coverage and verified against the committed
+  # constant below.
+  frozen_appcast=true
+fi
+if [[ "$frozen_appcast" == true ]]; then
+  checksum_assets=("$dmg" "$artifact_index" "$provenance")
+else
+  checksum_assets=("$dmg" "$appcast" "$artifact_index" "$provenance")
+fi
 bash "$repo_root/scripts/verify-release-checksums.sh" \
   --allow-partial --openssl "$openssl_bin" \
   "$checksums" "$signature" "$provenance" \
   "$expected_repository" "$expected_tag" "$expected_commit" \
-  "$dmg" "$appcast" "$artifact_index" "$provenance" >/dev/null
+  "${checksum_assets[@]}" >/dev/null
 
-publication_identity="$(python3 - "$manifest" "$dmg" "$appcast" "$artifact_index" "$checksums" "$signature" "$provenance" <<'PY'
+publication_identity="$(python3 - "$frozen_appcast" "$frozen_bridge_appcast" "$manifest" "$dmg" "$appcast" "$artifact_index" "$checksums" "$signature" "$provenance" <<'PY'
 import hashlib
 import json
 import pathlib
 import re
 import sys
 
-manifest_path, dmg_path, appcast_path, index_path, checksums_path, signature_path, provenance_path = map(pathlib.Path, sys.argv[1:])
+frozen_mode = sys.argv[1] == "true"
+frozen_ref = pathlib.Path(sys.argv[2])
+manifest_path, dmg_path, appcast_path, index_path, checksums_path, signature_path, provenance_path = map(pathlib.Path, sys.argv[3:])
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
 if manifest.get("schema_version") != 1 or provenance.get("schema_version") != 1:
@@ -61,21 +78,23 @@ tag = manifest.get("tag")
 commit = manifest.get("commit")
 if not isinstance(tag, str) or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
     raise SystemExit("invalid publication tag")
-if tag != "v1.8.39":
-    raise SystemExit("legacy Malibu publication is frozen to v1.8.39")
 if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
     raise SystemExit("invalid publication commit")
 if type(manifest.get("release_id")) is not int or manifest["release_id"] <= 0:
     raise SystemExit("invalid numeric release id")
 
-paths = [dmg_path, appcast_path, index_path, checksums_path, signature_path, provenance_path]
+# For non-v1.8.39 promotions the frozen legacy Sparkle bridge appcast is not a
+# per-release signed asset, so it is excluded from the manifest/provenance
+# binding here and verified against the committed constant below instead.
+if frozen_mode:
+    paths = [dmg_path, index_path, checksums_path, signature_path, provenance_path]
+else:
+    paths = [dmg_path, appcast_path, index_path, checksums_path, signature_path, provenance_path]
 local = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 dmg_name = f"Malibu-{tag}.dmg"
-if (
-    dmg_path.name != dmg_name
-    or appcast_path.name != "appcast.xml"
-    or index_path.name != "compatibility-artifact-index.json"
-):
+if dmg_path.name != dmg_name or index_path.name != "compatibility-artifact-index.json":
+    raise SystemExit("publication filenames do not match the tag")
+if not frozen_mode and appcast_path.name != "appcast.xml":
     raise SystemExit("publication filenames do not match the tag")
 assets = manifest.get("assets")
 if not isinstance(assets, dict):
@@ -93,12 +112,23 @@ for name, digest in signed_assets.items():
     if not isinstance(row, dict) or row.get("sha256") != digest:
         raise SystemExit(f"signed provenance differs from publication manifest for {name}")
 
-content = json.dumps(
-    {
+if frozen_mode:
+    if not frozen_ref.is_file() or frozen_ref.is_symlink():
+        raise SystemExit("committed frozen bridge appcast is missing")
+    if hashlib.sha256(appcast_path.read_bytes()).hexdigest() != hashlib.sha256(frozen_ref.read_bytes()).hexdigest():
+        raise SystemExit("appcast is not the committed frozen Malibu bridge appcast")
+    publication_content = {
+        "compatibility_artifact_index_sha256": local["compatibility-artifact-index.json"],
+        "dmg_sha256": local[dmg_name],
+    }
+else:
+    publication_content = {
         "appcast_sha256": local["appcast.xml"],
         "compatibility_artifact_index_sha256": local["compatibility-artifact-index.json"],
         "dmg_sha256": local[dmg_name],
-    },
+    }
+content = json.dumps(
+    publication_content,
     sort_keys=True,
     separators=(",", ":"),
 ).encode()
@@ -113,9 +143,17 @@ read -r tag commit <<< "$publication_identity"
   die "publication identity verification failed"
 
 bash "$repo_root/scripts/test-coordinator-advertised-version.sh" "$tag"
-python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
-  "$tag" "$dmg" "$appcast" \
-  "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+# The Sparkle EdDSA cross-check binds the appcast enclosure to the DMG it
+# advertises. That correspondence only holds for the v1.8.39 bootstrap, whose
+# appcast describes its own DMG. Non-v1.8.39 promotions ship the frozen bridge
+# appcast (verified byte-identical to the committed constant above) alongside a
+# newer DMG the frozen appcast does not describe, so the enclosure cross-check
+# does not apply.
+if [[ "$frozen_appcast" == false ]]; then
+  python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
+    "$tag" "$dmg" "$appcast" \
+    "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+fi
 bash "$repo_root/scripts/verify-malibu-release-artifacts.sh" \
   "$dmg" --legacy-app-only-no-provider-tarball
 

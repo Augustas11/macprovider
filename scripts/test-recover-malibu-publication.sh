@@ -112,13 +112,14 @@ SH
 cat >"$fixture/scripts/publish-malibu-latest-dmg.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$#" == 7 ]]
+[[ "$#" == 9 ]]
 python3 - "$@" <<'PY'
 import json
 import pathlib
 import sys
 
-manifest_path, dmg, appcast, index, checksums, signature, provenance = map(pathlib.Path, sys.argv[1:])
+(manifest_path, dmg, appcast, index, checksums, signature, provenance,
+ acceptance, acceptance_sig) = map(pathlib.Path, sys.argv[1:])
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 assert manifest["release_id"] == 701
 assert manifest["tag"] == "v1.8.39"
@@ -131,6 +132,8 @@ assert [path.name for path in (dmg, appcast, index, checksums, signature, proven
     "checksums.txt.sig",
     "release-provenance.json",
 ]
+# The frozen v1.8.39 bridge recovery carries no acceptance-candidate.
+assert str(acceptance) == "." and str(acceptance_sig) == "."
 assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 803
 PY
 printf '%s\n' published >"$MOCK_PUBLISH_MARKER"

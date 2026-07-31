@@ -6,7 +6,7 @@ die() {
   exit 1
 }
 
-[[ "$#" == 7 ]] || die "usage: WEBROOT TAG PUBLICATION_ID MANIFEST DMG APPCAST SHA256"
+[[ "$#" == 9 ]] || die "usage: WEBROOT TAG PUBLICATION_ID MANIFEST DMG APPCAST SHA256 ACCEPTANCE_CANDIDATE ACCEPTANCE_CANDIDATE_SIG"
 webroot="$1"
 tag="$2"
 release_id="$3"
@@ -14,12 +14,28 @@ manifest_source="$4"
 dmg_source="$5"
 appcast_source="$6"
 sha_source="$7"
+# Signed acceptance-candidate (acceptance-candidate.yml artifact). Placed into
+# the promoted release dir so the coordinator's install-time acceptance gate can
+# enforce it. The frozen v1.8.39 bootstrap bridge carries none, so the publisher
+# passes staged paths that do not exist for that tag.
+acceptance_source="$8"
+acceptance_sig_source="$9"
 
 [[ "$webroot" == /* ]] || die "webroot must be an absolute path"
 [[ "$webroot" =~ ^/[A-Za-z0-9._/-]+$ && "$webroot" != *'/../'* && "$webroot" != */.. ]] || die "unsafe webroot"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag must be vX.Y.Z"
-[[ "$tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
 [[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || die "publication id must be a full content digest"
+
+if [[ "$tag" == v1.8.39 ]]; then
+  [[ ! -e "$acceptance_source" && ! -e "$acceptance_sig_source" ]] ||
+    die "the frozen v1.8.39 bridge does not carry an acceptance-candidate"
+  have_acceptance=0
+else
+  [[ -f "$acceptance_source" && ! -L "$acceptance_source" &&
+     -f "$acceptance_sig_source" && ! -L "$acceptance_sig_source" ]] ||
+    die "generalized Malibu promotion requires the staged acceptance-candidate pair"
+  have_acceptance=1
+fi
 
 testing="${MALIBU_PUBLICATION_TESTING:-0}"
 if [[ "$testing" == 1 ]]; then
@@ -31,7 +47,7 @@ else
   trusted_gid=0
 fi
 
-python3 - "$testing" "$trusted_uid" "$manifest_source" "$dmg_source" "$appcast_source" "$sha_source" "$tag" "$release_id" <<'PY'
+python3 - "$testing" "$trusted_uid" "$manifest_source" "$dmg_source" "$appcast_source" "$sha_source" "$tag" "$release_id" "$have_acceptance" "$acceptance_source" "$acceptance_sig_source" <<'PY'
 import hashlib
 import json
 import os
@@ -39,9 +55,24 @@ import pathlib
 import stat
 import sys
 
-testing, trusted_uid, manifest_name, dmg_name, appcast_name, sha_name, tag, publication_id = sys.argv[1:]
+# SHA-256 of scripts/dist/malibu-frozen-bridge-appcast.xml, the reviewed frozen
+# legacy Sparkle bridge appcast (v1.8.39). Non-v1.8.39 download promotions ship
+# this exact appcast, which is not a per-release GitHub asset, so this remote
+# root helper binds it to the pinned constant instead of the per-release
+# manifest. scripts/test-malibu-bootstrap-bridge.sh proves the pin matches the
+# committed file so the two cannot drift.
+FROZEN_APPCAST_SHA256 = "94ecf57584a2a203336d3219ea42dec1945bae2e123cfce0b1b39f8e0231d83c"
+
+(testing, trusted_uid, manifest_name, dmg_name, appcast_name, sha_name, tag,
+ publication_id, have_acceptance, acceptance_name, acceptance_sig_name) = sys.argv[1:]
 trusted_uid = int(trusted_uid)
 paths = [pathlib.Path(value) for value in (manifest_name, dmg_name, appcast_name, sha_name)]
+if have_acceptance == "1":
+    if pathlib.Path(acceptance_name).name != "acceptance-candidate.json":
+        raise SystemExit("acceptance-candidate input has an unexpected name")
+    if pathlib.Path(acceptance_sig_name).name != "acceptance-candidate.json.sig":
+        raise SystemExit("acceptance-candidate signature has an unexpected name")
+    paths.extend(pathlib.Path(value) for value in (acceptance_name, acceptance_sig_name))
 for path in paths:
     row = path.lstat()
     if not stat.S_ISREG(row.st_mode) or row.st_uid != trusted_uid or row.st_nlink != 1:
@@ -57,13 +88,19 @@ if manifest.get("schema_version") != 1 or manifest.get("tag") != tag or manifest
 if manifest.get("prerelease") is not False:
     raise SystemExit("prerelease must not publish the stable Malibu feed")
 assets = manifest.get("assets")
-expected_names = [f"Malibu-{tag}.dmg", "appcast.xml"]
-for path, name in zip(paths[1:3], expected_names):
-    row = assets.get(name) if isinstance(assets, dict) else None
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if not isinstance(row, dict) or row.get("sha256") != digest or type(row.get("id")) is not int:
-        raise SystemExit(f"publication manifest does not bind {name}")
-expected_checksum = f"{hashlib.sha256(paths[1].read_bytes()).hexdigest()}  {expected_names[0]}\n"
+dmg_display_name = f"Malibu-{tag}.dmg"
+dmg_row = assets.get(dmg_display_name) if isinstance(assets, dict) else None
+dmg_digest = hashlib.sha256(paths[1].read_bytes()).hexdigest()
+if not isinstance(dmg_row, dict) or dmg_row.get("sha256") != dmg_digest or type(dmg_row.get("id")) is not int:
+    raise SystemExit(f"publication manifest does not bind {dmg_display_name}")
+appcast_digest = hashlib.sha256(paths[2].read_bytes()).hexdigest()
+if tag == "v1.8.39":
+    appcast_row = assets.get("appcast.xml") if isinstance(assets, dict) else None
+    if not isinstance(appcast_row, dict) or appcast_row.get("sha256") != appcast_digest or type(appcast_row.get("id")) is not int:
+        raise SystemExit("publication manifest does not bind appcast.xml")
+elif appcast_digest != FROZEN_APPCAST_SHA256:
+    raise SystemExit("appcast is not the frozen Malibu bridge appcast")
+expected_checksum = f"{dmg_digest}  {dmg_display_name}\n"
 if paths[3].read_text(encoding="utf-8") != expected_checksum:
     raise SystemExit("versioned DMG checksum file is invalid")
 PY
@@ -182,6 +219,10 @@ install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$dmg_source" "$stage/latest
 install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$appcast_source" "$stage/appcast.xml"
 install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$sha_source" "$stage/${dmg_name}.sha256"
 install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$manifest_source" "$stage/publication-manifest.json"
+if [[ "$have_acceptance" == 1 ]]; then
+  install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$acceptance_source" "$stage/acceptance-candidate.json"
+  install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$acceptance_sig_source" "$stage/acceptance-candidate.json.sig"
+fi
 
 if [[ -d "$release_dir" && ! -L "$release_dir" ]]; then
   validate_chain "$release_dir"
@@ -190,6 +231,12 @@ if [[ -d "$release_dir" && ! -L "$release_dir" ]]; then
     validate_node "$release_dir/$name" file
     cmp -s "$stage/$name" "$release_dir/$name" || die "immutable release differs: $release_dir/$name"
   done
+  if [[ "$have_acceptance" == 1 ]]; then
+    for name in acceptance-candidate.json acceptance-candidate.json.sig; do
+      validate_node "$release_dir/$name" file
+      cmp -s "$stage/$name" "$release_dir/$name" || die "immutable release differs: $release_dir/$name"
+    done
+  fi
   rm -rf "$stage"
 elif [[ -e "$release_dir" || -L "$release_dir" ]]; then
   die "release path is not an immutable directory: $release_dir"
