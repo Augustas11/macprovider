@@ -484,7 +484,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",

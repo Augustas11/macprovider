@@ -81,6 +81,11 @@ enum ToolCallParser {
         return (nilIfBlank(cleaned), calls)
     }
 
+    // The `<function=NAME><parameter=key>value</parameter></function>` XML grammar handled by
+    // the `*Nemotron*`-named helpers below is NOT Nemotron-specific: it is the shared function-
+    // XML tool-call grammar emitted by NVIDIA Nemotron AND by Qwen3-Coder. It is a recognized
+    // grammar under SPEC-018 §3.1 (Qwen row body-grammar alternative). Names follow the OpenAI/
+    // MCP charset (see isValidToolFunctionName / isValidToolParameterName), not Python identifiers.
     private static func parseBareNemotronCalls(_ rawOutput: String) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
         var searchStart = rawOutput.startIndex
         var cleaned = ""
@@ -177,7 +182,7 @@ enum ToolCallParser {
                 throw ParseError.invalidShape
             }
             let name = String(raw[nameStart..<nameEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard isPythonIdentifier(name) else {
+            guard isValidToolParameterName(name) else {
                 throw ParseError.invalidArguments
             }
             guard object[name] == nil else {
@@ -440,6 +445,20 @@ enum ToolCallParser {
     /// name not among the request's declared tools is still rejected.
     private static func isValidToolFunctionName(_ value: String) -> Bool {
         guard (1...64).contains(value.count) else {
+            return false
+        }
+        return value.allSatisfy { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "_" || char == "-")
+        }
+    }
+
+    /// Validates a `<parameter=NAME>` (function-XML grammar) property name. These become JSON
+    /// object keys in `function.arguments`; JSON-Schema / MCP property names are NOT restricted
+    /// to Python identifiers, so hyphens and other OpenAI/MCP-legal characters are accepted here.
+    /// (Python-style call bodies keep identifier-only keys per SPEC-018 §3.3.) ASCII
+    /// `[A-Za-z0-9_-]`, length 1..128.
+    private static func isValidToolParameterName(_ value: String) -> Bool {
+        guard (1...128).contains(value.count) else {
             return false
         }
         return value.allSatisfy { char in

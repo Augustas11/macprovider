@@ -1880,7 +1880,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
                     var emittedText = ""
                     var stoppedByRequestStop = false
-                    var toolStreamer = NativeToolCallStreamEmitter(modelID: request.model)
+                    var toolStreamer = NativeToolCallStreamEmitter(
+                        modelID: request.model,
+                        allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                    )
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
@@ -3400,16 +3403,24 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 }
 
-private struct NativeToolCallStreamEmitter {
+// `internal` (not `private`) so the allowlist fail-closed behavior is unit-testable via
+// `@testable import macprovider_cli` (see NativeToolCallStreamEmitterTests).
+struct NativeToolCallStreamEmitter {
     private let startDelimiter: String
     private let endDelimiter: String
     private let argumentKey: String
+    /// Declared tools for this request. A streamed tool-call delta MUST NOT be emitted for
+    /// any function name not in this set — otherwise a widened name grammar could surface an
+    /// undeclared tool_call to the buyer before the final parser's fail-closed check
+    /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
+    private let allowedFunctionNames: Set<String>?
     private var opened = false
     private var closed = false
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-    init(modelID: String) {
+    init(modelID: String, allowedFunctionNames: Set<String>?) {
+        self.allowedFunctionNames = allowedFunctionNames
         if modelID.localizedCaseInsensitiveContains("llama-3.3") {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
@@ -3447,6 +3458,10 @@ private struct NativeToolCallStreamEmitter {
         else {
             return []
         }
+        // Fail closed: never stream a tool-call delta for an undeclared function name.
+        guard let allowed = allowedFunctionNames, allowed.contains(name) else {
+            return []
+        }
 
         var events: [StreamChunk] = []
         if !opened {
@@ -3468,6 +3483,10 @@ private struct NativeToolCallStreamEmitter {
         guard let name = ToolCallParser.nemotronFunctionName(in: body),
               let arguments = ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: isClosed)
         else {
+            return []
+        }
+        // Fail closed: never stream a tool-call delta for an undeclared function name.
+        guard let allowed = allowedFunctionNames, allowed.contains(name) else {
             return []
         }
 

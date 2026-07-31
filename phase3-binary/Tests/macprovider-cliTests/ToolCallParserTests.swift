@@ -552,6 +552,19 @@ buzz messages send --channel 7d5f1966-d036-431e-821e-3a4083f145fe --content "buz
         XCTAssertTrue(parsed.toolCalls.isEmpty)
     }
 
+    // MCP/JSON-Schema property names are not restricted to Python identifiers; the XML
+    // <parameter=…> parser must accept hyphenated parameter names (they become JSON keys).
+    func testQwen3CoderHyphenatedParameterName() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call><function=buzz-dev-mcp__shell><parameter=work-dir>/tmp</parameter></function></tool_call>"#,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "buzz-dev-mcp__shell")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "work-dir") as? String, "/tmp")
+    }
+
     func testQwen3CoderNemotronXMLUndeclaredFunctionFailsClosed() {
         let raw = #"<tool_call><function=delete_symbol><parameter=symbol>x</parameter></function></tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
