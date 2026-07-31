@@ -3414,6 +3414,11 @@ struct NativeToolCallStreamEmitter {
     /// undeclared tool_call to the buyer before the final parser's fail-closed check
     /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
     private let allowedFunctionNames: Set<String>?
+    /// Function-XML (`<function=…>`) is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). The
+    /// streaming emitter mirrors the non-streaming parser's family gate: only Qwen models may
+    /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
+    /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
+    private let allowsFunctionXML: Bool
     private var opened = false
     private var closed = false
     private var emittedArguments = ""
@@ -3421,6 +3426,8 @@ struct NativeToolCallStreamEmitter {
 
     init(modelID: String, allowedFunctionNames: Set<String>?) {
         self.allowedFunctionNames = allowedFunctionNames
+        self.allowsFunctionXML = modelID.localizedCaseInsensitiveContains("qwen2.5")
+            || modelID.localizedCaseInsensitiveContains("qwen3")
         if modelID.localizedCaseInsensitiveContains("llama-3.3") {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
@@ -3441,12 +3448,12 @@ struct NativeToolCallStreamEmitter {
             let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
             let body = String(text[afterStart..<bodyEnd])
             let isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
-            if body.contains("<function=") {
+            if allowsFunctionXML, body.contains("<function=") {
                 return observeNemotronXML(body: body, isClosed: isClosed)
             }
             return observeJSONToolCall(body: body, isClosed: isClosed)
         }
-        if text.contains("<function=") {
+        if allowsFunctionXML, text.contains("<function=") {
             return observeNemotronXML(body: text, isClosed: false)
         }
         return []

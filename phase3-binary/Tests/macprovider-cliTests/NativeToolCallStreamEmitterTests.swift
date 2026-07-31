@@ -56,6 +56,15 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         XCTAssertFalse(hasAnyToolDelta(events), "arguments exceeding the per-call byte cap must not be streamed")
     }
 
+    func testLlamaStreamDoesNotEmitFunctionXML() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            allowedFunctionNames: ["search"]
+        )
+        let events = emitter.observe(#"<function=search><parameter=q>x</parameter></function>"#)
+        XCTAssertFalse(hasAnyToolDelta(events), "function-XML is a Qwen-only grammar; Llama must not stream it")
+    }
+
     func testNilAllowlistEmitsNothing() {
         var emitter = NativeToolCallStreamEmitter(
             modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
