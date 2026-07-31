@@ -165,8 +165,6 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 			"input must be an object"},
 		"array tool input": {`{"model":"claude","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"lookup","input":[]}]}]}`,
 			"input must be an object"},
-		"nested cache control": {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
-			"cache_control is not supported"},
 		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
 			"cache_control is not supported"},
 		"hosted tool type": {`{"model":"claude","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`,
@@ -217,6 +215,41 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_reject")
 	if snap.usageRows != 0 || snap.settledRows != 0 || snap.activeRows != 0 {
 		t.Fatalf("unsupported request touched settlement state: %+v", snap)
+	}
+}
+
+func TestAnthropicMessagesAcceptsTextCacheControlAndZeroMaxTokens(t *testing.T) {
+	var capturedBody map[string]any
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_cache_control_zero",
+			"object":"chat.completion",
+			"created":1,
+			"model":"claude",
+			"usage":{"prompt_tokens":5,"completion_tokens":0,"total_tokens":5},
+			"choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_cache_control_zero")
+
+	body := `{"model":"claude","max_tokens":0,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
+	resp := postAnthropicMessages(t, h, key, body, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := capturedBody["max_tokens"]; got != float64(0) {
+		t.Fatalf("translated max_tokens=%v want 0", got)
+	}
+	messages := capturedBody["messages"].([]any)
+	if got := messages[0].(map[string]any)["content"]; got != "hi" {
+		t.Fatalf("translated message content=%v want cache_control ignored and text preserved", got)
 	}
 }
 
@@ -340,6 +373,35 @@ func TestAnthropicMessagesNonStreamingToolArgumentsNullBecomesEmptyInput(t *test
 	input, ok := toolUse["input"].(map[string]any)
 	if !ok || input == nil || len(input) != 0 {
 		t.Fatalf("tool_use input=%#v want empty object", toolUse["input"])
+	}
+}
+
+func TestAnthropicMessagesNonStreamingLengthTakesPrecedenceOverToolUse(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_tool_length","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"toolu_len","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"length"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_tool_length")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var anth map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
+		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
+	}
+	if anth["stop_reason"] != "max_tokens" {
+		t.Fatalf("stop_reason=%v want max_tokens body=%s", anth["stop_reason"], resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"type":"tool_use"`) {
+		t.Fatalf("tool_use block missing body=%s", resp.Body.String())
 	}
 }
 
@@ -897,6 +959,46 @@ func TestAnthropicMessagesStreamingTerminalOutputExceededEmitsMessageStop(t *tes
 	}
 }
 
+func TestAnthropicMessagesStreamingTerminalResponseByteCapExceededRetryReplays(t *testing.T) {
+	var upstreamHits int
+	stream := `data: {"id":"chatcmpl_stream_response_byte_cap","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"error":{"message":"cap hit","type":"api_error","code":"response_byte_cap_exceeded","retryable":true}}`
+	stream += "\n\ndata: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_response_byte_cap_replay")
+
+	body := `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	first := postAnthropicMessages(t, h, key, body, nil)
+	second := postAnthropicMessages(t, h, key, body, nil)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("codes first=%d second=%d bodies:\n%s\n%s", first.Code, second.Code, first.Body.String(), second.Body.String())
+	}
+	if second.Header().Get(idlessDedupeHeader) != idlessDedupeHeaderValue {
+		t.Fatalf("second response did not replay; header=%q body=%s", second.Header().Get(idlessDedupeHeader), second.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits=%d want 1", upstreamHits)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replayed byte-cap stream differs:\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	if strings.Contains(second.Body.String(), "event: error") || strings.Contains(second.Body.String(), `"code":"response_byte_cap_exceeded"`) ||
+		!strings.Contains(second.Body.String(), `"stop_reason":"max_tokens"`) || !strings.Contains(second.Body.String(), "event: message_stop") {
+		t.Fatalf("replayed byte-cap stream was not a clean max_tokens terminal:\n%s", second.Body.String())
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_response_byte_cap_replay")
+	if snap.usageRows != 1 || snap.settledRows != 1 || snap.refundedRows != 0 || snap.activeRows != 0 {
+		t.Fatalf("settlement snapshot=%+v want one settled usage row and no refund", snap)
+	}
+}
+
 func TestAnthropicMessagesStreamingTerminalTruncatedEmitsError(t *testing.T) {
 	stream := `data: {"id":"chatcmpl_stream_truncated_terminal","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
 	stream += "\n\n" + `data: {"error":{"message":"line too large","type":"api_error","code":"stream_truncated","retryable":true}}`
@@ -1123,6 +1225,31 @@ func TestAnthropicMessagesStreamingTranslatesEventsAndSettles(t *testing.T) {
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_stream")
 	if snap.usageRows != 1 || snap.settledRows != 1 {
 		t.Fatalf("settlement snapshot=%+v want one settled usage row", snap)
+	}
+}
+
+func TestAnthropicMessagesStreamingLengthTakesPrecedenceOverToolUse(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_tool_length","model":"claude-stream","choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_len","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\ndata: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_tool_length")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, `"stop_reason":"max_tokens"`) || strings.Contains(body, `"stop_reason":"tool_use"`) {
+		t.Fatalf("length finish did not take precedence over tool_use:\n%s", body)
+	}
+	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("tool_use block or terminal missing:\n%s", body)
 	}
 }
 

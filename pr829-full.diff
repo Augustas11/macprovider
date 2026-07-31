@@ -95,10 +95,10 @@ index 216ae74e..e61910f3 100644
  
 diff --git a/phase5-gateway/internal/router/anthropic_messages.go b/phase5-gateway/internal/router/anthropic_messages.go
 new file mode 100644
-index 00000000..17d7617d
+index 00000000..267ab47f
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages.go
-@@ -0,0 +1,2072 @@
+@@ -0,0 +1,2099 @@
 +package router
 +
 +import (
@@ -150,6 +150,7 @@ index 00000000..17d7617d
 +	streamOutcome      string
 +	terminalStopReason string
 +	stopSequence       *string
++	streamRefusal      bool
 +	finished           bool
 +	replayBody         bool
 +	writeErr           error
@@ -1051,7 +1052,8 @@ index 00000000..17d7617d
 +		Error   any        `json:"error"`
 +		Choices []struct {
 +			Message struct {
-+				Content   any `json:"content"`
++				Content   any    `json:"content"`
++				Refusal   string `json:"refusal"`
 +				ToolCalls []struct {
 +					ID       string `json:"id"`
 +					Type     string `json:"type"`
@@ -1092,6 +1094,12 @@ index 00000000..17d7617d
 +		return nil, err
 +	} else if text = anthropicStripThinkBlocks(text); text != "" {
 +		content = append(content, map[string]any{"type": "text", "text": text})
++	}
++	if refusal := strings.TrimSpace(choice.Message.Refusal); refusal != "" {
++		if len(content) == 0 {
++			content = append(content, map[string]any{"type": "text", "text": choice.Message.Refusal})
++		}
++		stopReason = "refusal"
 +	}
 +	seenToolIDs := map[string]struct{}{}
 +	for _, tc := range choice.Message.ToolCalls {
@@ -1240,6 +1248,12 @@ index 00000000..17d7617d
 +	if text := a.filterThinkContent(anthropicStringFromAny(delta["content"])); text != "" {
 +		a.emitTextDelta(text)
 +	}
++	if refusal := anthropicStringFromAny(delta["refusal"]); strings.TrimSpace(refusal) != "" {
++		a.streamRefusal = true
++		if text := a.filterThinkContent(refusal); text != "" {
++			a.emitTextDelta(text)
++		}
++	}
 +	toolDeltas, err := anthropicToolCallDeltasFromAny(delta["tool_calls"])
 +	if err != nil {
 +		a.emitInvalidProviderResponse(err.Error())
@@ -1258,6 +1272,9 @@ index 00000000..17d7617d
 +			return
 +		}
 +		a.finishReason = finish
++		if a.streamRefusal {
++			a.terminalStopReason = "refusal"
++		}
 +		if chunk.Choices[0].StopSequence != nil {
 +			a.stopSequence = chunk.Choices[0].StopSequence
 +		}
@@ -1589,7 +1606,7 @@ index 00000000..17d7617d
 +
 +func anthropicFinishReasonFromTerminalErrorCode(code string) string {
 +	switch code {
-+	case "stream_output_exceeded", "stream_truncated", "response_byte_cap_exceeded":
++	case "stream_output_exceeded", "response_byte_cap_exceeded":
 +		return "length"
 +	default:
 +		return "stop"
@@ -1941,8 +1958,13 @@ index 00000000..17d7617d
 +			if err != nil {
 +				return fmt.Errorf("%s.delta must be an object", path)
 +			}
-+			if err := anthropicRejectUnknownKeys(delta, path+".delta", "role", "content", "tool_calls"); err != nil {
++			if err := anthropicRejectUnknownKeys(delta, path+".delta", "role", "content", "refusal", "tool_calls"); err != nil {
 +				return err
++			}
++			if refusalRaw, ok := delta["refusal"]; ok && !anthropicRawIsNull(refusalRaw) {
++				if err := anthropicValidateRawString(refusalRaw, path+".delta.refusal"); err != nil {
++					return err
++				}
 +			}
 +			if toolCallsRaw, ok := delta["tool_calls"]; ok {
 +				if err := anthropicValidateProviderToolCallsRaw(path+".delta.tool_calls", toolCallsRaw); err != nil {
@@ -1963,8 +1985,13 @@ index 00000000..17d7617d
 +		if err != nil {
 +			return fmt.Errorf("%s.message must be an object", path)
 +		}
-+		if err := anthropicRejectUnknownKeys(message, path+".message", "role", "content", "tool_calls"); err != nil {
++		if err := anthropicRejectUnknownKeys(message, path+".message", "role", "content", "refusal", "tool_calls"); err != nil {
 +			return err
++		}
++		if refusalRaw, ok := message["refusal"]; ok && !anthropicRawIsNull(refusalRaw) {
++			if err := anthropicValidateRawString(refusalRaw, path+".message.refusal"); err != nil {
++				return err
++			}
 +		}
 +		if toolCallsRaw, ok := message["tool_calls"]; ok {
 +			if err := anthropicValidateProviderToolCallsRaw(path+".message.tool_calls", toolCallsRaw); err != nil {
@@ -2173,10 +2200,10 @@ index 00000000..17d7617d
 +}
 diff --git a/phase5-gateway/internal/router/anthropic_messages_test.go b/phase5-gateway/internal/router/anthropic_messages_test.go
 new file mode 100644
-index 00000000..2f1130b0
+index 00000000..c589bfc0
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages_test.go
-@@ -0,0 +1,1727 @@
+@@ -0,0 +1,1782 @@
 +package router
 +
 +import (
@@ -2526,7 +2553,7 @@ index 00000000..2f1130b0
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 +		body := `{"id":"chatcmpl_content_filter","object":"chat.completion","created":1,"model":"claude",` +
 +			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-+			`"choices":[{"index":0,"message":{"role":"assistant","content":"cannot comply"},"finish_reason":"content_filter"}]}`
++			`"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"cannot comply"},"finish_reason":"content_filter"}]}`
 +		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
 +	})}
 +	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -2546,6 +2573,11 @@ index 00000000..2f1130b0
 +	if anth["stop_reason"] != "refusal" {
 +		t.Fatalf("stop_reason=%v want refusal body=%s", anth["stop_reason"], resp.Body.String())
 +	}
++	content := anth["content"].([]any)
++	text := content[0].(map[string]any)["text"]
++	if text != "cannot comply" {
++		t.Fatalf("refusal text=%v want visible refusal body=%s", text, resp.Body.String())
++	}
 +}
 +
 +func TestAnthropicMessagesNonStreamingInvalidProviderResponseIgnoresVerifiedFinalityDebit(t *testing.T) {
@@ -2553,7 +2585,7 @@ index 00000000..2f1130b0
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 +		body := `{"id":"chatcmpl_bad_verified","object":"chat.completion","created":1,"model":"claude",` +
 +			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-+			`"choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":"hidden"},"finish_reason":"stop"}]}`
++			`"choices":[{"index":0,"message":{"role":"assistant","content":"","unsupported_output":"hidden"},"finish_reason":"stop"}]}`
 +		h := http.Header{"Content-Type": []string{"application/json"}}
 +		for key, values := range finality {
 +			h[key] = values
@@ -2626,11 +2658,11 @@ index 00000000..2f1130b0
 +	}
 +}
 +
-+func TestAnthropicMessagesNonStreamingRejectsUnsupportedProviderOutputField(t *testing.T) {
++func TestAnthropicMessagesNonStreamingProviderRefusalMapsToText(t *testing.T) {
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 +		body := `{"id":"chatcmpl_refusal","object":"chat.completion","created":1,"model":"claude",` +
 +			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-+			`"choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":"no"},"finish_reason":"stop"}]}`
++			`"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"no"},"finish_reason":"stop"}]}`
 +		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
 +	})}
 +	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -2640,12 +2672,24 @@ index 00000000..2f1130b0
 +	key := createAccountAndKey(t, store, cfg, "acct_anthropic_refusal_provider")
 +
 +	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
-+	if resp.Code != http.StatusBadGateway {
-+		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	var anth map[string]any
++	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
++		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
++	}
++	if anth["stop_reason"] != "refusal" {
++		t.Fatalf("stop_reason=%v want refusal body=%s", anth["stop_reason"], resp.Body.String())
++	}
++	content := anth["content"].([]any)
++	text := content[0].(map[string]any)["text"]
++	if text != "no" {
++		t.Fatalf("refusal text=%v want visible refusal body=%s", text, resp.Body.String())
 +	}
 +	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_refusal_provider")
-+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
-+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
++	if outcome != "ok" || source != "provider_reported" || completion != 7 || prompt != 5 {
++		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want ok/provider_reported/7/5", outcome, source, completion, prompt)
 +	}
 +}
 +
@@ -3048,9 +3092,44 @@ index 00000000..2f1130b0
 +	if !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
 +		t.Fatalf("terminal output-exceeded frame did not close as max_tokens:\n%s", body)
 +	}
-+	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
-+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
-+		t.Fatalf("usage outcome/source=%s/%s want stream_output_exceeded/gateway_estimated", outcome, source)
++	delta := anthropicStreamPayloadForEvent(t, body, "message_delta")
++	usage, _ := delta["usage"].(map[string]any)
++	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
++	if outcome != "stream_output_exceeded" || source != "gateway_estimated" || completion <= 0 || prompt <= 0 {
++		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want stream_output_exceeded/gateway_estimated/nonzero", outcome, source, completion, prompt)
++	}
++	if usage["input_tokens"] != float64(prompt) || usage["output_tokens"] != float64(completion) {
++		t.Fatalf("visible usage=%v settlement prompt/completion=%d/%d", usage, prompt, completion)
++	}
++}
++
++func TestAnthropicMessagesStreamingTerminalTruncatedEmitsError(t *testing.T) {
++	stream := `data: {"id":"chatcmpl_stream_truncated_terminal","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
++	stream += "\n\n" + `data: {"error":{"message":"line too large","type":"api_error","code":"stream_truncated","retryable":true}}`
++	stream += "\n\n"
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
++	})}
++	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_truncated_terminal")
++
++	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	body := resp.Body.String()
++	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"stream_truncated"`) || !strings.Contains(body, "event: message_stop") {
++		t.Fatalf("stream_truncated terminal did not emit Anthropic error + close:\n%s", body)
++	}
++	if strings.Contains(body, `"stop_reason":"max_tokens"`) {
++		t.Fatalf("stream_truncated terminal was misclassified as max_tokens:\n%s", body)
++	}
++	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_truncated_terminal")
++	if outcome != "stream_truncated" || source != "gateway_estimated" {
++		t.Fatalf("usage outcome/source=%s/%s want stream_truncated/gateway_estimated", outcome, source)
 +	}
 +}
 +
@@ -3464,7 +3543,7 @@ index 00000000..2f1130b0
 +	}
 +}
 +
-+func TestAnthropicMessagesStreamingRejectsUnsupportedOutputFieldsBeforeBilling(t *testing.T) {
++func TestAnthropicMessagesStreamingRefusalMapsToText(t *testing.T) {
 +	stream := `data: {"id":"chatcmpl_refusal","model":"claude-stream","choices":[{"delta":{"refusal":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
 +	stream += "\n\ndata: [DONE]\n\n"
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -3478,17 +3557,20 @@ index 00000000..2f1130b0
 +
 +	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
 +	body := resp.Body.String()
-+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"invalid_provider_response"`) {
-+		t.Fatalf("unsupported output stream did not fail closed:\n%s", body)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, body)
++	}
++	if strings.Contains(body, "event: error") || !strings.Contains(body, `"text":"no"`) || !strings.Contains(body, `"stop_reason":"refusal"`) || !strings.Contains(body, "event: message_stop") {
++		t.Fatalf("refusal stream did not translate to visible refusal terminal:\n%s", body)
 +	}
 +	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_refusal")
-+	if outcome != "invalid_provider_response" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
-+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/gateway_estimated/0/nonzero", outcome, source, completion, prompt)
++	if outcome != "unverified_streaming" || source != "provider_reported" || completion != 4 || prompt != 3 {
++		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want unverified_streaming/provider_reported/4/3", outcome, source, completion, prompt)
 +	}
 +}
 +
 +func TestAnthropicMessagesStreamingInvalidProviderResponseIgnoresVerifiedFinalityDebit(t *testing.T) {
-+	stream := `data: {"id":"chatcmpl_refusal_verified","model":"claude-stream","choices":[{"delta":{"refusal":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`
++	stream := `data: {"id":"chatcmpl_refusal_verified","model":"claude-stream","choices":[{"delta":{"unsupported_output":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`
 +	stream += "\n\ndata: [DONE]\n\n"
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 +		h := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
@@ -3905,7 +3987,7 @@ index 00000000..2f1130b0
 +	}
 +}
 diff --git a/phase5-gateway/internal/router/chat_proxy.go b/phase5-gateway/internal/router/chat_proxy.go
-index 3ad94119..f4cc407d 100644
+index 3ad94119..5d7c0b5c 100644
 --- a/phase5-gateway/internal/router/chat_proxy.go
 +++ b/phase5-gateway/internal/router/chat_proxy.go
 @@ -138,13 +138,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -4001,13 +4083,17 @@ index 3ad94119..f4cc407d 100644
  	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
  		return
  	}
-@@ -1189,6 +1224,36 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1189,6 +1224,40 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  					}
  					return true
  				}
 +				anthropicTerminalFrame := false
 +				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
-+					anthropicTerminalFrame = terminalSSEErrorCode(data) != ""
++					terminalCode := terminalSSEErrorCode(data)
++					anthropicTerminalFrame = terminalCode != ""
++					if anthropicTerminalErrorCodeIsLengthTruncation(terminalCode) {
++						adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
++					}
 +				}
 +				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 +					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
@@ -4038,7 +4124,7 @@ index 3ad94119..f4cc407d 100644
  				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
  				if deltaBytes > 0 {
  					// #760: CONTENT progress, not byte progress. Only a frame
-@@ -1227,7 +1292,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1227,7 +1296,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  					} else {
  						line = nil
  					}
@@ -4047,7 +4133,7 @@ index 3ad94119..f4cc407d 100644
  					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
  					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
  					if flusher != nil {
-@@ -1275,6 +1340,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1275,6 +1344,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  		if len(line) == 0 {
  			return true
  		}
@@ -4057,7 +4143,7 @@ index 3ad94119..f4cc407d 100644
  		if _, err := w.Write(line); err != nil {
  			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
  			// #762: explicit, even though settleCancelled poisons too — this
-@@ -1284,6 +1352,23 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1284,6 +1356,23 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  			settleCancelled()
  			return false
  		}
@@ -4081,7 +4167,7 @@ index 3ad94119..f4cc407d 100644
  		if flusher != nil {
  			flusher.Flush()
  		}
-@@ -1393,12 +1478,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1393,12 +1482,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  		refundTerminalStructuredError()
  		return
  	}
@@ -4134,7 +4220,7 @@ index 3ad94119..f4cc407d 100644
  	if estimateTokensFromBytes(maxInt64(emitted, serializedEmitted)) > maxStreamingCompletionTokens(maxTokens) {
  		outcome = "stream_output_exceeded"
  	}
-@@ -1912,6 +2036,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
+@@ -1912,6 +2040,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
  }
  
  func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
@@ -4144,7 +4230,7 @@ index 3ad94119..f4cc407d 100644
  	finality := coordinatorSettlementFinalityFromHeaders(h)
  	switch finality.Action {
  	case settlementFinalityLegacy:
-@@ -1965,6 +2092,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
+@@ -1965,6 +2096,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
  }
  
  func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
@@ -4155,7 +4241,7 @@ index 3ad94119..f4cc407d 100644
  	finality := coordinatorStreamingSettlementFinality(resp)
  	switch finality.Action {
  	case settlementFinalityLegacy:
-@@ -2004,6 +2135,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
+@@ -2004,6 +2139,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
  	}
  }
  
@@ -4166,7 +4252,7 @@ index 3ad94119..f4cc407d 100644
  func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
  	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
  	defer cancel()
-@@ -2829,6 +2964,14 @@ type statusWriter struct {
+@@ -2829,6 +2968,14 @@ type statusWriter struct {
  	poisoned bool
  }
  
@@ -4181,7 +4267,7 @@ index 3ad94119..f4cc407d 100644
  // armDedupeCapture starts recording the buyer-visible body, up to limit bytes.
  func (sw *statusWriter) armDedupeCapture(limit int) {
  	sw.captureArmed = true
-@@ -2872,12 +3015,27 @@ func poisonDedupeCapture(w http.ResponseWriter) {
+@@ -2872,12 +3019,27 @@ func poisonDedupeCapture(w http.ResponseWriter) {
  	}
  }
  
@@ -4209,7 +4295,7 @@ index 3ad94119..f4cc407d 100644
  }
  
  func (sw *statusWriter) Write(b []byte) (int, error) {
-@@ -2891,24 +3049,41 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
+@@ -2891,24 +3053,41 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
  	// complete 2xx and replayed to the next retry.
  	n, err := sw.ResponseWriter.Write(b)
  	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
@@ -4257,7 +4343,7 @@ index 3ad94119..f4cc407d 100644
  // Flush satisfies http.Flusher so SSE streaming through this wrapper still
  // flushes chunks to the buyer in real time.
  func (sw *statusWriter) Flush() {
-@@ -2931,7 +3106,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
+@@ -2931,7 +3110,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
  	// #762: an SSE error frame means this 200 stream is NOT a complete
  	// answer. Poison the dedupe capture so an identical id-less retry gets a
  	// fresh dispatch instead of replaying a truncated generation.

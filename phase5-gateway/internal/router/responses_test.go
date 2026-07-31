@@ -190,6 +190,56 @@ func TestResponsesIdlessDedupeStreamingReplaysResponsesWireFormat(t *testing.T) 
 	}
 }
 
+func TestResponsesStreamingTerminalResponseByteCapExceededRetryReplays(t *testing.T) {
+	var hits atomic.Int32
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl_responses_byte_cap","model":"llama","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`,
+		`data: {"error":{"message":"cap hit","type":"api_error","code":"response_byte_cap_exceeded","retryable":true}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_response_byte_cap_replay")
+	body := `{"model":"llama","input":"hi","stream":true,"max_output_tokens":20,"store":false}`
+
+	first := postResponses(t, h, key, body, nil)
+	second := postResponses(t, h, key, body, nil)
+
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("statuses first=%d second=%d bodies:\n%s\n%s", first.Code, second.Code, first.Body.String(), second.Body.String())
+	}
+	if got := second.Header().Get(idlessDedupeHeader); got != idlessDedupeHeaderValue {
+		t.Fatalf("retry %s=%q want %q body=%s", idlessDedupeHeader, got, idlessDedupeHeaderValue, second.Body.String())
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream dispatches=%d want 1", got)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replayed byte-cap stream differs:\n first=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	for _, want := range []string{
+		"event: response.incomplete",
+		`"status":"incomplete"`,
+		`"reason":"max_output_tokens"`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(second.Body.String(), want) {
+			t.Fatalf("replayed byte-cap Responses stream missing %q:\n%s", want, second.Body.String())
+		}
+	}
+	if strings.Contains(second.Body.String(), "event: response.failed") || strings.Contains(second.Body.String(), `"code":"response_byte_cap_exceeded"`) {
+		t.Fatalf("byte-cap terminal leaked as failed error:\n%s", second.Body.String())
+	}
+	gotSettlement := gatewaySettlementSnapshot(t, dbPath, "acct_responses_response_byte_cap_replay")
+	if gotSettlement.usageRows != 1 || gotSettlement.settledRows != 1 || gotSettlement.refundedRows != 0 || gotSettlement.activeRows != 0 {
+		t.Fatalf("settlement=%+v want one settled usage row and no refund", gotSettlement)
+	}
+}
+
 func TestResponsesCodex0146DefaultToolsAreFlattened(t *testing.T) {
 	var capturedBody map[string]any
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

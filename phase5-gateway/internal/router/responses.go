@@ -51,6 +51,7 @@ type responsesAdapter struct {
 	nextOut        int
 	streamUsage    map[string]any
 	finishReason   string
+	streamOutcome  string
 	streamTerminal bool
 	text           strings.Builder
 	textOpen       bool
@@ -188,6 +189,10 @@ func (a *responsesAdapter) beginReplayPassthrough() {
 func (a *responsesAdapter) endReplayPassthrough() {
 	a.passthrough = false
 	a.finished = false
+}
+
+func (a *responsesAdapter) dedupeCleanSSEError(code string) bool {
+	return a.stream && gatewayCleanLengthTruncationTerminalCode(code)
 }
 
 func (a *responsesAdapter) finish() {
@@ -1034,6 +1039,12 @@ func (a *responsesAdapter) emitStreamFailed(errFrame *responsesStreamError) {
 	if code == "" {
 		code = "provider_error"
 	}
+	if gatewayCleanLengthTruncationTerminalCode(code) {
+		a.finishReason = "length"
+		a.streamOutcome = gatewayCleanLengthTruncationSettlementOutcome(code)
+		a.emitStreamDone()
+		return
+	}
 	message := errFrame.Message
 	if message == "" {
 		message = "Upstream provider failed"
@@ -1104,6 +1115,25 @@ func (a *responsesAdapter) writeFinalBytes(p []byte) (int, error) {
 		a.writeErr = err
 	}
 	return n, err
+}
+
+func (a *responsesAdapter) setFallbackStreamUsage(promptTokens, completionTokens int64) {
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	if completionTokens < 0 {
+		completionTokens = 0
+	}
+	if a.streamUsage == nil {
+		a.streamUsage = responsesUsageMap(promptTokens, 0, completionTokens, promptTokens+completionTokens)
+	}
+}
+
+func (a *responsesAdapter) settlementOutcome(defaultOutcome string) string {
+	if a.streamOutcome != "" {
+		return a.streamOutcome
+	}
+	return defaultOutcome
 }
 
 func (a *responsesAdapter) armDedupeCapture(limit int) {

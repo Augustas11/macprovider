@@ -257,7 +257,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if chat.MaxTokens != nil {
 		maxTokens = *chat.MaxTokens
 	}
-	if maxTokens <= 0 || maxTokens > maxAllowed {
+	if maxTokens < 0 || maxTokens > maxAllowed {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens_exceeded", "max_tokens exceeds configured limit")
 		return
 	}
@@ -1207,8 +1207,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				if terminalStructuredErrorCode != "" {
 					return true
 				}
-				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
-					terminalStructuredErrorCode = code
+				terminalCode := terminalSSEErrorCode(data)
+				cleanLengthTerminalFrame := sseErrorDeliveredClean(w, terminalCode)
+				if isSpec019TerminalSSEErrorCode(terminalCode) && !cleanLengthTerminalFrame {
+					terminalStructuredErrorCode = terminalCode
 					// #762: a 200 stream that ends in a SPEC-019 terminal
 					// error envelope is refunded, not an answer. Caching it
 					// would replay a stale provider error to a retry that
@@ -1226,11 +1228,13 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				}
 				anthropicTerminalFrame := false
 				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
-					terminalCode := terminalSSEErrorCode(data)
 					anthropicTerminalFrame = terminalCode != ""
-					if anthropicTerminalErrorCodeIsLengthTruncation(terminalCode) {
+					if gatewayCleanLengthTruncationTerminalCode(terminalCode) {
 						adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
 					}
+				}
+				if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && cleanLengthTerminalFrame {
+					adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
 				}
 				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
@@ -1296,7 +1300,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else {
 						line = nil
 					}
-				} else if !hasChoices && !anthropicTerminalFrame {
+				} else if !hasChoices && !anthropicTerminalFrame && !cleanLengthTerminalFrame {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
 					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
@@ -1365,6 +1369,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return false
 		}
 		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.streamDone && terminalStructuredErrorCode == "" {
+			if reported != nil && !invalidReportedUsage {
+				settleReported(adapter.settlementOutcome("ok"))
+			} else {
+				completion := gatewaySerializedEstimatedCompletion()
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
+			}
+			return false
+		}
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.streamTerminal && terminalStructuredErrorCode == "" {
 			if reported != nil && !invalidReportedUsage {
 				settleReported(adapter.settlementOutcome("ok"))
 			} else {
@@ -2917,6 +2930,22 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
 	}
 }
 
+func gatewayCleanLengthTruncationTerminalCode(code string) bool {
+	switch code {
+	case "stream_output_exceeded", "response_byte_cap_exceeded":
+		return true
+	default:
+		return false
+	}
+}
+
+func gatewayCleanLengthTruncationSettlementOutcome(code string) string {
+	if gatewayCleanLengthTruncationTerminalCode(code) {
+		return "stream_output_exceeded"
+	}
+	return ""
+}
+
 func demoTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -3020,15 +3049,22 @@ func poisonDedupeCapture(w http.ResponseWriter) {
 }
 
 func sseErrorDedupePoisonRequired(w http.ResponseWriter, code string) bool {
+	return !sseErrorDeliveredClean(w, code)
+}
+
+func sseErrorDeliveredClean(w http.ResponseWriter, code string) bool {
+	if code == "" {
+		return false
+	}
 	if sw, ok := w.(*statusWriter); ok {
 		if transformed, ok := sw.ResponseWriter.(cleanSSEErrorDedupeTransformer); ok {
-			return !transformed.dedupeCleanSSEError(code)
+			return transformed.dedupeCleanSSEError(code)
 		}
 	}
 	if transformed, ok := w.(cleanSSEErrorDedupeTransformer); ok {
-		return !transformed.dedupeCleanSSEError(code)
+		return transformed.dedupeCleanSSEError(code)
 	}
-	return true
+	return false
 }
 
 func (sw *statusWriter) WriteHeader(code int) {

@@ -221,7 +221,7 @@ func (a *anthropicMessagesAdapter) drainDedupeCapture() []byte {
 }
 
 func (a *anthropicMessagesAdapter) dedupeCleanSSEError(code string) bool {
-	return a.stream && anthropicTerminalErrorCodeIsLengthTruncation(code)
+	return a.stream && gatewayCleanLengthTruncationTerminalCode(code)
 }
 
 func (a *anthropicMessagesAdapter) finish() {
@@ -344,7 +344,7 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	if strings.TrimSpace(req.Model) == "" {
 		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request", message: "model is required"}
 	}
-	if req.MaxTokens == nil || *req.MaxTokens <= 0 {
+	if req.MaxTokens == nil || *req.MaxTokens < 0 {
 		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request", message: "max_tokens is required"}
 	}
 	if len(req.Messages) == 0 {
@@ -565,7 +565,7 @@ func anthropicValidateContentRaw(path string, raw json.RawMessage, role string) 
 		blockPath := fmt.Sprintf("%s[%d]", path, i)
 		switch typ {
 		case "text":
-			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "text"); err != nil {
+			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "text", "cache_control"); err != nil {
 				return err
 			}
 			if v, ok := m["text"]; ok {
@@ -640,7 +640,7 @@ func anthropicValidateToolResultContentRaw(path string, raw json.RawMessage) err
 		if err != nil {
 			return fmt.Errorf("%s[%d] must be an object", path, i)
 		}
-		if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("%s[%d]", path, i), "type", "text"); err != nil {
+		if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("%s[%d]", path, i), "type", "text", "cache_control"); err != nil {
 			return err
 		}
 		if v, ok := m["type"]; ok {
@@ -1467,12 +1467,13 @@ func (a *anthropicMessagesAdapter) effectiveMessageID() string {
 }
 
 func anthropicStopReason(reason string, hasToolUse bool) string {
+	if reason == "length" {
+		return "max_tokens"
+	}
 	if reason == "tool_calls" || hasToolUse {
 		return "tool_use"
 	}
 	switch reason {
-	case "length":
-		return "max_tokens"
 	case "stop_sequence":
 		return "stop_sequence"
 	case "content_filter":
@@ -1504,24 +1505,23 @@ func anthropicStopSequence(finishReason string, matched *string) any {
 }
 
 func anthropicFinishReasonFromTerminalErrorCode(code string) string {
-	switch code {
-	case "stream_output_exceeded", "response_byte_cap_exceeded":
+	if gatewayCleanLengthTruncationTerminalCode(code) {
 		return "length"
-	default:
-		return "stop"
 	}
+	return "stop"
 }
 
 func anthropicTerminalErrorCodeIsLengthTruncation(code string) bool {
-	return anthropicFinishReasonFromTerminalErrorCode(code) == "length"
+	return gatewayCleanLengthTruncationTerminalCode(code)
 }
 
 func anthropicStreamOutcomeFromTerminalErrorCode(code string) string {
+	if outcome := gatewayCleanLengthTruncationSettlementOutcome(code); outcome != "" {
+		return outcome
+	}
 	switch code {
-	case "stream_output_exceeded", "stream_truncated":
+	case "stream_truncated":
 		return code
-	case "response_byte_cap_exceeded":
-		return "stream_output_exceeded"
 	default:
 		return "invalid_provider_response"
 	}
