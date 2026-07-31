@@ -6,6 +6,7 @@
 **Change log v0.9.13 (2026-07-30, issue #829 — experimental Anthropic Messages facade):**
 - Adds an operator-gated `features.anthropic_messages_enabled` flag, default `false`. When disabled, `POST /v1/messages` is not mounted. When enabled, the gateway accepts a narrow Anthropic Messages compatibility subset and translates it through the existing billed `POST /v1/chat/completions` path; it is not a separate proxy, ledger, routing, or settlement implementation.
 - Supported Anthropic request features are text `system`, text `messages[]`, assistant `tool_use`, user `tool_result`, `tools[].input_schema`, `max_tokens`, `stream`, `tool_choice`, `stop_sequences`, `temperature`, and `top_p`. Unsupported Anthropic features such as images, documents/files, server tools, beta headers, thinking, and `top_k` fail before provider dispatch.
+- The facade best-effort infers `stop_reason: "stop_sequence"` for OpenAI-compatible providers that collapse custom stop matches to `finish_reason: "stop"` only when the returned visible text still has a request `stop_sequences[]` suffix to match and remove. If the provider strips the stop string before returning text and reports only `finish_reason: "stop"`, the matched sequence is not derivable and the facade reports `end_turn` with `stop_sequence: null`.
 - Settlement disclosure includes `POST /v1/messages` only when the feature is enabled, because the facade reuses the same reservation, quota, settlement, sticky routing, cancellation, request-id, and id-less replay path as chat completions. This does not certify full Claude Code or Anthropic SDK product compatibility beyond the supported wire subset.
 
 **Change log v0.9.12 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
@@ -1349,6 +1350,13 @@ Anthropic `message` envelopes with text and `tool_use` content blocks. For
 streaming responses, OpenAI SSE chunks MUST be converted to Anthropic
 `message_start`, `content_block_*`, `message_delta`, and `message_stop` events.
 Tool-call argument deltas MUST be emitted as `input_json_delta` fragments.
+When a request supplied `stop_sequences` and the upstream response reports
+`finish_reason: "stop"` without a provider `stop_sequence`, the facade SHOULD
+infer Anthropic `stop_reason: "stop_sequence"` only from a terminal suffix match
+against returned visible text and SHOULD omit that matched suffix from emitted
+text. If the upstream provider already stripped the sequence, the matched
+sequence is not recoverable from the OpenAI-shaped response and the facade MUST
+fall back to `stop_reason: "end_turn"` with `stop_sequence: null`.
 
 The facade's settlement and retry semantics are exactly the underlying chat
 completion semantics. Successful translated requests MUST reserve quota,

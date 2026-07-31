@@ -135,6 +135,36 @@ func TestAnthropicMessagesNonStreamingIncludesMatchedStopSequence(t *testing.T) 
 	}
 }
 
+func TestAnthropicMessagesNonStreamingInfersStopSequenceFromStopSuffix(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_stopseq_suffix","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"doneSTOP"},"finish_reason":"stop"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_nonstream_stop_suffix")
+
+	resp := postAnthropicMessages(t, h, "", `{"model":"claude","max_tokens":8,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Api-Key": key})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var anth map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
+		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
+	}
+	if anth["stop_reason"] != "stop_sequence" || anth["stop_sequence"] != "STOP" {
+		t.Fatalf("stop reason/sequence=%v/%v want stop_sequence/STOP body=%s", anth["stop_reason"], anth["stop_sequence"], resp.Body.String())
+	}
+	content, _ := anth["content"].([]any)
+	if len(content) != 1 || content[0].(map[string]any)["text"] != "done" {
+		t.Fatalf("content=%v want text without stop sequence", anth["content"])
+	}
+}
+
 func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing.T) {
 	var upstreamHits int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -833,6 +863,35 @@ func TestAnthropicMessagesStreamingIncludesMatchedStopSequence(t *testing.T) {
 	payload, _ := delta["delta"].(map[string]any)
 	if payload["stop_reason"] != "stop_sequence" || payload["stop_sequence"] != "STOP" {
 		t.Fatalf("stream stop reason/sequence=%v/%v want stop_sequence/STOP\n%s", payload["stop_reason"], payload["stop_sequence"], got)
+	}
+}
+
+func TestAnthropicMessagesStreamingInfersStopSequenceFromStopSuffix(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_stop_suffix","model":"claude-stream","choices":[{"delta":{"content":"do"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_stream_stop_suffix","choices":[{"delta":{"content":"neST"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_stream_stop_suffix","choices":[{"delta":{"content":"OP"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_stop_suffix")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := resp.Body.String()
+	delta := anthropicStreamPayloadForEvent(t, got, "message_delta")
+	payload, _ := delta["delta"].(map[string]any)
+	if payload["stop_reason"] != "stop_sequence" || payload["stop_sequence"] != "STOP" {
+		t.Fatalf("stream stop reason/sequence=%v/%v want stop_sequence/STOP\n%s", payload["stop_reason"], payload["stop_sequence"], got)
+	}
+	if text := strings.Join(anthropicTextDeltas(t, got), ""); text != "done" {
+		t.Fatalf("stream text=%q want done\n%s", text, got)
 	}
 }
 
@@ -1878,6 +1937,30 @@ func anthropicInputJSONDeltasByPartial(t *testing.T, stream string) map[string]i
 		}
 		if payload.Delta.Type == "input_json_delta" {
 			out[payload.Delta.PartialJSON] = payload.Index
+		}
+	}
+	return out
+}
+
+func anthropicTextDeltas(t *testing.T, stream string) []string {
+	t.Helper()
+	var out []string
+	for _, line := range strings.Split(stream, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") || !strings.Contains(line, `"text_delta"`) {
+			continue
+		}
+		var payload struct {
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &payload); err != nil {
+			t.Fatalf("decode text delta payload %q: %v", line, err)
+		}
+		if payload.Delta.Type == "text_delta" {
+			out = append(out, payload.Delta.Text)
 		}
 	}
 	return out

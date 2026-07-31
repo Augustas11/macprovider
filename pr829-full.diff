@@ -95,10 +95,10 @@ index 216ae74e..e61910f3 100644
  
 diff --git a/phase5-gateway/internal/router/anthropic_messages.go b/phase5-gateway/internal/router/anthropic_messages.go
 new file mode 100644
-index 00000000..aff2d611
+index 00000000..aeceafff
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages.go
-@@ -0,0 +1,2099 @@
+@@ -0,0 +1,2106 @@
 +package router
 +
 +import (
@@ -409,7 +409,7 @@ index 00000000..aff2d611
 +	}
 +	for key, value := range raw {
 +		switch key {
-+		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata":
++		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata", "service_tier":
 +		case "top_k":
 +			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "top_k is not supported"}
 +		case "thinking", "anthropic_beta":
@@ -542,6 +542,11 @@ index 00000000..aff2d611
 +			return fmt.Errorf("metadata must be an object")
 +		}
 +	}
++	if v, ok := raw["service_tier"]; ok && !anthropicRawIsNull(v) {
++		if err := anthropicValidateRawString(v, "service_tier"); err != nil {
++			return err
++		}
++	}
 +	return nil
 +}
 +
@@ -589,7 +594,7 @@ index 00000000..aff2d611
 +			if err != nil {
 +				return fmt.Errorf("tools[%d] must be an object", i)
 +			}
-+			if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("tools[%d]", i), "type", "name", "description", "input_schema"); err != nil {
++			if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("tools[%d]", i), "type", "name", "description", "input_schema", "cache_control"); err != nil {
 +				return err
 +			}
 +			if v, ok := m["type"]; ok {
@@ -1850,8 +1855,10 @@ index 00000000..aff2d611
 +			if rawName, ok := fn["name"]; ok && rawName != nil && delta.name == "" {
 +				return nil, fmt.Errorf("Upstream provider returned malformed stream tool-call name")
 +			}
-+			if rawArgs, ok := fn["arguments"]; ok && rawArgs != nil && delta.arguments == "" {
-+				return nil, fmt.Errorf("Upstream provider returned malformed stream tool-call arguments")
++			if rawArgs, ok := fn["arguments"]; ok && rawArgs != nil {
++				if _, ok := rawArgs.(string); !ok {
++					return nil, fmt.Errorf("Upstream provider returned malformed stream tool-call arguments")
++				}
 +			}
 +		}
 +		out = append(out, delta)
@@ -2200,10 +2207,10 @@ index 00000000..aff2d611
 +}
 diff --git a/phase5-gateway/internal/router/anthropic_messages_test.go b/phase5-gateway/internal/router/anthropic_messages_test.go
 new file mode 100644
-index 00000000..4c76af10
+index 00000000..5433eafb
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages_test.go
-@@ -0,0 +1,1909 @@
+@@ -0,0 +1,1949 @@
 +package router
 +
 +import (
@@ -2371,8 +2378,6 @@ index 00000000..4c76af10
 +			"input must be an object"},
 +		"array tool input": {`{"model":"claude","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"lookup","input":[]}]}]}`,
 +			"input must be an object"},
-+		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
-+			"cache_control is not supported"},
 +		"hosted tool type": {`{"model":"claude","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`,
 +			"web_search_20250305"},
 +		"numeric model": {`{"model":7,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
@@ -2445,13 +2450,21 @@ index 00000000..4c76af10
 +	}, WithHTTPClient(client))
 +	key := createAccountAndKey(t, store, cfg, "acct_anthropic_cache_control_zero")
 +
-+	body := `{"model":"claude","max_tokens":0,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
++	body := `{"model":"claude","max_tokens":0,"service_tier":"standard_only","tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
 +	resp := postAnthropicMessages(t, h, key, body, nil)
 +	if resp.Code != http.StatusOK {
 +		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 +	}
 +	if got := capturedBody["max_tokens"]; got != float64(0) {
 +		t.Fatalf("translated max_tokens=%v want 0", got)
++	}
++	if _, ok := capturedBody["service_tier"]; ok {
++		t.Fatalf("translated request unexpectedly preserved Anthropic service_tier: %v", capturedBody)
++	}
++	tools := capturedBody["tools"].([]any)
++	fn := tools[0].(map[string]any)["function"].(map[string]any)
++	if fn["name"] != "lookup" {
++		t.Fatalf("translated tool=%v want lookup", tools[0])
 +	}
 +	messages := capturedBody["messages"].([]any)
 +	if got := messages[0].(map[string]any)["content"]; got != "hi" {
@@ -2696,11 +2709,10 @@ index 00000000..4c76af10
 +	}
 +}
 +
-+func TestAnthropicMessagesNonStreamingRejectsDuplicateProviderKeysBeforeUsageRewrite(t *testing.T) {
++func TestAnthropicMessagesNonStreamingDuplicateProviderKeysSettleParsedUsage(t *testing.T) {
 +	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-+		body := `{"id":"chatcmpl_dup","model":"claude",` +
++		body := `{"id":"chatcmpl_dup","object":"chat.completion","object":"chat.completion.chunk","model":"claude",` +
 +			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-+			`"usage":{"prompt_tokens":50,"completion_tokens":70,"total_tokens":120},` +
 +			`"choices":[{"index":0,"message":{"role":"assistant","content":"ambiguous"},"finish_reason":"stop"}]}`
 +		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
 +	})}
@@ -2715,8 +2727,8 @@ index 00000000..4c76af10
 +		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 +	}
 +	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_dup_provider")
-+	if outcome != "invalid_provider_response" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
-+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/gateway_estimated/0/nonzero", outcome, source, completion, prompt)
++	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
++		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 +	}
 +}
 +
@@ -3268,6 +3280,15 @@ index 00000000..4c76af10
 +	if strings.Contains(second.Body.String(), "event: error") || !strings.Contains(second.Body.String(), `"stop_reason":"max_tokens"`) || !strings.Contains(second.Body.String(), "event: message_stop") {
 +		t.Fatalf("replayed cap stream was not a clean max_tokens terminal:\n%s", second.Body.String())
 +	}
++	delta := anthropicStreamPayloadForEvent(t, second.Body.String(), "message_delta")
++	usage, _ := delta["usage"].(map[string]any)
++	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_gateway_cap_replay")
++	if outcome != "stream_output_exceeded" || source != "gateway_estimated" || completion <= 0 || prompt <= 0 {
++		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want stream_output_exceeded/gateway_estimated/nonzero", outcome, source, completion, prompt)
++	}
++	if usage["output_tokens"] != float64(completion) || usage["output_tokens"] == float64(0) {
++		t.Fatalf("visible usage=%v settlement completion=%d want nonzero match", usage, completion)
++	}
 +	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_gateway_cap_replay")
 +	if snap.usageRows != 1 || snap.settledRows != 1 || snap.activeRows != 0 {
 +		t.Fatalf("settlement snapshot=%+v want one settled usage row", snap)
@@ -3456,6 +3477,32 @@ index 00000000..4c76af10
 +	}
 +	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
 +		t.Fatalf("tool_use block or terminal missing:\n%s", body)
++	}
++}
++
++func TestAnthropicMessagesStreamingAllowsEmptyInitialToolArguments(t *testing.T) {
++	stream := `data: {"id":"chatcmpl_empty_args","model":"claude-stream","choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_empty","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}`
++	stream += "\n\n" + `data: {"id":"chatcmpl_empty_args","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
++	stream += "\n\ndata: [DONE]\n\n"
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
++	})}
++	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_empty_initial_tool_args")
++
++	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	body := resp.Body.String()
++	if strings.Contains(body, "event: error") || strings.Contains(body, `"code":"invalid_provider_response"`) {
++		t.Fatalf("empty initial tool arguments were rejected:\n%s", body)
++	}
++	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, `"partial_json":"{\"q\":\"mac\"}"`) || !strings.Contains(body, `"stop_reason":"tool_use"`) {
++		t.Fatalf("tool stream missing expected Anthropic events:\n%s", body)
 +	}
 +}
 +
@@ -4114,7 +4161,7 @@ index 00000000..4c76af10
 +	}
 +}
 diff --git a/phase5-gateway/internal/router/chat_proxy.go b/phase5-gateway/internal/router/chat_proxy.go
-index 3ad94119..77a9bf88 100644
+index 3ad94119..f7fca96e 100644
 --- a/phase5-gateway/internal/router/chat_proxy.go
 +++ b/phase5-gateway/internal/router/chat_proxy.go
 @@ -138,13 +138,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -4189,21 +4236,45 @@ index 3ad94119..77a9bf88 100644
  	promptReservation := promptCapTokens(body)
  	reservationTokens := promptReservation + maxTokens
  	if reservationTokens < maxTokens {
-@@ -861,6 +880,13 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
+@@ -861,18 +880,34 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
  		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
  		return
  	}
++	anthropicDuplicateProviderResponse := false
 +	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
-+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_response", resp.Header) {
++		anthropicDuplicateProviderResponse = true
++	}
+ 	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
+ 	tokenSource := "gateway_estimated"
+ 	if !ok {
+ 		usage = tokenUsage{PromptTokens: promptEstimate, CachedPromptTokens: 0, CompletionTokens: 0, TotalTokens: promptEstimate}
+-	} else if usageErr != nil {
++	} else if usageErr == nil {
++		tokenSource = "provider_reported"
++	}
++	if anthropicDuplicateProviderResponse {
++		settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
++		if ok && usageErr == nil {
++			settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
++		}
++		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
 +			return
 +		}
 +		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
 +		return
 +	}
- 	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
- 	tokenSource := "gateway_estimated"
- 	if !ok {
-@@ -888,6 +914,15 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
++	if usageErr != nil {
+ 		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
+ 			return
+ 		}
+ 		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_usage", "Upstream provider returned invalid usage")
+ 		return
+-	} else {
+-		tokenSource = "provider_reported"
+ 	}
+ 	body = usageBodyWithTokenUsage(body, usage)
+ 	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
+@@ -888,6 +923,15 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
  			return
  		}
  	}
@@ -4219,7 +4290,49 @@ index 3ad94119..77a9bf88 100644
  	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
  		return
  	}
-@@ -1172,8 +1207,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1065,7 +1109,31 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+ 	gatewaySerializedEstimatedCompletion := func() int64 {
+ 		return estimateStreamingCompletionTokens(maxInt64(emitted, serializedEmitted), maxTokens)
+ 	}
+-	settleGatewayTerminalOutputExceeded := func() {
++	cleanLengthFallbackCompletion := func(observedBytes int64) int64 {
++		completion := estimateStreamingCompletionTokens(maxInt64(maxInt64(emitted, serializedEmitted), observedBytes), maxTokens)
++		if completion == 0 && maxTokens > 0 {
++			return 1
++		}
++		return completion
++	}
++	setCleanLengthFallbackUsage := func(completion int64) {
++		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
++			adapter.setFallbackStreamUsage(promptEstimate, completion)
++		}
++		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
++			adapter.setFallbackStreamUsage(promptEstimate, completion)
++		}
++	}
++	cleanLengthFacadeCompletion := func(completion int64) int64 {
++		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
++			return completion
++		}
++		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
++			return completion
++		}
++		return 0
++	}
++	settleGatewayTerminalOutputExceeded := func(completion int64) {
+ 		// This is a gateway-authored terminal SSE error. The gateway cancels
+ 		// the coordinator stream before EOF, so declared settlement trailers
+ 		// may be unavailable and must not rewrite the buyer-visible outcome.
+@@ -1084,7 +1152,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+ 			}
+ 			return
+ 		}
+-		s.settleAfterCommit(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
++		s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
+ 	}
+ 	settleTruncated := func() {
+ 		if reported != nil {
+@@ -1172,8 +1240,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  				if terminalStructuredErrorCode != "" {
  					return true
  				}
@@ -4232,7 +4345,7 @@ index 3ad94119..77a9bf88 100644
  					// #762: a 200 stream that ends in a SPEC-019 terminal
  					// error envelope is refunded, not an answer. Caching it
  					// would replay a stale provider error to a retry that
-@@ -1189,6 +1226,42 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1189,6 +1259,42 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  					}
  					return true
  				}
@@ -4240,11 +4353,11 @@ index 3ad94119..77a9bf88 100644
 +				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
 +					anthropicTerminalFrame = terminalCode != ""
 +					if gatewayCleanLengthTruncationTerminalCode(terminalCode) {
-+						adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
++						adapter.setFallbackStreamUsage(promptEstimate, cleanLengthFallbackCompletion(0))
 +					}
 +				}
 +				if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && cleanLengthTerminalFrame {
-+					adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
++					adapter.setFallbackStreamUsage(promptEstimate, cleanLengthFallbackCompletion(0))
 +				}
 +				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 +					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
@@ -4275,7 +4388,7 @@ index 3ad94119..77a9bf88 100644
  				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
  				if deltaBytes > 0 {
  					// #760: CONTENT progress, not byte progress. Only a frame
-@@ -1227,7 +1300,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1227,7 +1333,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  					} else {
  						line = nil
  					}
@@ -4284,7 +4397,36 @@ index 3ad94119..77a9bf88 100644
  					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
  					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
  					if flusher != nil {
-@@ -1275,6 +1348,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1249,22 +1355,26 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+ 					}
+ 					if projectedContentBytes > hardByteCeiling {
+ 						slog.Warn("streaming gateway estimate exceeded hard byte ceiling; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", estimateTokensFromBytes(projectedContentBytes), "max_completion_tokens", maxCompletion, "emitted_bytes", projectedContentBytes, "hard_byte_ceiling", hardByteCeiling)
++						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
++						setCleanLengthFallbackUsage(completion)
+ 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
+ 						if flusher != nil {
+ 							flusher.Flush()
+ 						}
+ 						cancelCoordinator()
+-						settleGatewayTerminalOutputExceeded()
++						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
+ 						return false
+ 					}
+ 					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
+ 						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", maxStreamingFallbackMetadataBytes)
++						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
++						setCleanLengthFallbackUsage(completion)
+ 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
+ 						if flusher != nil {
+ 							flusher.Flush()
+ 						}
+ 						cancelCoordinator()
+-						settleGatewayTerminalOutputExceeded()
++						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
+ 						return false
+ 					}
+ 					emitted = projectedContentBytes
+@@ -1275,6 +1385,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  		if len(line) == 0 {
  			return true
  		}
@@ -4294,7 +4436,7 @@ index 3ad94119..77a9bf88 100644
  		if _, err := w.Write(line); err != nil {
  			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
  			// #762: explicit, even though settleCancelled poisons too — this
-@@ -1284,6 +1360,32 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1284,6 +1397,40 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  			settleCancelled()
  			return false
  		}
@@ -4310,8 +4452,12 @@ index 3ad94119..77a9bf88 100644
 +			if reported != nil && !invalidReportedUsage {
 +				settleReported(adapter.settlementOutcome("ok"))
 +			} else {
++				outcome := adapter.settlementOutcome("ok")
 +				completion := gatewaySerializedEstimatedCompletion()
-+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
++				if outcome == "stream_output_exceeded" {
++					completion = cleanLengthFallbackCompletion(0)
++				}
++				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 +			}
 +			return false
 +		}
@@ -4319,15 +4465,19 @@ index 3ad94119..77a9bf88 100644
 +			if reported != nil && !invalidReportedUsage {
 +				settleReported(adapter.settlementOutcome("ok"))
 +			} else {
++				outcome := adapter.settlementOutcome("ok")
 +				completion := gatewaySerializedEstimatedCompletion()
-+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
++				if outcome == "stream_output_exceeded" {
++					completion = cleanLengthFallbackCompletion(0)
++				}
++				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 +			}
 +			return false
 +		}
  		if flusher != nil {
  			flusher.Flush()
  		}
-@@ -1393,12 +1495,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1393,12 +1540,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  		refundTerminalStructuredError()
  		return
  	}
@@ -4380,7 +4530,7 @@ index 3ad94119..77a9bf88 100644
  	if estimateTokensFromBytes(maxInt64(emitted, serializedEmitted)) > maxStreamingCompletionTokens(maxTokens) {
  		outcome = "stream_output_exceeded"
  	}
-@@ -1912,6 +2053,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
+@@ -1912,6 +2098,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
  }
  
  func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
@@ -4390,7 +4540,7 @@ index 3ad94119..77a9bf88 100644
  	finality := coordinatorSettlementFinalityFromHeaders(h)
  	switch finality.Action {
  	case settlementFinalityLegacy:
-@@ -1965,6 +2109,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
+@@ -1965,6 +2154,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
  }
  
  func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
@@ -4401,7 +4551,7 @@ index 3ad94119..77a9bf88 100644
  	finality := coordinatorStreamingSettlementFinality(resp)
  	switch finality.Action {
  	case settlementFinalityLegacy:
-@@ -2004,6 +2152,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
+@@ -2004,6 +2197,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
  	}
  }
  
@@ -4412,7 +4562,7 @@ index 3ad94119..77a9bf88 100644
  func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
  	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
  	defer cancel()
-@@ -2778,6 +2930,22 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
+@@ -2778,6 +2975,22 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
  	}
  }
  
@@ -4435,7 +4585,7 @@ index 3ad94119..77a9bf88 100644
  func demoTokenHash(token string) string {
  	sum := sha256.Sum256([]byte(token))
  	return hex.EncodeToString(sum[:])
-@@ -2829,6 +2997,14 @@ type statusWriter struct {
+@@ -2829,6 +3042,14 @@ type statusWriter struct {
  	poisoned bool
  }
  
@@ -4450,7 +4600,7 @@ index 3ad94119..77a9bf88 100644
  // armDedupeCapture starts recording the buyer-visible body, up to limit bytes.
  func (sw *statusWriter) armDedupeCapture(limit int) {
  	sw.captureArmed = true
-@@ -2872,12 +3048,34 @@ func poisonDedupeCapture(w http.ResponseWriter) {
+@@ -2872,12 +3093,34 @@ func poisonDedupeCapture(w http.ResponseWriter) {
  	}
  }
  
@@ -4485,7 +4635,7 @@ index 3ad94119..77a9bf88 100644
  }
  
  func (sw *statusWriter) Write(b []byte) (int, error) {
-@@ -2891,24 +3089,41 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
+@@ -2891,24 +3134,41 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
  	// complete 2xx and replayed to the next retry.
  	n, err := sw.ResponseWriter.Write(b)
  	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
@@ -4533,7 +4683,7 @@ index 3ad94119..77a9bf88 100644
  // Flush satisfies http.Flusher so SSE streaming through this wrapper still
  // flushes chunks to the buyer in real time.
  func (sw *statusWriter) Flush() {
-@@ -2931,7 +3146,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
+@@ -2931,7 +3191,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
  	// #762: an SSE error frame means this 200 stream is NOT a complete
  	// answer. Poison the dedupe capture so an identical id-less retry gets a
  	// fresh dispatch instead of replaying a truncated generation.

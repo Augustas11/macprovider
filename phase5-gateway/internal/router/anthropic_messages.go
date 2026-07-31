@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type anthropicMessagesAdapterContextKey struct{}
@@ -49,6 +50,9 @@ type anthropicMessagesAdapter struct {
 	streamOutcome      string
 	terminalStopReason string
 	stopSequence       *string
+	stopSequences      []string
+	maxStopSequenceLen int
+	streamTextTail     string
 	streamRefusal      bool
 	finished           bool
 	replayBody         bool
@@ -397,6 +401,8 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	}
 	a.model = req.Model
 	a.stream = req.Stream
+	a.stopSequences = anthropicNonEmptyStopSequences(req.StopSequences)
+	a.maxStopSequenceLen = anthropicMaxStopSequenceLen(a.stopSequences)
 	return translated, nil
 }
 
@@ -990,14 +996,29 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 	if choice.FinishReason == "tool_calls" && !hasToolCalls {
 		return nil, fmt.Errorf("finish_reason %q requires at least one tool call", choice.FinishReason)
 	}
-	stopReason, err := anthropicStopReasonStrict(choice.FinishReason, hasToolCalls)
+	finishReason := choice.FinishReason
+	stopSequence := choice.StopSequence
+	stopReason, err := anthropicStopReasonStrict(finishReason, hasToolCalls)
 	if err != nil {
 		return nil, err
 	}
 	if text, err := anthropicResponseContentToText(choice.Message.Content); err != nil {
 		return nil, err
-	} else if text = anthropicStripThinkBlocks(text); text != "" {
-		content = append(content, map[string]any{"type": "text", "text": text})
+	} else {
+		text = anthropicStripThinkBlocks(text)
+		if finishReason == "stop_sequence" && stopSequence != nil {
+			text, _ = anthropicTrimStopSequenceSuffix(text, *stopSequence)
+		} else if finishReason == "stop" {
+			if visible, matched := anthropicTextWithoutMatchedStopSequence(text, a.stopSequences); matched != nil {
+				text = visible
+				stopSequence = matched
+				finishReason = "stop_sequence"
+				stopReason = "stop_sequence"
+			}
+		}
+		if text != "" {
+			content = append(content, map[string]any{"type": "text", "text": text})
+		}
 	}
 	if refusal := strings.TrimSpace(choice.Message.Refusal); refusal != "" {
 		if len(content) == 0 {
@@ -1047,7 +1068,7 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 		"content":       content,
 		"model":         model,
 		"stop_reason":   stopReason,
-		"stop_sequence": anthropicStopSequence(choice.FinishReason, choice.StopSequence),
+		"stop_sequence": anthropicStopSequence(finishReason, stopSequence),
 		"usage": anthropicUsage{
 			InputTokens:  chat.Usage.PromptTokens,
 			OutputTokens: chat.Usage.CompletionTokens,
@@ -1200,6 +1221,18 @@ func (a *anthropicMessagesAdapter) emitTextDelta(text string) {
 	if text == "" || a.streamDone {
 		return
 	}
+	if a.maxStopSequenceLen > 0 {
+		a.streamTextTail += text
+		a.flushStreamTextTail(false)
+		return
+	}
+	a.emitRawTextDelta(text)
+}
+
+func (a *anthropicMessagesAdapter) emitRawTextDelta(text string) {
+	if text == "" || a.streamDone {
+		return
+	}
 	a.closeToolBlocks()
 	if !a.textOpen {
 		a.emitSSE("content_block_start", map[string]any{
@@ -1214,10 +1247,43 @@ func (a *anthropicMessagesAdapter) emitTextDelta(text string) {
 	})
 }
 
+func (a *anthropicMessagesAdapter) flushStreamTextTail(final bool) *string {
+	if a.streamTextTail == "" {
+		return nil
+	}
+	if final {
+		text := a.streamTextTail
+		a.streamTextTail = ""
+		if a.finishReason == "stop_sequence" && a.stopSequence != nil && a.terminalStopReason == "" {
+			visible, _ := anthropicTrimStopSequenceSuffix(text, *a.stopSequence)
+			if visible != "" {
+				a.emitRawTextDelta(visible)
+			}
+			return nil
+		}
+		if a.finishReason == "stop" && a.terminalStopReason == "" {
+			visible, matched := anthropicTextWithoutMatchedStopSequence(text, a.stopSequences)
+			if visible != "" {
+				a.emitRawTextDelta(visible)
+			}
+			return matched
+		}
+		a.emitRawTextDelta(text)
+		return nil
+	}
+	prefix, tail := anthropicSplitStopSequenceTail(a.streamTextTail, a.maxStopSequenceLen)
+	if prefix != "" {
+		a.emitRawTextDelta(prefix)
+	}
+	a.streamTextTail = tail
+	return nil
+}
+
 func (a *anthropicMessagesAdapter) emitToolCallDelta(index int, id, name, arguments string) {
 	if a.streamDone || a.streamInvalid != nil {
 		return
 	}
+	a.flushStreamTextTail(true)
 	if a.textOpen {
 		a.closeTextBlock()
 	}
@@ -1326,6 +1392,10 @@ func (a *anthropicMessagesAdapter) emitTerminalMessageStop() {
 	}
 	if remainder := a.flushThinkRemainder(); remainder != "" {
 		a.emitTextDelta(remainder)
+	}
+	if matched := a.flushStreamTextTail(true); matched != nil {
+		a.finishReason = "stop_sequence"
+		a.stopSequence = matched
 	}
 	if a.textOpen {
 		a.closeTextBlock()
@@ -1507,6 +1577,67 @@ func anthropicStopSequence(finishReason string, matched *string) any {
 		return nil
 	}
 	return *matched
+}
+
+func anthropicNonEmptyStopSequences(sequences []string) []string {
+	if len(sequences) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(sequences))
+	for _, sequence := range sequences {
+		if sequence != "" {
+			out = append(out, sequence)
+		}
+	}
+	return out
+}
+
+func anthropicMaxStopSequenceLen(sequences []string) int {
+	maxLen := 0
+	for _, sequence := range sequences {
+		if len(sequence) > maxLen {
+			maxLen = len(sequence)
+		}
+	}
+	return maxLen
+}
+
+func anthropicTextWithoutMatchedStopSequence(text string, sequences []string) (string, *string) {
+	best := ""
+	for _, sequence := range sequences {
+		if sequence == "" {
+			continue
+		}
+		if strings.HasSuffix(text, sequence) && len(sequence) > len(best) {
+			best = sequence
+		}
+	}
+	if best == "" {
+		return text, nil
+	}
+	matched := best
+	return text[:len(text)-len(best)], &matched
+}
+
+func anthropicTrimStopSequenceSuffix(text, sequence string) (string, bool) {
+	if sequence == "" || !strings.HasSuffix(text, sequence) {
+		return text, false
+	}
+	return text[:len(text)-len(sequence)], true
+}
+
+func anthropicSplitStopSequenceTail(text string, maxTailBytes int) (string, string) {
+	if maxTailBytes <= 0 {
+		return text, ""
+	}
+	if len(text) <= maxTailBytes {
+		return "", text
+	}
+	cut := len(text) - maxTailBytes
+	for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut], text[cut:]
 }
 
 func anthropicFinishReasonFromTerminalErrorCode(code string) string {
