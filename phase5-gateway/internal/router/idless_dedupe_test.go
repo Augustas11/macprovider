@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -138,6 +139,16 @@ func assertNoDedupeReplay(t *testing.T, resp *httptest.ResponseRecorder, what st
 	if got := resp.Header().Get(idlessDedupeHeader); got != "" {
 		t.Fatalf("%s: unexpected %s=%q (this attempt must not be a replay)", what, idlessDedupeHeader, got)
 	}
+}
+
+func translatedResponsesChatBodyForDedupeTest(t *testing.T, responsesBody string) string {
+	t.Helper()
+	adapter := newResponsesAdapter(httptest.NewRecorder(), newUUID(), nil)
+	translated, err := adapter.translateRequest([]byte(responsesBody))
+	if err != nil {
+		t.Fatalf("translate Responses request for collision fixture: %v", err)
+	}
+	return string(translated)
 }
 
 // ---- replay + coalesce (the fix) -------------------------------------------
@@ -602,6 +613,100 @@ func TestIdlessDedupe_DifferentBodyNotDeduped(t *testing.T) {
 	}
 }
 
+func TestIdlessDedupe_ResponsesThenChatDoNotShareFingerprint(t *testing.T) {
+	var hits atomic.Int32
+	var firstUpstreamBody string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/chat/completions" {
+			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+		}
+		raw, _ := io.ReadAll(r.Body)
+		if hits.Load() == 0 {
+			firstUpstreamBody = string(raw)
+		}
+		hits.Add(1)
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_cross_endpoint",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"cross endpoint answer"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_idless_responses_then_chat")
+	responsesBody := `{"model":"llama","input":"hi","max_output_tokens":20,"store":false}`
+
+	first := postResponses(t, h, key, responsesBody, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("Responses attempt status=%d body=%s", first.Code, first.Body.String())
+	}
+	if firstUpstreamBody == "" {
+		t.Fatal("Responses attempt did not reach upstream")
+	}
+	second := postChat(t, h, key, firstUpstreamBody, nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("chat attempt status=%d body=%s", second.Code, second.Body.String())
+	}
+	assertNoDedupeReplay(t, second, "chat after Responses")
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream dispatches=%d want 2", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode chat response: %v body=%s", err, second.Body.String())
+	}
+	if payload["object"] != "chat.completion" {
+		t.Fatalf("chat response object=%v want chat.completion body=%s", payload["object"], second.Body.String())
+	}
+}
+
+func TestIdlessDedupe_ChatThenResponsesDoNotShareFingerprint(t *testing.T) {
+	var hits atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/chat/completions" {
+			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
+		}
+		hits.Add(1)
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_cross_endpoint",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"cross endpoint answer"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_idless_chat_then_responses")
+	responsesBody := `{"model":"llama","input":"hi","max_output_tokens":20,"store":false}`
+	chatBody := translatedResponsesChatBodyForDedupeTest(t, responsesBody)
+
+	first := postChat(t, h, key, chatBody, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("chat attempt status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := postResponses(t, h, key, responsesBody, nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("Responses attempt status=%d body=%s", second.Code, second.Body.String())
+	}
+	assertNoDedupeReplay(t, second, "Responses after chat")
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream dispatches=%d want 2", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode Responses response: %v body=%s", err, second.Body.String())
+	}
+	if payload["object"] != "response" {
+		t.Fatalf("Responses object=%v want response body=%s", payload["object"], second.Body.String())
+	}
+	if strings.Contains(second.Body.String(), `"choices"`) {
+		t.Fatalf("Responses endpoint returned chat wire format: %s", second.Body.String())
+	}
+}
+
 // ---- opt-outs: higher-precedence dedupe owns the request -------------------
 
 // A client-supplied UUID X-Request-ID already deduped durably (harness H5b).
@@ -978,17 +1083,18 @@ func TestIdlessDedupeIndex_WaiterCapAndContextExpiry(t *testing.T) {
 }
 
 func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
-	base := idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
+	base := idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
 	cases := map[string]string{
-		"same inputs":         idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other account":       idlessRequestFingerprint("acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other demo token":    idlessRequestFingerprint("acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
-		"other conversation":  idlessRequestFingerprint("acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),
-		"retry hint present":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", "1", []byte(`{"a":1}`)),
-		"other retry hint":    idlessRequestFingerprint("acct", "demo-hash", "thread-1", "2", []byte(`{"a":1}`)),
-		"other body":          idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a":2}`)),
-		"whitespace in body":  idlessRequestFingerprint("acct", "demo-hash", "thread-1", "", []byte(`{"a": 1}`)),
-		"field-shifted parts": idlessRequestFingerprint("acc", "tdemo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"same inputs":         idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other entrypoint":    idlessRequestFingerprint(idlessDedupeEntrypointResponses, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other account":       idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other demo token":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
+		"other conversation":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),
+		"retry hint present":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "1", []byte(`{"a":1}`)),
+		"other retry hint":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "2", []byte(`{"a":1}`)),
+		"other body":          idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":2}`)),
+		"whitespace in body":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a": 1}`)),
+		"field-shifted parts": idlessRequestFingerprint(idlessDedupeEntrypointChat, "acc", "tdemo-hash", "thread-1", "", []byte(`{"a":1}`)),
 	}
 	for name, got := range cases {
 		if name == "same inputs" {

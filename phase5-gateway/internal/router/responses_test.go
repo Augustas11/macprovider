@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
@@ -104,6 +105,91 @@ func TestResponsesNonStreamingTranslatesThroughChatPipeline(t *testing.T) {
 	}
 }
 
+func TestResponsesIdlessDedupeNonStreamingReplaysResponsesWireFormat(t *testing.T) {
+	var hits atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_idless_responses",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"responses answer"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_idless_nonstream")
+	body := `{"model":"llama","input":"hi","max_output_tokens":20,"store":false}`
+
+	first := postResponses(t, h, key, body, nil)
+	second := postResponses(t, h, key, body, nil)
+
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("statuses first=%d second=%d second_body=%s", first.Code, second.Code, second.Body.String())
+	}
+	if got := second.Header().Get(idlessDedupeHeader); got != idlessDedupeHeaderValue {
+		t.Fatalf("retry %s=%q want %q", idlessDedupeHeader, got, idlessDedupeHeaderValue)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream dispatches=%d want 1", got)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replayed body differs:\n first=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	if strings.Contains(second.Body.String(), `"chat.completion"`) || strings.Contains(second.Body.String(), `"choices"`) {
+		t.Fatalf("replayed chat wire format on Responses endpoint:\n%s", second.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("replayed response is not JSON: %v body=%s", err, second.Body.String())
+	}
+	if payload["object"] != "response" {
+		t.Fatalf("replayed object=%v want response body=%s", payload["object"], second.Body.String())
+	}
+}
+
+func TestResponsesIdlessDedupeStreamingReplaysResponsesWireFormat(t *testing.T) {
+	var hits atomic.Int32
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl_idless_stream","model":"llama","choices":[{"delta":{"content":"hel"}}]}`,
+		`data: {"id":"chatcmpl_idless_stream","model":"llama","usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6},"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits.Add(1)
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_idless_stream")
+	body := `{"model":"llama","input":"hi","stream":true,"max_output_tokens":20,"store":false}`
+
+	first := postResponses(t, h, key, body, nil)
+	second := postResponses(t, h, key, body, nil)
+
+	if first.Code != http.StatusOK || second.Code != http.StatusOK {
+		t.Fatalf("statuses first=%d second=%d second_body=%s", first.Code, second.Code, second.Body.String())
+	}
+	if got := second.Header().Get(idlessDedupeHeader); got != idlessDedupeHeaderValue {
+		t.Fatalf("retry %s=%q want %q", idlessDedupeHeader, got, idlessDedupeHeaderValue)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream dispatches=%d want 1", got)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("replayed stream differs:\n first=%s\nsecond=%s", first.Body.String(), second.Body.String())
+	}
+	for _, want := range []string{"event: response.created", "event: response.output_text.delta", "event: response.completed", "data: [DONE]"} {
+		if !strings.Contains(second.Body.String(), want) {
+			t.Fatalf("replayed Responses stream missing %q:\n%s", want, second.Body.String())
+		}
+	}
+	if strings.Contains(second.Body.String(), `"choices"`) {
+		t.Fatalf("replayed chat SSE on Responses endpoint:\n%s", second.Body.String())
+	}
+}
+
 func TestResponsesCodex0146DefaultToolsAreFlattened(t *testing.T) {
 	var capturedBody map[string]any
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -161,6 +247,13 @@ func TestResponsesCodex0146DefaultToolsAreFlattened(t *testing.T) {
 	if _, ok := capturedBody["reasoning"]; ok {
 		t.Fatalf("forwarded Responses reasoning control: %v", capturedBody["reasoning"])
 	}
+	var responseBody map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &responseBody); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, resp.Body.String())
+	}
+	if got, ok := responseBody["parallel_tool_calls"].(bool); !ok || got {
+		t.Fatalf("response parallel_tool_calls=%v want false", responseBody["parallel_tool_calls"])
+	}
 	tools := capturedBody["tools"].([]any)
 	wantNames := []string{
 		"exec_command",
@@ -201,6 +294,27 @@ func TestResponsesCodex0146DefaultToolsAreFlattened(t *testing.T) {
 			t.Fatalf("missing forwarded tool %q in %v", name, tools)
 		}
 	}
+	responseTools := responseBody["tools"].([]any)
+	if len(responseTools) != len(wantNames) {
+		t.Fatalf("response tool count=%d want %d tools=%v", len(responseTools), len(wantNames), responseTools)
+	}
+	responseToolNames := make(map[string]bool, len(responseTools))
+	for _, raw := range responseTools {
+		tool := raw.(map[string]any)
+		if tool["type"] != "function" {
+			t.Fatalf("response echoed non-function tool: %v", tool)
+		}
+		name := tool["name"].(string)
+		if name == "multi_agent_v1" || name == "web_search" {
+			t.Fatalf("response echoed dropped tool %q in %v", name, responseTools)
+		}
+		responseToolNames[name] = true
+	}
+	for _, name := range wantNames {
+		if !responseToolNames[name] {
+			t.Fatalf("response missing echoed forwarded tool %q in %v", name, responseTools)
+		}
+	}
 }
 
 func TestResponsesUnknownHostedToolTypeIsAcceptedAndDropped(t *testing.T) {
@@ -234,6 +348,13 @@ func TestResponsesUnknownHostedToolTypeIsAcceptedAndDropped(t *testing.T) {
 	if _, ok := capturedBody["tools"]; ok {
 		t.Fatalf("forwarded tools for dropped hosted tool: %v", capturedBody["tools"])
 	}
+	var responseBody map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &responseBody); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, resp.Body.String())
+	}
+	if tools, ok := responseBody["tools"].([]any); ok && len(tools) > 0 {
+		t.Fatalf("response echoed dropped hosted tool: %v", tools)
+	}
 }
 
 func TestResponsesNonStreamingLengthFinishReasonIsIncomplete(t *testing.T) {
@@ -263,11 +384,112 @@ func TestResponsesNonStreamingLengthFinishReasonIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestResponsesNonStreamingContentFilterFinishReasonIsIncomplete(t *testing.T) {
+	adapter := newResponsesAdapter(httptest.NewRecorder(), "28282828-2828-4282-8282-282828282828", nil)
+	adapter.model = "llama"
+
+	body, err := adapter.translateNonStreamingResponse([]byte(`{
+		"id":"chatcmpl_content_filter",
+		"created":1782864000,
+		"model":"llama",
+		"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9},
+		"choices":[{"message":{"role":"assistant","content":"filtered partial"},"finish_reason":"content_filter"}]
+	}`))
+	if err != nil {
+		t.Fatalf("translate response: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("responses json: %v", err)
+	}
+	if resp["status"] != "incomplete" {
+		t.Fatalf("status=%v want incomplete body=%s", resp["status"], string(body))
+	}
+	details := resp["incomplete_details"].(map[string]any)
+	if details["reason"] != "content_filter" {
+		t.Fatalf("incomplete_details=%v want content_filter", details)
+	}
+}
+
+func TestResponsesNonStreamingTranslatesRefusal(t *testing.T) {
+	adapter := newResponsesAdapter(httptest.NewRecorder(), "26262626-2626-4262-8262-262626262626", nil)
+	adapter.model = "llama"
+
+	body, err := adapter.translateNonStreamingResponse([]byte(`{
+		"id":"chatcmpl_refusal",
+		"created":1782864000,
+		"model":"llama",
+		"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9},
+		"choices":[{"message":{"role":"assistant","refusal":"I cannot help with that."},"finish_reason":"stop"}]
+	}`))
+	if err != nil {
+		t.Fatalf("translate response: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("responses json: %v body=%s", err, string(body))
+	}
+	output := resp["output"].([]any)
+	message := output[0].(map[string]any)
+	content := message["content"].([]any)
+	if got := content[0].(map[string]any)["text"]; got != "I cannot help with that." {
+		t.Fatalf("refusal text=%v want visible refusal body=%s", got, string(body))
+	}
+}
+
+func TestResponsesNonStreamingTranslatesLegacyFunctionCall(t *testing.T) {
+	adapter := newResponsesAdapter(httptest.NewRecorder(), "27272727-2727-4272-8272-272727272727", nil)
+	adapter.model = "llama"
+
+	body, err := adapter.translateNonStreamingResponse([]byte(`{
+		"id":"chatcmpl_legacy_function_call",
+		"created":1782864000,
+		"model":"llama",
+		"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9},
+		"choices":[{"message":{"role":"assistant","function_call":{"name":"lookup","arguments":"{\"q\":\"hi\"}"}},"finish_reason":"function_call"}]
+	}`))
+	if err != nil {
+		t.Fatalf("translate response: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("responses json: %v body=%s", err, string(body))
+	}
+	output := resp["output"].([]any)
+	call := output[0].(map[string]any)
+	if call["type"] != "function_call" || call["name"] != "lookup" || call["arguments"] != `{"q":"hi"}` {
+		t.Fatalf("legacy function_call not translated: %v body=%s", call, string(body))
+	}
+}
+
+func TestResponsesNonStreamingStripsUnterminatedThinkBlock(t *testing.T) {
+	adapter := newResponsesAdapter(httptest.NewRecorder(), "25252525-2525-4252-8252-252525252525", nil)
+	adapter.model = "llama"
+
+	body, err := adapter.translateNonStreamingResponse([]byte(`{
+		"id":"chatcmpl_truncated_think",
+		"created":1782864000,
+		"model":"llama",
+		"usage":{"prompt_tokens":5,"completion_tokens":20,"total_tokens":25},
+		"choices":[{"message":{"role":"assistant","content":"visible <think>secret"},"finish_reason":"length"}]
+	}`))
+	if err != nil {
+		t.Fatalf("translate response: %v", err)
+	}
+	if strings.Contains(string(body), "secret") || strings.Contains(string(body), "<think") {
+		t.Fatalf("unterminated think block leaked: %s", string(body))
+	}
+	if !strings.Contains(string(body), `"text":"visible"`) {
+		t.Fatalf("visible text missing after think strip: %s", string(body))
+	}
+}
+
 func TestResponsesRejectsUnsupportedStateBeforeReservation(t *testing.T) {
 	tests := []struct {
-		name string
-		body string
-		code string
+		name  string
+		body  string
+		code  string
+		param string
 	}{
 		{name: "store_true", body: `{"model":"llama","input":"hi","store":true}`, code: "unsupported_parameter"},
 		{name: "previous_response_id", body: `{"model":"llama","input":"hi","store":false,"previous_response_id":"resp_123"}`, code: "unsupported_parameter"},
@@ -276,6 +498,9 @@ func TestResponsesRejectsUnsupportedStateBeforeReservation(t *testing.T) {
 		{name: "conversation", body: `{"model":"llama","input":"hi","store":false,"conversation":{"id":"conv_123"}}`, code: "unsupported_parameter"},
 		{name: "background", body: `{"model":"llama","input":"hi","store":false,"background":true}`, code: "unsupported_parameter"},
 		{name: "truncation_auto", body: `{"model":"llama","input":"hi","store":false,"truncation":"auto"}`, code: "unsupported_parameter"},
+		{name: "required_tool_choice_only_dropped_tool", body: `{"model":"llama","input":"hi","store":false,"tool_choice":"required","tools":[{"type":"future_hosted_tool","name":"future_search"}]}`, code: "unsupported_parameter", param: "tool_choice"},
+		{name: "specific_tool_choice_missing_flattened_tool", body: `{"model":"llama","input":"hi","store":false,"tool_choice":{"type":"function","name":"missing"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`, code: "unsupported_parameter", param: "tool_choice"},
+		{name: "colliding_flattened_tool_names", body: `{"model":"llama","input":"hi","store":false,"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"namespace","name":"ns","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]}`, code: "unsupported_parameter", param: "tools"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -294,6 +519,19 @@ func TestResponsesRejectsUnsupportedStateBeforeReservation(t *testing.T) {
 				t.Fatalf("status=%d want 400 body=%s", resp.Code, resp.Body.String())
 			}
 			assertErrorCode(t, resp.Body.String(), tc.code)
+			if tc.param != "" {
+				var payload struct {
+					Error struct {
+						Param any `json:"param"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("decode error response: %v body=%s", err, resp.Body.String())
+				}
+				if payload.Error.Param != tc.param {
+					t.Fatalf("error param=%v want %s body=%s", payload.Error.Param, tc.param, resp.Body.String())
+				}
+			}
 			if called {
 				t.Fatalf("coordinator was called for rejected request")
 			}
@@ -413,6 +651,118 @@ func TestResponsesNonStreamingInvalidProviderResponseDoesNotSettleOK(t *testing.
 	}
 }
 
+func TestResponsesNonStreamingEmptyStopCompletionSettlesOK(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_empty_stop",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":11,"completion_tokens":0,"total_tokens":11},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"<think>hidden</think>"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_empty_stop")
+
+	resp := postResponses(t, h, key, `{"model":"llama","input":"hi","max_output_tokens":20,"store":false}`, map[string]string{"X-Request-ID": "29292929-2929-4292-8292-292929292929"})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("responses json: %v body=%s", err, resp.Body.String())
+	}
+	if payload["status"] != "completed" {
+		t.Fatalf("status=%v want completed body=%s", payload["status"], resp.Body.String())
+	}
+	output := payload["output"].([]any)
+	if len(output) != 0 {
+		t.Fatalf("output=%v want empty output array", output)
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_responses_empty_stop")
+	if outcome != "ok" || source != "provider_reported" || prompt != 11 || completion != 0 {
+		t.Fatalf("usage outcome/source/prompt/completion=%s/%s/%d/%d want ok/provider_reported/11/0", outcome, source, prompt, completion)
+	}
+}
+
+func TestResponsesNonStreamingEmptyChoicesInvalidProviderResponseDoesNotSettleOK(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream string
+	}{
+		{
+			name: "empty",
+			upstream: `{
+				"id":"chatcmpl_empty_choices",
+				"object":"chat.completion",
+				"created":1782864000,
+				"model":"llama",
+				"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18},
+				"choices":[]
+			}`,
+		},
+		{
+			name: "missing",
+			upstream: `{
+				"id":"chatcmpl_missing_choices",
+				"object":"chat.completion",
+				"created":1782864000,
+				"model":"llama",
+				"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+			}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, tc.upstream), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+			acct := "acct_responses_empty_choices_" + tc.name
+			key := createAccountAndKey(t, store, cfg, acct)
+
+			resp := postResponses(t, h, key, `{"model":"llama","input":"hi","max_output_tokens":20,"store":false}`, map[string]string{"X-Request-ID": newUUID()})
+
+			if resp.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "invalid_provider_response")
+			outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, acct)
+			if outcome != "invalid_provider_response" || source != "provider_reported" || prompt != 11 || completion != 7 {
+				t.Fatalf("usage outcome/source/prompt/completion=%s/%s/%d/%d want invalid_provider_response/provider_reported/11/7", outcome, source, prompt, completion)
+			}
+		})
+	}
+}
+
+func TestResponsesNonStreamingTranslationFailureSettlesParsedProviderUsage(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_bad_choices",
+			"object":"chat.completion",
+			"created":1782864000,
+			"model":"llama",
+			"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18},
+			"choices":{"not":"an array"}
+		}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_responses_invalid_translation_with_usage")
+
+	resp := postResponses(t, h, key, `{"model":"llama","input":"hi","max_output_tokens":20,"store":false}`, map[string]string{"X-Request-ID": "24242424-2424-4242-8242-242424242424"})
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "invalid_provider_response")
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_responses_invalid_translation_with_usage")
+	if outcome != "invalid_provider_response" || source != "provider_reported" || prompt != 11 || completion != 7 {
+		t.Fatalf("usage outcome/source/prompt/completion=%s/%s/%d/%d want invalid_provider_response/provider_reported/11/7", outcome, source, prompt, completion)
+	}
+}
+
 func TestResponsesInputFunctionCallUsesCallIDForChatToolID(t *testing.T) {
 	adapter := newResponsesAdapter(httptest.NewRecorder(), "56565656-5656-4656-8656-565656565656", nil)
 
@@ -476,6 +826,7 @@ func TestResponsesStreamingTextAndToolEvents(t *testing.T) {
 	for _, want := range []string{
 		"event: response.created",
 		"event: response.output_text.delta",
+		`"output":[]`,
 		`"status":"in_progress"`,
 		`"delta":"hel"`,
 		"event: response.function_call_arguments.delta",
@@ -497,6 +848,89 @@ func TestResponsesStreamingTextAndToolEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamingRefusalAndLegacyFunctionCallEvents(t *testing.T) {
+	rec := httptest.NewRecorder()
+	adapter := newResponsesAdapter(rec, "46464646-4646-4646-8646-464646464646", nil)
+	adapter.stream = true
+	adapter.model = "llama"
+	adapter.WriteHeader(http.StatusOK)
+
+	adapter.handleChatStreamLine(`data: {"id":"chatcmpl_refusal_fc","model":"llama","choices":[{"delta":{"refusal":"cannot comply"}}]}`)
+	adapter.handleChatStreamLine(`data: {"id":"chatcmpl_refusal_fc","model":"llama","choices":[{"delta":{"function_call":{"name":"lookup","arguments":"{\"q\":\"hi\"}"}}}]}`)
+	adapter.handleChatStreamLine(`data: [DONE]`)
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"event: response.output_text.delta",
+		`"delta":"cannot comply"`,
+		"event: response.function_call_arguments.delta",
+		"event: response.function_call_arguments.done",
+		`"name":"lookup"`,
+		`\"q\":\"hi\"`,
+		"event: response.completed",
+		"data: [DONE]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestResponsesStreamingCleanEOFEmitsTerminalDone(t *testing.T) {
+	rec := httptest.NewRecorder()
+	adapter := newResponsesAdapter(rec, "47474747-4747-4747-8747-474747474747", nil)
+	adapter.stream = true
+	adapter.model = "llama"
+	adapter.WriteHeader(http.StatusOK)
+
+	if _, err := adapter.Write([]byte(`data: {"id":"chatcmpl_clean_eof","model":"llama","usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`)); err != nil {
+		t.Fatalf("write stream chunk: %v", err)
+	}
+	adapter.finish()
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"delta":"ok"`,
+		"event: response.completed",
+		`"input_tokens":3`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("clean EOF stream missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "event: response.failed") {
+		t.Fatalf("clean EOF stream emitted failed:\n%s", body)
+	}
+}
+
+func TestResponsesStreamingContentFilterFinishReasonIsIncomplete(t *testing.T) {
+	rec := httptest.NewRecorder()
+	adapter := newResponsesAdapter(rec, "48484848-4848-4848-8848-484848484848", nil)
+	adapter.stream = true
+	adapter.model = "llama"
+	adapter.WriteHeader(http.StatusOK)
+
+	adapter.handleChatStreamLine(`data: {"id":"chatcmpl_stream_filter","model":"llama","usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4},"choices":[{"delta":{},"finish_reason":"content_filter"}]}`)
+	adapter.handleChatStreamLine(`data: [DONE]`)
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"event: response.incomplete",
+		`"status":"incomplete"`,
+		`"reason":"content_filter"`,
+		`"output":[]`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("content-filter stream missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "event: response.completed") {
+		t.Fatalf("content-filter stream emitted completed:\n%s", body)
+	}
+}
+
 func TestResponsesStreamingChatErrorBecomesFailedTerminal(t *testing.T) {
 	rec := httptest.NewRecorder()
 	adapter := newResponsesAdapter(rec, "67676767-6767-4676-8676-676767676767", nil)
@@ -511,6 +945,7 @@ func TestResponsesStreamingChatErrorBecomesFailedTerminal(t *testing.T) {
 	for _, want := range []string{
 		"event: response.failed",
 		`"status":"failed"`,
+		`"output":[]`,
 		`"code":"provider_timeout"`,
 		"data: [DONE]",
 	} {
@@ -599,11 +1034,17 @@ func TestResponsesDisclosureIncludesEndpointOnlyWhenEnabled(t *testing.T) {
 	if !reflectDeepEqualStrings(defaultDisclosure.VerifiedModelSettlement.IncludedPaidEntrypoints, []string{"POST /v1/chat/completions"}) {
 		t.Fatalf("default included entrypoints=%v", defaultDisclosure.VerifiedModelSettlement.IncludedPaidEntrypoints)
 	}
+	if strings.Contains(defaultDisclosure.VerifiedModelSettlement.EnforceMode, "POST /v1/responses") {
+		t.Fatalf("default enforce disclosure mentions disabled responses endpoint: %q", defaultDisclosure.VerifiedModelSettlement.EnforceMode)
+	}
 	cfg := config.Default()
 	cfg.Features.ResponsesAPIEnabled = true
 	enabledDisclosure := (&Server{cfg: cfg}).makeTier1Disclosure()
 	if !reflectDeepEqualStrings(enabledDisclosure.VerifiedModelSettlement.IncludedPaidEntrypoints, []string{"POST /v1/chat/completions", "POST /v1/responses"}) {
 		t.Fatalf("enabled included entrypoints=%v", enabledDisclosure.VerifiedModelSettlement.IncludedPaidEntrypoints)
+	}
+	if !strings.Contains(enabledDisclosure.VerifiedModelSettlement.EnforceMode, "POST /v1/responses") {
+		t.Fatalf("enabled enforce disclosure omits responses endpoint: %q", enabledDisclosure.VerifiedModelSettlement.EnforceMode)
 	}
 }
 

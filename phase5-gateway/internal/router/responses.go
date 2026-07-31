@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -27,19 +28,22 @@ type responsesAdapter struct {
 	requestID string
 	now       func() time.Time
 
-	model           string
-	instructions    *string
-	maxOutputTokens *int64
-	stream          bool
-	tools           []map[string]any
-	toolChoice      any
-	textFormat      any
+	model             string
+	instructions      *string
+	maxOutputTokens   *int64
+	stream            bool
+	tools             []map[string]any
+	toolChoice        any
+	textFormat        any
+	parallelToolCalls bool
 
 	status      int
 	wroteHeader bool
 	body        bytes.Buffer
 	lineBuf     bytes.Buffer
 	prepared    []byte
+	finished    bool
+	passthrough bool
 
 	responseID     string
 	messageID      string
@@ -55,6 +59,11 @@ type responsesAdapter struct {
 	seq            int64
 	toolCalls      map[int]*responsesStreamToolCall
 	writeErr       error
+
+	captureArmed bool
+	captureCap   int
+	capture      []byte
+	overflowed   bool
 }
 
 type responsesStreamToolCall struct {
@@ -78,11 +87,12 @@ func newResponsesAdapter(dst http.ResponseWriter, requestID string, now func() t
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &responsesAdapter{
-		dst:        dst,
-		requestID:  requestID,
-		now:        now,
-		messageOut: -1,
-		toolCalls:  make(map[int]*responsesStreamToolCall),
+		dst:               dst,
+		requestID:         requestID,
+		now:               now,
+		messageOut:        -1,
+		toolCalls:         make(map[int]*responsesStreamToolCall),
+		parallelToolCalls: true,
 	}
 }
 
@@ -119,6 +129,10 @@ func (a *responsesAdapter) WriteHeader(code int) {
 	}
 	a.status = code
 	a.wroteHeader = true
+	if a.passthrough {
+		a.dst.WriteHeader(code)
+		return
+	}
 	if a.stream && code == http.StatusOK {
 		h := a.dst.Header()
 		h.Del("Content-Length")
@@ -139,6 +153,9 @@ func (a *responsesAdapter) Write(p []byte) (int, error) {
 	if !a.wroteHeader {
 		a.WriteHeader(http.StatusOK)
 	}
+	if a.passthrough {
+		return a.dst.Write(p)
+	}
 	if !a.stream || a.status != http.StatusOK {
 		_, _ = a.body.Write(p)
 		return len(p), nil
@@ -158,21 +175,38 @@ func (a *responsesAdapter) Write(p []byte) (int, error) {
 }
 
 func (a *responsesAdapter) Flush() {
-	if a.stream {
+	if a.stream || a.passthrough {
 		a.flush()
 	}
 }
 
+func (a *responsesAdapter) beginReplayPassthrough() {
+	a.passthrough = true
+	a.finished = true
+}
+
+func (a *responsesAdapter) endReplayPassthrough() {
+	a.passthrough = false
+	a.finished = false
+}
+
 func (a *responsesAdapter) finish() {
+	if a.finished {
+		return
+	}
+	a.finished = true
 	if a.stream {
 		if a.status != 0 && a.status != http.StatusOK {
 			a.dst.WriteHeader(a.status)
-			_, _ = a.dst.Write(a.body.Bytes())
+			_, _ = a.writeFinalBytes(a.body.Bytes())
 			return
 		}
 		if a.lineBuf.Len() > 0 && a.status == http.StatusOK {
 			a.handleChatStreamLine(a.lineBuf.String())
 			a.lineBuf.Reset()
+		}
+		if a.status == http.StatusOK && !a.streamTerminal {
+			a.emitStreamDone()
 		}
 		return
 	}
@@ -192,11 +226,11 @@ func (a *responsesAdapter) finish() {
 		}
 		a.dst.Header().Set("Content-Type", "application/json")
 		a.dst.WriteHeader(http.StatusOK)
-		_, _ = a.dst.Write(body)
+		_, _ = a.writeFinalBytes(body)
 		return
 	}
 	a.dst.WriteHeader(status)
-	_, _ = a.dst.Write(a.body.Bytes())
+	_, _ = a.writeFinalBytes(a.body.Bytes())
 }
 
 func (a *responsesAdapter) prepareNonStreamingResponse(body []byte) error {
@@ -269,12 +303,19 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 	if req.MaxOutputTokens != nil {
 		chat["max_tokens"] = *req.MaxOutputTokens
 	}
-	chatTools := responsesToolsToChatTools(req.Tools)
+	chatTools, toolsErr := responsesToolsToChatTools(req.Tools)
+	if toolsErr != nil {
+		return nil, toolsErr
+	}
 	if len(chatTools) > 0 {
 		chat["tools"] = chatTools
 	}
 	if req.ToolChoice != nil {
-		if toolChoice, ok := responsesToolChoiceToChatToolChoice(req.ToolChoice, chatTools); ok {
+		toolChoice, choiceErr := responsesToolChoiceToChatToolChoice(req.ToolChoice, chatTools)
+		if choiceErr != nil {
+			return nil, choiceErr
+		}
+		if toolChoice != nil {
 			chat["tool_choice"] = toolChoice
 		}
 	}
@@ -283,6 +324,7 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 	}
 	if parallelToolCalls, ok := req.ParallelToolCalls.(bool); ok {
 		chat["parallel_tool_calls"] = parallelToolCalls
+		a.parallelToolCalls = parallelToolCalls
 	}
 	if req.Temperature != nil {
 		chat["temperature"] = req.Temperature
@@ -301,7 +343,7 @@ func (a *responsesAdapter) translateRequest(body []byte) ([]byte, *responsesTran
 	a.instructions = req.Instructions
 	a.maxOutputTokens = req.MaxOutputTokens
 	a.stream = req.Stream
-	a.tools = req.Tools
+	a.tools = responsesToolsEchoFromChatTools(chatTools)
 	a.toolChoice = req.ToolChoice
 	a.textFormat = textFormat
 	return body, nil
@@ -549,11 +591,11 @@ func cloneMap(in map[string]any) map[string]any {
 	return out
 }
 
-func responsesToolsToChatTools(tools []map[string]any) []map[string]any {
+func responsesToolsToChatTools(tools []map[string]any) ([]map[string]any, *responsesTranslationError) {
 	out := make([]map[string]any, 0, len(tools))
 	usedNames := make(map[string]struct{}, len(tools))
-	var addFunction func(tool map[string]any, namespace string)
-	addFunction = func(tool map[string]any, namespace string) {
+	var addFunction func(tool map[string]any) *responsesTranslationError
+	addFunction = func(tool map[string]any) *responsesTranslationError {
 		fn := map[string]any{}
 		for _, key := range []string{"name", "description", "parameters", "strict"} {
 			if value, ok := tool[key]; ok {
@@ -562,32 +604,50 @@ func responsesToolsToChatTools(tools []map[string]any) []map[string]any {
 		}
 		name, _ := fn["name"].(string)
 		if name != "" {
-			finalName := name
-			if _, exists := usedNames[finalName]; exists {
-				// Chat function names must be unique; keep Codex's original names
-				// unless a real collision forces a namespace-derived prefix.
-				if namespace != "" {
-					finalName = namespace + "_" + name
-				}
-				finalName = uniqueResponsesToolName(finalName, usedNames)
-				fn["name"] = finalName
+			if _, exists := usedNames[name]; exists {
+				return &responsesTranslationError{code: "unsupported_parameter", param: "tools", message: fmt.Sprintf("tools contains multiple functions named %q after flattening", name)}
 			}
-			usedNames[finalName] = struct{}{}
+			usedNames[name] = struct{}{}
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
+		return nil
 	}
 	for _, tool := range tools {
 		switch typ, _ := tool["type"].(string); typ {
 		case "function":
-			addFunction(tool, "")
+			if err := addFunction(tool); err != nil {
+				return nil, err
+			}
 		case "namespace":
-			namespace, _ := tool["name"].(string)
 			for _, nested := range responsesNestedTools(tool["tools"]) {
 				if nestedType, _ := nested["type"].(string); nestedType == "function" {
-					addFunction(nested, namespace)
+					if err := addFunction(nested); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
+	}
+	return out, nil
+}
+
+func responsesToolsEchoFromChatTools(tools []map[string]any) []map[string]any {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		fn, _ := tool["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		echo := map[string]any{"type": "function"}
+		for _, key := range []string{"name", "description", "parameters", "strict"} {
+			if value, ok := fn[key]; ok {
+				echo[key] = value
+			}
+		}
+		out = append(out, echo)
 	}
 	return out
 }
@@ -609,36 +669,33 @@ func responsesNestedTools(v any) []map[string]any {
 	}
 }
 
-func uniqueResponsesToolName(name string, used map[string]struct{}) string {
-	candidate := name
-	for i := 2; ; i++ {
-		if _, exists := used[candidate]; !exists {
-			return candidate
+func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (any, *responsesTranslationError) {
+	if s, ok := choice.(string); ok {
+		switch s {
+		case "auto", "none":
+			return choice, nil
+		case "required":
+			if len(tools) == 0 {
+				return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: "tool_choice requires at least one supported function tool"}
+			}
+			return choice, nil
+		default:
+			return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: fmt.Sprintf("tool_choice %q is not supported", s)}
 		}
-		candidate = fmt.Sprintf("%s_%d", name, i)
-	}
-}
-
-func responsesToolChoiceToChatToolChoice(choice any, tools []map[string]any) (any, bool) {
-	if len(tools) == 0 {
-		if s, ok := choice.(string); ok && (s == "auto" || s == "none") {
-			return choice, true
-		}
-		return nil, false
 	}
 	m, ok := choice.(map[string]any)
 	if !ok {
-		return choice, true
+		return choice, nil
 	}
 	if typ, _ := m["type"].(string); typ == "function" {
 		if name, _ := m["name"].(string); name != "" {
 			if !responsesChatToolsContainName(tools, name) {
-				return nil, false
+				return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: fmt.Sprintf("tool_choice references unavailable function tool %q", name)}
 			}
-			return map[string]any{"type": "function", "function": map[string]any{"name": name}}, true
+			return map[string]any{"type": "function", "function": map[string]any{"name": name}}, nil
 		}
 	}
-	return choice, true
+	return nil, &responsesTranslationError{code: "unsupported_parameter", param: "tool_choice", message: "tool_choice is not supported by the Responses facade"}
 }
 
 func responsesChatToolsContainName(tools []map[string]any, name string) bool {
@@ -663,19 +720,8 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 			TotalTokens        int64 `json:"total_tokens"`
 		} `json:"usage"`
 		Choices []struct {
-			Message struct {
-				Role      string `json:"role"`
-				Content   any    `json:"content"`
-				ToolCalls []struct {
-					ID       string `json:"id"`
-					Type     string `json:"type"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
+			Message      json.RawMessage `json:"message"`
+			FinishReason string          `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &chat); err != nil {
@@ -691,41 +737,76 @@ func (a *responsesAdapter) translateNonStreamingResponse(body []byte) ([]byte, e
 		model = a.model
 	}
 	output := []map[string]any{}
-	if len(chat.Choices) > 0 {
-		msg := chat.Choices[0].Message
-		text := stripThinkBlocks(responsesContentToText(msg.Content))
-		if text != "" {
-			output = append(output, map[string]any{
-				"id":      "msg_" + idSuffix(id),
-				"type":    "message",
-				"role":    "assistant",
-				"status":  "completed",
-				"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
-			})
+	if len(chat.Choices) == 0 {
+		return nil, fmt.Errorf("missing choices")
+	}
+	if len(bytes.TrimSpace(chat.Choices[0].Message)) == 0 || jsonRawIsNull(chat.Choices[0].Message) {
+		return nil, fmt.Errorf("missing assistant message")
+	}
+	var msg struct {
+		Role         string  `json:"role"`
+		Content      any     `json:"content"`
+		Refusal      *string `json:"refusal"`
+		FunctionCall *struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function_call"`
+		ToolCalls []struct {
+			ID       string `json:"id"`
+			Type     string `json:"type"`
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(chat.Choices[0].Message, &msg); err != nil {
+		return nil, err
+	}
+	text := stripThinkBlocks(responsesContentToText(msg.Content))
+	if msg.Refusal != nil {
+		text = strings.TrimSpace(text + *msg.Refusal)
+	}
+	if text != "" {
+		output = append(output, map[string]any{
+			"id":      "msg_" + idSuffix(id),
+			"type":    "message",
+			"role":    "assistant",
+			"status":  "completed",
+			"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
+		})
+	}
+	for _, tc := range msg.ToolCalls {
+		if tc.Type != "" && tc.Type != "function" {
+			continue
 		}
-		for _, tc := range msg.ToolCalls {
-			if tc.Type != "" && tc.Type != "function" {
-				continue
-			}
-			callID := tc.ID
-			if callID == "" {
-				callID = "call_" + idSuffix(id)
-			}
-			output = append(output, map[string]any{
-				"id":        "fc_" + idSuffix(callID),
-				"type":      "function_call",
-				"call_id":   callID,
-				"name":      tc.Function.Name,
-				"arguments": tc.Function.Arguments,
-				"status":    "completed",
-			})
+		callID := tc.ID
+		if callID == "" {
+			callID = "call_" + idSuffix(id)
 		}
+		output = append(output, map[string]any{
+			"id":        "fc_" + idSuffix(callID),
+			"type":      "function_call",
+			"call_id":   callID,
+			"name":      tc.Function.Name,
+			"arguments": tc.Function.Arguments,
+			"status":    "completed",
+		})
+	}
+	if msg.FunctionCall != nil {
+		callID := "call_" + idSuffix(id)
+		output = append(output, map[string]any{
+			"id":        "fc_" + idSuffix(callID),
+			"type":      "function_call",
+			"call_id":   callID,
+			"name":      msg.FunctionCall.Name,
+			"arguments": msg.FunctionCall.Arguments,
+			"status":    "completed",
+		})
 	}
 	status := "completed"
 	incompleteDetails := any(nil)
-	if len(chat.Choices) > 0 {
-		_, status, incompleteDetails = responsesTerminalFromFinishReason(chat.Choices[0].FinishReason)
-	}
+	_, status, incompleteDetails = responsesTerminalFromFinishReason(chat.Choices[0].FinishReason)
 	resp := a.responseObjectWith(id, created, status, output, responsesUsageMap(
 		chat.Usage.PromptTokens,
 		chat.Usage.CachedPromptTokens,
@@ -770,7 +851,12 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 			Delta struct {
 				Content          *string `json:"content"`
 				ReasoningContent *string `json:"reasoning_content"`
-				ToolCalls        []struct {
+				Refusal          *string `json:"refusal"`
+				FunctionCall     *struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function_call"`
+				ToolCalls []struct {
 					Index    int    `json:"index"`
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -803,8 +889,14 @@ func (a *responsesAdapter) handleChatStreamLine(line string) {
 	if delta.Content != nil {
 		a.emitTextDelta(a.filterThinkContent(*delta.Content))
 	}
+	if delta.Refusal != nil {
+		a.emitTextDelta(*delta.Refusal)
+	}
 	for _, tc := range delta.ToolCalls {
 		a.emitToolCallDelta(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+	}
+	if delta.FunctionCall != nil {
+		a.emitToolCallDelta(0, "", delta.FunctionCall.Name, delta.FunctionCall.Arguments)
 	}
 	if chunk.Choices[0].FinishReason != nil {
 		a.finishReason = *chunk.Choices[0].FinishReason
@@ -991,7 +1083,59 @@ func (a *responsesAdapter) writeBytes(p []byte) {
 	if a.writeErr != nil {
 		return
 	}
-	_, a.writeErr = a.dst.Write(p)
+	n, err := a.dst.Write(p)
+	a.captureDedupeBytes(p[:n], err)
+	if err != nil {
+		a.writeErr = err
+		return
+	}
+	if n != len(p) {
+		a.writeErr = io.ErrShortWrite
+	}
+}
+
+func (a *responsesAdapter) writeFinalBytes(p []byte) (int, error) {
+	n, err := a.dst.Write(p)
+	a.captureDedupeBytes(p[:n], err)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		a.writeErr = err
+	}
+	return n, err
+}
+
+func (a *responsesAdapter) armDedupeCapture(limit int) {
+	a.captureArmed = true
+	a.captureCap = limit
+}
+
+func (a *responsesAdapter) captureDedupeBytes(p []byte, err error) {
+	if !a.captureArmed || a.overflowed {
+		return
+	}
+	if err != nil {
+		a.capture = nil
+		return
+	}
+	if len(a.capture)+len(p) > a.captureCap {
+		a.overflowed = true
+		a.capture = nil
+		return
+	}
+	a.capture = append(a.capture, p...)
+}
+
+func (a *responsesAdapter) dedupeCapture() []byte {
+	if !a.captureArmed || a.overflowed || a.writeErr != nil {
+		return nil
+	}
+	return a.capture
+}
+
+func (a *responsesAdapter) dedupeDeliveredButUncacheable() bool {
+	return a.captureArmed && a.overflowed && a.writeErr == nil
 }
 
 func (a *responsesAdapter) nextSeq() int64 {
@@ -1017,6 +1161,9 @@ func (a *responsesAdapter) responseObject(status string, output []map[string]any
 }
 
 func (a *responsesAdapter) responseObjectWith(id string, created int64, status string, output []map[string]any, usage map[string]any) map[string]any {
+	if output == nil {
+		output = []map[string]any{}
+	}
 	return map[string]any{
 		"id":                   id,
 		"object":               "response",
@@ -1028,7 +1175,7 @@ func (a *responsesAdapter) responseObjectWith(id string, created int64, status s
 		"max_output_tokens":    a.maxOutputTokens,
 		"model":                a.model,
 		"output":               output,
-		"parallel_tool_calls":  true,
+		"parallel_tool_calls":  a.parallelToolCalls,
 		"previous_response_id": nil,
 		"reasoning":            map[string]any{"effort": nil, "summary": nil},
 		"store":                false,
@@ -1045,8 +1192,11 @@ func (a *responsesAdapter) responseObjectWith(id string, created int64, status s
 }
 
 func responsesTerminalFromFinishReason(reason string) (event, status string, incompleteDetails any) {
-	if reason == "length" {
+	switch reason {
+	case "length":
 		return "response.incomplete", "incomplete", map[string]any{"reason": "max_output_tokens"}
+	case "content_filter":
+		return "response.incomplete", "incomplete", map[string]any{"reason": "content_filter"}
 	}
 	return "response.completed", "completed", nil
 }
@@ -1094,7 +1244,11 @@ func idSuffix(id string) string {
 var thinkBlockRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 func stripThinkBlocks(s string) string {
-	return strings.TrimSpace(thinkBlockRE.ReplaceAllString(s, ""))
+	s = thinkBlockRE.ReplaceAllString(s, "")
+	if start := strings.LastIndex(s, "<think>"); start >= 0 {
+		s = s[:start]
+	}
+	return strings.TrimSpace(s)
 }
 
 func (a *responsesAdapter) filterThinkContent(s string) string {

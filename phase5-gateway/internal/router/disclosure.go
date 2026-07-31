@@ -228,8 +228,10 @@ const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surface
 
 func makeVerifiedModelSettlementDisclosure(includeResponses ...bool) verifiedModelSettlementDisclosure {
 	included := []string{"POST /v1/chat/completions"}
+	enforceMode := settlementEnforceModeDisclosure
 	if len(includeResponses) > 0 && includeResponses[0] {
 		included = append(included, "POST /v1/responses")
+		enforceMode = "Enforce mode may settle only covered paid POST /v1/chat/completions and POST /v1/responses attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
 	}
 	return verifiedModelSettlementDisclosure{
 		IncludedPaidEntrypoints: included,
@@ -239,7 +241,7 @@ func makeVerifiedModelSettlementDisclosure(includeResponses ...bool) verifiedMod
 		ModelIdentity:       settlementModelIdentityDisclosure,
 		ModelIdentityCaveat: settlementModelIdentityCaveatDisclosure,
 		ObserveMode:         settlementObserveModeDisclosure,
-		EnforceMode:         settlementEnforceModeDisclosure,
+		EnforceMode:         enforceMode,
 		PendingReservation:  settlementPendingReservationDisclosure,
 		Outcomes: settlementOutcomeDisclosure{
 			Pending:     settlementPendingOutcomeDisclosure,

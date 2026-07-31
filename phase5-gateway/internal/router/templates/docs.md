@@ -99,11 +99,11 @@ Text-only structured `messages[].content` arrays are accepted for `system` and
 Multimodal parts such as `image_url` are not supported in v1 and return
 `unsupported_content_shape`.
 
-Covered paid settlement claims are limited to `POST /v1/chat/completions`. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.
+Covered paid settlement claims are limited to `POST /v1/chat/completions`, plus `POST /v1/responses` when the Responses compatibility flag is enabled. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.
 
 ### Responses API
 
-`POST /v1/responses` is a stateless OpenAI Responses compatibility facade over the same billed chat-completions pipeline. Send the full `input` on every request with `store:false`. Function tools and `text.format` structured output are translated into the chat pipeline. `previous_response_id`, `store:true`, `conversation`, `include`, `background:true`, non-disabled `truncation`, `reasoning` controls, non-default `parallel_tool_calls`, hosted tools, and multimodal input are not supported.
+`POST /v1/responses` is a stateless OpenAI Responses compatibility facade over the same billed chat-completions pipeline. Send the full `input` on every request with `store:false`. Function tools and `text.format` structured output are translated into the chat pipeline. `include`, `reasoning` summary controls, and `parallel_tool_calls` are tolerated; unsupported hosted or unknown tools are dropped before provider dispatch. `previous_response_id`, `store:true`, `conversation`, `background:true`, non-disabled `truncation`, `response_format`, and multimodal input are not supported.
 
 When the Responses compatibility flag is enabled, covered paid settlement claims include `POST /v1/responses` and `POST /v1/chat/completions`.
 
