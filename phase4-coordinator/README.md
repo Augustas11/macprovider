@@ -45,10 +45,15 @@ The full suite (`go test ./...`) is the only required gate; the named subsets ar
 Production builds run on Apple Silicon and ship to a linux/amd64 VPS. CGO-free `modernc.org/sqlite` makes this a one-liner:
 
 ```sh
-scripts/build-linux.sh           # version-stamped via git describe; refuses dirty trees
+scripts/build-linux.sh           # version-stamped from an exact vX.Y.Z release tag
 ```
 
-Output: `dist/coordinator-linux-amd64`. Override the dirty guard with `FORCE_DIRTY=1` (the version string then ends in `-dirty` or `-dirty-forced` so `/healthz` can self-identify the override at deploy time — see `dist/check-deploy-config.sh` and the M0-5 deploy-rollback story).
+Output: `dist/coordinator-linux-amd64`. Production builds refuse `main`,
+`vX.Y.Z-N-g<hash>`, dirty, and untagged checkouts so deploy provenance cannot
+self-confirm a regressing `git describe` string. For local/dev artifacts only,
+set `ALLOW_NON_RELEASE_COORDINATOR_BUILD=1`; combine it with `FORCE_DIRTY=1`
+only when you deliberately want a dirty dev stamp. The Pearl production deploy
+does not accept non-release coordinator versions.
 
 ## Deployment
 
