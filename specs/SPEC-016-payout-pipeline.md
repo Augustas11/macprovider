@@ -1,6 +1,9 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.23 (2026-07-30, draft — lineage reconciliation per issue #586. Merges the two divergent `v0.1.2x` lineages: the `main` v0.1.20 Wave-2 provider-token custody gate (2026-07-04 — payout attempts require provider-token trust: pinned/operator-issued, bearer-validated, or explicit `self_minted_verified` proof; tokenless self-minted sessions are not payout eligible) AND the `impl/spec-016` v0.1.22 IMPL follow-up (2026-06-29 — §7.1 gains `payout_stale_outbox_backlog`, `payout_rpc_chronic_outage`, `payout_spki_drain_skipped_unsupported_client`; §4.7 step 5 keyset-paginated bounded-memory scan with `staleOutboxScanCeiling=20000`; §4.4 two-RPC discipline via `TrackingRPCClient` + `ChronicOutageTracker`). Both lineages' normative content is retained in full; see the v0.1.23 change-log entry for the drop-nothing cross-check.)
+**Version:** 0.1.24 (2026-07-31, draft — preliminary conformance-unit anchors
+for the default-off payout implementation merged by PR #164. No payout
+behavior, runner activation, production deployment, or §9 prerequisite state
+changes.)
 **Status:** Draft (IMPL merged via PR #164, default-off — `payout.enabled=false`
 everywhere until the operator funds the hot wallet and discharges the eight
 §9 prerequisites; flipping the flag is an operator decision gated on §9).
@@ -15,6 +18,40 @@ filed as a separate follow-up).
 
 ---
 
+## Preliminary conformance unit IDs
+
+SPEC-016 v0.1.24 registers `SPEC-016-R001`..`SPEC-016-R011` in
+`specs/CONFORMANCE.json` as pending preliminary conformance anchors. These IDs
+group existing normative obligation areas without changing them:
+
+- `SPEC-016-R001` — default-off rail scope, operator prerequisites, and
+  activation boundary.
+- `SPEC-016-R002` — provider payout-address registration, EIP-712
+  proof-of-possession, replay protection, cooling-off, and rotation semantics.
+- `SPEC-016-R003` — payout package boundary, read surfaces, handler inventory,
+  and import-graph ownership.
+- `SPEC-016-R004` — runner selection, signing, broadcast, two-RPC confirmation,
+  and `ClaimPayoutReady` finalization.
+- `SPEC-016-R005` — payout attempt schema, idempotent retry, nonce-gap fill,
+  and abandon-attempt recovery.
+- `SPEC-016-R006` — reorg polling, orphan recording, compensation, and
+  funding-recording admin flows.
+- `SPEC-016-R007` — runtime flags, pause/resume, runner lease, self-fencing,
+  and crash-safe audit outboxes.
+- `SPEC-016-R008` — payout caps, hot-wallet balances, gas accounting, and
+  conservation reconciliation.
+- `SPEC-016-R009` — signer custody, Linux-only process hardening, RPC
+  discipline, and reload boundaries.
+- `SPEC-016-R010` — structured audit events, retention, operator queries, and
+  alert/runbook obligations.
+- `SPEC-016-R011` — provider-token custody and compliance payout eligibility.
+
+All eleven remain `pending`. They are not exhaustive clause-level migration:
+`requirement_id_migration` remains `pending` until a later reconciliation pass
+attaches stable IDs directly to every normative `MUST`, `MUST NOT`, and
+security/recovery `SHOULD`, and until implementation mappings, tests, and the
+signed journey-result contract required by `payout-lifecycle` are reconciled.
+
 ## Change log
 
 Audit-narrative-by-round detail lives in the per-round audit files
@@ -24,6 +61,16 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.24 (2026-07-31, draft — #614 preliminary conformance anchors):**
+Editorial, non-normative reconciliation after the PR #164 payout implementation
+and PR #827 spec-index repair landed. Registers `SPEC-016-R001`..`SPEC-016-R011`
+as pending preliminary anchors in `specs/CONFORMANCE.json`, updates the manifest
+to record partial/default-off implementation evidence, keeps requirement
+migration pending, and preserves the production-not-deployed gap. This does NOT
+enable `payout.enabled`, declare the runner production-ready, satisfy any §9
+operator prerequisite, or promote any `payout-lifecycle` requirement to
+`conformant`.
 
 **v0.1.23 (2026-07-30, draft — lineage reconciliation, issue #586):**
 Merges the forked `main` and `impl/spec-016` spec lineages when PR #164

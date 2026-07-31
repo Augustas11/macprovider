@@ -426,7 +426,7 @@
     {
       "spec_id": "SPEC-016",
       "title": "Provider payout pipeline (USDC on Base)",
-      "version": "0.1.23",
+      "version": "0.1.24",
       "path": "specs/SPEC-016-payout-pipeline.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -439,16 +439,24 @@
         "SPEC-006",
         "SPEC-014"
       ],
-      "implementation_status": "pending-reconciliation",
-      "production_status": "pending-verification",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
-      "evidence": [],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": "ed26cc8f3178b5da44fae93483df1d931410e35f",
+      "last_reconciled_at": "2026-07-31",
+      "evidence": [
+        {
+          "artifact": "commit:ed26cc8f3178b5da44fae93483df1d931410e35f",
+          "source": null,
+          "captured_at": "2026-07-31",
+          "expires_at": "2027-07-31"
+        }
+      ],
       "requirement_id_migration": "pending",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation and PR #827 repaired the spec-index drift, but the runner remains default-off with payout.enabled=false and no production activation claim. Reconciliation records partial/default-off implementation evidence and preliminary pending requirement anchors only; exhaustive clause-level requirement ID migration, production deployment, §9 operator prerequisites, signed journey-result support, and per-requirement conformance remain pending under the payout-lifecycle domain."
       }
     },
     {
@@ -3034,6 +3042,171 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R001",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (§1, §2, §9): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and §9 operator prerequisite evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R002",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider payout-address registration, EIP-712 proof-of-possession, replay protection, cooling-off, and rotation semantics (§3): preliminary anchor for the existing obligation area; implementation exists under internal/payout address handling, but conformance mappings and signed journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R003",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (§3.4, §4.1, §7.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R004",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (§4.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R005",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (§4.5, §4.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R006",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (§4.7, §4.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R007",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (§4.8, §4.8a, §4.8b, §4.8c, §6.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R008",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (§5, §6.2, §7.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R009",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (§6.3, §6.4, §6.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R010",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (§7, §9): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R011",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider-token custody and compliance payout eligibility (§8, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
       }
     }
   ]
