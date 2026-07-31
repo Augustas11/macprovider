@@ -12,11 +12,13 @@
 
 | Changes | Does NOT change |
 |---------|-----------------|
-| `/opt/macprovider/coordinator` binary (linux/amd64) | `/opt/macprovider/coordinator.yaml` base file |
+| OPoI overlay and systemd drop-in | `/opt/macprovider/coordinator.yaml` base file |
 | `/etc/macprovider/coordinator.opoi-v0-staging.yaml` overlay | nginx / TLS / gateway |
-| systemd drop-in with `--config-overlay` | Full `deploy-pearl-vps.sh` path |
+| systemd drop-in with `--config-overlay` | Coordinator/runtime binaries |
 
 Canaries enable via overlay only — rollback removes drop-in without editing production YAML.
+Production binary bytes must come from the signed Pearl runtime updater and the
+guarded `deploy-pearl-vps.sh` path, not this retired overlay runbook.
 
 ---
 
@@ -33,9 +35,10 @@ Canaries enable via overlay only — rollback removes drop-in without editing pr
 
 ## 2. Quick deploy (scripted)
 
-From a clean checkout of `origin/main`:
+From a clean checkout of the exact coordinator release tag:
 
 ```bash
+git checkout vX.Y.Z
 cd phase4-coordinator
 bash scripts/build-linux.sh
 bash dist/deploy-opoi-v0-pearl.sh
@@ -57,46 +60,38 @@ FORCE_RESTART=1 bash dist/deploy-opoi-v0-pearl.sh
 
 ## 3. Manual deploy (step-by-step)
 
-### 3.1 Build binary (operator Mac)
+### 3.1 Production binary authority
+
+Do not upload or install `dist/coordinator-linux-amd64` manually for production
+OPoI work. Production coordinator, coordinator-cli, gateway, and sidecar bytes
+must already be installed from the signed Pearl runtime release/updater; direct
+deploys only restart/validate those bytes after release provenance gates pass.
+
+Dev-only cross-compile (not production deployable):
 
 ```bash
 cd phase4-coordinator
-bash scripts/build-linux.sh
-# → dist/coordinator-linux-amd64 @ <git describe>
-```
-
-Cross-compile only (no sidecars required for OPoI):
-
-```bash
-cd phase4-coordinator
+ALLOW_NON_RELEASE_COORDINATOR_BUILD=1 \
 VERSION="$(git describe --always --dirty --tags)"
 GOOS=linux GOARCH=amd64 go build \
   -ldflags "-X main.version=${VERSION}" \
   -o dist/coordinator-linux-amd64 ./cmd/coordinator
 ```
 
-### 3.2 Upload artifacts
+### 3.2 Upload overlay artifacts only
 
 ```bash
 SSH_KEY=~/.ssh/pearl_operator_ed25519
 PEARL=root@159.223.165.194
 
-scp -i "$SSH_KEY" dist/coordinator-linux-amd64 "$PEARL:/tmp/coordinator-linux-amd64"
 scp -i "$SSH_KEY" coordinator.opoi-v0-staging.yaml "$PEARL:/etc/macprovider/"
 scp -i "$SSH_KEY" dist/systemd/opoi-v0.conf.example "$PEARL:/tmp/opoi-v0.conf"
 ```
 
-### 3.3 Install on Pearl
+### 3.3 Install overlay on Pearl
 
 ```bash
 ssh -i "$SSH_KEY" "$PEARL" 'set -e
-  # Binary snapshot for rollback
-  if [ -x /opt/macprovider/coordinator ]; then
-    install -o root -g macprovider -m 0750 \
-      /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
-  fi
-  install -o root -g macprovider -m 0750 \
-    /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator
   install -o root -g macprovider -m 0640 \
     /etc/macprovider/coordinator.opoi-v0-staging.yaml \
     /etc/macprovider/coordinator.opoi-v0-staging.yaml
@@ -152,7 +147,7 @@ Base unit (unchanged): `phase4-coordinator/dist/macprovider-coordinator.service`
 curl -sS https://coordinator.streamvc.live/healthz | jq '{version, pool_size}'
 ```
 
-Version should match local `git describe` from the build tree.
+Version should match the exact checked-out release tag (`vX.Y.Z`).
 
 ### 5.2 Canary logs (wait up to `canary_interval_s` = 300s)
 
@@ -193,20 +188,18 @@ Then `systemctl restart macprovider-coordinator` (no binary change needed).
 
 ## 6. Rollback
 
-### 6.1 Disable canaries (keep new binary)
+### 6.1 Disable canaries
 
 ```bash
 ssh pearl 'sudo rm /etc/systemd/system/macprovider-coordinator.service.d/opoi-v0.conf \
   && sudo systemctl daemon-reload && sudo systemctl restart macprovider-coordinator'
 ```
 
-### 6.2 Binary rollback
+### 6.2 Runtime rollback
 
-```bash
-ssh pearl 'sudo install -o root -g macprovider -m 0750 \
-  /opt/macprovider/coordinator.prev /opt/macprovider/coordinator \
-  && sudo systemctl restart macprovider-coordinator'
-```
+Do not restore `/opt/macprovider/coordinator` by copying local or `.prev`
+bytes. Use the signed Pearl runtime updater/rollback path for binary rollback,
+then rerun the guarded deploy validation if an overlay remains enabled.
 
 See `OPS.md` §2 and `audits/2026-06-10/ROLLBACK_PROCEDURE.md`.
 
