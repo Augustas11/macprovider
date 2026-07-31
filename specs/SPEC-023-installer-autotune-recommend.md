@@ -893,6 +893,14 @@ distribution, not copied directly from board TG:
 min_sustained_tps = max(8, floor(board_p25_tg * engine_delta * 0.90))
 ```
 
+`RESEARCH_231`'s "never below 75% of local median when local bench exists"
+clause is intentionally not carried into this formula: an oMLX-seeded row
+by definition has no qualifying local or verified-provider benchmark for
+that model/hardware bucket yet (§3.2, §5) — if one existed, the row would
+not need an oMLX seed. The clause is preserved as a candidate v0.2 input if
+a future workflow ever re-seeds a row that already has partial local
+evidence.
+
 The seed is usable only when at least `K = 10` distinct oMLX cells exist for the
 same normalized chip/RAM/model/quant/context bucket after duplicate and outlier
 handling. Rows used for the seed MUST be 4k-context, matching-quantization rows,
