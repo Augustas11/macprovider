@@ -880,25 +880,34 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
+	anthropicDuplicateProviderResponse := false
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
-		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_response", resp.Header) {
-			return
-		}
-		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
-		return
+		anthropicDuplicateProviderResponse = true
 	}
 	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
 	tokenSource := "gateway_estimated"
 	if !ok {
 		usage = tokenUsage{PromptTokens: promptEstimate, CachedPromptTokens: 0, CompletionTokens: 0, TotalTokens: promptEstimate}
-	} else if usageErr != nil {
+	} else if usageErr == nil {
+		tokenSource = "provider_reported"
+	}
+	if anthropicDuplicateProviderResponse {
+		settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
+		if ok && usageErr == nil {
+			settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
+		}
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+			return
+		}
+		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+		return
+	}
+	if usageErr != nil {
 		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_usage", "Upstream provider returned invalid usage")
 		return
-	} else {
-		tokenSource = "provider_reported"
 	}
 	body = usageBodyWithTokenUsage(body, usage)
 	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
@@ -1100,7 +1109,31 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	gatewaySerializedEstimatedCompletion := func() int64 {
 		return estimateStreamingCompletionTokens(maxInt64(emitted, serializedEmitted), maxTokens)
 	}
-	settleGatewayTerminalOutputExceeded := func() {
+	cleanLengthFallbackCompletion := func(observedBytes int64) int64 {
+		completion := estimateStreamingCompletionTokens(maxInt64(maxInt64(emitted, serializedEmitted), observedBytes), maxTokens)
+		if completion == 0 && maxTokens > 0 {
+			return 1
+		}
+		return completion
+	}
+	setCleanLengthFallbackUsage := func(completion int64) {
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			adapter.setFallbackStreamUsage(promptEstimate, completion)
+		}
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			adapter.setFallbackStreamUsage(promptEstimate, completion)
+		}
+	}
+	cleanLengthFacadeCompletion := func(completion int64) int64 {
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			return completion
+		}
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			return completion
+		}
+		return 0
+	}
+	settleGatewayTerminalOutputExceeded := func(completion int64) {
 		// This is a gateway-authored terminal SSE error. The gateway cancels
 		// the coordinator stream before EOF, so declared settlement trailers
 		// may be unavailable and must not rewrite the buyer-visible outcome.
@@ -1119,7 +1152,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			}
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
+		s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
 	}
 	settleTruncated := func() {
 		if reported != nil {
@@ -1230,11 +1263,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
 					anthropicTerminalFrame = terminalCode != ""
 					if gatewayCleanLengthTruncationTerminalCode(terminalCode) {
-						adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
+						adapter.setFallbackStreamUsage(promptEstimate, cleanLengthFallbackCompletion(0))
 					}
 				}
 				if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && cleanLengthTerminalFrame {
-					adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
+					adapter.setFallbackStreamUsage(promptEstimate, cleanLengthFallbackCompletion(0))
 				}
 				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
@@ -1322,22 +1355,26 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					if projectedContentBytes > hardByteCeiling {
 						slog.Warn("streaming gateway estimate exceeded hard byte ceiling; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", estimateTokensFromBytes(projectedContentBytes), "max_completion_tokens", maxCompletion, "emitted_bytes", projectedContentBytes, "hard_byte_ceiling", hardByteCeiling)
+						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
+						setCleanLengthFallbackUsage(completion)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						settleGatewayTerminalOutputExceeded()
+						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
 						return false
 					}
 					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
 						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", maxStreamingFallbackMetadataBytes)
+						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
+						setCleanLengthFallbackUsage(completion)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						settleGatewayTerminalOutputExceeded()
+						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
 						return false
 					}
 					emitted = projectedContentBytes
@@ -1372,8 +1409,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			if reported != nil && !invalidReportedUsage {
 				settleReported(adapter.settlementOutcome("ok"))
 			} else {
+				outcome := adapter.settlementOutcome("ok")
 				completion := gatewaySerializedEstimatedCompletion()
-				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
+				if outcome == "stream_output_exceeded" {
+					completion = cleanLengthFallbackCompletion(0)
+				}
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 			}
 			return false
 		}
@@ -1381,8 +1422,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			if reported != nil && !invalidReportedUsage {
 				settleReported(adapter.settlementOutcome("ok"))
 			} else {
+				outcome := adapter.settlementOutcome("ok")
 				completion := gatewaySerializedEstimatedCompletion()
-				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
+				if outcome == "stream_output_exceeded" {
+					completion = cleanLengthFallbackCompletion(0)
+				}
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 			}
 			return false
 		}

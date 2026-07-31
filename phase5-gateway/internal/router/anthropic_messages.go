@@ -308,7 +308,7 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	}
 	for key, value := range raw {
 		switch key {
-		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata":
+		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata", "service_tier":
 		case "top_k":
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "top_k is not supported"}
 		case "thinking", "anthropic_beta":
@@ -441,6 +441,11 @@ func anthropicValidateRequestRawTypes(raw map[string]json.RawMessage) error {
 			return fmt.Errorf("metadata must be an object")
 		}
 	}
+	if v, ok := raw["service_tier"]; ok && !anthropicRawIsNull(v) {
+		if err := anthropicValidateRawString(v, "service_tier"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -488,7 +493,7 @@ func anthropicValidateNestedRequest(raw map[string]json.RawMessage) error {
 			if err != nil {
 				return fmt.Errorf("tools[%d] must be an object", i)
 			}
-			if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("tools[%d]", i), "type", "name", "description", "input_schema"); err != nil {
+			if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("tools[%d]", i), "type", "name", "description", "input_schema", "cache_control"); err != nil {
 				return err
 			}
 			if v, ok := m["type"]; ok {
@@ -1749,8 +1754,10 @@ func anthropicToolCallDeltasFromAny(v any) ([]anthropicToolCallDelta, error) {
 			if rawName, ok := fn["name"]; ok && rawName != nil && delta.name == "" {
 				return nil, fmt.Errorf("Upstream provider returned malformed stream tool-call name")
 			}
-			if rawArgs, ok := fn["arguments"]; ok && rawArgs != nil && delta.arguments == "" {
-				return nil, fmt.Errorf("Upstream provider returned malformed stream tool-call arguments")
+			if rawArgs, ok := fn["arguments"]; ok && rawArgs != nil {
+				if _, ok := rawArgs.(string); !ok {
+					return nil, fmt.Errorf("Upstream provider returned malformed stream tool-call arguments")
+				}
 			}
 		}
 		out = append(out, delta)

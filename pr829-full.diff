@@ -95,7 +95,7 @@ index 216ae74e..e61910f3 100644
  
 diff --git a/phase5-gateway/internal/router/anthropic_messages.go b/phase5-gateway/internal/router/anthropic_messages.go
 new file mode 100644
-index 00000000..267ab47f
+index 00000000..aff2d611
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages.go
 @@ -0,0 +1,2099 @@
@@ -322,7 +322,7 @@ index 00000000..267ab47f
 +}
 +
 +func (a *anthropicMessagesAdapter) dedupeCleanSSEError(code string) bool {
-+	return a.stream && anthropicTerminalErrorCodeIsLengthTruncation(code)
++	return a.stream && gatewayCleanLengthTruncationTerminalCode(code)
 +}
 +
 +func (a *anthropicMessagesAdapter) finish() {
@@ -445,7 +445,7 @@ index 00000000..267ab47f
 +	if strings.TrimSpace(req.Model) == "" {
 +		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request", message: "model is required"}
 +	}
-+	if req.MaxTokens == nil || *req.MaxTokens <= 0 {
++	if req.MaxTokens == nil || *req.MaxTokens < 0 {
 +		return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "invalid_request", message: "max_tokens is required"}
 +	}
 +	if len(req.Messages) == 0 {
@@ -666,7 +666,7 @@ index 00000000..267ab47f
 +		blockPath := fmt.Sprintf("%s[%d]", path, i)
 +		switch typ {
 +		case "text":
-+			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "text"); err != nil {
++			if err := anthropicRejectUnknownKeys(m, blockPath, "type", "text", "cache_control"); err != nil {
 +				return err
 +			}
 +			if v, ok := m["text"]; ok {
@@ -741,7 +741,7 @@ index 00000000..267ab47f
 +		if err != nil {
 +			return fmt.Errorf("%s[%d] must be an object", path, i)
 +		}
-+		if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("%s[%d]", path, i), "type", "text"); err != nil {
++		if err := anthropicRejectUnknownKeys(m, fmt.Sprintf("%s[%d]", path, i), "type", "text", "cache_control"); err != nil {
 +			return err
 +		}
 +		if v, ok := m["type"]; ok {
@@ -1568,12 +1568,13 @@ index 00000000..267ab47f
 +}
 +
 +func anthropicStopReason(reason string, hasToolUse bool) string {
++	if reason == "length" {
++		return "max_tokens"
++	}
 +	if reason == "tool_calls" || hasToolUse {
 +		return "tool_use"
 +	}
 +	switch reason {
-+	case "length":
-+		return "max_tokens"
 +	case "stop_sequence":
 +		return "stop_sequence"
 +	case "content_filter":
@@ -1605,24 +1606,23 @@ index 00000000..267ab47f
 +}
 +
 +func anthropicFinishReasonFromTerminalErrorCode(code string) string {
-+	switch code {
-+	case "stream_output_exceeded", "response_byte_cap_exceeded":
++	if gatewayCleanLengthTruncationTerminalCode(code) {
 +		return "length"
-+	default:
-+		return "stop"
 +	}
++	return "stop"
 +}
 +
 +func anthropicTerminalErrorCodeIsLengthTruncation(code string) bool {
-+	return anthropicFinishReasonFromTerminalErrorCode(code) == "length"
++	return gatewayCleanLengthTruncationTerminalCode(code)
 +}
 +
 +func anthropicStreamOutcomeFromTerminalErrorCode(code string) string {
++	if outcome := gatewayCleanLengthTruncationSettlementOutcome(code); outcome != "" {
++		return outcome
++	}
 +	switch code {
-+	case "stream_output_exceeded", "stream_truncated":
++	case "stream_truncated":
 +		return code
-+	case "response_byte_cap_exceeded":
-+		return "stream_output_exceeded"
 +	default:
 +		return "invalid_provider_response"
 +	}
@@ -2200,10 +2200,10 @@ index 00000000..267ab47f
 +}
 diff --git a/phase5-gateway/internal/router/anthropic_messages_test.go b/phase5-gateway/internal/router/anthropic_messages_test.go
 new file mode 100644
-index 00000000..c589bfc0
+index 00000000..4c76af10
 --- /dev/null
 +++ b/phase5-gateway/internal/router/anthropic_messages_test.go
-@@ -0,0 +1,1782 @@
+@@ -0,0 +1,1909 @@
 +package router
 +
 +import (
@@ -2371,8 +2371,6 @@ index 00000000..c589bfc0
 +			"input must be an object"},
 +		"array tool input": {`{"model":"claude","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"lookup","input":[]}]}]}`,
 +			"input must be an object"},
-+		"nested cache control": {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
-+			"cache_control is not supported"},
 +		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
 +			"cache_control is not supported"},
 +		"hosted tool type": {`{"model":"claude","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`,
@@ -2423,6 +2421,41 @@ index 00000000..c589bfc0
 +	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_reject")
 +	if snap.usageRows != 0 || snap.settledRows != 0 || snap.activeRows != 0 {
 +		t.Fatalf("unsupported request touched settlement state: %+v", snap)
++	}
++}
++
++func TestAnthropicMessagesAcceptsTextCacheControlAndZeroMaxTokens(t *testing.T) {
++	var capturedBody map[string]any
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		if err := json.NewDecoder(r.Body).Decode(&capturedBody); err != nil {
++			t.Fatalf("decode upstream request: %v", err)
++		}
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
++			"id":"chatcmpl_cache_control_zero",
++			"object":"chat.completion",
++			"created":1,
++			"model":"claude",
++			"usage":{"prompt_tokens":5,"completion_tokens":0,"total_tokens":5},
++			"choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
++		}`), nil
++	})}
++	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_cache_control_zero")
++
++	body := `{"model":"claude","max_tokens":0,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
++	resp := postAnthropicMessages(t, h, key, body, nil)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	if got := capturedBody["max_tokens"]; got != float64(0) {
++		t.Fatalf("translated max_tokens=%v want 0", got)
++	}
++	messages := capturedBody["messages"].([]any)
++	if got := messages[0].(map[string]any)["content"]; got != "hi" {
++		t.Fatalf("translated message content=%v want cache_control ignored and text preserved", got)
 +	}
 +}
 +
@@ -2546,6 +2579,35 @@ index 00000000..c589bfc0
 +	input, ok := toolUse["input"].(map[string]any)
 +	if !ok || input == nil || len(input) != 0 {
 +		t.Fatalf("tool_use input=%#v want empty object", toolUse["input"])
++	}
++}
++
++func TestAnthropicMessagesNonStreamingLengthTakesPrecedenceOverToolUse(t *testing.T) {
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		body := `{"id":"chatcmpl_tool_length","object":"chat.completion","created":1,"model":"claude",` +
++			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
++			`"choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"toolu_len","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"length"}]}`
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
++	})}
++	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_tool_length")
++
++	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	var anth map[string]any
++	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
++		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
++	}
++	if anth["stop_reason"] != "max_tokens" {
++		t.Fatalf("stop_reason=%v want max_tokens body=%s", anth["stop_reason"], resp.Body.String())
++	}
++	if !strings.Contains(resp.Body.String(), `"type":"tool_use"`) {
++		t.Fatalf("tool_use block missing body=%s", resp.Body.String())
 +	}
 +}
 +
@@ -3103,6 +3165,46 @@ index 00000000..c589bfc0
 +	}
 +}
 +
++func TestAnthropicMessagesStreamingTerminalResponseByteCapExceededRetryReplays(t *testing.T) {
++	var upstreamHits int
++	stream := `data: {"id":"chatcmpl_stream_response_byte_cap","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
++	stream += "\n\n" + `data: {"error":{"message":"cap hit","type":"api_error","code":"response_byte_cap_exceeded","retryable":true}}`
++	stream += "\n\ndata: [DONE]\n\n"
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		upstreamHits++
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
++	})}
++	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_response_byte_cap_replay")
++
++	body := `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
++	first := postAnthropicMessages(t, h, key, body, nil)
++	second := postAnthropicMessages(t, h, key, body, nil)
++	if first.Code != http.StatusOK || second.Code != http.StatusOK {
++		t.Fatalf("codes first=%d second=%d bodies:\n%s\n%s", first.Code, second.Code, first.Body.String(), second.Body.String())
++	}
++	if second.Header().Get(idlessDedupeHeader) != idlessDedupeHeaderValue {
++		t.Fatalf("second response did not replay; header=%q body=%s", second.Header().Get(idlessDedupeHeader), second.Body.String())
++	}
++	if upstreamHits != 1 {
++		t.Fatalf("upstream hits=%d want 1", upstreamHits)
++	}
++	if first.Body.String() != second.Body.String() {
++		t.Fatalf("replayed byte-cap stream differs:\nfirst=%s\nsecond=%s", first.Body.String(), second.Body.String())
++	}
++	if strings.Contains(second.Body.String(), "event: error") || strings.Contains(second.Body.String(), `"code":"response_byte_cap_exceeded"`) ||
++		!strings.Contains(second.Body.String(), `"stop_reason":"max_tokens"`) || !strings.Contains(second.Body.String(), "event: message_stop") {
++		t.Fatalf("replayed byte-cap stream was not a clean max_tokens terminal:\n%s", second.Body.String())
++	}
++	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_response_byte_cap_replay")
++	if snap.usageRows != 1 || snap.settledRows != 1 || snap.refundedRows != 0 || snap.activeRows != 0 {
++		t.Fatalf("settlement snapshot=%+v want one settled usage row and no refund", snap)
++	}
++}
++
 +func TestAnthropicMessagesStreamingTerminalTruncatedEmitsError(t *testing.T) {
 +	stream := `data: {"id":"chatcmpl_stream_truncated_terminal","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
 +	stream += "\n\n" + `data: {"error":{"message":"line too large","type":"api_error","code":"stream_truncated","retryable":true}}`
@@ -3329,6 +3431,31 @@ index 00000000..c589bfc0
 +	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_stream")
 +	if snap.usageRows != 1 || snap.settledRows != 1 {
 +		t.Fatalf("settlement snapshot=%+v want one settled usage row", snap)
++	}
++}
++
++func TestAnthropicMessagesStreamingLengthTakesPrecedenceOverToolUse(t *testing.T) {
++	stream := `data: {"id":"chatcmpl_stream_tool_length","model":"claude-stream","choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_len","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
++	stream += "\n\ndata: [DONE]\n\n"
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
++	})}
++	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
++		cfg.Coordinator.BuyerURL = "http://coordinator.test"
++		cfg.Features.AnthropicMessagesEnabled = true
++	}, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_tool_length")
++
++	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
++	if resp.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
++	}
++	body := resp.Body.String()
++	if !strings.Contains(body, `"stop_reason":"max_tokens"`) || strings.Contains(body, `"stop_reason":"tool_use"`) {
++		t.Fatalf("length finish did not take precedence over tool_use:\n%s", body)
++	}
++	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
++		t.Fatalf("tool_use block or terminal missing:\n%s", body)
 +	}
 +}
 +
@@ -3987,7 +4114,7 @@ index 00000000..c589bfc0
 +	}
 +}
 diff --git a/phase5-gateway/internal/router/chat_proxy.go b/phase5-gateway/internal/router/chat_proxy.go
-index 3ad94119..5d7c0b5c 100644
+index 3ad94119..77a9bf88 100644
 --- a/phase5-gateway/internal/router/chat_proxy.go
 +++ b/phase5-gateway/internal/router/chat_proxy.go
 @@ -138,13 +138,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -4024,6 +4151,15 @@ index 3ad94119..5d7c0b5c 100644
  	chat, err := parseChatRequest(body)
  	if err != nil {
  		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
+@@ -247,7 +257,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+ 	if chat.MaxTokens != nil {
+ 		maxTokens = *chat.MaxTokens
+ 	}
+-	if maxTokens <= 0 || maxTokens > maxAllowed {
++	if maxTokens < 0 || maxTokens > maxAllowed {
+ 		writeError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens_exceeded", "max_tokens exceeds configured limit")
+ 		return
+ 	}
 @@ -316,12 +326,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
  				replayAdapter = adapter
  				replayAdapter.beginReplayPassthrough()
@@ -4083,17 +4219,32 @@ index 3ad94119..5d7c0b5c 100644
  	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
  		return
  	}
-@@ -1189,6 +1224,40 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1172,8 +1207,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+ 				if terminalStructuredErrorCode != "" {
+ 					return true
+ 				}
+-				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
+-					terminalStructuredErrorCode = code
++				terminalCode := terminalSSEErrorCode(data)
++				cleanLengthTerminalFrame := sseErrorDeliveredClean(w, terminalCode)
++				if isSpec019TerminalSSEErrorCode(terminalCode) && !cleanLengthTerminalFrame {
++					terminalStructuredErrorCode = terminalCode
+ 					// #762: a 200 stream that ends in a SPEC-019 terminal
+ 					// error envelope is refunded, not an answer. Caching it
+ 					// would replay a stale provider error to a retry that
+@@ -1189,6 +1226,42 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  					}
  					return true
  				}
 +				anthropicTerminalFrame := false
 +				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
-+					terminalCode := terminalSSEErrorCode(data)
 +					anthropicTerminalFrame = terminalCode != ""
-+					if anthropicTerminalErrorCodeIsLengthTruncation(terminalCode) {
++					if gatewayCleanLengthTruncationTerminalCode(terminalCode) {
 +						adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
 +					}
++				}
++				if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && cleanLengthTerminalFrame {
++					adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
 +				}
 +				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 +					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
@@ -4124,16 +4275,16 @@ index 3ad94119..5d7c0b5c 100644
  				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
  				if deltaBytes > 0 {
  					// #760: CONTENT progress, not byte progress. Only a frame
-@@ -1227,7 +1296,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1227,7 +1300,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  					} else {
  						line = nil
  					}
 -				} else if !hasChoices {
-+				} else if !hasChoices && !anthropicTerminalFrame {
++				} else if !hasChoices && !anthropicTerminalFrame && !cleanLengthTerminalFrame {
  					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
  					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
  					if flusher != nil {
-@@ -1275,6 +1344,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1275,6 +1348,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  		if len(line) == 0 {
  			return true
  		}
@@ -4143,7 +4294,7 @@ index 3ad94119..5d7c0b5c 100644
  		if _, err := w.Write(line); err != nil {
  			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
  			// #762: explicit, even though settleCancelled poisons too — this
-@@ -1284,6 +1356,23 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1284,6 +1360,32 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  			settleCancelled()
  			return false
  		}
@@ -4164,10 +4315,19 @@ index 3ad94119..5d7c0b5c 100644
 +			}
 +			return false
 +		}
++		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.streamTerminal && terminalStructuredErrorCode == "" {
++			if reported != nil && !invalidReportedUsage {
++				settleReported(adapter.settlementOutcome("ok"))
++			} else {
++				completion := gatewaySerializedEstimatedCompletion()
++				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
++			}
++			return false
++		}
  		if flusher != nil {
  			flusher.Flush()
  		}
-@@ -1393,12 +1482,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
+@@ -1393,12 +1495,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
  		refundTerminalStructuredError()
  		return
  	}
@@ -4220,7 +4380,7 @@ index 3ad94119..5d7c0b5c 100644
  	if estimateTokensFromBytes(maxInt64(emitted, serializedEmitted)) > maxStreamingCompletionTokens(maxTokens) {
  		outcome = "stream_output_exceeded"
  	}
-@@ -1912,6 +2040,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
+@@ -1912,6 +2053,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
  }
  
  func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
@@ -4230,7 +4390,7 @@ index 3ad94119..5d7c0b5c 100644
  	finality := coordinatorSettlementFinalityFromHeaders(h)
  	switch finality.Action {
  	case settlementFinalityLegacy:
-@@ -1965,6 +2096,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
+@@ -1965,6 +2109,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
  }
  
  func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
@@ -4241,7 +4401,7 @@ index 3ad94119..5d7c0b5c 100644
  	finality := coordinatorStreamingSettlementFinality(resp)
  	switch finality.Action {
  	case settlementFinalityLegacy:
-@@ -2004,6 +2139,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
+@@ -2004,6 +2152,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
  	}
  }
  
@@ -4252,7 +4412,30 @@ index 3ad94119..5d7c0b5c 100644
  func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
  	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
  	defer cancel()
-@@ -2829,6 +2968,14 @@ type statusWriter struct {
+@@ -2778,6 +2930,22 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
+ 	}
+ }
+ 
++func gatewayCleanLengthTruncationTerminalCode(code string) bool {
++	switch code {
++	case "stream_output_exceeded", "response_byte_cap_exceeded":
++		return true
++	default:
++		return false
++	}
++}
++
++func gatewayCleanLengthTruncationSettlementOutcome(code string) string {
++	if gatewayCleanLengthTruncationTerminalCode(code) {
++		return "stream_output_exceeded"
++	}
++	return ""
++}
++
+ func demoTokenHash(token string) string {
+ 	sum := sha256.Sum256([]byte(token))
+ 	return hex.EncodeToString(sum[:])
+@@ -2829,6 +2997,14 @@ type statusWriter struct {
  	poisoned bool
  }
  
@@ -4267,20 +4450,27 @@ index 3ad94119..5d7c0b5c 100644
  // armDedupeCapture starts recording the buyer-visible body, up to limit bytes.
  func (sw *statusWriter) armDedupeCapture(limit int) {
  	sw.captureArmed = true
-@@ -2872,12 +3019,27 @@ func poisonDedupeCapture(w http.ResponseWriter) {
+@@ -2872,12 +3048,34 @@ func poisonDedupeCapture(w http.ResponseWriter) {
  	}
  }
  
 +func sseErrorDedupePoisonRequired(w http.ResponseWriter, code string) bool {
++	return !sseErrorDeliveredClean(w, code)
++}
++
++func sseErrorDeliveredClean(w http.ResponseWriter, code string) bool {
++	if code == "" {
++		return false
++	}
 +	if sw, ok := w.(*statusWriter); ok {
 +		if transformed, ok := sw.ResponseWriter.(cleanSSEErrorDedupeTransformer); ok {
-+			return !transformed.dedupeCleanSSEError(code)
++			return transformed.dedupeCleanSSEError(code)
 +		}
 +	}
 +	if transformed, ok := w.(cleanSSEErrorDedupeTransformer); ok {
-+		return !transformed.dedupeCleanSSEError(code)
++		return transformed.dedupeCleanSSEError(code)
 +	}
-+	return true
++	return false
 +}
 +
  func (sw *statusWriter) WriteHeader(code int) {
@@ -4295,7 +4485,7 @@ index 3ad94119..5d7c0b5c 100644
  }
  
  func (sw *statusWriter) Write(b []byte) (int, error) {
-@@ -2891,24 +3053,41 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
+@@ -2891,24 +3089,41 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
  	// complete 2xx and replayed to the next retry.
  	n, err := sw.ResponseWriter.Write(b)
  	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
@@ -4343,7 +4533,7 @@ index 3ad94119..5d7c0b5c 100644
  // Flush satisfies http.Flusher so SSE streaming through this wrapper still
  // flushes chunks to the buyer in real time.
  func (sw *statusWriter) Flush() {
-@@ -2931,7 +3110,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
+@@ -2931,7 +3146,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
  	// #762: an SSE error frame means this 200 stream is NOT a complete
  	// answer. Poison the dedupe capture so an identical id-less retry gets a
  	// fresh dispatch instead of replaying a truncated generation.
@@ -4471,6 +4661,129 @@ index c0773587..20f8810d 100644
  	if !strings.Contains(varyJoined, "X-Demo-Token") {
  		t.Errorf("Vary=%q must contain X-Demo-Token", varyJoined)
  	}
+diff --git a/phase5-gateway/internal/router/responses.go b/phase5-gateway/internal/router/responses.go
+index af13b90d..862f0f7a 100644
+--- a/phase5-gateway/internal/router/responses.go
++++ b/phase5-gateway/internal/router/responses.go
+@@ -51,6 +51,7 @@ type responsesAdapter struct {
+ 	nextOut        int
+ 	streamUsage    map[string]any
+ 	finishReason   string
++	streamOutcome  string
+ 	streamTerminal bool
+ 	text           strings.Builder
+ 	textOpen       bool
+@@ -190,6 +191,10 @@ func (a *responsesAdapter) endReplayPassthrough() {
+ 	a.finished = false
+ }
+ 
++func (a *responsesAdapter) dedupeCleanSSEError(code string) bool {
++	return a.stream && gatewayCleanLengthTruncationTerminalCode(code)
++}
++
+ func (a *responsesAdapter) finish() {
+ 	if a.finished {
+ 		return
+@@ -1034,6 +1039,12 @@ func (a *responsesAdapter) emitStreamFailed(errFrame *responsesStreamError) {
+ 	if code == "" {
+ 		code = "provider_error"
+ 	}
++	if gatewayCleanLengthTruncationTerminalCode(code) {
++		a.finishReason = "length"
++		a.streamOutcome = gatewayCleanLengthTruncationSettlementOutcome(code)
++		a.emitStreamDone()
++		return
++	}
+ 	message := errFrame.Message
+ 	if message == "" {
+ 		message = "Upstream provider failed"
+@@ -1106,6 +1117,25 @@ func (a *responsesAdapter) writeFinalBytes(p []byte) (int, error) {
+ 	return n, err
+ }
+ 
++func (a *responsesAdapter) setFallbackStreamUsage(promptTokens, completionTokens int64) {
++	if promptTokens < 0 {
++		promptTokens = 0
++	}
++	if completionTokens < 0 {
++		completionTokens = 0
++	}
++	if a.streamUsage == nil {
++		a.streamUsage = responsesUsageMap(promptTokens, 0, completionTokens, promptTokens+completionTokens)
++	}
++}
++
++func (a *responsesAdapter) settlementOutcome(defaultOutcome string) string {
++	if a.streamOutcome != "" {
++		return a.streamOutcome
++	}
++	return defaultOutcome
++}
++
+ func (a *responsesAdapter) armDedupeCapture(limit int) {
+ 	a.captureArmed = true
+ 	a.captureCap = limit
+diff --git a/phase5-gateway/internal/router/responses_test.go b/phase5-gateway/internal/router/responses_test.go
+index b5072198..f113cce4 100644
+--- a/phase5-gateway/internal/router/responses_test.go
++++ b/phase5-gateway/internal/router/responses_test.go
+@@ -190,6 +190,56 @@ func TestResponsesIdlessDedupeStreamingReplaysResponsesWireFormat(t *testing.T)
+ 	}
+ }
+ 
++func TestResponsesStreamingTerminalResponseByteCapExceededRetryReplays(t *testing.T) {
++	var hits atomic.Int32
++	stream := strings.Join([]string{
++		`data: {"id":"chatcmpl_responses_byte_cap","model":"llama","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`,
++		`data: {"error":{"message":"cap hit","type":"api_error","code":"response_byte_cap_exceeded","retryable":true}}`,
++		`data: [DONE]`,
++		``,
++	}, "\n\n")
++	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++		hits.Add(1)
++		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
++	})}
++	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, enableResponsesWithCoordinator, WithHTTPClient(client))
++	key := createAccountAndKey(t, store, cfg, "acct_responses_response_byte_cap_replay")
++	body := `{"model":"llama","input":"hi","stream":true,"max_output_tokens":20,"store":false}`
++
++	first := postResponses(t, h, key, body, nil)
++	second := postResponses(t, h, key, body, nil)
++
++	if first.Code != http.StatusOK || second.Code != http.StatusOK {
++		t.Fatalf("statuses first=%d second=%d bodies:\n%s\n%s", first.Code, second.Code, first.Body.String(), second.Body.String())
++	}
++	if got := second.Header().Get(idlessDedupeHeader); got != idlessDedupeHeaderValue {
++		t.Fatalf("retry %s=%q want %q body=%s", idlessDedupeHeader, got, idlessDedupeHeaderValue, second.Body.String())
++	}
++	if got := hits.Load(); got != 1 {
++		t.Fatalf("upstream dispatches=%d want 1", got)
++	}
++	if first.Body.String() != second.Body.String() {
++		t.Fatalf("replayed byte-cap stream differs:\n first=%s\nsecond=%s", first.Body.String(), second.Body.String())
++	}
++	for _, want := range []string{
++		"event: response.incomplete",
++		`"status":"incomplete"`,
++		`"reason":"max_output_tokens"`,
++		"data: [DONE]",
++	} {
++		if !strings.Contains(second.Body.String(), want) {
++			t.Fatalf("replayed byte-cap Responses stream missing %q:\n%s", want, second.Body.String())
++		}
++	}
++	if strings.Contains(second.Body.String(), "event: response.failed") || strings.Contains(second.Body.String(), `"code":"response_byte_cap_exceeded"`) {
++		t.Fatalf("byte-cap terminal leaked as failed error:\n%s", second.Body.String())
++	}
++	gotSettlement := gatewaySettlementSnapshot(t, dbPath, "acct_responses_response_byte_cap_replay")
++	if gotSettlement.usageRows != 1 || gotSettlement.settledRows != 1 || gotSettlement.refundedRows != 0 || gotSettlement.activeRows != 0 {
++		t.Fatalf("settlement=%+v want one settled usage row and no refund", gotSettlement)
++	}
++}
++
+ func TestResponsesCodex0146DefaultToolsAreFlattened(t *testing.T) {
+ 	var capturedBody map[string]any
+ 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 diff --git a/phase5-gateway/internal/router/server.go b/phase5-gateway/internal/router/server.go
 index 1f0fbdb1..6f7ea569 100644
 --- a/phase5-gateway/internal/router/server.go

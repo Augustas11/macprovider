@@ -165,8 +165,6 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 			"input must be an object"},
 		"array tool input": {`{"model":"claude","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"lookup","input":[]}]}]}`,
 			"input must be an object"},
-		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
-			"cache_control is not supported"},
 		"hosted tool type": {`{"model":"claude","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`,
 			"web_search_20250305"},
 		"numeric model": {`{"model":7,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
@@ -239,13 +237,21 @@ func TestAnthropicMessagesAcceptsTextCacheControlAndZeroMaxTokens(t *testing.T) 
 	}, WithHTTPClient(client))
 	key := createAccountAndKey(t, store, cfg, "acct_anthropic_cache_control_zero")
 
-	body := `{"model":"claude","max_tokens":0,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
+	body := `{"model":"claude","max_tokens":0,"service_tier":"standard_only","tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`
 	resp := postAnthropicMessages(t, h, key, body, nil)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	if got := capturedBody["max_tokens"]; got != float64(0) {
 		t.Fatalf("translated max_tokens=%v want 0", got)
+	}
+	if _, ok := capturedBody["service_tier"]; ok {
+		t.Fatalf("translated request unexpectedly preserved Anthropic service_tier: %v", capturedBody)
+	}
+	tools := capturedBody["tools"].([]any)
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "lookup" {
+		t.Fatalf("translated tool=%v want lookup", tools[0])
 	}
 	messages := capturedBody["messages"].([]any)
 	if got := messages[0].(map[string]any)["content"]; got != "hi" {
@@ -490,11 +496,10 @@ func TestAnthropicMessagesNonStreamingRejectsChoiceLessProviderError(t *testing.
 	}
 }
 
-func TestAnthropicMessagesNonStreamingRejectsDuplicateProviderKeysBeforeUsageRewrite(t *testing.T) {
+func TestAnthropicMessagesNonStreamingDuplicateProviderKeysSettleParsedUsage(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		body := `{"id":"chatcmpl_dup","model":"claude",` +
+		body := `{"id":"chatcmpl_dup","object":"chat.completion","object":"chat.completion.chunk","model":"claude",` +
 			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-			`"usage":{"prompt_tokens":50,"completion_tokens":70,"total_tokens":120},` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"ambiguous"},"finish_reason":"stop"}]}`
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
 	})}
@@ -509,8 +514,8 @@ func TestAnthropicMessagesNonStreamingRejectsDuplicateProviderKeysBeforeUsageRew
 		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_dup_provider")
-	if outcome != "invalid_provider_response" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/gateway_estimated/0/nonzero", outcome, source, completion, prompt)
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -1062,6 +1067,15 @@ func TestAnthropicMessagesStreamingGatewayOutputExceededRetryReplays(t *testing.
 	if strings.Contains(second.Body.String(), "event: error") || !strings.Contains(second.Body.String(), `"stop_reason":"max_tokens"`) || !strings.Contains(second.Body.String(), "event: message_stop") {
 		t.Fatalf("replayed cap stream was not a clean max_tokens terminal:\n%s", second.Body.String())
 	}
+	delta := anthropicStreamPayloadForEvent(t, second.Body.String(), "message_delta")
+	usage, _ := delta["usage"].(map[string]any)
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_gateway_cap_replay")
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" || completion <= 0 || prompt <= 0 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want stream_output_exceeded/gateway_estimated/nonzero", outcome, source, completion, prompt)
+	}
+	if usage["output_tokens"] != float64(completion) || usage["output_tokens"] == float64(0) {
+		t.Fatalf("visible usage=%v settlement completion=%d want nonzero match", usage, completion)
+	}
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_gateway_cap_replay")
 	if snap.usageRows != 1 || snap.settledRows != 1 || snap.activeRows != 0 {
 		t.Fatalf("settlement snapshot=%+v want one settled usage row", snap)
@@ -1250,6 +1264,32 @@ func TestAnthropicMessagesStreamingLengthTakesPrecedenceOverToolUse(t *testing.T
 	}
 	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
 		t.Fatalf("tool_use block or terminal missing:\n%s", body)
+	}
+}
+
+func TestAnthropicMessagesStreamingAllowsEmptyInitialToolArguments(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_empty_args","model":"claude-stream","choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_empty","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_empty_args","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\ndata: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_empty_initial_tool_args")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if strings.Contains(body, "event: error") || strings.Contains(body, `"code":"invalid_provider_response"`) {
+		t.Fatalf("empty initial tool arguments were rejected:\n%s", body)
+	}
+	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, `"partial_json":"{\"q\":\"mac\"}"`) || !strings.Contains(body, `"stop_reason":"tool_use"`) {
+		t.Fatalf("tool stream missing expected Anthropic events:\n%s", body)
 	}
 }
 
