@@ -1238,11 +1238,11 @@ func TestAnthropicMessagesIdlessBodylessFallbackErrorIsAnthropicShaped(t *testin
 }
 
 func TestAnthropicMessagesSettlementDisclosureIsFlagScoped(t *testing.T) {
-	base := makeVerifiedModelSettlementDisclosure(false)
+	base := makeVerifiedModelSettlementDisclosure(false, false)
 	if containsString(base.IncludedPaidEntrypoints, "POST /v1/messages") {
 		t.Fatalf("base disclosure unexpectedly includes /v1/messages: %+v", base.IncludedPaidEntrypoints)
 	}
-	enabled := makeVerifiedModelSettlementDisclosure(true)
+	enabled := makeVerifiedModelSettlementDisclosure(false, true)
 	if !containsString(enabled.IncludedPaidEntrypoints, "POST /v1/messages") {
 		t.Fatalf("enabled disclosure missing /v1/messages: %+v", enabled.IncludedPaidEntrypoints)
 	}

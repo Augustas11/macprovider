@@ -39,6 +39,10 @@ const (
 	// computed by an older build.
 	idlessDedupeFingerprintVersion = "mpg-idless-v2"
 
+	idlessDedupeEntrypointChat      = "chat"
+	idlessDedupeEntrypointResponses = "responses"
+	idlessDedupeEntrypointMessages  = "anthropic-messages"
+
 	// Two separate caps, because the two things an entry holds cost wildly
 	// different amounts of memory and wildly different amounts of money when
 	// dropped.
@@ -84,7 +88,7 @@ const (
 // its neighbour:
 //
 //  1. idlessDedupeFingerprintVersion — the keying-scheme tag.
-//  2. protocol — the buyer-visible API contract whose response is cached.
+//  2. entrypoint — the public API facade whose wire contract is being served.
 //  3. accountID — the billed tenant.
 //  4. demoTokenHash — distinguishes two demo sessions behind one IP.
 //  5. conversationTag — X-MacProvider-Conversation, which selects sticky
@@ -102,10 +106,10 @@ const (
 // Adding a component is a keying change: bump idlessDedupeFingerprintVersion
 // when one is added to a build that is already deployed, so old and new
 // fingerprints cannot collide.
-func idlessRequestFingerprint(protocol, accountID, demoTokenHash, conversationTag, retryHint string, body []byte) string {
+func idlessRequestFingerprint(entrypoint, accountID, demoTokenHash, conversationTag, retryHint string, body []byte) string {
 	bodyDigest := sha256.Sum256(body)
 	h := sha256.New()
-	for _, part := range []string{idlessDedupeFingerprintVersion, protocol, accountID, demoTokenHash, conversationTag, retryHint} {
+	for _, part := range []string{idlessDedupeFingerprintVersion, entrypoint, accountID, demoTokenHash, conversationTag, retryHint} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}

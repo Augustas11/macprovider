@@ -1246,3 +1246,93 @@ func TestWriteErrorEnvelopeShape(t *testing.T) {
 		t.Errorf("type for 500 = %q, want %q", got, "server_error")
 	}
 }
+
+// TestEarningsEndpointEmitsUsdcFields locks the contract the Malibu client
+// (ProviderEarningsClient) actually decodes: usdc_today / usdc_week /
+// usdc_pending / usdc_lifetime. Before this fix the endpoint emitted only
+// *_credits, so every provider card rendered $0.00 despite real accrued
+// credits. usd = provider_credits / 1_000_000 (SPEC-016 §4.3 payout invariant:
+// provider_credits == USDC base units, 6 decimals).
+func TestEarningsEndpointEmitsUsdcFields(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	// 500,000 payable credits == $0.50 USDC, all in the current day/week/life.
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500000)
+
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		TotalCredits float64  `json:"total_credits"`
+		UsdcToday    *float64 `json:"usdc_today"`
+		UsdcWeek     *float64 `json:"usdc_week"`
+		UsdcPending  *float64 `json:"usdc_pending"`
+		UsdcLifetime *float64 `json:"usdc_lifetime"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.TotalCredits != 500000 {
+		t.Fatalf("total_credits=%v want 500000 (unchanged)", resp.TotalCredits)
+	}
+	// All four usdc_* fields must be present (a nil = the pre-fix $0.00 bug).
+	for name, got := range map[string]*float64{
+		"usdc_today": resp.UsdcToday, "usdc_week": resp.UsdcWeek,
+		"usdc_pending": resp.UsdcPending, "usdc_lifetime": resp.UsdcLifetime,
+	} {
+		if got == nil {
+			t.Fatalf("%s missing from earnings response (client decodes nil -> $0.00)", name)
+		}
+	}
+	// lifetime + pending are range-/window-independent, so their conversion is
+	// asserted exactly: 500000 base units / 1e6 == $0.50.
+	if *resp.UsdcLifetime != 0.5 {
+		t.Fatalf("usdc_lifetime=%v want 0.5", *resp.UsdcLifetime)
+	}
+	if *resp.UsdcPending != 0.5 {
+		t.Fatalf("usdc_pending=%v want 0.5", *resp.UsdcPending)
+	}
+	// today/week depend on the handler's own UTC clock vs the seed time; a run
+	// crossing 00:00 (or Monday 00:00) UTC would zero the window. Assert only
+	// that they carry the credit's converted value or 0 — never a bogus figure.
+	for name, got := range map[string]float64{"usdc_today": *resp.UsdcToday, "usdc_week": *resp.UsdcWeek} {
+		if got != 0.5 && got != 0 {
+			t.Fatalf("%s=%v want 0.5 or 0 (UTC-boundary tolerant)", name, got)
+		}
+	}
+}
+
+// TestEarningsEndpointUsdcPendingIsRangeIndependent locks the security-audit
+// MEDIUM fixes: usdc_pending is all owed money and must not shrink when a
+// from/to range is supplied, whereas usdc_lifetime is range-scoped. An older
+// credit outside the range still counts as owed/pending.
+func TestEarningsEndpointUsdcPendingIsRangeIndependent(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	// One old credit (outside the range) + one recent (inside the range).
+	insertCredit(t, store.db, "provider-a", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), 300000)
+	insertCredit(t, store.db, "provider-a", time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC), 200000)
+
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings?from=2026-06-01&to=2026-06-30", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		UsdcLifetime float64 `json:"usdc_lifetime"`
+		UsdcPending  float64 `json:"usdc_pending"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.UsdcLifetime != 0.2 { // range-scoped: only the 200000 recent credit
+		t.Fatalf("usdc_lifetime=%v want 0.2 (range-scoped)", resp.UsdcLifetime)
+	}
+	if resp.UsdcPending != 0.5 { // all owed: (300000+200000)/1e6, ignores range
+		t.Fatalf("usdc_pending=%v want 0.5 (range-independent owed total)", resp.UsdcPending)
+	}
+}

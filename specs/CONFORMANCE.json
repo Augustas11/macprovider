@@ -603,7 +603,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.5",
+      "version": "v0.1.6",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -627,11 +627,12 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Requirement IDs SPEC-022-R001..R011 registered (one per normative requirement group R-1..R-11) in v0.1.6; conformance reconciliation of the settlement pipeline tracked under the verified-model-settlement domain."
       }
     },
     {
@@ -2847,6 +2848,171 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-PKV14 (operator configuration surface mirroring SPEC-037 FR-KVP11: triple-source precedence, default-off, block size, pool capacity, fallback policy): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R001",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-1 policy authority and mode (single authoritative verified_model_settlement surface; default observe MUST NOT change money; enforce activation preconditions; effective policy recorded and read from request-start row): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R002",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-2 entrypoint and routing preconditions (covered paid entrypoints; active signed catalog at route time; route only to hash_verified provider/model pairs; fail-closed warm-swap): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R003",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-3 route-time verification snapshot (immutable per-attempt snapshot; model-hash triple-equality; usage/prompt_hash/output_hash cross-check against coordinator-observed canonical state; quarantine on unavailable/mismatch): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R004",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-4 receipt requirement (settlement-capable provider-signed receipt for any debitable/creditable outcome; null model_hash and legacy receipts non-settling; signature necessary not sufficient; receipt-key identity binding; terminal receipt selection is idempotent): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R005",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; per-attempt failover settles delivered verified prefixes without double-charge): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R006",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-6 buyer receipt retrieval (owner/operator auth; no raw prompts or outputs; proof/metadata only; defined retention, rate limits, idempotency, 404/403, pending/quarantined visibility): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R007",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-7 settlement, quarantine, and payout exclusion (receipt-verification gate before any credit/earnings/sweep/payout; non-verified excluded; quarantine mandatory for trust failures and terminal; no fallback to provider-reported usage under enforce; operator money-positive bypasses forbidden): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R008",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-8 buyer debit semantics (reservation-first; final debit only on verified; quarantine/deadline releases reservation and keeps provider credit zero; zero_settled terminal; buyer surfaces distinguish pending/verified/quarantined/zero_settled): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R009",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-9 rollout, migration, and rollback (effective policy by request-start timestamp and attempt identity; no retroactive reclassification; enforced rows retain original policy/deadline/payout-exclusion across rollback; pre-existing payout-ready rows excluded from the snapshot): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R010",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge and failover disclosure): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R011",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
       }
     }
   ]

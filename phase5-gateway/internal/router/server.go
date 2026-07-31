@@ -215,6 +215,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
+	if s.cfg.Features.ResponsesAPIEnabled {
+		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleResponses)))
+	}
 	if s.cfg.Features.AnthropicMessagesEnabled {
 		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleAnthropicMessages)))
 	}
@@ -396,7 +399,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			"window_date": window, "daily_tokens_used": used, "daily_tokens_reserved": reserved,
 			"daily_tokens_remaining": remaining, "daily_tokens_limit": limit,
 		},
-		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(s.cfg.Features.AnthropicMessagesEnabled),
+		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled, s.cfg.Features.AnthropicMessagesEnabled),
 		"capacity":              map[string]any{"tier": tier.Tier},
 		"keys":                  keys,
 		"models":                []any{},

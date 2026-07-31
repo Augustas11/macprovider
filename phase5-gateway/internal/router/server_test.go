@@ -6196,6 +6196,8 @@ var gatewayEmittedErrorCodes = []string{
 	"invalid_kill_switch_version", "invalid_limit", "invalid_operator_token",
 	"invalid_provider_response", "invalid_provider_usage", "invalid_rating", "invalid_request",
 	"invalid_request_body", "invalid_request_id", "invalid_window",
+	"invalid_provider_usage", "invalid_rating", "invalid_request",
+	"invalid_provider_response", "invalid_request_body", "invalid_request_id", "invalid_window",
 	"keys_load_failed", "max_tokens_exceeded", "method_not_allowed",
 	"missing_bearer_token", "n_must_be_1", "no_provider_available",
 	"nonce_unavailable", "not_found", "oauth_action_unknown",

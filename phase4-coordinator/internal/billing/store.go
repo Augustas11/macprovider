@@ -1080,6 +1080,23 @@ func (s *Store) SetSettlementConfig(cfg SettlementConfig) {
 	s.settlement = cfg
 }
 
+// usdcBaseUnitsPerUSDC is the USDC fixed-point scale (6 decimals): one USDC
+// equals 1,000,000 base units.
+const usdcBaseUnitsPerUSDC = 1_000_000
+
+// providerCreditsToUSDC converts ledger provider_credits into a USDC amount
+// using the SAME invariant the payout runner enforces at settlement time —
+// SPEC-016 §4.3 step 2: the on-chain payout amount in USDC base units equals
+// provider_credits exactly (phase4-coordinator/internal/payout/runner.go). So
+// the displayed usdc_* figure is, by construction, the amount the provider is
+// actually owed/paid, independent of any tunable stats display rate.
+func providerCreditsToUSDC(credits int64) float64 {
+	if credits <= 0 {
+		return 0
+	}
+	return float64(credits) / usdcBaseUnitsPerUSDC
+}
+
 func (s *Store) SettlementConfig(defaultCfg SettlementConfig) SettlementConfig {
 	s.settlementMu.RLock()
 	defer s.settlementMu.RUnlock()
