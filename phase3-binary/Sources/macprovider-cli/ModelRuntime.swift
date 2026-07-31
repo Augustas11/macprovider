@@ -1880,7 +1880,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
                     var emittedText = ""
                     var stoppedByRequestStop = false
-                    var toolStreamer = NativeToolCallStreamEmitter(modelID: request.model)
+                    var toolStreamer = NativeToolCallStreamEmitter(
+                        modelID: request.model,
+                        allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                    )
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
@@ -3400,16 +3403,31 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 }
 
-private struct NativeToolCallStreamEmitter {
+// `internal` (not `private`) so the allowlist fail-closed behavior is unit-testable via
+// `@testable import macprovider_cli` (see NativeToolCallStreamEmitterTests).
+struct NativeToolCallStreamEmitter {
     private let startDelimiter: String
     private let endDelimiter: String
     private let argumentKey: String
+    /// Declared tools for this request. A streamed tool-call delta MUST NOT be emitted for
+    /// any function name not in this set — otherwise a widened name grammar could surface an
+    /// undeclared tool_call to the buyer before the final parser's fail-closed check
+    /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
+    private let allowedFunctionNames: Set<String>?
+    /// Function-XML (`<function=…>`) is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). The
+    /// streaming emitter mirrors the non-streaming parser's family gate: only Qwen models may
+    /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
+    /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
+    private let allowsFunctionXML: Bool
     private var opened = false
     private var closed = false
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-    init(modelID: String) {
+    init(modelID: String, allowedFunctionNames: Set<String>?) {
+        self.allowedFunctionNames = allowedFunctionNames
+        self.allowsFunctionXML = modelID.localizedCaseInsensitiveContains("qwen2.5")
+            || modelID.localizedCaseInsensitiveContains("qwen3")
         if modelID.localizedCaseInsensitiveContains("llama-3.3") {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
@@ -3430,12 +3448,12 @@ private struct NativeToolCallStreamEmitter {
             let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
             let body = String(text[afterStart..<bodyEnd])
             let isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
-            if body.contains("<function=") {
+            if allowsFunctionXML, body.contains("<function=") {
                 return observeNemotronXML(body: body, isClosed: isClosed)
             }
             return observeJSONToolCall(body: body, isClosed: isClosed)
         }
-        if text.contains("<function=") {
+        if allowsFunctionXML, text.contains("<function=") {
             return observeNemotronXML(body: text, isClosed: false)
         }
         return []
@@ -3445,6 +3463,16 @@ private struct NativeToolCallStreamEmitter {
         guard let name = stringField("name", in: body),
               let arguments = argumentPrefix(in: body)
         else {
+            return []
+        }
+        // Fail closed: never stream a tool-call delta for an undeclared function name.
+        guard let allowed = allowedFunctionNames, allowed.contains(name) else {
+            return []
+        }
+        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
+        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
+        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            closed = true
             return []
         }
 
@@ -3468,6 +3496,16 @@ private struct NativeToolCallStreamEmitter {
         guard let name = ToolCallParser.nemotronFunctionName(in: body),
               let arguments = ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: isClosed)
         else {
+            return []
+        }
+        // Fail closed: never stream a tool-call delta for an undeclared function name.
+        guard let allowed = allowedFunctionNames, allowed.contains(name) else {
+            return []
+        }
+        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
+        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
+        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            closed = true
             return []
         }
 
