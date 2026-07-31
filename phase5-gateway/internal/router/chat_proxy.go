@@ -1226,7 +1226,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				}
 				anthropicTerminalFrame := false
 				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
-					anthropicTerminalFrame = terminalSSEErrorCode(data) != ""
+					terminalCode := terminalSSEErrorCode(data)
+					anthropicTerminalFrame = terminalCode != ""
+					if anthropicTerminalErrorCodeIsLengthTruncation(terminalCode) {
+						adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
+					}
 				}
 				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))

@@ -49,6 +49,7 @@ type anthropicMessagesAdapter struct {
 	streamOutcome      string
 	terminalStopReason string
 	stopSequence       *string
+	streamRefusal      bool
 	finished           bool
 	replayBody         bool
 	writeErr           error
@@ -950,7 +951,8 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 		Error   any        `json:"error"`
 		Choices []struct {
 			Message struct {
-				Content   any `json:"content"`
+				Content   any    `json:"content"`
+				Refusal   string `json:"refusal"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -991,6 +993,12 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 		return nil, err
 	} else if text = anthropicStripThinkBlocks(text); text != "" {
 		content = append(content, map[string]any{"type": "text", "text": text})
+	}
+	if refusal := strings.TrimSpace(choice.Message.Refusal); refusal != "" {
+		if len(content) == 0 {
+			content = append(content, map[string]any{"type": "text", "text": choice.Message.Refusal})
+		}
+		stopReason = "refusal"
 	}
 	seenToolIDs := map[string]struct{}{}
 	for _, tc := range choice.Message.ToolCalls {
@@ -1139,6 +1147,12 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 	if text := a.filterThinkContent(anthropicStringFromAny(delta["content"])); text != "" {
 		a.emitTextDelta(text)
 	}
+	if refusal := anthropicStringFromAny(delta["refusal"]); strings.TrimSpace(refusal) != "" {
+		a.streamRefusal = true
+		if text := a.filterThinkContent(refusal); text != "" {
+			a.emitTextDelta(text)
+		}
+	}
 	toolDeltas, err := anthropicToolCallDeltasFromAny(delta["tool_calls"])
 	if err != nil {
 		a.emitInvalidProviderResponse(err.Error())
@@ -1157,6 +1171,9 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 			return
 		}
 		a.finishReason = finish
+		if a.streamRefusal {
+			a.terminalStopReason = "refusal"
+		}
 		if chunk.Choices[0].StopSequence != nil {
 			a.stopSequence = chunk.Choices[0].StopSequence
 		}
@@ -1488,7 +1505,7 @@ func anthropicStopSequence(finishReason string, matched *string) any {
 
 func anthropicFinishReasonFromTerminalErrorCode(code string) string {
 	switch code {
-	case "stream_output_exceeded", "stream_truncated", "response_byte_cap_exceeded":
+	case "stream_output_exceeded", "response_byte_cap_exceeded":
 		return "length"
 	default:
 		return "stop"
@@ -1840,8 +1857,13 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 			if err != nil {
 				return fmt.Errorf("%s.delta must be an object", path)
 			}
-			if err := anthropicRejectUnknownKeys(delta, path+".delta", "role", "content", "tool_calls"); err != nil {
+			if err := anthropicRejectUnknownKeys(delta, path+".delta", "role", "content", "refusal", "tool_calls"); err != nil {
 				return err
+			}
+			if refusalRaw, ok := delta["refusal"]; ok && !anthropicRawIsNull(refusalRaw) {
+				if err := anthropicValidateRawString(refusalRaw, path+".delta.refusal"); err != nil {
+					return err
+				}
 			}
 			if toolCallsRaw, ok := delta["tool_calls"]; ok {
 				if err := anthropicValidateProviderToolCallsRaw(path+".delta.tool_calls", toolCallsRaw); err != nil {
@@ -1862,8 +1884,13 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 		if err != nil {
 			return fmt.Errorf("%s.message must be an object", path)
 		}
-		if err := anthropicRejectUnknownKeys(message, path+".message", "role", "content", "tool_calls"); err != nil {
+		if err := anthropicRejectUnknownKeys(message, path+".message", "role", "content", "refusal", "tool_calls"); err != nil {
 			return err
+		}
+		if refusalRaw, ok := message["refusal"]; ok && !anthropicRawIsNull(refusalRaw) {
+			if err := anthropicValidateRawString(refusalRaw, path+".message.refusal"); err != nil {
+				return err
+			}
 		}
 		if toolCallsRaw, ok := message["tool_calls"]; ok {
 			if err := anthropicValidateProviderToolCallsRaw(path+".message.tool_calls", toolCallsRaw); err != nil {

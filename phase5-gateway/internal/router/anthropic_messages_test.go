@@ -347,7 +347,7 @@ func TestAnthropicMessagesNonStreamingContentFilterMapsToRefusal(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := `{"id":"chatcmpl_content_filter","object":"chat.completion","created":1,"model":"claude",` +
 			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-			`"choices":[{"index":0,"message":{"role":"assistant","content":"cannot comply"},"finish_reason":"content_filter"}]}`
+			`"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"cannot comply"},"finish_reason":"content_filter"}]}`
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -367,6 +367,11 @@ func TestAnthropicMessagesNonStreamingContentFilterMapsToRefusal(t *testing.T) {
 	if anth["stop_reason"] != "refusal" {
 		t.Fatalf("stop_reason=%v want refusal body=%s", anth["stop_reason"], resp.Body.String())
 	}
+	content := anth["content"].([]any)
+	text := content[0].(map[string]any)["text"]
+	if text != "cannot comply" {
+		t.Fatalf("refusal text=%v want visible refusal body=%s", text, resp.Body.String())
+	}
 }
 
 func TestAnthropicMessagesNonStreamingInvalidProviderResponseIgnoresVerifiedFinalityDebit(t *testing.T) {
@@ -374,7 +379,7 @@ func TestAnthropicMessagesNonStreamingInvalidProviderResponseIgnoresVerifiedFina
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := `{"id":"chatcmpl_bad_verified","object":"chat.completion","created":1,"model":"claude",` +
 			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-			`"choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":"hidden"},"finish_reason":"stop"}]}`
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"","unsupported_output":"hidden"},"finish_reason":"stop"}]}`
 		h := http.Header{"Content-Type": []string{"application/json"}}
 		for key, values := range finality {
 			h[key] = values
@@ -447,11 +452,11 @@ func TestAnthropicMessagesNonStreamingRejectsDuplicateProviderKeysBeforeUsageRew
 	}
 }
 
-func TestAnthropicMessagesNonStreamingRejectsUnsupportedProviderOutputField(t *testing.T) {
+func TestAnthropicMessagesNonStreamingProviderRefusalMapsToText(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := `{"id":"chatcmpl_refusal","object":"chat.completion","created":1,"model":"claude",` +
 			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
-			`"choices":[{"index":0,"message":{"role":"assistant","content":"","refusal":"no"},"finish_reason":"stop"}]}`
+			`"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"no"},"finish_reason":"stop"}]}`
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
 	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -461,12 +466,24 @@ func TestAnthropicMessagesNonStreamingRejectsUnsupportedProviderOutputField(t *t
 	key := createAccountAndKey(t, store, cfg, "acct_anthropic_refusal_provider")
 
 	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
-	if resp.Code != http.StatusBadGateway {
-		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var anth map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
+		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
+	}
+	if anth["stop_reason"] != "refusal" {
+		t.Fatalf("stop_reason=%v want refusal body=%s", anth["stop_reason"], resp.Body.String())
+	}
+	content := anth["content"].([]any)
+	text := content[0].(map[string]any)["text"]
+	if text != "no" {
+		t.Fatalf("refusal text=%v want visible refusal body=%s", text, resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_refusal_provider")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
+	if outcome != "ok" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want ok/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -869,9 +886,44 @@ func TestAnthropicMessagesStreamingTerminalOutputExceededEmitsMessageStop(t *tes
 	if !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
 		t.Fatalf("terminal output-exceeded frame did not close as max_tokens:\n%s", body)
 	}
-	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
-	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source=%s/%s want stream_output_exceeded/gateway_estimated", outcome, source)
+	delta := anthropicStreamPayloadForEvent(t, body, "message_delta")
+	usage, _ := delta["usage"].(map[string]any)
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" || completion <= 0 || prompt <= 0 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want stream_output_exceeded/gateway_estimated/nonzero", outcome, source, completion, prompt)
+	}
+	if usage["input_tokens"] != float64(prompt) || usage["output_tokens"] != float64(completion) {
+		t.Fatalf("visible usage=%v settlement prompt/completion=%d/%d", usage, prompt, completion)
+	}
+}
+
+func TestAnthropicMessagesStreamingTerminalTruncatedEmitsError(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_truncated_terminal","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"error":{"message":"line too large","type":"api_error","code":"stream_truncated","retryable":true}}`
+	stream += "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_truncated_terminal")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"stream_truncated"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("stream_truncated terminal did not emit Anthropic error + close:\n%s", body)
+	}
+	if strings.Contains(body, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("stream_truncated terminal was misclassified as max_tokens:\n%s", body)
+	}
+	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_truncated_terminal")
+	if outcome != "stream_truncated" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source=%s/%s want stream_truncated/gateway_estimated", outcome, source)
 	}
 }
 
@@ -1285,7 +1337,7 @@ func TestAnthropicMessagesStreamingTerminalErrorRefundsInsteadOfSettling(t *test
 	}
 }
 
-func TestAnthropicMessagesStreamingRejectsUnsupportedOutputFieldsBeforeBilling(t *testing.T) {
+func TestAnthropicMessagesStreamingRefusalMapsToText(t *testing.T) {
 	stream := `data: {"id":"chatcmpl_refusal","model":"claude-stream","choices":[{"delta":{"refusal":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
 	stream += "\n\ndata: [DONE]\n\n"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1299,17 +1351,20 @@ func TestAnthropicMessagesStreamingRejectsUnsupportedOutputFieldsBeforeBilling(t
 
 	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
 	body := resp.Body.String()
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"invalid_provider_response"`) {
-		t.Fatalf("unsupported output stream did not fail closed:\n%s", body)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, body)
+	}
+	if strings.Contains(body, "event: error") || !strings.Contains(body, `"text":"no"`) || !strings.Contains(body, `"stop_reason":"refusal"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("refusal stream did not translate to visible refusal terminal:\n%s", body)
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_refusal")
-	if outcome != "invalid_provider_response" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/gateway_estimated/0/nonzero", outcome, source, completion, prompt)
+	if outcome != "unverified_streaming" || source != "provider_reported" || completion != 4 || prompt != 3 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want unverified_streaming/provider_reported/4/3", outcome, source, completion, prompt)
 	}
 }
 
 func TestAnthropicMessagesStreamingInvalidProviderResponseIgnoresVerifiedFinalityDebit(t *testing.T) {
-	stream := `data: {"id":"chatcmpl_refusal_verified","model":"claude-stream","choices":[{"delta":{"refusal":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`
+	stream := `data: {"id":"chatcmpl_refusal_verified","model":"claude-stream","choices":[{"delta":{"unsupported_output":"no"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}`
 	stream += "\n\ndata: [DONE]\n\n"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		h := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
