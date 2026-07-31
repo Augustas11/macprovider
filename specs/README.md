@@ -26,7 +26,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-015 | Verifiable inference receipts | 0.4.2 | normative | pending | pending corpus migration | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.23 | draft | pending | pending corpus migration | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.1.9 | normative | pending | pending: 1 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
-| SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.7 | normative | pending | pending: 1 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
+| SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.7 | normative | pending | pending: 2 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.11 | normative | pending | pending: 4 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.0 | draft | pending | pending corpus migration | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
