@@ -288,7 +288,7 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Create verified draft GitHub release", 1, 1),
     ("Publish only the revalidated numeric draft", 2, 2),
     ("Publish one append-only immutable discovery transport", 1, 1),
-    ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
+    ("Publish Malibu download bridge to Pearl", 0, 0),
 )
 
 
@@ -732,20 +732,24 @@ for requirement in (
         raise SystemExit(f"final Malibu artifact verification omits: {requirement}")
 if publish.count("Generate one-time Malibu 1.8.32 bootstrap bridge") != 1:
     raise SystemExit("release workflow must contain exactly one named bootstrap generator")
-if publish.count("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") != 1:
-    raise SystemExit("release workflow must contain exactly one named bootstrap publisher")
+if publish.count("Publish Malibu download bridge to Pearl") != 1:
+    raise SystemExit("release workflow must contain exactly one named download bridge publisher")
 bridge = publish.split("- name: Generate one-time Malibu 1.8.32 bootstrap bridge", 1)[1].split(
     "\n      - name:", 1
 )[0]
 pearl_bridge = publish.split(
-    "- name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 1
+    "- name: Publish Malibu download bridge to Pearl", 1
 )[1].split("\n      - name:", 1)[0]
 if "if: needs.build.outputs.tag == 'v1.8.39'" not in bridge:
     raise SystemExit("legacy appcast generation is not frozen to v1.8.39")
 if "SPARKLE_EDDSA_PRIVATE_KEY" not in bridge or "verify-malibu-sparkle-signature.py" not in bridge:
     raise SystemExit("legacy appcast lacks protected signing or frozen-key verification")
-if "if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
-    raise SystemExit("Pearl bridge publication is not frozen to stable v1.8.39")
+if "if: needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
+    raise SystemExit("Pearl download bridge publication must gate on a stable release")
+if "scripts/dist/malibu-frozen-bridge-appcast.xml" not in pearl_bridge:
+    raise SystemExit("Pearl download bridge must ship the committed frozen Sparkle appcast")
+if "acceptance-candidate.json acceptance-candidate.json.sig" not in pearl_bridge:
+    raise SystemExit("Pearl download bridge must place the signed acceptance-candidate pair")
 for requirement in (
     "publish-malibu-latest-dmg.sh",
     "publication-manifest.json",
