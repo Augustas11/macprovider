@@ -261,11 +261,21 @@ grep -q 'CATALOG_CANARY_AUTH_TOKEN is required' "$DEPLOY_SH" ||
   fail "deploy must require authenticated canary evidence"
 
 token_validator_tmp="$(mktemp)"
+token_loader_tmp="$(mktemp)"
 canary_operator_guard_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp" "$canary_operator_guard_tmp"' EXIT
+security_mock_dir="$(mktemp -d)"
+trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp"; rm -rf "$security_mock_dir"' EXIT
 awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$token_validator_tmp"
 grep -qF '_validate_catalog_canary_auth_token()' "$token_validator_tmp" ||
   fail "deploy must keep an extractable portable canary token validator"
+awk '
+  /^_catalog_canary_auth_token_from_file\(\) \{/ { f=1 }
+  f { print }
+  /^_load_catalog_canary_auth_token\(\) \{/ { loader=1 }
+  f && loader && /^\}$/ { exit }
+' "$DEPLOY_SH" > "$token_loader_tmp"
+grep -qF '_load_catalog_canary_auth_token()' "$token_loader_tmp" ||
+  fail "deploy must keep an extractable catalog canary token loader"
 awk '
   /^_catalog_canary_auth_token_sha256\(\) \{/ { f=1 }
   f { print }
@@ -278,6 +288,11 @@ grep -qF 'CATALOG_CANARY_AUTH_TOKEN must be the coordinator operator key' "$DEPL
   fail "deploy must name the operator-key-only canary token requirement"
 grep -qF '/v1/pool/check?details=deployment is operator-only' "$DEPLOY_SH" ||
   fail "deploy must document that service tokens cannot satisfy deployment evidence"
+grep -qF 'CATALOG_CANARY_AUTH_TOKEN_FILE' "$DEPLOY_SH" &&
+  grep -qF 'macOS Keychain service=' "$DEPLOY_SH" &&
+  grep -qF '/usr/bin/security find-generic-password -w' "$DEPLOY_SH" &&
+  ! grep -qF 'command -v security' "$DEPLOY_SH" ||
+  fail "deploy must support stable file/keychain catalog-canary token sources"
 # BSD grep rejects interval upper bounds greater than 255. Length checks belong
 # in Bash so the production deploy remains portable on the operator Mac.
 if grep -qF '{32,512}' "$DEPLOY_SH"; then
@@ -304,6 +319,57 @@ _validate_catalog_canary_auth_token "$token_512" ||
 ! _validate_catalog_canary_auth_token "${token_32}"$'\r''header = "X-Injected: yes"' ||
   fail "canary token validator must reject carriage-return curl-config injection"
 
+# shellcheck disable=SC1090
+. "$token_loader_tmp"
+token_file_dir="$(mktemp -d)"
+trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp"; rm -rf "$token_file_dir" "$security_mock_dir"' EXIT
+token_file="$token_file_dir/catalog-canary-token"
+printf '%s\n' "$token_32" > "$token_file"
+chmod 600 "$token_file"
+CATALOG_CANARY_AUTH_TOKEN=""
+CATALOG_CANARY_AUTH_TOKEN_FILE="$token_file"
+_load_catalog_canary_auth_token >/dev/null 2>&1
+[ "$CATALOG_CANARY_AUTH_TOKEN" = "$token_32" ] ||
+  fail "canary token loader must read a strict 0600 token file"
+chmod 644 "$token_file"
+if _catalog_canary_auth_token_from_file "$token_file" >/dev/null 2>&1; then
+  fail "canary token file loader must reject group/other-accessible files"
+fi
+chmod 600 "$token_file"
+printf '%s\n%s\n' "$token_32" "$token_32" > "$token_file"
+if _catalog_canary_auth_token_from_file "$token_file" >/dev/null 2>&1; then
+  fail "canary token file loader must reject multi-line token files"
+fi
+cat > "$security_mock_dir/security" <<'SH'
+#!/usr/bin/env sh
+: > "$SECURITY_MOCK_MARKER"
+printf '%s' "$SECURITY_MOCK_TOKEN"
+SH
+chmod 700 "$security_mock_dir/security"
+security_mock_marker="$security_mock_dir/security.executed"
+old_path="$PATH"
+PATH="$security_mock_dir:$PATH"
+SECURITY_MOCK_MARKER="$security_mock_marker"
+SECURITY_MOCK_TOKEN="$token_32"
+export SECURITY_MOCK_MARKER SECURITY_MOCK_TOKEN
+CATALOG_CANARY_AUTH_TOKEN=""
+# shellcheck disable=SC2034
+CATALOG_CANARY_AUTH_TOKEN_FILE=""
+# shellcheck disable=SC2034
+CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE="macprovider.test.no-path-security.$$"
+# shellcheck disable=SC2034
+CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT="operator"
+_load_catalog_canary_auth_token >/dev/null 2>&1 || {
+  PATH="$old_path"
+  fail "canary token loader must ignore PATH-selected security binaries"
+}
+PATH="$old_path"
+unset SECURITY_MOCK_MARKER SECURITY_MOCK_TOKEN
+[ ! -e "$security_mock_marker" ] ||
+  fail "canary token loader must not execute a PATH-selected security binary"
+[ -z "$CATALOG_CANARY_AUTH_TOKEN" ] ||
+  fail "canary token loader must not accept a PATH-selected security binary"
+
 HEX64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 HEX64B=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 HEX64_SHA256="$(printf '%s' "$HEX64" | shasum -a 256 | awk '{print $1}')"
@@ -324,7 +390,7 @@ _catalog_canary_auth_token_matches_operator_key "$HEX64" "$(printf '%s' "$HEX64_
   fail "canary token guard must preserve token syntax validation"
 
 deadline_alarm_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp"' EXIT
+trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp"; rm -rf "$token_file_dir" "$security_mock_dir"' EXIT
 awk '/^_run_with_deadline_alarm\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_alarm_tmp"
 grep -qF '_run_with_deadline_alarm()' "$deadline_alarm_tmp" ||
   fail "deploy must keep an extractable subprocess deadline helper"
@@ -340,7 +406,7 @@ _run_with_deadline_alarm 2 sh -c 'exit 0' ||
   fail "subprocess deadline helper must preserve successful commands"
 
 deadline_parser_tmp="$(mktemp)"
-trap 'rm -f "$token_validator_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"' EXIT
+trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp" "$deadline_alarm_tmp" "$deadline_parser_tmp"; rm -rf "$token_file_dir" "$security_mock_dir"' EXIT
 awk '/^_parse_model_hash_legacy_until\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$deadline_parser_tmp"
 grep -qF '_parse_model_hash_legacy_until()' "$deadline_parser_tmp" ||
   fail "deploy must keep an extractable MODEL_HASH_LEGACY_UNTIL parser"
@@ -438,6 +504,12 @@ grep -q 'KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh' "$CATALOG_RU
   grep -q 'prior provider live' "$CATALOG_RUNBOOK" &&
   grep -q 'MACPROVIDER_EMERGENCY_ROLLBACK=1' "$CATALOG_RUNBOOK" ||
   fail "catalog runbook must prefetch without mutation and document bounded emergency rollback"
+
+grep -qF '/usr/bin/security add-generic-password' "$CATALOG_RUNBOOK" &&
+  grep -qF 'do not pass the token in argv' "$CATALOG_RUNBOOK" &&
+  grep -qF '/usr/bin/stat -f %Lp "$CATALOG_CANARY_AUTH_TOKEN_FILE"' "$CATALOG_RUNBOOK" &&
+  ! grep -qF -- '-w "$CATALOG_CANARY_AUTH_TOKEN"' "$CATALOG_RUNBOOK" ||
+  fail "catalog runbook must provision stable canary secrets without PATH lookup or argv token exposure"
 
 grep -q 'PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required' "$PEARL_RUNBOOK" &&
   grep -q 'PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=' "$PEARL_RUNBOOK" &&

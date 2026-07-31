@@ -32,6 +32,15 @@
 #   CATALOG_CANARY_AUTH_TOKEN required for production deploys. Use the
 #                    coordinator operator key; service tokens are not
 #                    accepted by operator-only deployment evidence.
+#   CATALOG_CANARY_AUTH_TOKEN_FILE optional local root/operator-only file
+#                    containing the coordinator operator key. Used only when
+#                    CATALOG_CANARY_AUTH_TOKEN is unset.
+#   CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE optional macOS Keychain generic
+#                    password service to read when both direct env and file
+#                    token sources are unset. Default:
+#                    macprovider.catalog-canary.operator-token.
+#   CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT optional Keychain account.
+#                    Default: current USER.
 #   CATALOG_CANARY_SSH_TARGET required for production deploys. SSH target for
 #                    the operator-controlled canary Mac (for example user@host).
 #   CATALOG_CANARY_SSH_KEY default: ~/.ssh/macprovider_canary_ed25519
@@ -137,6 +146,9 @@ STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 CATALOG_CANARY_PROVIDER_ID="${CATALOG_CANARY_PROVIDER_ID:-}"
 CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
+CATALOG_CANARY_AUTH_TOKEN_FILE="${CATALOG_CANARY_AUTH_TOKEN_FILE:-}"
+CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE="${CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE:-macprovider.catalog-canary.operator-token}"
+CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT="${CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT:-${USER:-}}"
 CATALOG_CANARY_SSH_TARGET="${CATALOG_CANARY_SSH_TARGET:-}"
 CATALOG_CANARY_SSH_KEY="${CATALOG_CANARY_SSH_KEY:-$HOME/.ssh/macprovider_canary_ed25519}"
 CATALOG_CANARY_INSTALL_DIR="${CATALOG_CANARY_INSTALL_DIR:-macprovider/catalog-release}"
@@ -191,6 +203,70 @@ _validate_catalog_canary_auth_token() {
 
 _catalog_canary_auth_token_sha256() {
   printf '%s' "$1" | shasum -a 256 | awk '{print tolower($1)}'
+}
+
+_catalog_canary_auth_token_from_file() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, os.O_RDONLY | nofollow)
+except FileNotFoundError:
+    raise SystemExit(f"token file is missing: {path}")
+except OSError as exc:
+    raise SystemExit(f"token file is not safely readable: {path}: {exc}")
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"token file is not a regular file: {path}")
+    if stat.S_IMODE(info.st_mode) & (stat.S_IRWXG | stat.S_IRWXO):
+        raise SystemExit(f"token file must not be group/other accessible: {path}")
+    raw = os.read(fd, 514)
+finally:
+    os.close(fd)
+if len(raw) > 513:
+    raise SystemExit("token file is too large")
+try:
+    value = raw.decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit("token file must be UTF-8 text")
+if value.endswith("\n"):
+    value = value[:-1]
+if value.endswith("\r"):
+    value = value[:-1]
+if "\n" in value or "\r" in value:
+    raise SystemExit("token file must contain exactly one bearer token line")
+print(value, end="")
+PY
+}
+
+_load_catalog_canary_auth_token() {
+  [ -z "$CATALOG_CANARY_AUTH_TOKEN" ] || return 0
+  if [ -n "$CATALOG_CANARY_AUTH_TOKEN_FILE" ]; then
+    CATALOG_CANARY_AUTH_TOKEN="$(_catalog_canary_auth_token_from_file "$CATALOG_CANARY_AUTH_TOKEN_FILE")" || {
+      echo "aborting deploy: could not read CATALOG_CANARY_AUTH_TOKEN_FILE" >&2
+      exit 1
+    }
+    echo "  loaded catalog canary bearer from CATALOG_CANARY_AUTH_TOKEN_FILE" >&2
+    return 0
+  fi
+  if [ -n "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE" ] &&
+     [ -n "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT" ] &&
+     [ -x /usr/bin/security ]; then
+    CATALOG_CANARY_AUTH_TOKEN="$(
+      /usr/bin/security find-generic-password -w \
+        -s "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE" \
+        -a "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT" 2>/dev/null || true
+    )"
+    if [ -n "$CATALOG_CANARY_AUTH_TOKEN" ]; then
+      echo "  loaded catalog canary bearer from macOS Keychain service=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE account=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT" >&2
+    fi
+  fi
 }
 
 _catalog_canary_auth_token_matches_operator_key() {
@@ -389,6 +465,7 @@ if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z
   exit 1
 fi
 if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  _load_catalog_canary_auth_token
   if ! printf '%s' "$CATALOG_CANARY_PROVIDER_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
     echo "aborting deploy: CATALOG_CANARY_PROVIDER_ID is required and must be a safe provider ID" >&2
     echo "  Select a provider expected to reconnect after restart; deployment commits only after pool admission." >&2
@@ -396,6 +473,8 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   fi
   if ! _validate_catalog_canary_auth_token "$CATALOG_CANARY_AUTH_TOKEN"; then
     echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN is required and must be a safe 32-512 character bearer token" >&2
+    echo "  Provide it via CATALOG_CANARY_AUTH_TOKEN, CATALOG_CANARY_AUTH_TOKEN_FILE, or macOS Keychain service=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE account=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT." >&2
+    echo "  The deploy will later prove this secret matches Pearl's coordinator operator key by SHA-256; it never copies key material from Pearl." >&2
     exit 1
   fi
   if ! printf '%s' "$CATALOG_CANARY_SSH_TARGET" | grep -Eq '^([A-Za-z_][A-Za-z0-9._-]*@)?[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$'; then
