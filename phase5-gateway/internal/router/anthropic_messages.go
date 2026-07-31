@@ -48,6 +48,7 @@ type anthropicMessagesAdapter struct {
 	streamInvalid      *anthropicMessagesTranslationError
 	streamOutcome      string
 	terminalStopReason string
+	stopSequence       *string
 	finished           bool
 	replayBody         bool
 	writeErr           error
@@ -302,7 +303,7 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 	}
 	for key, value := range raw {
 		switch key {
-		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p":
+		case "model", "max_tokens", "system", "messages", "tools", "tool_choice", "stream", "stop_sequences", "temperature", "top_p", "metadata":
 		case "top_k":
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: "top_k is not supported"}
 		case "thinking", "anthropic_beta":
@@ -376,11 +377,14 @@ func (a *anthropicMessagesAdapter) translateRequest(header http.Header, body []b
 		chat["tools"] = tools
 	}
 	if req.ToolChoice != nil {
-		toolChoice, err := anthropicToolChoiceToChatToolChoice(req.ToolChoice)
+		toolChoice, parallelToolCalls, err := anthropicToolChoiceToChatToolChoice(req.ToolChoice)
 		if err != nil {
 			return nil, &anthropicMessagesTranslationError{typ: "invalid_request_error", code: "unsupported_content_shape", message: err.Error()}
 		}
 		chat["tool_choice"] = toolChoice
+		if parallelToolCalls != nil {
+			chat["parallel_tool_calls"] = *parallelToolCalls
+		}
 	}
 	translated, err := json.Marshal(chat)
 	if err != nil {
@@ -425,6 +429,11 @@ func anthropicValidateRequestRawTypes(raw map[string]json.RawMessage) error {
 	if v, ok := raw["stop_sequences"]; ok {
 		if err := anthropicValidateRawStringArray(v, "stop_sequences"); err != nil {
 			return err
+		}
+	}
+	if v, ok := raw["metadata"]; ok && !anthropicRawIsNull(v) {
+		if _, err := anthropicRawObject(v); err != nil {
+			return fmt.Errorf("metadata must be an object")
 		}
 	}
 	return nil
@@ -504,7 +513,7 @@ func anthropicValidateNestedRequest(raw map[string]json.RawMessage) error {
 		if err != nil {
 			return fmt.Errorf("tool_choice must be an object")
 		}
-		if err := anthropicRejectUnknownKeys(m, "tool_choice", "type", "name"); err != nil {
+		if err := anthropicRejectUnknownKeys(m, "tool_choice", "type", "name", "disable_parallel_tool_use"); err != nil {
 			return err
 		}
 		if v, ok := m["type"]; ok {
@@ -514,6 +523,11 @@ func anthropicValidateNestedRequest(raw map[string]json.RawMessage) error {
 		}
 		if v, ok := m["name"]; ok {
 			if err := anthropicValidateRawString(v, "tool_choice.name"); err != nil {
+				return err
+			}
+		}
+		if v, ok := m["disable_parallel_tool_use"]; ok {
+			if err := anthropicValidateRawBool(v, "tool_choice.disable_parallel_tool_use"); err != nil {
 				return err
 			}
 		}
@@ -889,27 +903,32 @@ func anthropicToolsToChatTools(tools []map[string]any) ([]map[string]any, error)
 	return out, nil
 }
 
-func anthropicToolChoiceToChatToolChoice(choice any) (any, error) {
+func anthropicToolChoiceToChatToolChoice(choice any) (any, *bool, error) {
 	m, ok := choice.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("tool_choice must be an object")
+		return nil, nil, fmt.Errorf("tool_choice must be an object")
+	}
+	var parallelToolCalls *bool
+	if disableParallel, _ := m["disable_parallel_tool_use"].(bool); disableParallel {
+		v := false
+		parallelToolCalls = &v
 	}
 	typ, _ := m["type"].(string)
 	switch typ {
 	case "", "auto":
-		return "auto", nil
+		return "auto", parallelToolCalls, nil
 	case "any":
-		return "required", nil
+		return "required", parallelToolCalls, nil
 	case "none":
-		return "none", nil
+		return "none", parallelToolCalls, nil
 	case "tool":
 		name, _ := m["name"].(string)
 		if strings.TrimSpace(name) == "" {
-			return nil, fmt.Errorf("tool_choice.name is required")
+			return nil, nil, fmt.Errorf("tool_choice.name is required")
 		}
-		return map[string]any{"type": "function", "function": map[string]any{"name": name}}, nil
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}, parallelToolCalls, nil
 	default:
-		return nil, fmt.Errorf("tool_choice.type %q is not supported", typ)
+		return nil, nil, fmt.Errorf("tool_choice.type %q is not supported", typ)
 	}
 }
 
@@ -937,7 +956,8 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
-			FinishReason string `json:"finish_reason"`
+			FinishReason string  `json:"finish_reason"`
+			StopSequence *string `json:"stop_sequence"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &chat); err != nil {
@@ -1003,7 +1023,7 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 		"content":       content,
 		"model":         model,
 		"stop_reason":   stopReason,
-		"stop_sequence": nil,
+		"stop_sequence": anthropicStopSequence(choice.FinishReason, choice.StopSequence),
 		"usage": anthropicUsage{
 			InputTokens:  chat.Usage.PromptTokens,
 			OutputTokens: chat.Usage.CompletionTokens,
@@ -1033,6 +1053,13 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		return
 	}
 	if typ, code, msg, retryable, ok := anthropicStandaloneStreamErrorFromOpenAIData(data); ok {
+		if anthropicTerminalErrorCodeIsLengthTruncation(code) {
+			a.finishReason = anthropicFinishReasonFromTerminalErrorCode(code)
+			a.streamOutcome = anthropicStreamOutcomeFromTerminalErrorCode(code)
+			a.terminalStopReason = anthropicStopReason(a.finishReason, false)
+			a.emitTerminalMessageStop()
+			return
+		}
 		a.emitSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg, "code": code, "retryable": retryable}})
 		a.finishReason = anthropicFinishReasonFromTerminalErrorCode(code)
 		a.streamOutcome = anthropicStreamOutcomeFromTerminalErrorCode(code)
@@ -1056,6 +1083,7 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		Choices []struct {
 			Delta        map[string]any `json:"delta"`
 			FinishReason any            `json:"finish_reason"`
+			StopSequence *string        `json:"stop_sequence"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -1118,6 +1146,9 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 			return
 		}
 		a.finishReason = finish
+		if chunk.Choices[0].StopSequence != nil {
+			a.stopSequence = chunk.Choices[0].StopSequence
+		}
 		a.finished = true
 	}
 	a.flush()
@@ -1276,7 +1307,7 @@ func (a *anthropicMessagesAdapter) emitTerminalMessageStop() {
 		"type": "message_delta",
 		"delta": map[string]any{
 			"stop_reason":   stopReason,
-			"stop_sequence": nil,
+			"stop_sequence": anthropicStopSequence(a.finishReason, a.stopSequence),
 		},
 		"usage": usage,
 	})
@@ -1421,6 +1452,13 @@ func anthropicStopReasonStrict(reason string, hasToolUse bool) (string, error) {
 	}
 }
 
+func anthropicStopSequence(finishReason string, matched *string) any {
+	if finishReason != "stop_sequence" || matched == nil {
+		return nil
+	}
+	return *matched
+}
+
 func anthropicFinishReasonFromTerminalErrorCode(code string) string {
 	switch code {
 	case "stream_output_exceeded", "stream_truncated", "response_byte_cap_exceeded":
@@ -1428,6 +1466,10 @@ func anthropicFinishReasonFromTerminalErrorCode(code string) string {
 	default:
 		return "stop"
 	}
+}
+
+func anthropicTerminalErrorCodeIsLengthTruncation(code string) bool {
+	return anthropicFinishReasonFromTerminalErrorCode(code) == "length"
 }
 
 func anthropicStreamOutcomeFromTerminalErrorCode(code string) string {
@@ -1717,9 +1759,6 @@ func anthropicValidateNonStreamingProviderRaw(raw json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("provider response must be an object")
 	}
-	if err := anthropicRejectUnknownKeys(root, "provider response", "id", "object", "created", "model", "system_fingerprint", "usage", "choices"); err != nil {
-		return err
-	}
 	if choicesRaw, ok := root["choices"]; ok {
 		var choices []json.RawMessage
 		if err := json.Unmarshal(choicesRaw, &choices); err != nil {
@@ -1739,9 +1778,6 @@ func anthropicValidateStreamProviderRaw(raw json.RawMessage) error {
 	root, err := anthropicRawObject(raw)
 	if err != nil {
 		return fmt.Errorf("Upstream provider returned malformed stream data")
-	}
-	if err := anthropicRejectUnknownKeys(root, "stream chunk", "id", "object", "created", "model", "system_fingerprint", "usage", "choices"); err != nil {
-		return err
 	}
 	if choicesRaw, ok := root["choices"]; ok {
 		var choices []json.RawMessage
@@ -1766,7 +1802,10 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 		return fmt.Errorf("%s must be an object", path)
 	}
 	if streaming {
-		if err := anthropicRejectUnknownKeys(choice, path, "index", "delta", "finish_reason", "logprobs"); err != nil {
+		if err := anthropicRejectUnknownKeys(choice, path, "index", "delta", "finish_reason", "stop_sequence", "logprobs"); err != nil {
+			return err
+		}
+		if err := anthropicValidateProviderStopSequenceRaw(choice, path); err != nil {
 			return err
 		}
 		if deltaRaw, ok := choice["delta"]; ok && !anthropicRawIsNull(deltaRaw) {
@@ -1785,7 +1824,10 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 		}
 		return nil
 	}
-	if err := anthropicRejectUnknownKeys(choice, path, "index", "message", "finish_reason", "logprobs"); err != nil {
+	if err := anthropicRejectUnknownKeys(choice, path, "index", "message", "finish_reason", "stop_sequence", "logprobs"); err != nil {
+		return err
+	}
+	if err := anthropicValidateProviderStopSequenceRaw(choice, path); err != nil {
 		return err
 	}
 	if messageRaw, ok := choice["message"]; ok && !anthropicRawIsNull(messageRaw) {
@@ -1800,6 +1842,15 @@ func anthropicValidateProviderChoiceRaw(path string, raw json.RawMessage, stream
 			if err := anthropicValidateProviderToolCallsRaw(path+".message.tool_calls", toolCallsRaw); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func anthropicValidateProviderStopSequenceRaw(choice map[string]json.RawMessage, path string) error {
+	if raw, ok := choice["stop_sequence"]; ok && !anthropicRawIsNull(raw) {
+		if err := anthropicValidateRawString(raw, path+".stop_sequence"); err != nil {
+			return err
 		}
 	}
 	return nil

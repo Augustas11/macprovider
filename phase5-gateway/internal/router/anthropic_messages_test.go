@@ -32,7 +32,7 @@ func TestAnthropicMessagesNonStreamingTranslatesThroughBilledChatPath(t *testing
 		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
 			t.Fatalf("decode upstream request: %v", err)
 		}
-		body := `{"id":"chatcmpl_123","object":"chat.completion","created":1,"model":"claude-3-5-sonnet-latest",` +
+		body := `{"id":"chatcmpl_123","object":"chat.completion","created":1,"model":"claude-3-5-sonnet-latest","service_tier":"default",` +
 			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"done","tool_calls":[{"id":"toolu_lookup","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"mac\"}"}}]},"finish_reason":"tool_calls"}]}`
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
@@ -49,7 +49,8 @@ func TestAnthropicMessagesNonStreamingTranslatesThroughBilledChatPath(t *testing
 		"system":[{"type":"text","text":"system prompt"}],
 		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],
 		"tools":[{"name":"lookup","description":"Lookup things","input_schema":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}],
-		"tool_choice":{"type":"tool","name":"lookup"},
+		"tool_choice":{"type":"tool","name":"lookup","disable_parallel_tool_use":true},
+		"metadata":{"user_id":"u"},
 		"stop_sequences":["STOP"],
 		"temperature":0.2
 	}`
@@ -82,6 +83,10 @@ func TestAnthropicMessagesNonStreamingTranslatesThroughBilledChatPath(t *testing
 	if choice["type"] != "function" || choice["function"].(map[string]any)["name"] != "lookup" {
 		t.Fatalf("tool_choice not translated: %v", choice)
 	}
+	assertChatRequestField(t, upstreamBody, "parallel_tool_calls", false)
+	if _, ok := upstreamBody["metadata"]; ok {
+		t.Fatalf("metadata was forwarded to chat request: %v", upstreamBody["metadata"])
+	}
 
 	var anth map[string]any
 	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
@@ -104,6 +109,32 @@ func TestAnthropicMessagesNonStreamingTranslatesThroughBilledChatPath(t *testing
 	}
 }
 
+func TestAnthropicMessagesNonStreamingIncludesMatchedStopSequence(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_stopseq","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop_sequence","stop_sequence":"STOP"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_nonstream_stop_sequence")
+
+	resp := postAnthropicMessages(t, h, "", `{"model":"claude","max_tokens":8,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Api-Key": key})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var anth map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &anth); err != nil {
+		t.Fatalf("anthropic response json: %v body=%s", err, resp.Body.String())
+	}
+	if anth["stop_reason"] != "stop_sequence" || anth["stop_sequence"] != "STOP" {
+		t.Fatalf("stop reason/sequence=%v/%v want stop_sequence/STOP body=%s", anth["stop_reason"], anth["stop_sequence"], resp.Body.String())
+	}
+}
+
 func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing.T) {
 	var upstreamHits int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -121,7 +152,6 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 		want string
 	}{
 		"image":             {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}]}]}`, "image content is not supported"},
-		"metadata":          {`{"model":"claude","max_tokens":8,"metadata":{"user_id":"u"},"messages":[{"role":"user","content":"hi"}]}`, "metadata is not supported"},
 		"unknown top-level": {`{"model":"claude","max_tokens":8,"container":"c","messages":[{"role":"user","content":"hi"}]}`, "container is not supported"},
 		"empty thinking":    {`{"model":"claude","max_tokens":8,"thinking":{},"messages":[{"role":"user","content":"hi"}]}`, "Anthropic beta features are not supported"},
 		"top_k":             {`{"model":"claude","max_tokens":8,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`, "top_k is not supported"},
@@ -137,8 +167,6 @@ func TestAnthropicMessagesRejectsUnsupportedFeaturesBeforeReservation(t *testing
 			"input must be an object"},
 		"nested cache control": {`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
 			"cache_control is not supported"},
-		"tool choice unsupported field": {`{"model":"claude","max_tokens":8,"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"messages":[{"role":"user","content":"hi"}]}`,
-			"disable_parallel_tool_use is not supported"},
 		"tool unsupported field": {`{"model":"claude","max_tokens":8,"tools":[{"name":"lookup","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hi"}]}`,
 			"cache_control is not supported"},
 		"numeric model": {`{"model":7,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
@@ -616,6 +644,31 @@ func TestAnthropicMessagesStreamingEOFCompletesAnthropicMessage(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesStreamingIncludesMatchedStopSequence(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_stopseq","model":"claude-stream","choices":[{"delta":{"content":"done"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_stream_stopseq","choices":[{"delta":{},"finish_reason":"stop_sequence","stop_sequence":"STOP"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_stop_sequence")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":16,"stream":true,"stop_sequences":["STOP"],"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := resp.Body.String()
+	delta := anthropicStreamPayloadForEvent(t, got, "message_delta")
+	payload, _ := delta["delta"].(map[string]any)
+	if payload["stop_reason"] != "stop_sequence" || payload["stop_sequence"] != "STOP" {
+		t.Fatalf("stream stop reason/sequence=%v/%v want stop_sequence/STOP\n%s", payload["stop_reason"], payload["stop_sequence"], got)
+	}
+}
+
 func TestAnthropicMessagesStreamingWithoutUsageReportsFallbackSettlementUsage(t *testing.T) {
 	stream := `data: {"id":"chatcmpl_no_usage","model":"claude-stream","choices":[{"delta":{"content":"done"},"finish_reason":null}]}`
 	stream += "\n\n" + `data: {"id":"chatcmpl_no_usage","choices":[{"delta":{},"finish_reason":"stop"}]}`
@@ -727,8 +780,11 @@ func TestAnthropicMessagesStreamingTerminalOutputExceededEmitsMessageStop(t *tes
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	body := resp.Body.String()
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"stream_output_exceeded"`) || !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
-		t.Fatalf("terminal output-exceeded frame did not close Anthropic stream:\n%s", body)
+	if strings.Contains(body, "event: error") || strings.Contains(body, `"code":"stream_output_exceeded"`) {
+		t.Fatalf("terminal output-exceeded frame emitted Anthropic error:\n%s", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("terminal output-exceeded frame did not close as max_tokens:\n%s", body)
 	}
 	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
 	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
