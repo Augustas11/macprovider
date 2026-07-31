@@ -36,20 +36,24 @@ type anthropicMessagesAdapter struct {
 	lineBuf     bytes.Buffer
 	prepared    []byte
 
-	messageID     string
-	contentIndex  int
-	textOpen      bool
-	toolCalls     map[int]*anthropicStreamToolCall
-	toolOrder     []int
-	finishReason  string
-	streamUsage   *anthropicUsage
-	startUsage    anthropicUsage
-	streamDone    bool
-	streamInvalid *anthropicMessagesTranslationError
-	finished      bool
-	replayBody    bool
-	writeErr      error
-	dedupeCapture []byte
+	messageID          string
+	contentIndex       int
+	textOpen           bool
+	toolCalls          map[int]*anthropicStreamToolCall
+	toolOrder          []int
+	finishReason       string
+	streamUsage        *anthropicUsage
+	startUsage         anthropicUsage
+	streamDone         bool
+	streamInvalid      *anthropicMessagesTranslationError
+	streamOutcome      string
+	terminalStopReason string
+	finished           bool
+	replayBody         bool
+	writeErr           error
+	dedupeCapture      []byte
+	thinkPending       string
+	thinkInBlock       bool
 }
 
 type anthropicStreamToolCall struct {
@@ -957,7 +961,7 @@ func (a *anthropicMessagesAdapter) translateNonStreamingResponse(body []byte) ([
 	}
 	if text, err := anthropicResponseContentToText(choice.Message.Content); err != nil {
 		return nil, err
-	} else if text != "" {
+	} else if text = anthropicStripThinkBlocks(text); text != "" {
 		content = append(content, map[string]any{"type": "text", "text": text})
 	}
 	seenToolIDs := map[string]struct{}{}
@@ -1030,8 +1034,10 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 	}
 	if typ, code, msg, retryable, ok := anthropicStandaloneStreamErrorFromOpenAIData(data); ok {
 		a.emitSSE("error", map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg, "code": code, "retryable": retryable}})
-		a.flush()
-		a.streamDone = true
+		a.finishReason = anthropicFinishReasonFromTerminalErrorCode(code)
+		a.streamOutcome = anthropicStreamOutcomeFromTerminalErrorCode(code)
+		a.terminalStopReason = anthropicStopReason(a.finishReason, false)
+		a.emitTerminalMessageStop()
 		return
 	}
 	if anthropicRawHasDuplicateKeys([]byte(data)) {
@@ -1091,7 +1097,7 @@ func (a *anthropicMessagesAdapter) handleChatStreamLine(line string) {
 		a.emitInvalidProviderResponse("Upstream provider returned unsupported stream tool-call shape")
 		return
 	}
-	if text := anthropicStringFromAny(delta["content"]); text != "" {
+	if text := a.filterThinkContent(anthropicStringFromAny(delta["content"])); text != "" {
 		a.emitTextDelta(text)
 	}
 	toolDeltas, err := anthropicToolCallDeltasFromAny(delta["tool_calls"])
@@ -1231,12 +1237,22 @@ func (a *anthropicMessagesAdapter) emitMessageStop() {
 		a.emitInvalidProviderResponse(err.Error())
 		return
 	}
+	a.emitTerminalMessageStop()
+}
+
+func (a *anthropicMessagesAdapter) emitTerminalMessageStop() {
+	if a.streamDone {
+		return
+	}
 	if a.lineBuf.Len() > 0 {
 		a.handleChatStreamLine(a.lineBuf.String())
 		a.lineBuf.Reset()
 		if a.streamDone || a.writeErr != nil {
 			return
 		}
+	}
+	if remainder := a.flushThinkRemainder(); remainder != "" {
+		a.emitTextDelta(remainder)
 	}
 	if a.textOpen {
 		a.closeTextBlock()
@@ -1252,10 +1268,14 @@ func (a *anthropicMessagesAdapter) emitMessageStop() {
 			toolCallCount++
 		}
 	}
+	stopReason := a.terminalStopReason
+	if stopReason == "" {
+		stopReason = anthropicStopReason(a.finishReason, toolCallCount > 0)
+	}
 	a.emitSSE("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
-			"stop_reason":   anthropicStopReason(a.finishReason, toolCallCount > 0),
+			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
 		"usage": usage,
@@ -1311,14 +1331,16 @@ func (a *anthropicMessagesAdapter) emitInvalidProviderResponse(message string) {
 		message = "Upstream provider returned invalid response"
 	}
 	a.streamInvalid = &anthropicMessagesTranslationError{typ: "api_error", code: "invalid_provider_response", message: message}
+	a.finishReason = "stop"
+	a.streamOutcome = "invalid_provider_response"
+	a.terminalStopReason = "end_turn"
 	a.emitSSE("error", map[string]any{"type": "error", "error": map[string]any{
 		"type":      "api_error",
 		"message":   message,
 		"code":      "invalid_provider_response",
 		"retryable": true,
 	}})
-	a.flush()
-	a.streamDone = true
+	a.emitTerminalMessageStop()
 }
 
 func (a *anthropicMessagesAdapter) hasStreamInvalid() bool {
@@ -1330,6 +1352,13 @@ func (a *anthropicMessagesAdapter) invalidMessage() string {
 		return ""
 	}
 	return a.streamInvalid.message
+}
+
+func (a *anthropicMessagesAdapter) settlementOutcome(defaultOutcome string) string {
+	if a.streamOutcome != "" {
+		return a.streamOutcome
+	}
+	return defaultOutcome
 }
 
 func (a *anthropicMessagesAdapter) emitSSE(event string, payload map[string]any) {
@@ -1392,6 +1421,74 @@ func anthropicStopReasonStrict(reason string, hasToolUse bool) (string, error) {
 	}
 }
 
+func anthropicFinishReasonFromTerminalErrorCode(code string) string {
+	switch code {
+	case "stream_output_exceeded", "stream_truncated", "response_byte_cap_exceeded":
+		return "length"
+	default:
+		return "stop"
+	}
+}
+
+func anthropicStreamOutcomeFromTerminalErrorCode(code string) string {
+	switch code {
+	case "stream_output_exceeded", "stream_truncated":
+		return code
+	case "response_byte_cap_exceeded":
+		return "stream_output_exceeded"
+	default:
+		return "invalid_provider_response"
+	}
+}
+
+func anthropicStripThinkBlocks(s string) string {
+	if !strings.Contains(s, "<think>") {
+		return s
+	}
+	s = thinkBlockRE.ReplaceAllString(s, "")
+	if start := strings.LastIndex(s, "<think>"); start >= 0 {
+		s = s[:start]
+	}
+	return s
+}
+
+func (a *anthropicMessagesAdapter) filterThinkContent(s string) string {
+	input := a.thinkPending + s
+	a.thinkPending = ""
+	var out strings.Builder
+	for input != "" {
+		if a.thinkInBlock {
+			if end := strings.Index(input, "</think>"); end >= 0 {
+				input = input[end+len("</think>"):]
+				a.thinkInBlock = false
+				continue
+			}
+			a.thinkPending = longestSuffixThatPrefixes(input, "</think>")
+			return out.String()
+		}
+		if start := strings.Index(input, "<think>"); start >= 0 {
+			out.WriteString(input[:start])
+			input = input[start+len("<think>"):]
+			a.thinkInBlock = true
+			continue
+		}
+		a.thinkPending = longestSuffixThatPrefixes(input, "<think>")
+		out.WriteString(input[:len(input)-len(a.thinkPending)])
+		return out.String()
+	}
+	return out.String()
+}
+
+func (a *anthropicMessagesAdapter) flushThinkRemainder() string {
+	if a.thinkInBlock {
+		a.thinkPending = ""
+		return ""
+	}
+	remainder := a.thinkPending
+	a.thinkPending = ""
+	return remainder
+}
+
 func anthropicResponseContentToText(v any) (string, error) {
 	switch typed := v.(type) {
 	case nil:
@@ -1402,17 +1499,14 @@ func anthropicResponseContentToText(v any) (string, error) {
 		parts := make([]string, 0, len(typed))
 		for i, part := range typed {
 			if m, ok := part.(map[string]any); ok {
-				typ, _ := m["type"].(string)
-				if typ != "" && typ != "text" {
-					return "", fmt.Errorf("content[%d].type %q is not supported", i, typ)
+				if err := anthropicValidateProviderTextContentPart(m, i); err != nil {
+					return "", err
 				}
-				if raw, ok := m["text"]; ok {
-					s, ok := raw.(string)
-					if !ok {
-						return "", fmt.Errorf("content[%d].text must be a string", i)
-					}
-					parts = append(parts, s)
+				s, ok := m["text"].(string)
+				if !ok {
+					return "", fmt.Errorf("content[%d].text must be a string", i)
 				}
+				parts = append(parts, s)
 			} else if s, ok := part.(string); ok {
 				parts = append(parts, s)
 			} else {
@@ -1423,6 +1517,27 @@ func anthropicResponseContentToText(v any) (string, error) {
 	default:
 		return "", fmt.Errorf("message content shape is not supported")
 	}
+}
+
+func anthropicValidateProviderTextContentPart(m map[string]any, index int) error {
+	for key := range m {
+		switch key {
+		case "type", "text":
+		default:
+			return fmt.Errorf("content[%d].%s is not supported", index, key)
+		}
+	}
+	typ, ok := m["type"].(string)
+	if !ok || typ != "text" {
+		if ok {
+			return fmt.Errorf("content[%d].type %q is not supported", index, typ)
+		}
+		return fmt.Errorf("content[%d].type is required", index)
+	}
+	if _, ok := m["text"]; !ok {
+		return fmt.Errorf("content[%d].text is required", index)
+	}
+	return nil
 }
 
 func anthropicStandaloneStreamErrorFromOpenAIData(data string) (string, string, string, bool, bool) {

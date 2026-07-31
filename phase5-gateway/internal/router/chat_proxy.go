@@ -914,16 +914,9 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	// NOTE (composition #829×#831): the /v1/responses path above settles the
-	// PARSED provider usage on translation failure (PR #831 security fix). This
-	// /v1/messages path preserves PR #829's authored prompt-only settlement
-	// (completion=0). The two facades therefore disagree on invalid-provider-
-	// response settlement — a deliberate composition choice to preserve each
-	// PR's tested behavior; the money-path audit must reconcile which semantic
-	// both facades should share.
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
 		if err := adapter.prepareNonStreamingResponse(body); err != nil {
-			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, 0, maxUsageTokens, tokenSource, "invalid_provider_response", resp.Header) {
+			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "invalid_provider_response", resp.Header) {
 				return
 			}
 			writeAnthropicMessagesError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
@@ -1231,7 +1224,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					return true
 				}
-				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && anthropicRawHasDuplicateKeys([]byte(data)) {
+				anthropicTerminalFrame := false
+				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+					anthropicTerminalFrame = terminalSSEErrorCode(data) != ""
+				}
+				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
 					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
 					adapter.emitInvalidProviderResponse("Upstream provider returned ambiguous stream data")
 					if flusher != nil {
@@ -1243,7 +1240,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
 					return false
 				}
-				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame {
 					if err := anthropicValidateStreamProviderRaw([]byte(data)); err != nil {
 						slog.Warn("anthropic stream rejected provider chunk before accounting", "request_id", requestID(r), "error", err)
 						adapter.emitInvalidProviderResponse(err.Error())
@@ -1295,7 +1292,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else {
 						line = nil
 					}
-				} else if !hasChoices {
+				} else if !hasChoices && !anthropicTerminalFrame {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
 					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
@@ -1365,10 +1362,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.streamDone && terminalStructuredErrorCode == "" {
 			if reported != nil && !invalidReportedUsage {
-				settleReported("ok")
+				settleReported(adapter.settlementOutcome("ok"))
 			} else {
 				completion := gatewaySerializedEstimatedCompletion()
-				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "ok", reservationWindow, resp)
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", adapter.settlementOutcome("ok"), reservationWindow, resp)
 			}
 			return false
 		}
@@ -1514,11 +1511,18 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 	}
 	if reported != nil && !invalidReportedUsage {
-		settleReported("ok")
+		outcome := "ok"
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			outcome = adapter.settlementOutcome(outcome)
+		}
+		settleReported(outcome)
 		return
 	}
 	completion := gatewaySerializedEstimatedCompletion()
 	outcome := "ok"
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+		outcome = adapter.settlementOutcome(outcome)
+	}
 	if estimateTokensFromBytes(maxInt64(emitted, serializedEmitted)) > maxStreamingCompletionTokens(maxTokens) {
 		outcome = "stream_output_exceeded"
 	}

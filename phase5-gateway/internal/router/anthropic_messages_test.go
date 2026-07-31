@@ -228,7 +228,7 @@ func TestAnthropicMessagesRejectsMalformedToolResultBeforeReservation(t *testing
 	}
 }
 
-func TestAnthropicMessagesNonStreamingInvalidProviderResponseSettlesPromptOnly(t *testing.T) {
+func TestAnthropicMessagesNonStreamingInvalidProviderResponseSettlesParsedUsage(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := `{"id":"chatcmpl_bad_tool_args","object":"chat.completion","created":1,"model":"claude",` +
 			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
@@ -253,8 +253,8 @@ func TestAnthropicMessagesNonStreamingInvalidProviderResponseSettlesPromptOnly(t
 		t.Fatalf("error missing provider retry metadata: %s", resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_bad_provider")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 0 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/0/5", outcome, source, completion, prompt)
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -281,8 +281,8 @@ func TestAnthropicMessagesNonStreamingInvalidProviderResponseIgnoresVerifiedFina
 		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_bad_verified_finality")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 0 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/0/5", outcome, source, completion, prompt)
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_bad_verified_finality")
 	if snap.heldRows != 0 || snap.activeRows != 0 || snap.settledRows != 1 {
@@ -307,8 +307,8 @@ func TestAnthropicMessagesNonStreamingRejectsChoiceLessProviderError(t *testing.
 		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_200_error")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 0 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/0/5", outcome, source, completion, prompt)
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -354,8 +354,8 @@ func TestAnthropicMessagesNonStreamingRejectsUnsupportedProviderOutputField(t *t
 		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_refusal_provider")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 0 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/0/5", outcome, source, completion, prompt)
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -381,8 +381,8 @@ func TestAnthropicMessagesNonStreamingRejectsToolCallWithoutName(t *testing.T) {
 		t.Fatalf("unexpected error body=%s", resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_bad_tool_name")
-	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 0 || prompt != 5 {
-		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/0/5", outcome, source, completion, prompt)
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -411,8 +411,8 @@ func TestAnthropicMessagesNonStreamingRejectsMissingOrDuplicateToolCallID(t *tes
 				t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
 			}
 			outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
-			if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 0 || prompt != 5 {
-				t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/0/5", outcome, source, completion, prompt)
+			if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+				t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 			}
 		})
 	}
@@ -475,6 +475,58 @@ func TestAnthropicMessagesNonStreamingPreservesWhitespaceOnlyText(t *testing.T) 
 	}
 	if len(anth.Content) != 1 || anth.Content[0].Type != "text" || anth.Content[0].Text != " \n " {
 		t.Fatalf("content=%+v want one preserved whitespace text block", anth.Content)
+	}
+}
+
+func TestAnthropicMessagesNonStreamingStripsThinkBlocks(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_think","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"<think>hidden</think> visible <think>unterminated"},"finish_reason":"length"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_nonstream_think")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if strings.Contains(body, "hidden") || strings.Contains(body, "unterminated") || strings.Contains(body, "<think") {
+		t.Fatalf("think block leaked into Anthropic response:\n%s", body)
+	}
+	if !strings.Contains(body, "visible") || !strings.Contains(body, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("visible answer or max_tokens terminal missing:\n%s", body)
+	}
+}
+
+func TestAnthropicMessagesNonStreamingRejectsReasoningContentArray(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"id":"chatcmpl_reasoning_array","object":"chat.completion","created":1,"model":"claude",` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12},` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"reasoning","text":"hidden chain of thought"},{"type":"text","text":"visible"}]},"finish_reason":"stop"}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_reasoning_array")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d want 502 body=%s", resp.Code, resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "hidden chain of thought") || !strings.Contains(resp.Body.String(), `"code":"invalid_provider_response"`) {
+		t.Fatalf("reasoning array content leaked or wrong error:\n%s", resp.Body.String())
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_reasoning_array")
+	if outcome != "invalid_provider_response" || source != "provider_reported" || completion != 7 || prompt != 5 {
+		t.Fatalf("usage outcome/source/completion/prompt=%s/%s/%d/%d want invalid_provider_response/provider_reported/7/5", outcome, source, completion, prompt)
 	}
 }
 
@@ -630,7 +682,88 @@ func TestAnthropicMessagesStreamingDoneWithoutUsageReportsVisibleFallbackUsage(t
 	}
 }
 
-func TestAnthropicMessagesStreamingEOFWithoutFinishReasonFailsClosed(t *testing.T) {
+func TestAnthropicMessagesStreamingStripsThinkBlocks(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_think","model":"claude-stream","choices":[{"delta":{"content":"<thi"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_stream_think","choices":[{"delta":{"content":"nk>hidden"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"id":"chatcmpl_stream_think","choices":[{"delta":{"content":"</think> visible <think>trailing"},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+	stream += "\n\ndata: [DONE]\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_think")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if strings.Contains(body, "hidden") || strings.Contains(body, "trailing") || strings.Contains(body, "<think") {
+		t.Fatalf("think block leaked into Anthropic stream:\n%s", body)
+	}
+	if !strings.Contains(body, `"text":" visible "`) || !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("visible stream delta or max_tokens terminal missing:\n%s", body)
+	}
+}
+
+func TestAnthropicMessagesStreamingTerminalOutputExceededEmitsMessageStop(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_stream_cap","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"error":{"message":"cap hit","type":"api_error","code":"stream_output_exceeded","retryable":true}}`
+	stream += "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_output_exceeded_terminal")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"stream_output_exceeded"`) || !strings.Contains(body, `"stop_reason":"max_tokens"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("terminal output-exceeded frame did not close Anthropic stream:\n%s", body)
+	}
+	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_output_exceeded_terminal")
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source=%s/%s want stream_output_exceeded/gateway_estimated", outcome, source)
+	}
+}
+
+func TestAnthropicMessagesStreamingUnknownTerminalErrorSettlesInvalidProviderResponse(t *testing.T) {
+	stream := `data: {"id":"chatcmpl_unknown_terminal","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
+	stream += "\n\n" + `data: {"error":{"message":"provider failed","type":"api_error","code":"upstream_provider_error","retryable":true}}`
+	stream += "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Features.AnthropicMessagesEnabled = true
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_anthropic_stream_unknown_terminal")
+
+	resp := postAnthropicMessages(t, h, key, `{"model":"claude-stream","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"upstream_provider_error"`) || !strings.Contains(body, `"stop_reason":"end_turn"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("unknown terminal error did not close Anthropic stream:\n%s", body)
+	}
+	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_unknown_terminal")
+	if outcome != "invalid_provider_response" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source=%s/%s want invalid_provider_response/gateway_estimated", outcome, source)
+	}
+}
+
+func TestAnthropicMessagesStreamingEOFWithoutFinishReasonFailsClosedWithMessageStop(t *testing.T) {
 	stream := `data: {"id":"chatcmpl_truncated","model":"claude-stream","choices":[{"delta":{"content":"partial"},"finish_reason":null}]}`
 	stream += "\n\n"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -647,11 +780,8 @@ func TestAnthropicMessagesStreamingEOFWithoutFinishReasonFailsClosed(t *testing.
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	body := resp.Body.String()
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"invalid_provider_response"`) {
-		t.Fatalf("truncated stream did not emit Anthropic invalid-provider error:\n%s", body)
-	}
-	if strings.Contains(body, "event: message_stop") {
-		t.Fatalf("truncated stream emitted message_stop:\n%s", body)
+	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"invalid_provider_response"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("truncated stream did not emit Anthropic error terminal:\n%s", body)
 	}
 	outcome, source, _, _ := usageEventOutcomeAndTokens(t, dbPath, "acct_anthropic_stream_truncated")
 	if outcome != "invalid_provider_response" || source != "gateway_estimated" {
@@ -921,6 +1051,9 @@ func TestAnthropicMessagesStreamingTerminalErrorRefundsInsteadOfSettling(t *test
 	body := resp.Body.String()
 	if !strings.Contains(body, "event: error") || !strings.Contains(body, `"code":"provider_timeout"`) {
 		t.Fatalf("terminal error not translated:\n%s", body)
+	}
+	if !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("terminal error did not close Anthropic stream:\n%s", body)
 	}
 	snap := gatewaySettlementSnapshot(t, dbPath, "acct_anthropic_stream_terminal_error")
 	if snap.usageRows != 0 || snap.settledRows != 0 || snap.activeRows != 0 {
