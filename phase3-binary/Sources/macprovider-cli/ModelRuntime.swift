@@ -3462,6 +3462,12 @@ struct NativeToolCallStreamEmitter {
         guard let allowed = allowedFunctionNames, allowed.contains(name) else {
             return []
         }
+        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
+        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
+        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            closed = true
+            return []
+        }
 
         var events: [StreamChunk] = []
         if !opened {
@@ -3487,6 +3493,12 @@ struct NativeToolCallStreamEmitter {
         }
         // Fail closed: never stream a tool-call delta for an undeclared function name.
         guard let allowed = allowedFunctionNames, allowed.contains(name) else {
+            return []
+        }
+        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
+        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
+        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            closed = true
             return []
         }
 

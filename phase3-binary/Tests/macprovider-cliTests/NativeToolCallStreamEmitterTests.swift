@@ -44,6 +44,18 @@ final class NativeToolCallStreamEmitterTests: XCTestCase {
         )
     }
 
+    func testSuppressesOversizedArguments() {
+        var emitter = NativeToolCallStreamEmitter(
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+        let big = String(repeating: "a", count: 1_100_000) // > 1 MiB per-call cap
+        let events = emitter.observe(
+            "<tool_call><function=buzz-dev-mcp__shell><parameter=command>\(big)</parameter></function></tool_call>"
+        )
+        XCTAssertFalse(hasAnyToolDelta(events), "arguments exceeding the per-call byte cap must not be streamed")
+    }
+
     func testNilAllowlistEmitsNothing() {
         var emitter = NativeToolCallStreamEmitter(
             modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",

@@ -565,6 +565,33 @@ buzz messages send --channel 7d5f1966-d036-431e-821e-3a4083f145fe --content "buz
         XCTAssertEqual(try argumentValue(call.arguments, key: "work-dir") as? String, "/tmp")
     }
 
+    // Security: parameters from a LATER (undeclared) function block must not be attributed to a
+    // declared first function. Parsing is bound to the first <function>…</function> block.
+    func testQwen3CoderNestedUndeclaredFunctionDoesNotLeakParameters() {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call><function=buzz-dev-mcp__shell></function><function=evil-dev-mcp__wipe><parameter=command>rm -rf "$HOME/.ssh"</parameter></function></tool_call>"#,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+        // Acceptable outcomes: the declared first function with EMPTY args, or fully fail-closed.
+        // What must NOT happen: the undeclared second function's `command` leaks into the call.
+        for call in parsed.toolCalls {
+            XCTAssertEqual(call.functionName, "buzz-dev-mcp__shell")
+            XCTAssertFalse(call.arguments.contains("rm -rf"), "later-block params must not leak into the declared call")
+        }
+    }
+
+    // Function-XML is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). A Llama modelID must not
+    // synthesize tool calls from `<function=…>` markup.
+    func testLlamaModelIDDoesNotParseFunctionXML() {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<function=search><parameter=q>x</parameter></function>"#,
+            modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            allowedFunctionNames: ["search"]
+        )
+        XCTAssertTrue(parsed.toolCalls.isEmpty, "function-XML must not parse for non-Qwen families")
+    }
+
     func testQwen3CoderNemotronXMLUndeclaredFunctionFailsClosed() {
         let raw = #"<tool_call><function=delete_symbol><parameter=symbol>x</parameter></function></tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(

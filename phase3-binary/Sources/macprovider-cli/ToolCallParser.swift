@@ -29,7 +29,10 @@ enum ToolCallParser {
                 }
                 return parsed
             }
-            if rawOutput.contains("<function=") {
+            // Function-XML (`<function=…>`) is a Qwen-row body grammar only (SPEC-018 §3.1
+            // v0.2.7). Do NOT run it for other families (e.g. Llama-3.3), whose §3.1 rows
+            // define only JSON/Python bodies — keep the parser-family boundary tight.
+            if format == .qwen25, rawOutput.contains("<function=") {
                 let bare = try parseBareNemotronCalls(rawOutput)
                 if !bare.toolCalls.isEmpty {
                     if let allowedFunctionNames,
@@ -61,7 +64,7 @@ enum ToolCallParser {
                 throw ParseError.missingEndDelimiter
             }
             let body = String(rawOutput[bodyStart..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let call = try parseCall(body, argumentKey: format.argumentKey)
+            let call = try parseCall(body, argumentKey: format.argumentKey, allowFunctionXML: format == .qwen25)
             let argumentBytes = call.arguments.utf8.count
             guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
                 throw ParseError.byteCapExceeded
@@ -116,22 +119,36 @@ enum ToolCallParser {
         return (nilIfBlank(cleaned), calls)
     }
 
-    private static func parseCall(_ rawCall: String, argumentKey: String) throws -> ToolCall {
+    private static func parseCall(_ rawCall: String, argumentKey: String, allowFunctionXML: Bool) throws -> ToolCall {
         let trimmed = rawCall.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") {
             return try parseJSONCall(rawCall, argumentKey: argumentKey)
         }
-        if trimmed.contains("<function=") {
+        if allowFunctionXML, trimmed.contains("<function=") {
             return try parseNemotronXMLCall(rawCall)
         }
         return try parsePythonStyleCall(rawCall)
     }
 
+    /// Returns the substring covering the FIRST `<function=…>…</function>` block (through the
+    /// first `</function>`, or to the end if unterminated for a streaming prefix). Name and
+    /// parameter parsing MUST be scoped to this block: otherwise a `<parameter=…>` belonging to
+    /// a LATER (possibly undeclared) function block could be attributed to this call, letting a
+    /// declared-but-empty first function inherit an undeclared function's arguments.
+    static func firstFunctionBlock(in raw: String) -> Substring {
+        guard let open = raw.range(of: "<function=") else {
+            return raw[raw.startIndex..<raw.startIndex]
+        }
+        let end = raw.range(of: "</function>", range: open.lowerBound..<raw.endIndex)?.upperBound ?? raw.endIndex
+        return raw[open.lowerBound..<end]
+    }
+
     private static func parseNemotronXMLCall(_ rawCall: String) throws -> ToolCall {
-        guard let functionName = nemotronFunctionName(in: rawCall) else {
+        let block = String(firstFunctionBlock(in: rawCall))
+        guard let functionName = nemotronFunctionName(in: block) else {
             throw ParseError.invalidShape
         }
-        let argumentsObject = try nemotronParameterObject(in: rawCall, includeIncomplete: true)
+        let argumentsObject = try nemotronParameterObject(in: block, includeIncomplete: true)
         guard JSONSerialization.isValidJSONObject(argumentsObject) else {
             throw ParseError.invalidArguments
         }
@@ -161,7 +178,8 @@ enum ToolCallParser {
     }
 
     static func nemotronArgumentsJSON(in raw: String, includeIncomplete: Bool) -> String? {
-        guard let object = try? nemotronParameterObject(in: raw, includeIncomplete: includeIncomplete),
+        let block = String(firstFunctionBlock(in: raw))
+        guard let object = try? nemotronParameterObject(in: block, includeIncomplete: includeIncomplete),
               JSONSerialization.isValidJSONObject(object)
         else {
             return nil
