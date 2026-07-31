@@ -285,6 +285,31 @@ rewards:
       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
       completion_credits_per_mtok: 850000    # $0.850/M (RESEARCH_227 dev-coding premium, dense 32B UX painful on M-base)
 
+# SPEC-015 / SPEC-022 settlement policy.
+#
+# `verified_model_settlement_mode: enforce` makes the coordinator require a
+# valid route snapshot at dispatch and gates the verified-receipt -> billable
+# credit upgrade on a settled=verified verdict. The alternative, `observe`
+# (the code default), records snapshots/verdicts but admits credits without a
+# verified settlement and silently skips on any route-snapshot prereq miss.
+#
+# Enforce is safe here ONLY because PR #833 (commit f9c5db19) removed the
+# len(body)/4 prompt-token cap from the settlement evidence tuple. Before that
+# fix, token-dense chat templates (Llama-3.2/3.1, gpt-oss) quarantined on
+# `usage_mismatch`; after it, the live Pearl DB shows normal_done receipts at
+# 100% verified across all providers/models (203/203 Llama-3.2-3B, 29/29
+# Qwen3-8B, 28/28 Qwen3-Coder-30B) and 0 usage_mismatch network-wide, with a
+# measured enforce-dispatch rejection risk of 1/267 successful requests (0.4%,
+# a no-charge/refund path, not a user-facing error). See the rollout runbook
+# ops/runbooks/settlement-enforce-rollout.md.
+#
+# Instant rollback WITHOUT a redeploy: set
+# `settlement: { verified_model_settlement_mode: observe }` in the Pearl
+# overlay /etc/macprovider/coordinator.pearl-overlays.yaml (overlay keys win
+# over this base) and restart the coordinator.
+settlement:
+  verified_model_settlement_mode: enforce
+
 # Admission tier (SPEC-002 v1.1.2 § 7.1 amendment to F-2).
 # Pinned providers are enumerated below in `providers:`. Provisional
 # providers connect dynamically (curl-install path) up to these caps.
