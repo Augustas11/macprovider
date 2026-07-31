@@ -1808,6 +1808,18 @@ jobs:
             final-draft-by-id.json release-provenance.json final-draft-manifest.json \
             "${release_assets[@]}" checksums.txt checksums.txt.sig
 
+          if [ "$PRERELEASE_INPUT" = false ]; then
+            echo "::group::Verify live coordinator release gate"
+            env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
+              python3 scripts/verify-live-coordinator-release-gate.py \
+              --tag "$tag" \
+              --pearl-release-json pearl-release.json \
+              --trusted-keys trusted-keys.json \
+              --coordinator-url https://coordinator.streamvc.live \
+              --openssl "$OPENSSL_BIN"
+            echo "::endgroup::"
+          fi
+
           gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/$release_id" \
             -F draft=false \
