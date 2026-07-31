@@ -58,6 +58,7 @@ test-dist:
 	bash scripts/test-malibu-independent-release.sh
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-pearl-runtime-release.sh
+	bash scripts/test-live-coordinator-release-gate.sh
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-malibu-bootstrap-bridge.sh
 	bash scripts/test-recover-malibu-publication.sh

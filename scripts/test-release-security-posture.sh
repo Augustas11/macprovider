@@ -286,7 +286,7 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Prepare release assets", 4, 1),
     ("Require an advancing immutable discovery head", 2, 2),
     ("Create verified draft GitHub release", 1, 1),
-    ("Publish only the revalidated numeric draft", 1, 1),
+    ("Publish only the revalidated numeric draft", 2, 2),
     ("Publish one append-only immutable discovery transport", 1, 1),
     ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
 )
