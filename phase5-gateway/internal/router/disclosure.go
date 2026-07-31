@@ -226,16 +226,22 @@ const settlementPartialChargeDisclosure = "Buyer cancel, gateway timeout, provid
 const settlementStreamingFailoverDisclosure = "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above."
 const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
 
-func makeVerifiedModelSettlementDisclosure() verifiedModelSettlementDisclosure {
+func makeVerifiedModelSettlementDisclosure(includeResponses ...bool) verifiedModelSettlementDisclosure {
+	included := []string{"POST /v1/chat/completions"}
+	enforceMode := settlementEnforceModeDisclosure
+	if len(includeResponses) > 0 && includeResponses[0] {
+		included = append(included, "POST /v1/responses")
+		enforceMode = "Enforce mode may settle only covered paid POST /v1/chat/completions and POST /v1/responses attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
+	}
 	return verifiedModelSettlementDisclosure{
-		IncludedPaidEntrypoints: []string{"POST /v1/chat/completions"},
+		IncludedPaidEntrypoints: included,
 		ExcludedPaidEntrypoints: []string{
 			"legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger",
 		},
 		ModelIdentity:       settlementModelIdentityDisclosure,
 		ModelIdentityCaveat: settlementModelIdentityCaveatDisclosure,
 		ObserveMode:         settlementObserveModeDisclosure,
-		EnforceMode:         settlementEnforceModeDisclosure,
+		EnforceMode:         enforceMode,
 		PendingReservation:  settlementPendingReservationDisclosure,
 		Outcomes: settlementOutcomeDisclosure{
 			Pending:     settlementPendingOutcomeDisclosure,
@@ -305,7 +311,7 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 		HardwareAttestation:     "none",
 		Tier2Milestone:          "future",
 		ModelVerificationLimit:  modelVerificationLimitDisclosure,
-		VerifiedModelSettlement: makeVerifiedModelSettlementDisclosure(),
+		VerifiedModelSettlement: makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled),
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",

@@ -12,8 +12,8 @@ Phase 5 gateway implementation for SPEC-006 v0.8.3. The gateway is intentionally
 - Minimal `/account` handoff page that displays a newly issued key once and clears the handoff cookie.
 - HMAC/SHA API key generation, hash-only storage, validation, rotation, revocation, and account-history preservation.
 - HMAC demo-session token issuance/validation with per-IP issuance limits and demo-only kill switch.
-- `/v1/models`, `/v1/usage`, `/v1/chat/completions`, `/v1/status`, `/v1/feedback`, `/healthz`.
-- OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation.
+- `/v1/models`, `/v1/usage`, `/v1/chat/completions`, optional stateless `/v1/responses`, `/v1/status`, `/v1/feedback`, `/healthz`.
+- OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation; the optional Responses facade translates into the same billed path.
 - Quota reservation/settlement for success, 503 refund, 502/504 prompt-only or partial usage, demo chat usage, provider-reported streaming actuals, and byte-estimation fallback.
 - Storage-backed per-account concurrency caps.
 - Inbound and outbound `X-MacProvider-*` stripping plus UUID-v4 `X-Request-ID` generation/forwarding.

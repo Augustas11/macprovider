@@ -29,6 +29,7 @@ type Config struct {
 	Routing     RoutingConfig     `yaml:"routing"`
 	Retry503    Retry503Config    `yaml:"retry_503"`
 	Explorer    ExplorerConfig    `yaml:"explorer"`
+	Features    FeaturesConfig    `yaml:"features"`
 }
 
 type ListenConfig struct {
@@ -238,6 +239,10 @@ type ExplorerConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+type FeaturesConfig struct {
+	ResponsesAPIEnabled bool `yaml:"responses_api_enabled"`
+}
+
 func Default() Config {
 	return Config{
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
@@ -343,6 +348,7 @@ func Default() Config {
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Retry503: Retry503Config{Enabled: true, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
 		Explorer: ExplorerConfig{Enabled: false},
+		Features: FeaturesConfig{ResponsesAPIEnabled: false},
 	}
 }
 
