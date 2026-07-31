@@ -149,7 +149,7 @@ enum ToolCallParser {
             return nil
         }
         let name = String(raw[nameStart..<close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isPythonIdentifier(name) else {
+        guard isValidToolFunctionName(name) else {
             return nil
         }
         return name
@@ -429,6 +429,22 @@ enum ToolCallParser {
             return false
         }
         return value.dropFirst().allSatisfy { $0 == "_" || $0.isLetter || $0.isNumber }
+    }
+
+    /// Validates a tool/function name against the OpenAI function-name charset —
+    /// ASCII letters, digits, underscore, and hyphen, 1–64 chars. `isPythonIdentifier`
+    /// wrongly rejected MCP-namespaced names such as `buzz-dev-mcp__shell` (hyphens),
+    /// which made valid Qwen3-Coder `<function=…>` tool calls leak as raw text instead
+    /// of parsing into structured `tool_calls`. The declared-tool allowlist
+    /// (`allowedFunctionNames` in `parseToolCalls`) remains the security boundary: any
+    /// name not among the request's declared tools is still rejected.
+    private static func isValidToolFunctionName(_ value: String) -> Bool {
+        guard (1...64).contains(value.count) else {
+            return false
+        }
+        return value.allSatisfy { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "_" || char == "-")
+        }
     }
 
     private static func argumentsString(_ rawArguments: Any?) throws -> String {
