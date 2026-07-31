@@ -62,6 +62,7 @@ test-dist:
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-malibu-bootstrap-bridge.sh
 	bash scripts/test-recover-malibu-publication.sh
+	bash scripts/test-malibu-acceptance-candidate-prepublish.sh
 	bash scripts/test-acceptance-candidate-security.sh
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
