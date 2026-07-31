@@ -1,10 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.8.6
+version: v0.9.0
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-29
+last-locked: 2026-07-31
 
 ## Change log
+
+- **v0.9.0 (2026-07-31)** — Swap veto redefined as sustained memory-pressure thrash.
+  1. **`swap_detected` now means sustained CRITICAL memory pressure, not any pageout.** The signal is the macOS kernel memory-pressure verdict (`kern.memorystatus_vm_pressure_level`: 1 = Normal, 2 = Warning, 4 = Critical), read in-process across the probe. It replaces the machine-wide cumulative `Pageouts` counter, which on Apple Silicon counts healthy memory compression and is not process-scoped, so any incidental system paging during the probe flipped the old flag and false-rejected legitimate small-model providers (e.g. an 8 GB Mac on llama-3.2-3b).
+  2. **Interval sampling.** The CLI samples the pressure level (and thermal state) as a SERIES at a fixed ~250 ms interval for the duration of the Stage 1 probe, plus one synchronous sample at probe start and one after the probe returns (always ≥2 samples). `swap_detected == true` only when at least 2 samples are Critical AND Critical readings are ≥50% of the readable (non-Unknown) samples. A genuinely thrashing node (the 32 GB M5 / #742 incident) still fails paid eligibility, including short probes that collect only the two synchronous samples.
+  3. **Advisory WARNING-majority.** When at least 2 samples are Warning and Warning readings are ≥50% of the readable samples (without a Critical majority), `swap_detected` stays false and the CLI records an advisory `swap_observed_under_load` observation in local probe-safety telemetry; it does NOT block the paid path.
+  4. **Fail-closed narrowed.** `swap_detected` fails closed to true only when the pressure level could not be read for the ENTIRE series (every sample unknown). A single transient unknown/warning sample MUST NOT veto the paid path.
+  5. **No wire/schema change.** The `swap_detected` boolean field name, the candidate-benchmark shape, and the coordinator-facing evidence schema are unchanged; only the field's meaning tightens.
 
 - **v0.8.6 (2026-07-29)** — Signed rate-card feed (B10).
   1. **Rate-card live bytes are signed.** `/v1/rate-card` is served from literal verified static bytes when configured, and `/v1/rate-card.sig` is a detached Ed25519 sidecar over those exact bytes.
@@ -43,7 +50,7 @@ last-locked: 2026-07-29
   5. **Static signer rotation is bridged, not activated.** At v0.8 publication time, the active v4 signing material was unavailable to that release session, so the v5 public key was release-pinned in the trusted keyring with bridge status while the live feed remained signed by `streamvc-autotune-static-v4`. A4 later published the in-band provenance release with the active v4 signer; the first v5-signed feed remains a separate activation after bridge adoption.
 
 - **v0.7 (2026-07-25)** — Swap is a paid-path hard eligibility veto (#742).
-  1. **`swap_detected == true` disqualifies paid recommendation.** Swap is a locally measured fact about the provider machine (pageouts during the Stage 1 probe). It needs no catalog threshold and applies on hardware never benchmarked in advance. A swapping row MUST NOT become `recommended_model`.
+  1. **`swap_detected == true` disqualifies paid recommendation.** Swap is a locally measured fact about the provider machine. **[amended v0.9: the signal is sustained CRITICAL memory pressure — ≥2 samples of `kern.memorystatus_vm_pressure_level` across the probe reading Critical AND Critical forming ≥50% of the readable samples — not the old machine-wide `Pageouts` delta.]** It needs no catalog threshold and applies on hardware never benchmarked in advance. A thrashing row MUST NOT become `recommended_model`.
   2. **§4 scoring untouched.** Ranking, demand weight, and payout-first order are unchanged; only §5 eligibility gains the swap gate.
   3. **Donor mode keeps swap advisory.** When no non-swapping paid row exists, the CLI falls to donor mode and MUST name swap in the transcript / candidate `why` / `swap_observed_under_load` warning. Donor commit still admits a swapping row when other donor gates pass.
   4. **No 60 s TTFT feasibility default on the paid path.** `autotune --recommend` MUST NOT default its probe TTFT ceiling to 60_000 ms. Omitting `--gate-ttft-ms` on `--recommend` disables that ceiling (`0`). Classic (non-recommend) Stage 1/2 retains the SPEC-013 60_000 ms default when the flag is omitted. Catalog `bench_gate` TPS/TTFT fields remain advisory.
@@ -186,7 +193,7 @@ Required hardware fields:
 || `diversification_id` | string | HMAC-SHA256-derived provider ID if configured, otherwise HMAC-SHA256-derived stable machine identity | Input to deterministic diversification. Raw machine fingerprints MUST NOT be persisted, logged, emitted in JSON, included in support bundles, or sent to coordinator/gateway as part of v0.1 recommendation. |
 || `candidate_benchmarks[model_key].sustained_tps` | float | local autotune benchmark | Warm steady-state decode tokens/sec for each candidate. |
 || `candidate_benchmarks[model_key].ttft_ms` | integer | local autotune benchmark | Time to first token under the v0.1 benchmark prompt shape. |
-|| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.7 / #742]** Observed swap fails paid eligibility (hard block) and emits `swap_observed_under_load`. Donor mode keeps swap advisory. |
+|| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.9 / #742]** True means sustained CRITICAL memory pressure across the probe (≥2 samples of `kern.memorystatus_vm_pressure_level` reading Critical AND ≥50% of the readable samples Critical); fails paid eligibility (hard block) and, when it leaves no paid row, emits `swap_observed_under_load`. Advisory Warning-majority is telemetry-only. Field name/type unchanged. Donor mode keeps swap advisory. |
 || `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. **[unchanged v0.2: hard block]** |
 
 HMAC identity rules:
@@ -516,7 +523,7 @@ A row is eligible only if every gate passes:
 
 - `sustained_tps >= model.bench_gate.min_sustained_tps` **[v0.2 amendment: advisory; missing emits `tps_below_gate` warning but does not veto eligibility]**.
 - `ttft_ms <= model.bench_gate.max_4k_ttft_ms` **[v0.2 amendment: advisory; missing emits `ttft_above_gate` warning but does not veto eligibility]**.
-- `swap_detected == false` **[amended v0.7 / #742: hard block for paid recommendation. When swap causes no paid row to land, emit `swap_observed_under_load`. Donor mode keeps swap advisory]**.
+- `swap_detected == false` **[amended v0.9 / #742: `swap_detected` == sustained CRITICAL memory pressure (≥2 samples Critical AND ≥50% of readable samples Critical) is a hard block for paid recommendation. When it causes no paid row to land, emit `swap_observed_under_load`. Advisory Warning-majority pressure does not set `swap_detected` and does not block (telemetry only). Fail closed to true only when the whole series is unreadable. Donor mode keeps swap advisory]**.
 - `buyer_ttft_ceiling_ms == 0 OR ttft_ms <= buyer_ttft_ceiling_ms` **[v0.8 / #744: hard block for paid recommendation only. The operator-set ceiling protects buyer UX and is independent of catalog `bench_gate.max_4k_ttft_ms`. Enabling donor mode does not bypass the paid-path ceiling; donor fallback remains local-only and may still name a compatible row separately]**.
 - `thermal_throttle_detected == false` **[unchanged from v0.1: hard block]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
@@ -777,7 +784,7 @@ AC-10: A row with demand `recommendable: false` or candidate `runtime_status != 
 
 AC-11: A row whose `model.min_ram_gb > mac.ram_gb - 4` fails `hardware_fits` and is not benchmarked. v0.4 has no arbitrary local-model or custom donor-mode path override; any donor-mode selection must still select a row from the signed selected candidate catalog and pass §3.2, §5, §8, and AC-22 controls.
 
-AC-12 **[amended v0.7 / #742]**: A row whose local benchmark records `thermal_throttle_detected == true` fails paid eligibility (hard block). A row whose local benchmark records `swap_detected == true` fails paid eligibility (hard block), MUST NOT become `recommended_model`, and emits `swap_observed_under_load`. When every paid row fails for swap (or other §5 gates) the CLI falls to donor mode and the transcript / candidate `why` names swap.
+AC-12 **[amended v0.9 / #742]**: A row whose local benchmark records `thermal_throttle_detected == true` fails paid eligibility (hard block). A row whose local benchmark records `swap_detected == true` — now defined as sustained CRITICAL memory pressure across the probe (≥2 samples of `kern.memorystatus_vm_pressure_level` reading Critical AND Critical forming ≥50% of the readable samples) — fails paid eligibility (hard block), MUST NOT become `recommended_model`, and emits the top-level `swap_observed_under_load` warning when the disqualification leaves no paid recommendation. Incidental single-sample pressure and Warning-majority-without-Critical-majority MUST NOT set `swap_detected` (the latter is recorded as advisory local telemetry only); `swap_detected` fails closed to true only when the entire sample series is unreadable. When every paid row fails for swap (or other §5 gates) the CLI falls to donor mode and the transcript / candidate `why` names swap.
 
 AC-13 **[amended v0.2]**: A row whose benchmark misses `min_sustained_tps` or `max_4k_ttft_ms` emits `tps_below_gate` / `ttft_above_gate` warnings but does NOT fail eligibility on that basis alone.
 
