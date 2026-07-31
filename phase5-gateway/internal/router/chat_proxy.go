@@ -221,6 +221,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	dedupeEntrypoint := idlessDedupeEntrypointChat
+	dedupeBody := body
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+		translatedBody, translateErr := adapter.translateRequest(body)
+		if translateErr != nil {
+			writeResponsesTranslationError(w, http.StatusBadRequest, translateErr)
+			return
+		}
+		dedupeEntrypoint = idlessDedupeEntrypointResponses
+		body = translatedBody
+	}
 	chat, err := parseChatRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
@@ -275,11 +286,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		requestIDClass(r) == retry503RequestIDClassGatewayGenerated &&
 		strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
 		dedupeFingerprint = idlessRequestFingerprint(
+			dedupeEntrypoint,
 			subject.AccountID,
 			subject.DemoTokenHash,
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
-			body,
+			dedupeBody,
 		)
 		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
 		switch {
@@ -299,11 +311,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// fall-through 409 would name an id the buyer cannot correlate.
 			r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, entry.requestID))
 			w.Header().Set("X-Request-ID", entry.requestID)
+			var replayAdapter *responsesAdapter
+			if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+				replayAdapter = adapter
+				replayAdapter.beginReplayPassthrough()
+			}
 			if s.replayIdlessDuplicate(w, r, subject, dailyQuota, entry, dedupeWindow, deadlines) {
 				return
 			}
+			if replayAdapter != nil {
+				replayAdapter.endReplayPassthrough()
+			}
 		default:
 			sw.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+				adapter.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			}
 			defer func() {
 				if dedupeFingerprint == "" {
 					return
@@ -318,12 +341,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
 					panic(recovered)
 				}
+				adapter := responsesAdapterFromContext(r.Context())
+				if adapter != nil {
+					adapter.finish()
+				}
 				// Publish is gated on a buyer-visible 2xx, not on settlement
 				// finality: a SPEC-022 hold is still a delivered answer, and
 				// a retry of it must not re-run inference. A buyer who
 				// disconnected never saw the whole response, so nothing is
 				// cached for them (their partial is settled as usual).
-				if sw.dedupePublishable() && r.Context().Err() == nil {
+				if adapter != nil && sw.dedupeDelivered2xx() && r.Context().Err() == nil {
+					capture := adapter.dedupeCapture()
+					if capture != nil {
+						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							capture, s.now())
+						return
+					}
+					if adapter.dedupeDeliveredButUncacheable() {
+						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							nil, s.now())
+						return
+					}
+					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
+					return
+				}
+				if adapter == nil && sw.dedupePublishable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
 						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
 						sw.dedupeCapture(), s.now())
@@ -830,10 +874,23 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	} else {
 		tokenSource = "provider_reported"
 	}
+	body = usageBodyWithTokenUsage(body, usage)
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
+		if err := adapter.prepareNonStreamingResponse(body); err != nil {
+			settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
+			if ok {
+				settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
+			}
+			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+				return
+			}
+			writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+			return
+		}
+	}
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
-	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -2781,7 +2838,11 @@ func (sw *statusWriter) armDedupeCapture(limit int) {
 // dedupePublishable reports whether the captured response may be replayed to
 // an identical id-less retry: a complete, buyer-visible 2xx that fit the cap.
 func (sw *statusWriter) dedupePublishable() bool {
-	return sw.captureArmed && !sw.poisoned && !sw.overflowed &&
+	return sw.dedupeDelivered2xx() && !sw.overflowed
+}
+
+func (sw *statusWriter) dedupeDelivered2xx() bool {
+	return sw.captureArmed && !sw.poisoned &&
 		sw.statusCode >= 200 && sw.statusCode < 300
 }
 

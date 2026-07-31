@@ -215,6 +215,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
+	if s.cfg.Features.ResponsesAPIEnabled {
+		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleResponses)))
+	}
 	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
@@ -385,7 +388,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			"window_date": window, "daily_tokens_used": used, "daily_tokens_reserved": reserved,
 			"daily_tokens_remaining": remaining, "daily_tokens_limit": limit,
 		},
-		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(),
+		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled),
 		"capacity":              map[string]any{"tier": tier.Tier},
 		"keys":                  keys,
 		"models":                []any{},
@@ -914,9 +917,10 @@ var gatewayRetryableByCode = map[string]bool{
 	"rate_limited":               true,
 	// Gateway-generated transient/availability codes (no coordinator-body
 	// equivalent — the gateway itself constructs these envelopes).
-	"coordinator_unavailable": true,
-	"upstream_provider_error": true,
-	"invalid_provider_usage":  true,
+	"coordinator_unavailable":   true,
+	"upstream_provider_error":   true,
+	"invalid_provider_usage":    true,
+	"invalid_provider_response": true,
 	// rate_limit_exceeded-typed 429s that actually ship a backoff signal
 	// (Retry-After via setConcurrencyRateLimitHeaders, or X-RateLimit-Reset
 	// via setRateLimitHeaders) — H-R2. (signup_rate_limited was the one

@@ -37,7 +37,10 @@ const (
 	// idlessDedupeFingerprintVersion is mixed into every fingerprint so a
 	// future change to the keying inputs can never collide with entries
 	// computed by an older build.
-	idlessDedupeFingerprintVersion = "mpg-idless-v1"
+	idlessDedupeFingerprintVersion = "mpg-idless-v2"
+
+	idlessDedupeEntrypointChat      = "chat"
+	idlessDedupeEntrypointResponses = "responses"
 
 	// Two separate caps, because the two things an entry holds cost wildly
 	// different amounts of memory and wildly different amounts of money when
@@ -49,10 +52,10 @@ const (
 	// INSIDE the window costs money: the retry mints a fresh id, reserves
 	// independently, and bills twice. So memory pressure spends bodies first
 	// and keeps bare mapping stubs until the window expires.
-	idlessDedupeMaxBodies     = 4096      // entries still holding a response
-	idlessDedupeMaxMappings   = 65536     // fp→requestID stubs, body or not
-	idlessDedupeMaxEntryBytes = 1 << 20   // 1 MiB per cached response body
-	idlessDedupeMaxTotalBytes = 32 << 20  // 32 MiB of cached bodies overall
+	idlessDedupeMaxBodies     = 4096     // entries still holding a response
+	idlessDedupeMaxMappings   = 65536    // fp→requestID stubs, body or not
+	idlessDedupeMaxEntryBytes = 1 << 20  // 1 MiB per cached response body
+	idlessDedupeMaxTotalBytes = 32 << 20 // 32 MiB of cached bodies overall
 	idlessDedupePruneInterval = time.Minute
 	// idlessDedupeMaxWaiters bounds how many concurrent identical attempts
 	// may park on one in-flight request. Waiters hold no quota reservation
@@ -84,14 +87,15 @@ const (
 // its neighbour:
 //
 //  1. idlessDedupeFingerprintVersion — the keying-scheme tag.
-//  2. accountID — the billed tenant.
-//  3. demoTokenHash — distinguishes two demo sessions behind one IP.
-//  4. conversationTag — X-MacProvider-Conversation, which selects sticky
+//  2. entrypoint — the public API facade whose wire contract is being served.
+//  3. accountID — the billed tenant.
+//  4. demoTokenHash — distinguishes two demo sessions behind one IP.
+//  5. conversationTag — X-MacProvider-Conversation, which selects sticky
 //     routing and therefore which provider answers.
-//  5. retryHint — X-MacProvider-Retry, which copyForwardHeaders forwards to
+//  6. retryHint — X-MacProvider-Retry, which copyForwardHeaders forwards to
 //     the coordinator where it changes retry/failover behaviour. Two requests
 //     that differ only in this header are NOT the same dispatch.
-//  6. SHA-256 of the raw body bytes.
+//  7. SHA-256 of the raw body bytes.
 //
 // Everything else that changes the generated answer is inside those bytes
 // (model, messages, stream, max_tokens, response_format). Transport-level
@@ -101,10 +105,10 @@ const (
 // Adding a component is a keying change: bump idlessDedupeFingerprintVersion
 // when one is added to a build that is already deployed, so old and new
 // fingerprints cannot collide.
-func idlessRequestFingerprint(accountID, demoTokenHash, conversationTag, retryHint string, body []byte) string {
+func idlessRequestFingerprint(entrypoint, accountID, demoTokenHash, conversationTag, retryHint string, body []byte) string {
 	bodyDigest := sha256.Sum256(body)
 	h := sha256.New()
-	for _, part := range []string{idlessDedupeFingerprintVersion, accountID, demoTokenHash, conversationTag, retryHint} {
+	for _, part := range []string{idlessDedupeFingerprintVersion, entrypoint, accountID, demoTokenHash, conversationTag, retryHint} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
