@@ -51,7 +51,15 @@ curl_args=(
   --fail --show-error --silent --location --proto '=https' --tlsv1.2
   --connect-timeout 20 --max-time 240 --retry 3 --retry-delay 2
 )
-cache_key="publication=${expected_appcast_sha}"
+# The cache-bust key must vary per release so a CDN/proxy cannot serve a stale
+# prior latest.dmg. For non-v1.8.39 promotions the appcast is the frozen bridge
+# constant (identical every release), so key off the per-release DMG sha; the
+# v1.8.39 bootstrap keeps its unique per-release appcast sha.
+if [[ "$tag" == v1.8.39 ]]; then
+  cache_key="publication=${expected_appcast_sha}"
+else
+  cache_key="publication=${expected_dmg_sha}"
+fi
 curl "${curl_args[@]}" -o "$work/appcast.xml" "${base}/appcast.xml?${cache_key}"
 curl "${curl_args[@]}" -o "$work/latest.dmg" "${base}/latest.dmg?${cache_key}"
 curl "${curl_args[@]}" -o "$work/Malibu-${tag}.dmg" \

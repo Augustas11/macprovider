@@ -30,7 +30,7 @@ bash "$SCRIPT_DIR/verify-malibu-publication-set.sh" \
   "$manifest" "$asset" "$appcast" "$artifact_index" \
   "$checksums" "$signature" "$provenance"
 
-read -r tag commit release_number publication_id dmg_asset_id appcast_asset_id < <(
+read -r tag commit release_number publication_id repository dmg_asset_id appcast_asset_id < <(
   python3 - "$manifest" <<'PY'
 import json
 import pathlib
@@ -44,6 +44,7 @@ print(
     manifest["commit"],
     manifest["release_id"],
     manifest["publication_id"],
+    manifest["repository"],
     assets[f"Malibu-{tag}.dmg"]["id"],
     # Non-v1.8.39 promotions ship the frozen bridge appcast, which is not a
     # per-release GitHub asset, so it has no numeric manifest asset id.
@@ -53,6 +54,7 @@ PY
 )
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "manifest tag is invalid"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "manifest commit is invalid"
+[[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "manifest repository is invalid"
 [[ "$release_number" =~ ^[1-9][0-9]*$ ]] || die "manifest release id is invalid"
 [[ "$publication_id" =~ ^[0-9a-f]{64}$ ]] || die "manifest publication id is invalid"
 [[ "$dmg_asset_id" =~ ^[1-9][0-9]*$ ]] || die "manifest publication dmg asset id is invalid"
@@ -77,6 +79,23 @@ else
     die "acceptance-candidate must be named acceptance-candidate.json"
   [[ "$(basename "$acceptance_signature")" == acceptance-candidate.json.sig ]] ||
     die "acceptance-candidate signature must be named acceptance-candidate.json.sig"
+  # Fail closed BEFORE any Pearl transfer/promotion: the immutable release dir
+  # would otherwise pin a stale/expired/mismatched candidate that only the
+  # installer's die-4 rejects, and the same release id could never be repaired.
+  # Runs the same domain-separated ECDSA P-256 validation install.sh uses
+  # (schema/channel, signing key macprovider-acceptance-p256-v1, checksums.txt
+  # binding, 5m-24h validity window, not expired) and pins the candidate's
+  # tag/candidate_commit/compatibility_set_id to this exact release.
+  repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  python3 "$SCRIPT_DIR/acceptance-candidate-metadata.py" verify \
+    --input "$acceptance_candidate" \
+    --signature "$acceptance_signature" \
+    --public-key "$repo_root/security/acceptance-candidate-signing-public.pem" \
+    --checksums "$checksums" \
+    --repository "$repository" \
+    --tag "$tag" \
+    --candidate-commit "$commit" ||
+    die "acceptance-candidate signature/identity/expiry validation failed"
 fi
 
 VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:-159.223.165.194}"
