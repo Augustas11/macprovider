@@ -2544,8 +2544,9 @@ struct ProbeSafetyAssessment: Equatable {
     /// #742 fix: `swapDetected` now means "sustained memory-pressure thrash",
     /// not "any pageout". Computed over the interval series sampled across the
     /// probe:
-    /// - TRUE only when there are >= 3 samples AND >= 50% are `.critical`.
-    /// - Advisory WARNING-majority (>= 3 samples, >= 50% `.warning`, not a
+    /// - TRUE only when at least 2 samples are `.critical` AND `.critical`
+    ///   readings are >= 50% of the READABLE (non-`.unknown`) samples.
+    /// - Advisory WARNING-majority (>= 2 `.warning`, >= 50% of readable, not a
     ///   critical majority) sets `swapDetected = false` but flags
     ///   `swapObservedUnderLoad` so operators can see it without being blocked.
     /// - Fail-closed to TRUE only when the pressure level could not be read for
