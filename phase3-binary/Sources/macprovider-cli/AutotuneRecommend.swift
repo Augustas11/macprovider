@@ -2555,18 +2555,25 @@ struct ProbeSafetyAssessment: Equatable {
     static func assess(samples: [ProbeSafetySample]) -> ProbeSafetyAssessment {
         let pressureLevels = samples.map(\.pressureLevel)
         let readable = pressureLevels.filter { $0 != .unknown }
+        let criticalCount = pressureLevels.filter { $0 == .critical }.count
+        let warningCount = pressureLevels.filter { $0 == .warning }.count
         let swapDetected: Bool
         if readable.isEmpty {
             // No usable pressure reading for the whole series: fail closed.
             swapDetected = true
         } else {
-            let criticalCount = pressureLevels.filter { $0 == .critical }.count
-            swapDetected = pressureLevels.count >= 3 && criticalCount * 2 >= pressureLevels.count
+            // Sustained CRITICAL memory pressure: at least two CRITICAL
+            // observations AND a majority of the READABLE samples critical.
+            // Requiring >= 2 rejects a lone incidental spike; using the readable
+            // count (not the raw sample count) as the denominator stops
+            // transient .unknown readings from diluting a real majority and
+            // removes the round-1 fail-open where a short probe with < 3 total
+            // samples could never trip the veto.
+            swapDetected = criticalCount >= 2 && criticalCount * 2 >= readable.count
         }
-        let warningCount = pressureLevels.filter { $0 == .warning }.count
         let swapObservedUnderLoad = !swapDetected
-            && pressureLevels.count >= 3
-            && warningCount * 2 >= pressureLevels.count
+            && warningCount >= 2
+            && warningCount * 2 >= readable.count
 
         let thermalStates = samples.map(\.thermalState)
         let thermalKnown = !thermalStates.isEmpty && thermalStates.allSatisfy { $0 != nil }
@@ -3247,7 +3254,7 @@ struct AutotuneRecommendationBenchmarker {
                 let sampler = safetySampler
                 let samplingTask = Task {
                     while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        try? await Task.sleep(nanoseconds: 250_000_000)
                         if Task.isCancelled { break }
                         safetyBuffer.append(sampler.sample())
                     }
@@ -3262,7 +3269,15 @@ struct AutotuneRecommendationBenchmarker {
                     gateTTFTMS: gateTTFTMS,
                     replicates: replicates
                 )
+                // Round-1 audit fix (MEDIUM): stop the sampler and WAIT for its
+                // loop to finish so no in-flight boundary sample races the
+                // snapshot, then take one final synchronous sample. This
+                // guarantees at least two samples (probe start + end) for even a
+                // sub-interval probe, closing the fail-open where a short but
+                // genuinely pressured probe could never reach the veto.
                 samplingTask.cancel()
+                _ = await samplingTask.value
+                safetyBuffer.append(sampler.sample())
                 let safetySamples = safetyBuffer.snapshot()
                 let safety = ProbeSafetyAssessment.assess(samples: safetySamples)
                 switch probe {
@@ -3388,6 +3403,16 @@ struct AutotuneRecommendationBenchmarker {
         let dir = CandidateProviderRunner.defaultLogDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("probe-safety.log")
+        // Round-1 audit fix (LOW): cap the local log so repeated recommendation
+        // runs can't exhaust the cache/home volume. Rotate to a single .1 backup
+        // once the active log passes ~5 MiB.
+        let sizeCapBytes = 5 * 1024 * 1024
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int, size > sizeCapBytes {
+            let rotated = dir.appendingPathComponent("probe-safety.log.1")
+            try? FileManager.default.removeItem(at: rotated)
+            try? FileManager.default.moveItem(at: url, to: rotated)
+        }
         let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
         guard let data = stamped.data(using: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: url) {

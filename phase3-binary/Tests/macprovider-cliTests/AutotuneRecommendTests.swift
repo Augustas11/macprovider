@@ -2577,6 +2577,43 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(transient.swapDetected)
     }
 
+    func testProbeSafetyAssessmentShortProbeSustainedCriticalStillBlocks() {
+        // Round-1 audit fix (MEDIUM): a short probe that yields only the two
+        // synchronous samples must still veto when both read CRITICAL — the old
+        // >= 3 total-sample floor let this fail open.
+        let shortThrash = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+        ])
+        XCTAssertTrue(shortThrash.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentLoneCriticalSpikeDoesNotBlock() {
+        // A single incidental CRITICAL reading among healthy samples is not
+        // sustained thrash (requires >= 2 critical), so it must not block.
+        let spike = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(spike.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentUnknownDoesNotDiluteCriticalMajority() {
+        // Round-1 audit fix (MEDIUM): .unknown readings must not dilute the
+        // denominator. Two CRITICAL among many UNKNOWN is a critical majority of
+        // the READABLE samples and must veto (the old raw-count denominator let
+        // this fail open).
+        let diluted = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+        ])
+        XCTAssertTrue(diluted.swapDetected)
+    }
+
     func testBothMarketFallbacksProduceLowConfidence() throws {
         var request = try makeRequest()
         request.warnings = [.rateCardFallbackUsed, .demandRankFallbackUsed]
