@@ -35,6 +35,8 @@ if "make_latest=true" in publish or "true|false) make_latest=false" not in publi
     raise SystemExit("runtime workflow must never make a runtime-only release latest")
 if 'RELEASE_PRERELEASE_INPUT: "true"' not in workflow:
     raise SystemExit("runtime workflow must force GitHub prerelease publication")
+if 'EXPECTED_REVISION="${{ steps.release_source.outputs.commit }}"' not in workflow:
+    raise SystemExit("runtime workflow must bind Pearl Go binary verification to the reviewed commit")
 patch_position = publish.find("gh api --method PATCH")
 if patch_position < 0:
     raise SystemExit("runtime workflow must publish by numeric-ID PATCH")

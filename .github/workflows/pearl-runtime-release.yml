@@ -117,7 +117,8 @@ jobs:
           strings gateway-linux-amd64 > gateway-linux-amd64.strings
           grep -Fq "$tag" coordinator-linux-amd64.strings
           grep -Fq "$tag" gateway-linux-amd64.strings
-          python3 scripts/verify-pearl-go-binaries.py \
+          EXPECTED_REVISION="${{ steps.release_source.outputs.commit }}" \
+            python3 scripts/verify-pearl-go-binaries.py \
             coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64
 
       - name: Sign Pearl runtime metadata and checksums
