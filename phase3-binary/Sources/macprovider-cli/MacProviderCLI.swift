@@ -425,6 +425,13 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+        if let maxBatch = resolved.maxConcurrencyOverride,
+           maxBatch > ProviderCapacity.maxConcurrencyOverrideLimit {
+            FileHandle.standardError.write(Data((
+                "--max-batch \(maxBatch) must be <= \(ProviderCapacity.maxConcurrencyOverrideLimit)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
         if !(1...16).contains(resolved.numDraftTokens) {
             FileHandle.standardError.write(Data((
                 "--num-draft-tokens \(resolved.numDraftTokens) out of range 1...16\n"

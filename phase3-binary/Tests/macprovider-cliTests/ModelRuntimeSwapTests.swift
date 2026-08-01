@@ -202,6 +202,78 @@ final class ModelRuntimeSwapTests: XCTestCase {
         try await task.value
     }
 
+    func testServingDecodeRunsThroughBlockingInferenceExecutor() throws {
+        let source = try String(contentsOfFile: "Sources/macprovider-cli/ModelRuntime.swift", encoding: .utf8)
+        let pattern = #"let result: BlockingGenerateResult = try await blockingInferenceExecutor\.run \{ inferenceCancellation in\s+BlockingGenerateResult\(generate\(input: iteratorInput, context: generationContext, iterator: iterator\)"#
+        let matches = try NSRegularExpression(pattern: pattern).numberOfMatches(
+            in: source,
+            range: NSRange(source.startIndex..., in: source)
+        )
+
+        XCTAssertGreaterThanOrEqual(matches, 2, "non-streaming and streaming serving decode must not block Swift cooperative tasks")
+        XCTAssertFalse(source.contains("let result: GenerateResult = generate(input: iteratorInput"))
+        XCTAssertTrue(source.contains("return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    let draftCache = draftContext.model.newCache(parameters: parameters)"))
+        XCTAssertTrue(source.contains("SpeculativeTokenIterator("), "speculative decode must use the blocking iterator route")
+        XCTAssertFalse(source.contains("let stream = try generate(\n                    input: input,\n                    cache: cache"))
+        XCTAssertFalse(source.contains("generateTokens("), "raw speculative startup/canary generation must not use AsyncStream token generation")
+        XCTAssertTrue(source.contains("Thread.detachNewThread"), "blocking inference executor must use dedicated OS threads")
+        XCTAssertTrue(source.contains("inferenceCancellation.isCancelled"), "blocking inference callbacks must observe task cancellation")
+    }
+
+    func testGenerationConfigStopStringFilterMatchesStreamingHoldback() {
+        var filter = GenerationConfigStopStringFilter(stopStrings: ["STOP"])
+
+        let first = filter.process("hello ST")
+        XCTAssertEqual(first.text, "hello ")
+        XCTAssertFalse(first.stopped)
+
+        let second = filter.process("OP hidden")
+        XCTAssertNil(second.text)
+        XCTAssertTrue(second.stopped)
+        XCTAssertNil(filter.finish())
+    }
+
+    func testGenerationConfigStopStringFilterUsesEarliestStop() {
+        var filter = GenerationConfigStopStringFilter(stopStrings: ["STOP", "HALT"])
+
+        let result = filter.process("abcHALTdefSTOP")
+
+        XCTAssertEqual(result.text, "abc")
+        XCTAssertTrue(result.stopped)
+    }
+
+    func testBlockingInferenceExecutorDoesNotStarveRuntimeActor() async throws {
+        let runtime = makeRuntime(modelID: "model-a", warmSwapEnabled: false)
+        let task = Task {
+            try await runtime.runBlockingInferenceProbeForTest(milliseconds: 250)
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        for _ in 0 ..< 10 {
+            let start = DispatchTime.now().uptimeNanoseconds
+            _ = await runtime.currentSnapshot()
+            let elapsed = DispatchTime.now().uptimeNanoseconds - start
+            XCTAssertLessThan(elapsed, 50_000_000)
+        }
+        try await task.value
+    }
+
+    func testBlockingInferenceExecutorObservesTaskCancellation() async throws {
+        let runtime = makeRuntime(modelID: "model-a", warmSwapEnabled: false)
+        let task = Task {
+            try await runtime.runBlockingInferenceProbeForTest(milliseconds: 5_000)
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        task.cancel()
+
+        do {
+            try await task.value
+            XCTFail("Expected blocking inference probe to observe cancellation")
+        } catch is CancellationError {
+        }
+    }
+
     func testBootPathDoesNotPassThroughLoading() async throws {
         let runtime = try await ModelRuntime(modelID: nil)
 
