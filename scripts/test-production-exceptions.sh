@@ -390,7 +390,7 @@ removed = {
     "owner": "ops/test",
     "issue": "https://github.com/Augustas11/macprovider/issues/615",
     "created_at": "2026-07-01T00:00:00Z",
-    "expires_at": "2026-08-01T00:00:00Z",
+    "expires_at": "2099-01-01T00:00:00Z",
     "scope": "test",
     "removal_condition": "done",
     "rollback_command": "echo",
@@ -418,7 +418,9 @@ tombs = {
 (work / "stale.json").write_text(json.dumps(active))
 (work / "tombs.json").write_text(json.dumps(tombs))
 PY
-if python3 scripts/check-production-exceptions.py sync-check \
+if python3 scripts/check-production-exceptions.py \
+  --now 2026-07-22T12:00:00Z \
+  sync-check \
   --current "$work/current.json" \
   --stale "$work/stale.json" \
   --tombstones "$work/tombs.json"; then

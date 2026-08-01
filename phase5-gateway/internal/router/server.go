@@ -218,6 +218,9 @@ func (s *Server) Handler() http.Handler {
 	if s.cfg.Features.ResponsesAPIEnabled {
 		mux.Handle("/v1/responses", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleResponses)))
 	}
+	if s.cfg.Features.AnthropicMessagesEnabled {
+		mux.Handle("/v1/messages", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleAnthropicMessages)))
+	}
 	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
@@ -273,6 +276,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		if s.publicPaused(r.URL.Path) {
+			if r.URL.Path == "/v1/messages" && s.cfg.Features.AnthropicMessagesEnabled {
+				writeAnthropicMessagesError(w, http.StatusServiceUnavailable, "server_error", "public_api_paused", "Mac Provider beta is paused while capacity catches up. Please retry later.")
+				return
+			}
 			writeError(w, http.StatusServiceUnavailable, "server_error", "public_api_paused", "Mac Provider beta is paused while capacity catches up. Please retry later.")
 			return
 		}
@@ -281,6 +288,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				slog.Error("panic recovered", "panic", recovered, "request_id", requestID, "path", r.URL.Path, "stack", string(debug.Stack()))
+				if r.URL.Path == "/v1/messages" && s.cfg.Features.AnthropicMessagesEnabled {
+					writeAnthropicMessagesError(w, http.StatusInternalServerError, "server_error", "internal_error", "Internal server error")
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "server_error", "internal_error", "Internal server error")
 			}
 		}()
@@ -388,7 +399,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			"window_date": window, "daily_tokens_used": used, "daily_tokens_reserved": reserved,
 			"daily_tokens_remaining": remaining, "daily_tokens_limit": limit,
 		},
-		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled),
+		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(s.cfg.Features.ResponsesAPIEnabled, s.cfg.Features.AnthropicMessagesEnabled),
 		"capacity":              map[string]any{"tier": tier.Tier},
 		"keys":                  keys,
 		"models":                []any{},
@@ -963,6 +974,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
 	"invalid_limit": true, "api_key_lookup_failed": true,
 	"request_content_encoding_unsupported": true,
+	"unsupported_content_shape":            true,
 	// Round-3 SECURITY MEDIUM revert: round-2 classified these three true
 	// as part of the rate_limit_exceeded family, but unlike
 	// account_request_rate_exceeded/account_concurrency_exceeded/

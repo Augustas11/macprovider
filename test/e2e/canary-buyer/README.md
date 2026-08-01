@@ -60,10 +60,10 @@ automatically repeated. `CANARY_DEGRADED_RETRIES` values other than `0` are
 rejected before the probe process starts. Every invocation is also wrapped by
 GNU `timeout`/`gtimeout` (`120s` liveness, `330s` qualification by default), so
 DNS, output delivery, or runtime bugs cannot defeat the external deadline.
-The exact two-provider/two-model topology is a code invariant, not an operator
-override. During every stream a separate safety observer polls at two-second
-intervals and aborts the request immediately if provider, heartbeat, thermal,
-memory, queue, session, or build identity regresses.
+The exact expected-fleet topology is the reviewed provider inventory, not an
+operator count override. During every stream a separate safety observer polls
+at two-second intervals and aborts the request immediately if provider,
+heartbeat, thermal, memory, queue, session, or build identity regresses.
 
 For systemd, install `probe.mjs`, `safety.mjs`, `run-canary.sh`, and
 `emergency-disable.sh` together,
@@ -134,12 +134,15 @@ not listed; no unlisted provider other than that exact target is accepted):
 
 Scheduled liveness uses the same document without an allowed extra target, so
 membership, provider IDs, model IDs, Ready/routable state, and heartbeat
-freshness must all match exactly. The document is required to contain exactly
-two unique providers mapped one-to-one to two unique models.
-`CANARY_MODELS` must exactly equal the unique
-model set in the document. The shipped schedules pin both live models:
+freshness must all match exactly. The document is required to contain the
+operator-reviewed live protected fleet: provider IDs are unique, duplicate
+model IDs are allowed when multiple protected providers serve the same model,
+and every model in the fleet must be probed by `CANARY_MODELS`.
+`CANARY_MODELS` must exactly equal the unique model set in the document. The
+shipped schedules pin Pearl's live models:
 `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` and
-`mlx-community/Llama-3.2-3B-Instruct-4bit`, producing one 8-token request each.
+`mlx-community/Llama-3.2-3B-Instruct-4bit`, and
+`mlx-community/Qwen3-8B-4bit`, producing one 8-token request each.
 Each provider heartbeat carries versioned `safety_telemetry`; the coordinator
 validates it, stamps receipt freshness, and publishes it through authenticated
 `/poolz`. Version 2 binds the observation to the coordinator session, binary,
@@ -149,8 +152,8 @@ if any expected provider lacks a complete measurement,
 so Pearl does not need a provider-local route to enforce queue, restart,
 memory-pressure, RSS, thermal, and runtime-state invariants.
 GPU utilization is explicitly marked `host` scope: Apple exposes AGX device
-utilization rather than per-process accounting. The two-provider fleet keeps
-one provider service per physical Mac, and evidence reviewers treat this as a
+utilization rather than per-process accounting. The expected fleet keeps one
+provider service per physical Mac, and evidence reviewers treat this as a
 host-condition signal rather than misattributing it to the provider process.
 
 Baseline file schema:

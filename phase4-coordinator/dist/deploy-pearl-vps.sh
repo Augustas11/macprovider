@@ -25,13 +25,27 @@
 #                                 stats cert outages must not break the
 #                                 primary deploy — issue #244 root cause).
 #   FORCE_RESTART    default: 0   bypass connected-provider guard at step 1c/6c
-#   STRICT_PROVENANCE default: 0  fail if /healthz lacks `version` field
+#   STRICT_PROVENANCE default: 0  legacy compatibility knob. Exact release
+#                    provenance is now always fatal on missing/mismatched
+#                    /healthz version.
+#                    Production deploys always require this checkout to be
+#                    exactly one clean numeric release tag (vX.Y.Z); there is
+#                    no non-release production deploy override.
 #   CATALOG_CANARY_PROVIDER_ID required for production deploys. The provider
 #                    must reconnect after restart and pass authenticated
 #                    compatibility admission through /v1/pool/check before commit.
 #   CATALOG_CANARY_AUTH_TOKEN required for production deploys. Use the
 #                    coordinator operator key; service tokens are not
 #                    accepted by operator-only deployment evidence.
+#   CATALOG_CANARY_AUTH_TOKEN_FILE optional local root/operator-only file
+#                    containing the coordinator operator key. Used only when
+#                    CATALOG_CANARY_AUTH_TOKEN is unset.
+#   CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE optional macOS Keychain generic
+#                    password service to read when both direct env and file
+#                    token sources are unset. Default:
+#                    macprovider.catalog-canary.operator-token.
+#   CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT optional Keychain account.
+#                    Default: current USER.
 #   CATALOG_CANARY_SSH_TARGET required for production deploys. SSH target for
 #                    the operator-controlled canary Mac (for example user@host).
 #   CATALOG_CANARY_SSH_KEY default: ~/.ssh/macprovider_canary_ed25519
@@ -137,6 +151,9 @@ STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 CATALOG_CANARY_PROVIDER_ID="${CATALOG_CANARY_PROVIDER_ID:-}"
 CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
+CATALOG_CANARY_AUTH_TOKEN_FILE="${CATALOG_CANARY_AUTH_TOKEN_FILE:-}"
+CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE="${CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE:-macprovider.catalog-canary.operator-token}"
+CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT="${CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT:-${USER:-}}"
 CATALOG_CANARY_SSH_TARGET="${CATALOG_CANARY_SSH_TARGET:-}"
 CATALOG_CANARY_SSH_KEY="${CATALOG_CANARY_SSH_KEY:-$HOME/.ssh/macprovider_canary_ed25519}"
 CATALOG_CANARY_INSTALL_DIR="${CATALOG_CANARY_INSTALL_DIR:-macprovider/catalog-release}"
@@ -193,6 +210,70 @@ _catalog_canary_auth_token_sha256() {
   printf '%s' "$1" | shasum -a 256 | awk '{print tolower($1)}'
 }
 
+_catalog_canary_auth_token_from_file() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, os.O_RDONLY | nofollow)
+except FileNotFoundError:
+    raise SystemExit(f"token file is missing: {path}")
+except OSError as exc:
+    raise SystemExit(f"token file is not safely readable: {path}: {exc}")
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"token file is not a regular file: {path}")
+    if stat.S_IMODE(info.st_mode) & (stat.S_IRWXG | stat.S_IRWXO):
+        raise SystemExit(f"token file must not be group/other accessible: {path}")
+    raw = os.read(fd, 514)
+finally:
+    os.close(fd)
+if len(raw) > 513:
+    raise SystemExit("token file is too large")
+try:
+    value = raw.decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit("token file must be UTF-8 text")
+if value.endswith("\n"):
+    value = value[:-1]
+if value.endswith("\r"):
+    value = value[:-1]
+if "\n" in value or "\r" in value:
+    raise SystemExit("token file must contain exactly one bearer token line")
+print(value, end="")
+PY
+}
+
+_load_catalog_canary_auth_token() {
+  [ -z "$CATALOG_CANARY_AUTH_TOKEN" ] || return 0
+  if [ -n "$CATALOG_CANARY_AUTH_TOKEN_FILE" ]; then
+    CATALOG_CANARY_AUTH_TOKEN="$(_catalog_canary_auth_token_from_file "$CATALOG_CANARY_AUTH_TOKEN_FILE")" || {
+      echo "aborting deploy: could not read CATALOG_CANARY_AUTH_TOKEN_FILE" >&2
+      exit 1
+    }
+    echo "  loaded catalog canary bearer from CATALOG_CANARY_AUTH_TOKEN_FILE" >&2
+    return 0
+  fi
+  if [ -n "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE" ] &&
+     [ -n "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT" ] &&
+     [ -x /usr/bin/security ]; then
+    CATALOG_CANARY_AUTH_TOKEN="$(
+      /usr/bin/security find-generic-password -w \
+        -s "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE" \
+        -a "$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT" 2>/dev/null || true
+    )"
+    if [ -n "$CATALOG_CANARY_AUTH_TOKEN" ]; then
+      echo "  loaded catalog canary bearer from macOS Keychain service=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE account=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT" >&2
+    fi
+  fi
+}
+
 _catalog_canary_auth_token_matches_operator_key() {
   local token="$1" operator_key_sha="$2" token_sha operator_sha_lc
   _validate_catalog_canary_auth_token "$token" || return 1
@@ -237,6 +318,87 @@ if len(values) != 1:
     raise SystemExit("MODEL_HASH_LEGACY_UNTIL must be a single scalar value")
 print(values[0], end="")
 ' "$1"
+}
+
+_coordinator_release_tag_version() {
+  local module_dir="$1" repo_root candidates count dirty_state tag head rows tag_object peeled_count peeled_commit tag_type verify_output remote_url
+  local release_tag_remote="origin"
+  local release_tag_remote_url="https://github.com/Augustas11/macprovider.git"
+  local release_tag_signer_line='Good "git" signature for augstar@gmail.com with ED25519 key SHA256:6DgoKNaOgF5c7NPHTAbNxJ2LT0uuj8U/3zObOOZjRiA'
+  repo_root="$(git -C "$module_dir" rev-parse --show-toplevel)"
+  dirty_state="$(git -C "$repo_root" status --porcelain)"
+  if [ -n "$dirty_state" ]; then
+    echo "aborting deploy: coordinator production deploy requires a clean release-tag checkout" >&2
+    git -C "$repo_root" status --short >&2
+    return 1
+  fi
+  candidates="$(git -C "$repo_root" tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  count="$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+  case "$count" in
+    1)
+      tag="$candidates"
+      ;;
+    0)
+      echo "aborting deploy: HEAD is not exactly a numeric release tag (vX.Y.Z)" >&2
+      echo "  Deploy the signed coordinator/gateway release tag first; do not let git describe from main become production version authority." >&2
+      return 1
+      ;;
+    *)
+      echo "aborting deploy: HEAD has multiple numeric release tags:" >&2
+      printf '%s\n' "$candidates" | sed 's/^/  - /' >&2
+      return 1
+      ;;
+  esac
+  tag_type="$(git -C "$repo_root" cat-file -t "$tag" 2>/dev/null || true)"
+  if [ "$tag_type" != tag ]; then
+    echo "aborting deploy: $tag is not an annotated signed release tag" >&2
+    return 1
+  fi
+  if ! verify_output="$(git -C "$repo_root" verify-tag "$tag" 2>&1)"; then
+    echo "aborting deploy: $tag does not verify as a trusted signed tag" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$verify_output" | grep -qxF "$release_tag_signer_line"; then
+    echo "aborting deploy: $tag was signed by an unauthorized release signer" >&2
+    return 1
+  fi
+  remote_url="$(git -C "$repo_root" remote get-url "$release_tag_remote" 2>/dev/null || true)"
+  case "$remote_url" in
+    https://github.com/Augustas11/macprovider.git|git@github.com:Augustas11/macprovider.git|ssh://git@github.com/Augustas11/macprovider.git) ;;
+    *)
+      echo "aborting deploy: $release_tag_remote must point at the canonical Augustas11/macprovider GitHub repository" >&2
+      return 1
+      ;;
+  esac
+  head="$(git -C "$repo_root" rev-parse HEAD)"
+  rows="$(git -C "$repo_root" ls-remote "$release_tag_remote_url" "refs/tags/$tag" "refs/tags/$tag^{}")"
+  tag_object="$(printf '%s\n' "$rows" | awk -v ref="refs/tags/$tag" '$2 == ref { print $1 }')"
+  peeled_commit="$(printf '%s\n' "$rows" | awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1 }')"
+  peeled_count="$(printf '%s\n' "$peeled_commit" | awk 'NF { count++ } END { print count + 0 }')"
+  if [ -z "$tag_object" ] || [ "$peeled_count" != 1 ] || [ "$peeled_commit" != "$head" ]; then
+    echo "aborting deploy: $tag is not the protected remote annotated tag for HEAD on $release_tag_remote" >&2
+    return 1
+  fi
+  printf '%s %s\n' "$tag" "$head"
+}
+
+_coordinator_verify_deployed_version() {
+  local healthz_body="$1" expected_version="$2" deployed_version
+  deployed_version=$(printf '%s' "$healthz_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version', '?'))" 2>/dev/null || echo "?")
+  if [ "$deployed_version" = "?" ]; then
+    echo "  CRITICAL provenance MISSING: /healthz returned no \"version\" field" >&2
+    echo "           This almost certainly means the deployed binary predates the" >&2
+    echo "           M0-5 instrumentation (PR #18) and the rollback gate is bypassed." >&2
+    echo "           Expected was: $expected_version" >&2
+    echo "           See audits/2026-06-10/ROLLBACK_PROCEDURE.md to replace the live binary." >&2
+    return 7
+  elif [ "$deployed_version" = "$expected_version" ]; then
+    echo "  provenance OK: deployed=$deployed_version | expected=$expected_version"
+  else
+    echo "  aborting deploy: provenance mismatch: deployed=$deployed_version | expected=$expected_version" >&2
+    echo "       (deployed binary does not match the exact local release tag — rollback before commit)" >&2
+    return 8
+  fi
 }
 
 _tier2_migration_gate_remote_script() {
@@ -382,6 +544,54 @@ PY
 SH
 }
 
+# R3 SEC MED — reuse the already-resolved physical dir from the
+# symlink walker rather than recomputing from `$0` (which is the
+# symlink path) + logical `pwd`. All later artifact reads,
+# check-deploy-config, config uploads, and vhost templates hang
+# off DIST_DIR, so any parent-symlink retargeting attack that
+# survives helper sourcing would still land here.
+DIST_DIR="$_PEARL_TLS_SCRIPT_DIR"
+MODULE_DIR="$(cd "$DIST_DIR/.." && pwd -P)"
+REPO_ROOT="$(git -C "$MODULE_DIR" rev-parse --show-toplevel)"
+
+COORDINATOR_RELEASE_VERSION=""
+COORDINATOR_RELEASE_COMMIT=""
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  COORDINATOR_RELEASE_IDENTITY="$(_coordinator_release_tag_version "$MODULE_DIR")" || exit 2
+  COORDINATOR_RELEASE_VERSION="${COORDINATOR_RELEASE_IDENTITY%% *}"
+  COORDINATOR_RELEASE_COMMIT="${COORDINATOR_RELEASE_IDENTITY#* }"
+  echo "  release tag OK: $COORDINATOR_RELEASE_VERSION @ $COORDINATOR_RELEASE_COMMIT"
+  GH_HOST=github.com bash "$REPO_ROOT/scripts/verify-pearl-runtime-release.sh" \
+    --tag "$COORDINATOR_RELEASE_VERSION" \
+    --expected-commit "$COORDINATOR_RELEASE_COMMIT" \
+    --repository "Augustas11/macprovider" \
+    --remote "origin"
+fi
+
+PINNED_DEPLOY_INPUT_DIR=""
+PINNED_DIST_DIR="$DIST_DIR"
+PINNED_STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
+PINNED_AUTOTUNE_DIR="$DIST_DIR/../../phase3-binary/catalog/autotune"
+PINNED_SCRIPTS_DIR="$DIST_DIR/../../scripts"
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  PINNED_DEPLOY_INPUT_DIR="$(umask 077 && mktemp -d -t macprovider-deploy-inputs.XXXXXXXX)" || {
+    echo "aborting deploy: mktemp failed for pinned deploy inputs" >&2
+    exit 2
+  }
+  trap 'rm -rf "${PINNED_DEPLOY_INPUT_DIR:-}"' EXIT HUP INT TERM
+  git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- \
+    phase4-coordinator/dist \
+    phase3-binary/dist/static \
+    phase3-binary/catalog/autotune \
+    scripts/catalog-release.py \
+    scripts/sign-catalog.go \
+    | tar -xf - -C "$PINNED_DEPLOY_INPUT_DIR"
+  PINNED_DIST_DIR="$PINNED_DEPLOY_INPUT_DIR/phase4-coordinator/dist"
+  PINNED_STATIC_FEEDS_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/dist/static"
+  PINNED_AUTOTUNE_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/catalog/autotune"
+  PINNED_SCRIPTS_DIR="$PINNED_DEPLOY_INPUT_DIR/scripts"
+fi
+
 # Email validator — RFC-conformant pre-validation is overkill; we just
 # need to reject metacharacters that would split a shell arg.
 if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
@@ -389,6 +599,7 @@ if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z
   exit 1
 fi
 if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  _load_catalog_canary_auth_token
   if ! printf '%s' "$CATALOG_CANARY_PROVIDER_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
     echo "aborting deploy: CATALOG_CANARY_PROVIDER_ID is required and must be a safe provider ID" >&2
     echo "  Select a provider expected to reconnect after restart; deployment commits only after pool admission." >&2
@@ -396,6 +607,8 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   fi
   if ! _validate_catalog_canary_auth_token "$CATALOG_CANARY_AUTH_TOKEN"; then
     echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN is required and must be a safe 32-512 character bearer token" >&2
+    echo "  Provide it via CATALOG_CANARY_AUTH_TOKEN, CATALOG_CANARY_AUTH_TOKEN_FILE, or macOS Keychain service=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE account=$CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT." >&2
+    echo "  The deploy will later prove this secret matches Pearl's coordinator operator key by SHA-256; it never copies key material from Pearl." >&2
     exit 1
   fi
   if ! printf '%s' "$CATALOG_CANARY_SSH_TARGET" | grep -Eq '^([A-Za-z_][A-Za-z0-9._-]*@)?[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$'; then
@@ -429,34 +642,27 @@ if [ "${STATS_DOMAIN:-stats.streamvc.live}" != "stats.streamvc.live" ]; then
   exit 1
 fi
 
-# R3 SEC MED — reuse the already-resolved physical dir from the
-# symlink walker rather than recomputing from `$0` (which is the
-# symlink path) + logical `pwd`. All later artifact reads,
-# check-deploy-config, config uploads, and vhost templates hang
-# off DIST_DIR, so any parent-symlink retargeting attack that
-# survives helper sourcing would still land here.
-DIST_DIR="$_PEARL_TLS_SCRIPT_DIR"
 BINARY="$DIST_DIR/coordinator-linux-amd64"
 CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
 STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
 STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
-CONFIG="$DIST_DIR/coordinator.yaml"
+CONFIG="$PINNED_DIST_DIR/coordinator.yaml"
 DEPLOY_CONFIG="$CONFIG"
-SERVICE="$DIST_DIR/macprovider-coordinator.service"
-DEPLOY_RECOVER="$DIST_DIR/coordinator-deploy-recover.sh"
-DEPLOY_GUARD="$DIST_DIR/systemd/macprovider-coordinator-deploy-guard.conf"
-DEPLOY_RECOVERY_SERVICE="$DIST_DIR/systemd/macprovider-coordinator-deploy-recovery.service"
-DEPLOY_WATCHDOG_SERVICE="$DIST_DIR/systemd/macprovider-coordinator-deploy-watchdog.service"
-STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"
-STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"
-STATS_BILLING_MIRROR_SERVICE="$DIST_DIR/stats-billing-mirror.service"
-STATS_BILLING_MIRROR_TIMER="$DIST_DIR/stats-billing-mirror.timer"
-STATS_HARDWARE_VERIFIER_SERVICE="$DIST_DIR/stats-hardware-verifier.service"
-STATS_HARDWARE_VERIFIER_TIMER="$DIST_DIR/stats-hardware-verifier.timer"
-NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
-TCP_SYSCTL="$DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
-TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
+SERVICE="$PINNED_DIST_DIR/macprovider-coordinator.service"
+DEPLOY_RECOVER="$PINNED_DIST_DIR/coordinator-deploy-recover.sh"
+DEPLOY_GUARD="$PINNED_DIST_DIR/systemd/macprovider-coordinator-deploy-guard.conf"
+DEPLOY_RECOVERY_SERVICE="$PINNED_DIST_DIR/systemd/macprovider-coordinator-deploy-recovery.service"
+DEPLOY_WATCHDOG_SERVICE="$PINNED_DIST_DIR/systemd/macprovider-coordinator-deploy-watchdog.service"
+STATS_INVENTORY_SERVICE="$PINNED_DIST_DIR/stats-inventory-sync.service"
+STATS_INVENTORY_TIMER="$PINNED_DIST_DIR/stats-inventory-sync.timer"
+STATS_BILLING_MIRROR_SERVICE="$PINNED_DIST_DIR/stats-billing-mirror.service"
+STATS_BILLING_MIRROR_TIMER="$PINNED_DIST_DIR/stats-billing-mirror.timer"
+STATS_HARDWARE_VERIFIER_SERVICE="$PINNED_DIST_DIR/stats-hardware-verifier.service"
+STATS_HARDWARE_VERIFIER_TIMER="$PINNED_DIST_DIR/stats-hardware-verifier.timer"
+NGINX_SITE="$PINNED_DIST_DIR/nginx-coordinator.streamvc.live.conf"
+TCP_SYSCTL="$PINNED_DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
+TCP_BBR_MODULES_LOAD="$PINNED_DIST_DIR/modules-load.d/tcp_bbr.conf"
 # SPEC-017 v0.1.8 Step 4.B — additional nginx artifacts the
 # coordinator vhost depends on:
 #   - stats-shared.conf is the http-context snippet declaring the
@@ -469,28 +675,28 @@ TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
 #     `stats.streamvc.live` vhost.
 # Both files MUST exist before this deploy proceeds; they are
 # installed below alongside the coordinator vhost.
-NGINX_STATS_SHARED="$DIST_DIR/nginx-snippets/stats-shared.conf"
-NGINX_STATS_SECHEADERS="$DIST_DIR/nginx-snippets/stats-security-headers.conf"
-NGINX_STATS_CORS_429="$DIST_DIR/nginx-snippets/cors-429.conf"
-NGINX_STATS_PROXY_PUBLIC="$DIST_DIR/nginx-snippets/stats-proxy-public.conf"
-NGINX_STATS_PROXY_PARTNER="$DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
-NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
+NGINX_STATS_SHARED="$PINNED_DIST_DIR/nginx-snippets/stats-shared.conf"
+NGINX_STATS_SECHEADERS="$PINNED_DIST_DIR/nginx-snippets/stats-security-headers.conf"
+NGINX_STATS_CORS_429="$PINNED_DIST_DIR/nginx-snippets/cors-429.conf"
+NGINX_STATS_PROXY_PUBLIC="$PINNED_DIST_DIR/nginx-snippets/stats-proxy-public.conf"
+NGINX_STATS_PROXY_PARTNER="$PINNED_DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
+NGINX_STATS_SITE="$PINNED_DIST_DIR/nginx-stats.streamvc.live.conf"
 # SPEC-023 signed recommendation feeds served on the buyer mux at
 # /v1/rate-card, /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
 # Files live in phase3-binary/dist/static/ in the repo. Deploy installs
 # them into /opt/macprovider/autotune/ for coordinator startup load.
-STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
+STATIC_FEEDS_DIR="$PINNED_STATIC_FEEDS_DIR"
 STATIC_DEMAND_JSON="$STATIC_FEEDS_DIR/demand-rank.json"
 STATIC_DEMAND_SIG="$STATIC_FEEDS_DIR/demand-rank.json.sig"
 STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 STATIC_RATE_CARD_JSON="$STATIC_FEEDS_DIR/rate-card.json"
 STATIC_RATE_CARD_SIG="$STATIC_FEEDS_DIR/rate-card.json.sig"
-AUTOTUNE_RELEASE_MANIFEST="$DIST_DIR/../../phase3-binary/catalog/autotune/release.json"
-AUTOTUNE_TRUSTED_KEYS="$DIST_DIR/../../phase3-binary/catalog/autotune/trusted-keys.json"
-AUTOTUNE_TIER2_JSON="$DIST_DIR/../../phase3-binary/catalog/autotune/tier2-catalog.json"
-AUTOTUNE_RELEASE_VERIFY="$DIST_DIR/../../scripts/catalog-release.py"
-AUTOTUNE_TIER2_VERIFIER="$DIST_DIR/../../scripts/sign-catalog.go"
+AUTOTUNE_RELEASE_MANIFEST="$PINNED_AUTOTUNE_DIR/release.json"
+AUTOTUNE_TRUSTED_KEYS="$PINNED_AUTOTUNE_DIR/trusted-keys.json"
+AUTOTUNE_TIER2_JSON="$PINNED_AUTOTUNE_DIR/tier2-catalog.json"
+AUTOTUNE_RELEASE_VERIFY="$PINNED_SCRIPTS_DIR/catalog-release.py"
+AUTOTUNE_TIER2_VERIFIER="$PINNED_SCRIPTS_DIR/sign-catalog.go"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$AUTOTUNE_TIER2_JSON}"
 
 python3 "$AUTOTUNE_RELEASE_VERIFY" verify
@@ -871,6 +1077,10 @@ trap '
   rm -f "${RATE_CARD_MIGRATED_OVERLAY_TMP:-}"
   rm -f "${RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
+  rm -f "${DEPLOY_INPUT_MANIFEST_TMP:-}"
+  rm -f "${RECOVERY_INPUT_MANIFEST_TMP:-}"
+  rm -f "${TCP_INPUT_MANIFEST_TMP:-}"
+  rm -rf "${PINNED_DEPLOY_INPUT_DIR:-}"
   rm -rf "${STATIC_SMOKE_DIR:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
@@ -1401,7 +1611,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     echo "aborting deploy: cannot bind Tier-2 identity without $STATIC_AUTOTUNE_JSON" >&2
     exit 5
   fi
-  python3 "$DIST_DIR/../../scripts/catalog-release.py" check-tier2-binding \
+  python3 "$AUTOTUNE_RELEASE_VERIFY" check-tier2-binding \
     --candidate "$STATIC_AUTOTUNE_JSON" \
     --tier2 "$TMP_CATALOG_PINNED" || {
     echo "aborting deploy: Tier-2 catalog conflicts with autotune release identity (#608)" >&2
@@ -1429,6 +1639,17 @@ $SCP "$DEPLOY_RECOVER" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/coordinator-dep
 $SCP "$DEPLOY_GUARD" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/10-deploy-transaction-guard.conf"
 $SCP "$DEPLOY_RECOVERY_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service"
 $SCP "$DEPLOY_WATCHDOG_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service"
+RECOVERY_INPUT_MANIFEST_TMP="$(umask 077 && mktemp -t macprovider-recovery-inputs.XXXXXXXX)" || {
+  echo "aborting deploy: mktemp failed for recovery input manifest" >&2
+  exit 2
+}
+shasum -a 256 "$DEPLOY_RECOVER" | awk '{ print $1 "  coordinator-deploy-recover" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+shasum -a 256 "$DEPLOY_GUARD" | awk '{ print $1 "  10-deploy-transaction-guard.conf" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+shasum -a 256 "$DEPLOY_RECOVERY_SERVICE" | awk '{ print $1 "  macprovider-coordinator-deploy-recovery.service" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+shasum -a 256 "$DEPLOY_WATCHDOG_SERVICE" | awk '{ print $1 "  macprovider-coordinator-deploy-watchdog.service" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+$SCP "$RECOVERY_INPUT_MANIFEST_TMP" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/recovery-inputs.sha256"
+$SSH "cd $RECOVERY_DEPLOY_TMP && shasum -a 256 -c recovery-inputs.sha256 >/dev/null"
+echo "  recovery staged input digests OK"
 $SSH "set -e
   _helper_next=/opt/macprovider/coordinator-deploy-recover.next.\$\$
   _unit_next=/etc/systemd/system/macprovider-coordinator-deploy-recovery.service.next.\$\$
@@ -2609,6 +2830,22 @@ EOF
     $SSH "rm -rf $TCP_SYSCTL_TMP" 2>/dev/null || true
     exit 1
   fi
+  TCP_INPUT_MANIFEST_TMP="$(umask 077 && mktemp -t macprovider-tcp-inputs.XXXXXXXX)" || {
+    echo "aborting deploy: mktemp failed for TCP input manifest" >&2
+    $SSH "rm -rf $TCP_SYSCTL_TMP" 2>/dev/null || true
+    exit 2
+  }
+  shasum -a 256 "$TCP_SYSCTL" | awk '{ print $1 "  macprovider-tcp.conf" }' >> "$TCP_INPUT_MANIFEST_TMP"
+  shasum -a 256 "$TCP_BBR_MODULES_LOAD" | awk '{ print $1 "  tcp_bbr.conf" }' >> "$TCP_INPUT_MANIFEST_TMP"
+  if ! $SCP "$TCP_INPUT_MANIFEST_TMP" "$VPS_USER@$VPS_HOST:$TCP_SYSCTL_TMP/tcp-inputs.sha256"; then
+    $SSH "rm -rf $TCP_SYSCTL_TMP" 2>/dev/null || true
+    exit 1
+  fi
+  if ! $SSH "cd $TCP_SYSCTL_TMP && shasum -a 256 -c tcp-inputs.sha256 >/dev/null"; then
+    $SSH "rm -rf $TCP_SYSCTL_TMP" 2>/dev/null || true
+    exit 1
+  fi
+  log "  TCP staged input digests OK"
   TCP_SYSCTL_RESULT=$($SSH "bash -s -- '$TCP_SYSCTL_TMP'" <<'REMOTE_TCP_SYSCTL'
     set -e
     tmp_dir="$1"
@@ -2898,6 +3135,65 @@ esac
 log "  staging dir: $DEPLOY_TMP (root:root 0700)"
 $SSH "install -d -o root -g root -m 0700 $DEPLOY_TMP/scripts"
 
+DEPLOY_INPUT_MANIFEST_TMP="$(umask 077 && mktemp -t macprovider-deploy-inputs.XXXXXXXX)" || {
+  echo "aborting deploy: mktemp failed for deploy input manifest" >&2
+  exit 2
+}
+_append_deploy_input_digest() {
+  local source_path="$1" remote_name="$2"
+  shasum -a 256 "$source_path" | awk -v name="$remote_name" '{ print $1 "  " name }' >> "$DEPLOY_INPUT_MANIFEST_TMP"
+}
+_append_deploy_input_digest "$BINARY" "coordinator-linux-amd64"
+_append_deploy_input_digest "$CLI_BINARY" "coordinator-cli-linux-amd64"
+_append_deploy_input_digest "$STATS_INVENTORY_BINARY" "stats-inventory-sync-linux-amd64"
+_append_deploy_input_digest "$STATS_BILLING_MIRROR_BINARY" "stats-billing-mirror-linux-amd64"
+_append_deploy_input_digest "$STATS_HARDWARE_VERIFIER_BINARY" "stats-hardware-verifier-linux-amd64"
+if [ "$CONFIG_MODE" = "apply-tracked" ]; then
+  _append_deploy_input_digest "$CONFIG" "coordinator.yaml"
+elif [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ]; then
+  _append_deploy_input_digest "$RATE_CARD_MIGRATED_CONFIG_TMP" "coordinator.rate-card-migration.yaml"
+elif [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
+  _append_deploy_input_digest "$C2_TIMER_MIGRATED_CONFIG_TMP" "coordinator.c2-timer-migration.yaml"
+fi
+if [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
+  _append_deploy_input_digest "$RATE_CARD_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.rate-card-migration.yaml"
+elif [ "${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
+  _append_deploy_input_digest "$C2_TIMER_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.c2-timer-migration.yaml"
+fi
+for _deploy_input in \
+  "$SERVICE=macprovider-coordinator.service" \
+  "$STATS_INVENTORY_SERVICE=stats-inventory-sync.service" \
+  "$STATS_INVENTORY_TIMER=stats-inventory-sync.timer" \
+  "$STATS_BILLING_MIRROR_SERVICE=stats-billing-mirror.service" \
+  "$STATS_BILLING_MIRROR_TIMER=stats-billing-mirror.timer" \
+  "$STATS_HARDWARE_VERIFIER_SERVICE=stats-hardware-verifier.service" \
+  "$STATS_HARDWARE_VERIFIER_TIMER=stats-hardware-verifier.timer" \
+  "$NGINX_SITE=nginx-coordinator-full.conf" \
+  "$NGINX_STATS_SHARED=nginx-stats-shared.conf" \
+  "$NGINX_STATS_SECHEADERS=nginx-stats-security-headers.conf" \
+  "$NGINX_STATS_CORS_429=nginx-stats-cors-429.conf" \
+  "$NGINX_STATS_PROXY_PUBLIC=nginx-stats-proxy-public.conf" \
+  "$NGINX_STATS_PROXY_PARTNER=nginx-stats-proxy-partner.conf" \
+  "$NGINX_STATS_SITE=nginx-stats.streamvc.live.conf" \
+  "$STATIC_DEMAND_JSON=demand-rank.json" \
+  "$STATIC_DEMAND_SIG=demand-rank.json.sig" \
+  "$STATIC_AUTOTUNE_JSON=autotune-candidates.json" \
+  "$STATIC_AUTOTUNE_SIG=autotune-candidates.json.sig" \
+  "$STATIC_RATE_CARD_JSON=rate-card.json" \
+  "$STATIC_RATE_CARD_SIG=rate-card.json.sig" \
+  "$AUTOTUNE_RELEASE_MANIFEST=release.json" \
+  "$AUTOTUNE_TRUSTED_KEYS=trusted-keys.json" \
+  "$AUTOTUNE_RELEASE_VERIFY=scripts/catalog-release.py" \
+  "$AUTOTUNE_TIER2_VERIFIER=scripts/sign-catalog.go"; do
+  _append_deploy_input_digest "${_deploy_input%%=*}" "${_deploy_input#*=}"
+done
+if [ -n "$CATALOG_REMOTE_PATH" ]; then
+  _append_deploy_input_digest "$TMP_CATALOG_PINNED" "tier2-catalog.json"
+  _append_deploy_input_digest "$TMP_CATALOG_PUBKEY" "tier2-catalog.pub"
+else
+  _append_deploy_input_digest "$AUTOTUNE_TIER2_JSON" "tier2-catalog.json"
+fi
+
 $SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
 $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
 $SCP "$STATS_INVENTORY_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync-linux-amd64"
@@ -2962,6 +3258,9 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$TMP_CATALOG_PINNED" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
   $SCP "$TMP_CATALOG_PUBKEY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.pub"
 fi
+$SCP "$DEPLOY_INPUT_MANIFEST_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/deploy-inputs.sha256"
+$SSH "cd $DEPLOY_TMP && shasum -a 256 -c deploy-inputs.sha256 >/dev/null"
+echo "  staged deploy input digests OK"
 
 if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] || [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ] || [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
   # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
@@ -3009,6 +3308,10 @@ $SSH "set -e
   fi
   # coordinator-cli is operator-facing, but remains part of the same release
   # and therefore has an exact durable snapshot like the daemon binary.
+  if [ ! -x /opt/macprovider/coordinator-cli ] || ! cmp -s $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli; then
+    echo 'refusing coordinator-cli replacement from direct deploy: install the signed matching Pearl runtime release first' >&2
+    exit 1
+  fi
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
   # stats-inventory-sync is an operator sidecar, not a coordinator child.
   # It runs under its own Unix identity and only receives execute access
@@ -3029,14 +3332,28 @@ $SSH "set -e
   elif ! grep -qx "parity_required=absent" /opt/macprovider/.coordinator-deploy-sidecar-prior-state; then
     echo "refusing stats-inventory sidecar install: invalid pre-quiesce parity state" >&2
     exit 1
+  elif [ ! -x /opt/macprovider-stats/stats-inventory-sync ] ||
+       ! cmp -s $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync; then
+    echo "refusing stats-inventory sidecar replacement from direct deploy: install the signed matching stats sidecar release first" >&2
+    exit 1
   fi
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync
   # stats-billing-mirror is an out-of-band stats sidecar. It runs as the
   # dedicated macprovider-stats identity and gets read access only to the
   # SQLite ledger files via file ACLs below.
+  if [ ! -x /opt/macprovider-stats/stats-billing-mirror ] ||
+     ! cmp -s $DEPLOY_TMP/stats-billing-mirror-linux-amd64 /opt/macprovider-stats/stats-billing-mirror; then
+    echo "refusing stats-billing-mirror replacement from direct deploy: install the signed matching stats sidecar release first" >&2
+    exit 1
+  fi
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-billing-mirror-linux-amd64 /opt/macprovider-stats/stats-billing-mirror
   # stats-hardware-verifier is an out-of-band stats sidecar. It promotes
   # queued autotune evidence after conservative verification.
+  if [ ! -x /opt/macprovider-stats/stats-hardware-verifier ] ||
+     ! cmp -s $DEPLOY_TMP/stats-hardware-verifier-linux-amd64 /opt/macprovider-stats/stats-hardware-verifier; then
+    echo "refusing stats-hardware-verifier replacement from direct deploy: install the signed matching stats sidecar release first" >&2
+    exit 1
+  fi
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-hardware-verifier-linux-amd64 /opt/macprovider-stats/stats-hardware-verifier
   if [ '$CONFIG_MODE' = 'apply-tracked' ]; then
     install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
@@ -3507,36 +3824,13 @@ echo "  GET https://$DOMAIN/healthz"
 HEALTHZ_BODY=$(curl -fsS --max-time 10 --max-filesize 65536 "https://$DOMAIN/healthz" || { echo "healthz failed"; exit 1; })
 printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
 
-# Provenance check: compare the deployed version (from /healthz) against
-# what the local working tree would have built. Three outcomes:
-#   - "?"        the binary predates PR #18 and has no `version` field on
-#                /healthz at all → CRITICAL line (and abort if
-#                STRICT_PROVENANCE=1) because the entire M0-5 instrumentation
-#                got bypassed. By design still non-fatal by default so the
-#                operator can decide.
-#   - matched    OK line.
-#   - mismatched WARN line (the deployed binary was built from a different
-#                commit than the local tree — usually means an unstaged or
-#                unfetched change locally; investigate before trusting).
+# Provenance check: compare the deployed version (from /healthz) against the
+# exact release tag validated before any production SSH mutation. Missing and
+# mismatched versions are fatal while rollback is still armed; otherwise a clean
+# tag checkout could still commit a stale ignored dist/coordinator-linux-amd64.
 # See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the rollback path.
-DEPLOYED_VERSION=$(printf '%s' "$HEALTHZ_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version', '?'))" 2>/dev/null || echo "?")
-EXPECTED_VERSION=$(git describe --always --dirty --tags 2>/dev/null || git rev-parse --short HEAD)
-if [ "$DEPLOYED_VERSION" = "?" ]; then
-  echo "  CRITICAL provenance MISSING: /healthz returned no \"version\" field" >&2
-  echo "           This almost certainly means the deployed binary predates the" >&2
-  echo "           M0-5 instrumentation (PR #18) and the rollback gate is bypassed." >&2
-  echo "           Expected was: $EXPECTED_VERSION" >&2
-  echo "           See audits/2026-06-10/ROLLBACK_PROCEDURE.md to replace the live binary." >&2
-  if [ "${STRICT_PROVENANCE:-0}" = "1" ]; then
-    echo "  STRICT_PROVENANCE=1 set — aborting." >&2
-    exit 7
-  fi
-elif [ "$DEPLOYED_VERSION" = "$EXPECTED_VERSION" ]; then
-  echo "  provenance OK: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION"
-else
-  echo "  WARN provenance mismatch: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION" >&2
-  echo "       (build artifact does not match the local working tree — investigate before relying on this deploy)" >&2
-fi
+EXPECTED_VERSION="$COORDINATOR_RELEASE_VERSION"
+_coordinator_verify_deployed_version "$HEALTHZ_BODY" "$EXPECTED_VERSION" || exit $?
 
 echo "  GET https://$DOMAIN/v1/models -> expect 404 (buyer API is gateway-only)"
 STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/v1/models")

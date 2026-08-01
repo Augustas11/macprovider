@@ -29,7 +29,10 @@ enum ToolCallParser {
                 }
                 return parsed
             }
-            if rawOutput.contains("<function=") {
+            // Function-XML (`<function=…>`) is a Qwen-row body grammar only (SPEC-018 §3.1
+            // v0.2.7). Do NOT run it for other families (e.g. Llama-3.3), whose §3.1 rows
+            // define only JSON/Python bodies — keep the parser-family boundary tight.
+            if format == .qwen25, rawOutput.contains("<function=") {
                 let bare = try parseBareNemotronCalls(rawOutput)
                 if !bare.toolCalls.isEmpty {
                     if let allowedFunctionNames,
@@ -61,7 +64,7 @@ enum ToolCallParser {
                 throw ParseError.missingEndDelimiter
             }
             let body = String(rawOutput[bodyStart..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let call = try parseCall(body, argumentKey: format.argumentKey)
+            let call = try parseCall(body, argumentKey: format.argumentKey, allowFunctionXML: format == .qwen25)
             let argumentBytes = call.arguments.utf8.count
             guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
                 throw ParseError.byteCapExceeded
@@ -81,6 +84,11 @@ enum ToolCallParser {
         return (nilIfBlank(cleaned), calls)
     }
 
+    // The `<function=NAME><parameter=key>value</parameter></function>` XML grammar handled by
+    // the `*Nemotron*`-named helpers below is NOT Nemotron-specific: it is the shared function-
+    // XML tool-call grammar emitted by NVIDIA Nemotron AND by Qwen3-Coder. It is a recognized
+    // grammar under SPEC-018 §3.1 (Qwen row body-grammar alternative). Names follow the OpenAI/
+    // MCP charset (see isValidToolFunctionName / isValidToolParameterName), not Python identifiers.
     private static func parseBareNemotronCalls(_ rawOutput: String) throws -> (cleanedContent: String?, toolCalls: [ToolCall]) {
         var searchStart = rawOutput.startIndex
         var cleaned = ""
@@ -111,22 +119,36 @@ enum ToolCallParser {
         return (nilIfBlank(cleaned), calls)
     }
 
-    private static func parseCall(_ rawCall: String, argumentKey: String) throws -> ToolCall {
+    private static func parseCall(_ rawCall: String, argumentKey: String, allowFunctionXML: Bool) throws -> ToolCall {
         let trimmed = rawCall.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") {
             return try parseJSONCall(rawCall, argumentKey: argumentKey)
         }
-        if trimmed.contains("<function=") {
+        if allowFunctionXML, trimmed.contains("<function=") {
             return try parseNemotronXMLCall(rawCall)
         }
         return try parsePythonStyleCall(rawCall)
     }
 
+    /// Returns the substring covering the FIRST `<function=…>…</function>` block (through the
+    /// first `</function>`, or to the end if unterminated for a streaming prefix). Name and
+    /// parameter parsing MUST be scoped to this block: otherwise a `<parameter=…>` belonging to
+    /// a LATER (possibly undeclared) function block could be attributed to this call, letting a
+    /// declared-but-empty first function inherit an undeclared function's arguments.
+    static func firstFunctionBlock(in raw: String) -> Substring {
+        guard let open = raw.range(of: "<function=") else {
+            return raw[raw.startIndex..<raw.startIndex]
+        }
+        let end = raw.range(of: "</function>", range: open.lowerBound..<raw.endIndex)?.upperBound ?? raw.endIndex
+        return raw[open.lowerBound..<end]
+    }
+
     private static func parseNemotronXMLCall(_ rawCall: String) throws -> ToolCall {
-        guard let functionName = nemotronFunctionName(in: rawCall) else {
+        let block = String(firstFunctionBlock(in: rawCall))
+        guard let functionName = nemotronFunctionName(in: block) else {
             throw ParseError.invalidShape
         }
-        let argumentsObject = try nemotronParameterObject(in: rawCall, includeIncomplete: true)
+        let argumentsObject = try nemotronParameterObject(in: block, includeIncomplete: true)
         guard JSONSerialization.isValidJSONObject(argumentsObject) else {
             throw ParseError.invalidArguments
         }
@@ -149,14 +171,15 @@ enum ToolCallParser {
             return nil
         }
         let name = String(raw[nameStart..<close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isPythonIdentifier(name) else {
+        guard isValidToolFunctionName(name) else {
             return nil
         }
         return name
     }
 
     static func nemotronArgumentsJSON(in raw: String, includeIncomplete: Bool) -> String? {
-        guard let object = try? nemotronParameterObject(in: raw, includeIncomplete: includeIncomplete),
+        let block = String(firstFunctionBlock(in: raw))
+        guard let object = try? nemotronParameterObject(in: block, includeIncomplete: includeIncomplete),
               JSONSerialization.isValidJSONObject(object)
         else {
             return nil
@@ -177,7 +200,7 @@ enum ToolCallParser {
                 throw ParseError.invalidShape
             }
             let name = String(raw[nameStart..<nameEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard isPythonIdentifier(name) else {
+            guard isValidToolParameterName(name) else {
                 throw ParseError.invalidArguments
             }
             guard object[name] == nil else {
@@ -429,6 +452,36 @@ enum ToolCallParser {
             return false
         }
         return value.dropFirst().allSatisfy { $0 == "_" || $0.isLetter || $0.isNumber }
+    }
+
+    /// Validates a tool/function name against the OpenAI function-name charset —
+    /// ASCII letters, digits, underscore, and hyphen, 1–64 chars. `isPythonIdentifier`
+    /// wrongly rejected MCP-namespaced names such as `buzz-dev-mcp__shell` (hyphens),
+    /// which made valid Qwen3-Coder `<function=…>` tool calls leak as raw text instead
+    /// of parsing into structured `tool_calls`. The declared-tool allowlist
+    /// (`allowedFunctionNames` in `parseToolCalls`) remains the security boundary: any
+    /// name not among the request's declared tools is still rejected.
+    private static func isValidToolFunctionName(_ value: String) -> Bool {
+        guard (1...64).contains(value.count) else {
+            return false
+        }
+        return value.allSatisfy { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "_" || char == "-")
+        }
+    }
+
+    /// Validates a `<parameter=NAME>` (function-XML grammar) property name. These become JSON
+    /// object keys in `function.arguments`; JSON-Schema / MCP property names are NOT restricted
+    /// to Python identifiers, so hyphens and other OpenAI/MCP-legal characters are accepted here.
+    /// (Python-style call bodies keep identifier-only keys per SPEC-018 §3.3.) ASCII
+    /// `[A-Za-z0-9_-]`, length 1..128.
+    private static func isValidToolParameterName(_ value: String) -> Bool {
+        guard (1...128).contains(value.count) else {
+            return false
+        }
+        return value.allSatisfy { char in
+            char.isASCII && (char.isLetter || char.isNumber || char == "_" || char == "-")
+        }
     }
 
     private static func argumentsString(_ rawArguments: Any?) throws -> String {

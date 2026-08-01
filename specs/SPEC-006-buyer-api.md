@@ -1,7 +1,13 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.12 (2026-07-15, § 17.2 declared-`supported_models` in "known" — cross-spec 404 reconciliation, runbook item 22)
+**Version:** 0.9.13 (2026-07-30, experimental default-off Anthropic Messages facade)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.13 (2026-07-30, issue #829 — experimental Anthropic Messages facade):**
+- Adds an operator-gated `features.anthropic_messages_enabled` flag, default `false`. When disabled, `POST /v1/messages` is not mounted. When enabled, the gateway accepts a narrow Anthropic Messages compatibility subset and translates it through the existing billed `POST /v1/chat/completions` path; it is not a separate proxy, ledger, routing, or settlement implementation.
+- Supported Anthropic request features are text `system`, text `messages[]`, assistant `tool_use`, user `tool_result`, `tools[].input_schema`, `max_tokens`, `stream`, `tool_choice`, `stop_sequences`, `temperature`, and `top_p`. Unsupported Anthropic features such as images, documents/files, server tools, beta headers, thinking, and `top_k` fail before provider dispatch.
+- The facade best-effort infers `stop_reason: "stop_sequence"` for OpenAI-compatible providers that collapse custom stop matches to `finish_reason: "stop"` only when the returned visible text still has a request `stop_sequences[]` suffix to match and remove. If the provider strips the stop string before returning text and reports only `finish_reason: "stop"`, the matched sequence is not derivable and the facade reports `end_turn` with `stop_sequence: null`.
+- Settlement disclosure includes `POST /v1/messages` only when the feature is enabled, because the facade reuses the same reservation, quota, settlement, sticky routing, cancellation, request-id, and id-less replay path as chat completions. This does not certify full Claude Code or Anthropic SDK product compatibility beyond the supported wire subset.
 
 **Change log v0.9.12 (2026-07-15, runbook item 22 — cross-spec 404/known-model reconciliation):**
 - § 17.2 clarified: a provider's "seen" model list is the union of its served `model_id` and its declared `supported_models` (SPEC-010 v1.5 R-3.3.4, authoritative; SPEC-002 v1.5.4 R-3.X.6). A declared-but-cold model is therefore *known* → `503 no_provider_available` via § 17.3, not `404 model_not_found`. § 17.3 and § 2.12 name declared models alongside served/seen. Already the shipped coordinator behavior (`ModelKnown()` unions declared `supported_models`; #555); changes no dispatch outcome, only the error code a declared-but-cold request receives. Docs-only. Resolves the SPEC-010 R-3.3.4 carried cross-spec-inconsistency note. **(v0.9.11 is the in-flight item-20 change on PR #594; this v0.9.12 entry sequences after it — merge #594 first.)**
@@ -186,6 +192,7 @@ SPEC-006 covers:
 - Public endpoint routing at `api.streamvc.live`.
 - Public `/v1/models`.
 - Public `/v1/chat/completions`.
+- Experimental operator-gated public `/v1/messages` facade.
 - Public `/v1/usage`.
 - Public `/v1/status`.
 - Public authenticated `/v1/feedback`.
@@ -336,7 +343,7 @@ SPEC-006 v0.8 is a Tier 1 cooperative inference product. The following propertie
 2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
 3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
 4. **v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot.** They do not detect a provider falsifying its own loaded-model hash measurement.
-5. **Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.** Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
+5. **Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.** Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
 6. **Pending means quota or balance can remain reserved while receipt verification is incomplete.** Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
 7. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
 8. **Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.**
@@ -453,6 +460,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
 - Endpoints exposed at `api.streamvc.live`:
   - `GET /v1/models`
   - `POST /v1/chat/completions` (including SSE streaming via `stream: true`)
+  - `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
   - `GET /v1/usage`
   - `GET /v1/status`
   - `POST /v1/feedback`
@@ -727,6 +735,7 @@ The gateway MUST be restartable independently of the coordinator.
 
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `POST /v1/messages` only when `features.anthropic_messages_enabled` is true
 - `GET /v1/usage`
 - `GET /v1/status`
 - `POST /v1/feedback`
@@ -1020,7 +1029,7 @@ The gateway MAY accept an inbound `X-Request-ID` only if it is a UUID v4 in 8-4-
 
 ### 5.2 Error envelope
 
-All non-streaming errors MUST use this shape:
+For OpenAI-compatible endpoints, all non-streaming errors MUST use this shape:
 
 ```json
 {
@@ -1028,6 +1037,22 @@ All non-streaming errors MUST use this shape:
     "message": "Human-readable message",
     "type": "invalid_request_error",
     "code": "machine_readable_code"
+  }
+}
+```
+
+The experimental Anthropic Messages facade (`POST /v1/messages`) is the
+documented exception: its non-streaming errors MUST use an Anthropic-shaped
+envelope with the same gateway `code` and `retryable` extension fields:
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "Human-readable message",
+    "code": "machine_readable_code",
+    "retryable": false
   }
 }
 ```
@@ -1043,15 +1068,15 @@ The `type` field MUST be one of:
 - `service_unavailable`
 - `upstream_error`
 
-Streaming errors after headers are sent MUST be emitted as SSE data frames with an OpenAI-shaped error object, followed by `[DONE]`.
+Streaming errors after headers are sent MUST be emitted as SSE data frames with an OpenAI-shaped error object, followed by `[DONE]`. The `/v1/messages` facade instead emits Anthropic SSE `event: error` frames with the Anthropic-shaped error object above, including `code` and `retryable`.
 
-The gateway MUST install panic recovery middleware that converts unexpected panics into HTTP 500 responses in this OpenAI-shaped error envelope.
+The gateway MUST install panic recovery middleware that converts unexpected panics into HTTP 500 responses in the endpoint's documented error envelope.
 
-**Retryability (`retryable`).** Every coordinator- or gateway-ORIGINATED buyer error envelope (non-streaming JSON body and streaming SSE `error` frame alike) MUST carry a boolean `retryable` field alongside `code`. `retryable` is envelope metadata: for most codes it equals the code's fixed default classification below, but specific codes carry a documented per-response override — see "Overrides" below. A provider-originated error body forwarded verbatim is a documented exception to the MUST — see "Known carried items" (4).
+**Retryability (`retryable`).** Every coordinator- or gateway-ORIGINATED buyer error envelope (non-streaming JSON body and streaming SSE `error` frame alike, including the experimental Anthropic-shaped `/v1/messages` facade envelope) MUST carry a boolean `retryable` field alongside `code`. `retryable` is envelope metadata: for most codes it equals the code's fixed default classification below, but specific codes carry a documented per-response override — see "Overrides" below. A provider-originated error body forwarded verbatim is a documented exception to the MUST — see "Known carried items" (4).
 
 **Retryable (`true`) — the same request may succeed later without changes, grouped by why:**
 
-- Availability/timeout: `no_provider_available`, `provider_error`, `provider_timeout`, `provider_disconnected`, `provider_failed` (coordinator-generated); `coordinator_unavailable`, `upstream_provider_error` (§13.4's error-action table already directs buyers to retry this), `invalid_provider_usage` (gateway-generated).
+- Availability/timeout: `no_provider_available`, `provider_error`, `provider_timeout`, `provider_disconnected`, `provider_failed` (coordinator-generated); `coordinator_unavailable`, `upstream_provider_error` (§13.4's error-action table already directs buyers to retry this), `invalid_provider_usage`, `invalid_provider_response` (gateway-generated provider response-shape defects).
 - Temporal 429s that ship a machine-readable backoff signal — a `Retry-After` or `X-RateLimit-Reset*` header the buyer can act on: `provisional_quota_exceeded`, `rate_limited` (coordinator); `account_request_rate_exceeded`, `account_concurrency_exceeded`, `demo_concurrency_exceeded`, `quota_exhausted` (gateway).
 - Operator-controlled capacity pauses — the pause condition itself resolves with time, not with a different request: `public_api_paused`, `demo_paused`, `capacity_signup_closed`.
 - Preflight/idempotency infrastructure availability: `preflight_rejected`, `idempotency_unavailable`.
@@ -1109,7 +1134,7 @@ Response shape:
       "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
       "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
       "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
-      "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+      "enforce_mode": "Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
       "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
       "outcomes": {
         "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
@@ -1184,7 +1209,7 @@ The `/v1/models` response MUST include a top-level field:
     "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
     "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
     "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
-    "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+    "enforce_mode": "Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
     "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
     "outcomes": {
       "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
@@ -1280,6 +1305,71 @@ Gateway request caps:
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
 The gateway MUST match model IDs ASCII case-insensitively when interpreting coordinator availability.
+
+### 5.4a `POST /v1/messages` experimental facade
+
+`POST /v1/messages` is a default-off Anthropic Messages compatibility facade.
+It MUST be mounted only when `features.anthropic_messages_enabled` is true. It
+MUST NOT introduce a parallel provider proxy, quota ledger, reservation path,
+settlement path, sticky-routing path, cancellation path, or request-id path.
+The gateway MUST translate supported requests into the existing
+`POST /v1/chat/completions` handler and translate the resulting OpenAI-shaped
+response back to Anthropic Message JSON or Anthropic SSE events.
+
+Authentication:
+
+- Bearer token MUST be accepted.
+- `X-Api-Key` MUST be accepted as an alias for bearer authentication when
+  `Authorization` is absent.
+- Browser demo tokens are not part of the `/v1/messages` facade.
+
+Supported Anthropic request fields:
+
+- `model`
+- `system` as a string or text-only content blocks
+- `messages[]` with user/assistant text blocks
+- assistant `tool_use`
+- user `tool_result`
+- `tools[].input_schema`
+- `max_tokens`
+- `stream`
+- `tool_choice`
+- `stop_sequences`
+- `temperature`
+- `top_p`
+
+Unsupported Anthropic-only features MUST be rejected before reservation or
+provider dispatch with an Anthropic-shaped error envelope that still carries
+the gateway extension fields `code` and `retryable`. This includes image,
+document, or file content blocks; server tools; malformed or unsupported
+`tool_result.content[]` blocks; `Anthropic-Beta` headers or body beta fields;
+`thinking`; `top_k`; and unknown content-block types.
+
+For non-streaming responses, OpenAI chat choices MUST be converted to
+Anthropic `message` envelopes with text and `tool_use` content blocks. For
+streaming responses, OpenAI SSE chunks MUST be converted to Anthropic
+`message_start`, `content_block_*`, `message_delta`, and `message_stop` events.
+Tool-call argument deltas MUST be emitted as `input_json_delta` fragments.
+When a request supplied `stop_sequences` and the upstream response reports
+`finish_reason: "stop"` without a provider `stop_sequence`, the facade SHOULD
+infer Anthropic `stop_reason: "stop_sequence"` only from a terminal suffix match
+against returned visible text and SHOULD omit that matched suffix from emitted
+text. If the upstream provider already stripped the sequence, the matched
+sequence is not recoverable from the OpenAI-shaped response and the facade MUST
+fall back to `stop_reason: "end_turn"` with `stop_sequence: null`.
+
+The facade's settlement and retry semantics are exactly the underlying chat
+completion semantics. Successful translated requests MUST reserve quota,
+settle usage, honor sticky conversation headers, propagate cancellation, carry
+gateway request IDs, and replay id-less duplicate requests through the same
+mechanisms as `POST /v1/chat/completions`. `GET /v1/usage` and `/v1/models`
+settlement disclosures MUST include `POST /v1/messages` only when the feature
+flag is enabled.
+
+The facade does not certify full Claude Code, Claude Agent SDK, or Anthropic SDK
+product compatibility. Compatibility claims MUST be limited to the supported
+wire subset above until a live end-to-end smoke explicitly proves a wider
+client workflow.
 
 The gateway MUST strip these inbound buyer request headers before forwarding to the coordinator:
 
@@ -1439,7 +1529,7 @@ Response shape:
     "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
     "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
     "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
-    "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+    "enforce_mode": "Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
     "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
     "outcomes": {
       "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",

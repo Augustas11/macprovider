@@ -20,6 +20,7 @@ import production_exceptions as pe  # noqa: E402
 
 
 NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+FUTURE_EXPIRES_AT = "2099-01-01T00:00:00Z"
 
 
 def _minimal_entry(**overrides):
@@ -34,7 +35,7 @@ def _minimal_entry(**overrides):
         "owner": "ops/test",
         "issue": "https://github.com/Augustas11/macprovider/issues/615",
         "created_at": "2026-07-01T00:00:00Z",
-        "expires_at": "2026-08-01T00:00:00Z",
+        "expires_at": FUTURE_EXPIRES_AT,
         "scope": "unit-test only; must not widen to arbitrary providers",
         "removal_condition": "test complete",
         "rollback_command": "echo rollback",
@@ -189,7 +190,13 @@ class ProductionExceptionsTests(unittest.TestCase):
         removed = _minimal_entry(id="exc-removed-sample", status="removed")
         current = _minimal_register([removed])
         stale = _minimal_register(
-            [_minimal_entry(id="exc-removed-sample", status="active", expires_at="2026-08-01T00:00:00Z")]
+            [
+                _minimal_entry(
+                    id="exc-removed-sample",
+                    status="active",
+                    expires_at=FUTURE_EXPIRES_AT,
+                )
+            ]
         )
         tombstones = _tombstones(
             [
@@ -201,7 +208,7 @@ class ProductionExceptionsTests(unittest.TestCase):
                 }
             ]
         )
-        result = pe.simulate_config_sync_restore(current, stale, tombstones)
+        result = pe.simulate_config_sync_restore(current, stale, tombstones, now=NOW)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
     def test_health_report_allowlists_and_omits_free_prose(self):
@@ -370,7 +377,7 @@ class ProductionExceptionsTests(unittest.TestCase):
             ),
         ]
         for stale, expect_prefix in cases:
-            result = pe.simulate_config_sync_restore(current, stale, _tombstones())
+            result = pe.simulate_config_sync_restore(current, stale, _tombstones(), now=NOW)
             self.assertTrue(
                 any(f.code.startswith(expect_prefix) for f in result.errors),
                 msg=f"expected {expect_prefix} in {[f.code for f in result.errors]} for {stale!r}",
@@ -478,7 +485,7 @@ class ProductionExceptionsTests(unittest.TestCase):
     def test_sync_check_fails_on_malformed_stale(self):
         current = _minimal_register()
         stale = {"schema_version": "wrong", "environment": "nope", "exceptions": {}}
-        result = pe.simulate_config_sync_restore(current, stale, _tombstones())
+        result = pe.simulate_config_sync_restore(current, stale, _tombstones(), now=NOW)
         self.assertTrue(any(f.code.startswith("stale_") for f in result.errors))
 
     def test_cli_gate_report_and_sync_roundtrip(self):
@@ -527,6 +534,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tombs),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(register),
@@ -538,6 +547,8 @@ class ProductionExceptionsTests(unittest.TestCase):
             # Documented form with --tombstones after subcommand also works.
             rc_sync2 = pe.main(
                 [
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(register),
@@ -578,6 +589,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tmp_path / "tombs.json"),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(tmp_path / "current.json"),
@@ -590,6 +603,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tmp_path / "empty.json"),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(tmp_path / "current.json"),

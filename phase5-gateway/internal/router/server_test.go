@@ -5985,6 +5985,25 @@ func TestPanicRecoveryLogsPanicAndReturnsEnvelope(t *testing.T) {
 	}
 }
 
+func TestPanicRecoveryReturnsAnthropicEnvelopeForMessages(t *testing.T) {
+	cfg := config.Default()
+	cfg.Features.AnthropicMessagesEnabled = true
+	s := &Server{cfg: cfg}
+	h := s.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("panic status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, `"code":"internal_error"`) || strings.Contains(body, `"error":{"message"`) {
+		t.Fatalf("panic recovery did not use Anthropic error envelope: %s", body)
+	}
+}
+
 func TestHealthzReturnsOK(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusOK)
@@ -6175,6 +6194,8 @@ var gatewayEmittedErrorCodes = []string{
 	"invalid_demo_token", "invalid_feedback", "invalid_feedback_scope",
 	"invalid_feedback_source", "invalid_handoff", "invalid_kill_switch",
 	"invalid_kill_switch_version", "invalid_limit", "invalid_operator_token",
+	"invalid_provider_response", "invalid_provider_usage", "invalid_rating", "invalid_request",
+	"invalid_request_body", "invalid_request_id", "invalid_window",
 	"invalid_provider_usage", "invalid_rating", "invalid_request",
 	"invalid_provider_response", "invalid_request_body", "invalid_request_id", "invalid_window",
 	"keys_load_failed", "max_tokens_exceeded", "method_not_allowed",

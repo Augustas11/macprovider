@@ -58,6 +58,7 @@ test-dist:
 	bash scripts/test-malibu-independent-release.sh
 	bash scripts/test-release-tag-target.sh
 	bash scripts/test-pearl-runtime-release.sh
+	bash scripts/test-live-coordinator-release-gate.sh
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-malibu-bootstrap-bridge.sh
 	bash scripts/test-recover-malibu-publication.sh
@@ -94,6 +95,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_config_mode_test.sh
+	bash phase4-coordinator/dist/test/coordinator_release_tag_guard.test.sh
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh

@@ -35,6 +35,38 @@ if "make_latest=true" in publish or "true|false) make_latest=false" not in publi
     raise SystemExit("runtime workflow must never make a runtime-only release latest")
 if 'RELEASE_PRERELEASE_INPUT: "true"' not in workflow:
     raise SystemExit("runtime workflow must force GitHub prerelease publication")
+if 'EXPECTED_REVISION="${{ steps.release_source.outputs.commit }}"' not in workflow:
+    raise SystemExit("runtime workflow must bind Pearl Go binary verification to the reviewed commit")
+before_build = workflow.split("- name: Build Pearl linux-amd64 runtime pair", 1)[0]
+if "id: release_toolchain" not in before_build:
+    raise SystemExit("runtime workflow must expose the reviewed toolchain path as a step output")
+if 'toolchain_json="$RUNNER_TEMP/release-toolchain.json"' not in before_build:
+    raise SystemExit("runtime workflow must keep release-toolchain.json outside the git worktree before Go builds")
+if "scripts/verify-release-toolchain.sh release-toolchain.json" in before_build:
+    raise SystemExit("runtime workflow must not write release-toolchain.json into the git worktree before Go builds")
+build = workflow.split("- name: Build Pearl linux-amd64 runtime pair", 1)[1].split(
+    "- name: Sign Pearl runtime metadata and checksums", 1
+)[0]
+if 'artifact_dir="$RUNNER_TEMP/pearl-runtime-build"' not in build:
+    raise SystemExit("runtime workflow must build Pearl Go binaries outside the git worktree")
+if "git status --porcelain --untracked-files=all" not in build:
+    raise SystemExit("runtime workflow must fail closed when the checkout is dirty before Go builds")
+if '-o "$GITHUB_WORKSPACE/' in build:
+    raise SystemExit("runtime workflow must not write Go build outputs into the git worktree")
+if 'python3 scripts/verify-pearl-go-binaries.py \\\n            "$artifact_dir/coordinator-linux-amd64" \\\n            "$artifact_dir/coordinator-cli-linux-amd64" \\\n            "$artifact_dir/gateway-linux-amd64"' not in build:
+    raise SystemExit("runtime workflow must verify the out-of-worktree Pearl Go binaries")
+verify_position = build.find("python3 scripts/verify-pearl-go-binaries.py")
+install_position = build.find('install -m 0755 "$artifact_dir/coordinator-linux-amd64" coordinator-linux-amd64')
+if verify_position < 0 or install_position < 0 or install_position < verify_position:
+    raise SystemExit("runtime workflow must copy release assets into the workspace only after binary verification")
+sign = workflow.split("- name: Sign Pearl runtime metadata and checksums", 1)[1].split(
+    "- name: Prepare runtime release notes", 1
+)[0]
+toolchain_copy = 'install -m 0644 "${{ steps.release_toolchain.outputs.json }}" release-toolchain.json'
+if toolchain_copy not in sign:
+    raise SystemExit("runtime workflow must copy release-toolchain.json into release assets only after binary verification")
+if sign.find(toolchain_copy) > sign.find("scripts/build-release-provenance.py"):
+    raise SystemExit("runtime workflow must copy release-toolchain.json before building provenance")
 patch_position = publish.find("gh api --method PATCH")
 if patch_position < 0:
     raise SystemExit("runtime workflow must publish by numeric-ID PATCH")

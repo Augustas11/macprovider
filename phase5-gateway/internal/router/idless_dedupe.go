@@ -41,6 +41,7 @@ const (
 
 	idlessDedupeEntrypointChat      = "chat"
 	idlessDedupeEntrypointResponses = "responses"
+	idlessDedupeEntrypointMessages  = "anthropic-messages"
 
 	// Two separate caps, because the two things an entry holds cost wildly
 	// different amounts of memory and wildly different amounts of money when

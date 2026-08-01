@@ -531,6 +531,7 @@ func (s *AddressesService) pausedConn(ctx context.Context, conn *sql.Conn) (bool
 			// sentinel-asymmetry detector (bootstrap.go)
 			// HALT the process at next boot.
 			s.Log.Error().Str("event", "payout_invariant_violation").
+				Str("severity", "PAGE").
 				Str("where", "runtime_flag missing").
 				Str("name", "registration_paused").Send()
 			return false, fmt.Errorf("runtime flag missing")
@@ -574,6 +575,7 @@ func (s *AddressesService) emitFailure(r *http.Request, providerID, reason, subm
 	}
 	s.Log.Info().
 		Str("event", ev.Event).
+		Str("severity", "WARN").
 		Str("provider_id", ev.ProviderID).
 		Str("reason", ev.Reason).
 		Str("src_ip", ev.SrcIP).
@@ -585,6 +587,7 @@ func (s *AddressesService) emitFailure(r *http.Request, providerID, reason, subm
 func (s *AddressesService) emitReject(r *http.Request, providerID, eventName, submittedAddress string) {
 	s.Log.Info().
 		Str("event", eventName).
+		Str("severity", "WARN").
 		Str("provider_id", providerID).
 		Str("src_ip", clientIP(r)).
 		Str("submitted_fingerprint", addressFingerprint(submittedAddress)).

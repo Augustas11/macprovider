@@ -156,6 +156,8 @@ final class SystemMemoryPressureMonitor: MemoryPressureProviding, @unchecked Sen
 }
 
 struct ProviderCapacity: Sendable {
+    static let maxConcurrencyOverrideLimit = 8
+
     let ramGB: Int
     let ramTier: String
     let maxContextTokens: Int

@@ -167,6 +167,11 @@ routing:
   sticky_ttl_s: 1800
 
 features:
+  # Experimental Anthropic Messages compatibility facade. When enabled,
+  # POST /v1/messages translates supported full-context text/tool requests into
+  # the existing billed chat-completions pipeline. Multimodal inputs, hosted
+  # Anthropic tools, beta features, and count_tokens remain unsupported.
+  anthropic_messages_enabled: false
   # Stateless OpenAI Responses API compatibility facade. When enabled,
   # POST /v1/responses translates full-context Responses requests into the
   # existing billed chat-completions pipeline. Server-side response state,

@@ -946,7 +946,9 @@ func TestEarningsEndpointIncludesProviderSettlementReceiptReasonCodes(t *testing
 	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
+	setSettlementReceiptNow(store, time.UnixMilli(input.ReceiptReceivedUnixMS).UTC().Add(24*time.Hour).UnixMilli())
 	seedSettlementReceiptEvidence(t, store, input)
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS+int64(24*time.Hour/time.Millisecond))
 	insertCredit(t, store.db, input.ProviderID, time.Now().UTC(), 500)
 
 	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
@@ -1061,7 +1063,9 @@ func TestProvidersEndpointIncludesRedactedSettlementReceiptDiagnostics(t *testin
 	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
+	setSettlementReceiptNow(store, time.UnixMilli(input.ReceiptReceivedUnixMS).UTC().Add(24*time.Hour).UnixMilli())
 	seedSettlementReceiptEvidence(t, store, input)
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS+int64(24*time.Hour/time.Millisecond))
 	insertCredit(t, store.db, input.ProviderID, time.Now().UTC(), 500)
 
 	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{

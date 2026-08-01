@@ -111,6 +111,33 @@ if 'git merge-base --is-ancestor "$CONTROL_SHA"' not in protected:
     raise SystemExit("acceptance signer control commit need not remain reachable from main")
 if protected.count('scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA" origin --require-existing') < 2:
     raise SystemExit("exact protected tag is not revalidated immediately before publication")
+publish_step = protected.split(
+    "- name: Reverify and publish only the captured numeric draft", 1
+)[1].split("\n      - name:", 1)[0]
+live_gate = publish_step.find("scripts/verify-live-coordinator-release-gate.py")
+patch = publish_step.find("gh api --method PATCH")
+final_draft_capture = publish_step.find("scripts/capture-release-publication.py --draft")
+final_authority = publish_step.find("origin/main moved under bound exception authority before undraft")
+if live_gate < 0:
+    raise SystemExit("promotion public-transition step omits the live coordinator release gate")
+if patch < 0:
+    raise SystemExit("promotion public-transition step lost numeric release PATCH")
+if final_draft_capture < 0 or final_authority < 0:
+    raise SystemExit("promotion public-transition step lost final draft or authority regate")
+if live_gate < final_draft_capture or live_gate < final_authority:
+    raise SystemExit("promotion live coordinator gate must run after final draft and authority regates")
+if live_gate > patch or publish_step.find("-F draft=false") < live_gate:
+    raise SystemExit("promotion live coordinator gate must run before undraft/latest publication")
+for requirement in (
+    "env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN",
+    "--tag \"$TAG\"",
+    "--pearl-release-json \"$accepted/pearl-release.json\"",
+    "--trusted-keys \"$accepted/trusted-keys.json\"",
+    "--coordinator-url https://coordinator.streamvc.live",
+    "--openssl \"$OPENSSL_BIN\"",
+):
+    if requirement not in publish_step:
+        raise SystemExit(f"promotion live coordinator gate omits: {requirement}")
 if '[\\"candidate_ref\\"]' in protected or '.removeprefix(\\"refs/heads/\\")' in protected:
     raise SystemExit("candidate ref extraction contains shell-literal Python escapes")
 if 'print(json.load(open(sys.argv[1]))["candidate_ref"])' not in protected:

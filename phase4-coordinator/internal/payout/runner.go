@@ -1111,6 +1111,7 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 			// error_class, ts_utc.
 			r.opts.Logger.Error().
 				Str("event", "payout_signer_unavailable").
+				Str("severity", "PAGE").
 				Str("from_address", r.opts.Security.HotWalletAddress).
 				Str("error_class", err.Error()).
 				Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
@@ -1345,6 +1346,7 @@ func (r *Runner) claimAndLog(ctx context.Context, runID string, row ReadyRow, at
 		// provider_id, stage, error_class, error_text, ts_utc.
 		r.opts.Logger.Error().
 			Str("event", "payout_failed").
+			Str("severity", "PAGE").
 			Str("run_id", runID).
 			Int64("payout_id", row.PayoutID).
 			Int("attempt_seq", attempt.AttemptSeq).
@@ -1359,6 +1361,7 @@ func (r *Runner) claimAndLog(ctx context.Context, runID string, row ReadyRow, at
 	if !claimed {
 		r.opts.Logger.Warn().
 			Str("event", "payout_failed").
+			Str("severity", "PAGE").
 			Str("run_id", runID).
 			Int64("payout_id", row.PayoutID).
 			Int("attempt_seq", attempt.AttemptSeq).

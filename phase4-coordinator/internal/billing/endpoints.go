@@ -50,19 +50,30 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 // below) so it shares atomicity with the ledger_config_snapshots
 // row §13.2 already requires.
 func (s *Store) HandlersWithQuarantineGate(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, nil)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, nil, 0)
 }
 
 func (s *Store) HandlersWithQuarantineGateAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, idlePrewarm)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, idlePrewarm, 0)
 }
 
 func (s *Store) HandlersWithQuarantineGates(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, nil)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, nil, 0)
 }
 
 func (s *Store) HandlersWithQuarantineGatesAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm, 0)
+}
+
+// HandlersWithQuarantineGatesIdlePrewarmAndPayoutCap is the SPEC-005
+// vX.Y+1 constructor (SPEC-016 §9.5b HARD prereq) that additionally
+// threads the immutable §5.2 per-payout cap
+// (payout.security.per_payout_cap_usdc_base_units) into the
+// `/admin/ledger/payout-ready` reorg-compensation handler. The cap is
+// a startup-immutable scalar (payout.security.* is not live-reloaded),
+// so it is passed by value rather than read through a reload primitive.
+func (s *Store) HandlersWithQuarantineGatesIdlePrewarmAndPayoutCap(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader, perPayoutCapBaseUnits int64) http.Handler {
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm, perPayoutCapBaseUnits)
 }
 
 // HandlersWithBridge mounts the admin/provider handlers. The
@@ -75,10 +86,10 @@ func (s *Store) HandlersWithQuarantineGatesAndIdlePrewarm(operatorKey string, to
 // accepted. Handlers (the legacy single-arg signature) is kept as a
 // thin shim so test fixtures and direct callers don't churn.
 func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
-	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, false, nil)
+	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, false, nil, 0)
 }
 
-func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
+func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader, perPayoutCapBaseUnits int64) http.Handler {
 	// SPEC-005 v0.4 (issue #169) — handler CONSTRUCTION must not be
 	// able to silently flip the live route-layer flag. R8 fix
 	// (ARCH-M1) replaces the unconditional SetForceVoidEnabled call
@@ -107,6 +118,7 @@ func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOn
 		tokenStore:              tokenStore,
 		requireProviderTokens:   requireProviderTokens,
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
+		perPayoutCapBaseUnits:   perPayoutCapBaseUnits,
 		lastEarnings:            map[string][]time.Time{},
 		adminBucket:             newAdminRateLimiter(),
 		idlePrewarm:             idlePrewarm,
@@ -121,6 +133,7 @@ type handler struct {
 	tokenStore              tokenValidator
 	requireProviderTokens   bool
 	earningsRateLimitPerMin int
+	perPayoutCapBaseUnits   int64
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
 	adminBucket             *adminRateLimiter
@@ -245,6 +258,12 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			h.forceCreditHandler(w, r, m.id)
 			return
 		}
+	}
+	// SPEC-005 vX.Y+1 §9.5b reorg-compensation admin endpoint
+	// (SPEC-016 §9.5b HARD prereq for USDC payouts).
+	if r.URL.Path == payoutReadyPath {
+		h.payoutReadyHandler(w, r)
+		return
 	}
 	switch {
 	case r.URL.Path == "/admin/ledger/summary":
@@ -573,7 +592,7 @@ SELECT lrc.provider_id,
 			providerIDs = append(providerIDs, providerID)
 		}
 	}
-	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), time.Time{}, time.Time{}, false)
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.nowUTC(), time.Time{}, time.Time{}, false)
 	summaries, err := h.settlementReceiptSummariesForProviders(ctx, providerIDs, diagnosticsFrom, diagnosticsTo, true, 3)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -963,7 +982,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp["idle_prewarm"] = idlePrewarm
-	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), rangeFrom, rangeTo, hasRange)
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.nowUTC(), rangeFrom, rangeTo, hasRange)
 	summaries, err := h.settlementReceiptSummariesForProviders(r.Context(), []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())

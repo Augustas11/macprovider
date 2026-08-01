@@ -1,6 +1,14 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.23 (2026-07-30, draft — lineage reconciliation per issue #586. Merges the two divergent `v0.1.2x` lineages: the `main` v0.1.20 Wave-2 provider-token custody gate (2026-07-04 — payout attempts require provider-token trust: pinned/operator-issued, bearer-validated, or explicit `self_minted_verified` proof; tokenless self-minted sessions are not payout eligible) AND the `impl/spec-016` v0.1.22 IMPL follow-up (2026-06-29 — §7.1 gains `payout_stale_outbox_backlog`, `payout_rpc_chronic_outage`, `payout_spki_drain_skipped_unsupported_client`; §4.7 step 5 keyset-paginated bounded-memory scan with `staleOutboxScanCeiling=20000`; §4.4 two-RPC discipline via `TrackingRPCClient` + `ChronicOutageTracker`). Both lineages' normative content is retained in full; see the v0.1.23 change-log entry for the drop-nothing cross-check.)
+**Version:** 0.1.25 (2026-08-01, draft — §9.5b.1 assertion-set reconciliation
+to the merged SPEC-005 `POST /admin/ledger/payout-ready` IMPL: canonical
+idempotency_key requirement (leading-zero-alias double-pay defense), replay
+precedence, `payout_attempts` join with `is_cancel_self_transfer = 0`
+non-compensable carve-out, `resolved_at_utc IS NULL` unresolved filter, and
+`ambiguous_orphan` multiplicity guard. Documentation of enforced endpoint
+behavior; no runner activation, production deployment, or §9 prerequisite
+state changes. Prior: 0.1.24 (2026-07-31, preliminary conformance-unit
+anchors for the default-off payout implementation merged by PR #164).)
 **Status:** Draft (IMPL merged via PR #164, default-off — `payout.enabled=false`
 everywhere until the operator funds the hot wallet and discharges the eight
 §9 prerequisites; flipping the flag is an operator decision gated on §9).
@@ -15,6 +23,40 @@ filed as a separate follow-up).
 
 ---
 
+## Preliminary conformance unit IDs
+
+SPEC-016 v0.1.24 registers `SPEC-016-R001`..`SPEC-016-R011` in
+`specs/CONFORMANCE.json` as pending preliminary conformance anchors. These IDs
+group existing normative obligation areas without changing them:
+
+- `SPEC-016-R001` — default-off rail scope, operator prerequisites, and
+  activation boundary.
+- `SPEC-016-R002` — provider payout-address registration, EIP-712
+  proof-of-possession, replay protection, cooling-off, and rotation semantics.
+- `SPEC-016-R003` — payout package boundary, read surfaces, handler inventory,
+  and import-graph ownership.
+- `SPEC-016-R004` — runner selection, signing, broadcast, two-RPC confirmation,
+  and `ClaimPayoutReady` finalization.
+- `SPEC-016-R005` — payout attempt schema, idempotent retry, nonce-gap fill,
+  and abandon-attempt recovery.
+- `SPEC-016-R006` — reorg polling, orphan recording, compensation, and
+  funding-recording admin flows.
+- `SPEC-016-R007` — runtime flags, pause/resume, runner lease, self-fencing,
+  and crash-safe audit outboxes.
+- `SPEC-016-R008` — payout caps, hot-wallet balances, gas accounting, and
+  conservation reconciliation.
+- `SPEC-016-R009` — signer custody, Linux-only process hardening, RPC
+  discipline, and reload boundaries.
+- `SPEC-016-R010` — structured audit events, retention, operator queries, and
+  alert/runbook obligations.
+- `SPEC-016-R011` — provider-token custody and compliance payout eligibility.
+
+All eleven remain `pending`. They are not exhaustive clause-level migration:
+`requirement_id_migration` remains `pending` until a later reconciliation pass
+attaches stable IDs directly to every normative `MUST`, `MUST NOT`, and
+security/recovery `SHOULD`, and until implementation mappings, tests, and the
+signed journey-result contract required by `payout-lifecycle` are reconciled.
+
 ## Change log
 
 Audit-narrative-by-round detail lives in the per-round audit files
@@ -24,6 +66,16 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.24 (2026-07-31, draft — #614 preliminary conformance anchors):**
+Editorial, non-normative reconciliation after the PR #164 payout implementation
+and PR #827 spec-index repair landed. Registers `SPEC-016-R001`..`SPEC-016-R011`
+as pending preliminary anchors in `specs/CONFORMANCE.json`, updates the manifest
+to record partial/default-off implementation evidence, keeps requirement
+migration pending, and preserves the production-not-deployed gap. This does NOT
+enable `payout.enabled`, declare the runner production-ready, satisfy any §9
+operator prerequisite, or promote any `payout-lifecycle` requirement to
+`conformant`.
 
 **v0.1.23 (2026-07-30, draft — lineage reconciliation, issue #586):**
 Merges the forked `main` and `impl/spec-016` spec lineages when PR #164
@@ -4398,13 +4450,19 @@ discharged:
      constraint. The `+ 1µs * orphan_id` offset on the end
      prevents collision when multiple orphans for the same
      provider are observed in the same nanosecond.
-   - Every successful invocation MUST emit a SPEC-005
-     structured log event
+   - Every successful invocation MUST record
      `ledger_payout_ready_admin_inserted` with
      `provider_id, id, idempotency_key, reason,
      actor=operator_key, ts_utc` so the operator audit
      trail covers admin-inserted rows separately from
-     settlement-emitted rows.
+     settlement-emitted rows. v0.1.25 (SPEC-005 IMPL
+     reconciliation): this is recorded BOTH as a durable
+     `audit_log` row written in the SAME transaction as the
+     INSERT (the authoritative, tamper-evident audit trail,
+     mirroring the quarantine force-void endpoint) AND as a
+     post-commit structured log event for observability /
+     alerting. `actor` is the fixed principal marker string
+     `"operator_key"`, never the operator bearer secret.
    - **The SPEC-005 IMPL MUST bind the compensation row to
      the original orphan's IMMUTABLE snapshot columns in
      the SAME SQLite transaction as the INSERT.** Closes
@@ -4420,19 +4478,53 @@ discharged:
      orphan. v0.1.9 (codex round-10 CRIT-1 framing):
      the IMPL MUST parse `orig_payout_id` and
      `orig_attempt_seq` from the `idempotency_key` regex
-     match, then `SELECT
-     observed_provider_id,
-     observed_provider_credits,
-     observed_gross_credits,
-     observed_amount_base_units,
-     compensation_settlement_id
-     FROM payout_reorg_orphans
-     WHERE payout_id = <orig_payout_id>
-     AND attempt_seq = <orig_attempt_seq>`
+     match, and MUST reject any non-canonical spelling —
+     require `idempotency_key ==
+     "reorg_compensation:<orig_payout_id>:<orig_attempt_seq>"`
+     with minimal decimal encodings (else 400): the
+     `UNIQUE(idempotency_key)` guard keys on raw text, so a
+     leading-zero alias (`reorg_compensation:05:1` vs
+     `:5:1`) would otherwise bind the same orphan twice and
+     double-pay (v0.1.25). Then, in the SAME SQLite
+     transaction as the INSERT, FIRST probe `SELECT id FROM
+     ledger_payout_ready WHERE idempotency_key = <key>` — if
+     present, return 409 with the original `{"id": <id>}`
+     body (REPLAY PRECEDENCE: this wins over every orphan
+     precondition below, so a replay is idempotent
+     regardless of the orphan's later resolution or
+     compensation state). Otherwise `SELECT
+     pro.observed_provider_id,
+     pro.observed_provider_credits,
+     pro.observed_gross_credits,
+     pro.observed_amount_base_units,
+     pro.compensation_settlement_id,
+     pa.is_cancel_self_transfer
+     FROM payout_reorg_orphans pro
+     JOIN payout_attempts pa
+       ON pa.payout_id = pro.payout_id
+      AND pa.attempt_seq = pro.attempt_seq
+     WHERE pro.payout_id = <orig_payout_id>
+     AND pro.attempt_seq = <orig_attempt_seq>
+     AND pro.resolved_at_utc IS NULL`
      in the SAME SQLite transaction as the INSERT, and
      assert ALL of:
      - exactly one row returned (else 422
-       `no_matching_orphan`)
+       `no_matching_orphan` for zero rows; 422
+       `ambiguous_orphan` for more than one — two unresolved
+       orphans with different `orphan_tx_hash` can coexist
+       for the same `(payout_id, attempt_seq)`, so
+       multiplicity fails closed) (v0.1.25)
+     - the orphan is UNRESOLVED: the `resolved_at_utc IS
+       NULL` filter excludes terminal record-only
+       resolutions (e.g. `operator_resolution = "no
+       compensation; provider acknowledged"`), which yield
+       zero rows → 422 `no_matching_orphan` (v0.1.25)
+     - `is_cancel_self_transfer = 0` (else 422
+       `orphan_not_compensable`) — cancel self-transfer
+       reorgs are non-compensable (the §4.3 carve-out;
+       record-orphan writes an orphan row for cancel
+       attempts too, so the compensation endpoint MUST
+       reject them) (v0.1.25)
      - `compensation_settlement_id IS NULL` (else 422
        `orphan_already_compensated`)
      - request `provider_id = observed_provider_id`

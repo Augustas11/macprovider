@@ -1,6 +1,6 @@
 # Mac Provider Buyer API Gateway
 
-Phase 5 gateway implementation for SPEC-006 v0.8.3. The gateway is intentionally separate from `phase4-coordinator`: the coordinator remains router-only, while the gateway owns buyer identity, API keys, quota reservations, usage events, feedback events, audit events, status shaping, and kill switches.
+Phase 5 gateway implementation for SPEC-006 v0.9.13. The gateway is intentionally separate from `phase4-coordinator`: the coordinator remains router-only, while the gateway owns buyer identity, API keys, quota reservations, usage events, feedback events, audit events, status shaping, and kill switches.
 
 ## What Is Implemented
 
@@ -12,6 +12,8 @@ Phase 5 gateway implementation for SPEC-006 v0.8.3. The gateway is intentionally
 - Minimal `/account` handoff page that displays a newly issued key once and clears the handoff cookie.
 - HMAC/SHA API key generation, hash-only storage, validation, rotation, revocation, and account-history preservation.
 - HMAC demo-session token issuance/validation with per-IP issuance limits and demo-only kill switch.
+- `/v1/models`, `/v1/usage`, `/v1/chat/completions`, `/v1/status`, `/v1/feedback`, `/healthz`; experimental `/v1/messages` only when `features.anthropic_messages_enabled` is set.
+- OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation.
 - `/v1/models`, `/v1/usage`, `/v1/chat/completions`, optional stateless `/v1/responses`, `/v1/status`, `/v1/feedback`, `/healthz`.
 - OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation; the optional Responses facade translates into the same billed path.
 - Quota reservation/settlement for success, 503 refund, 502/504 prompt-only or partial usage, demo chat usage, provider-reported streaming actuals, and byte-estimation fallback.
@@ -60,6 +62,21 @@ OpenAI SDK configuration uses:
 base_url = https://api.streamvc.live/v1
 api_key = <mp_* key>
 ```
+
+Experimental Anthropic Messages compatibility can be enabled locally with:
+
+```yaml
+features:
+  anthropic_messages_enabled: true
+```
+
+When enabled, `POST /v1/messages` accepts supported text and client-tool
+Anthropic Messages requests, translates them into the existing
+`/v1/chat/completions` gateway path, and translates the response back into the
+Anthropic Message/SSE shape. It is a compatibility facade, not a separate
+settlement path. Unsupported Anthropic features such as images, documents,
+server tools, beta headers, thinking, and `top_k` are rejected before provider
+dispatch.
 
 SPEC-015 receipt compatibility live checks are opt-in because they require a running provider, coordinator, gateway, and valid API key. Run these from the repo root:
 

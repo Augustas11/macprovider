@@ -462,11 +462,16 @@ the batch tally.
 - `evidence_sha256` is `UNIQUE` and computed by a **canonical** hash (`canonicalEvidenceSHA`); the
   enqueue path keys on it, so the **same evidence document creates at most one queue row** — a
   replay collides and is routed through the fail-closed replay state machine (§3.1).
+- A provider-authenticated install/update resubmission for the **same active
+  `hardware_identity_hash`** may return an admission-success replay while a prior job is
+  `pending`/`waiting_trust`. This is not a new queue row and not a trust verdict; it only
+  acknowledges that evidence for the same hardware root is already awaiting verifier/operator
+  progress. Changed hardware identities still enter the normal admission cap and trust flow.
 - **One queue row does NOT mean one evaluation.** A `waiting_trust` job is re-`Evaluate`d on every
   batch run until it reaches a terminal state; this is by design (§6). Idempotency is preserved by
   the terminal-safe write `WHERE` + trigger B: a job cannot double-promote or be reopened.
-- Net: **exactly one queue row per distinct document; exactly one *terminal verdict* committed;
-  possibly many interim `waiting_trust` evaluations.**
+- Net: **at most one active admission row per hardware root during pending trust; exactly one
+  *terminal verdict* committed; possibly many interim `waiting_trust` evaluations.**
 
 ---
 

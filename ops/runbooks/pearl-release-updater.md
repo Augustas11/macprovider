@@ -110,13 +110,13 @@ legacy git-describe bootstrap is no longer accepted.
 
 ## One-time installation
 
-First deploy the #585 integration revision of #584's redesigned canary buyer
-exactly as reviewed, including its root-only `LoadCredential` files, safety
-observer, emergency stop, and classified no-load exits. The
+First deploy the issue #825 r5 legacy duplicate recovery revision of #584's redesigned
+canary buyer exactly as reviewed, including its root-only `LoadCredential`
+files, safety observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-585-integration-r7` at source commit `43138cee6dd26f18a11934390fc6b3b0623f1e00`;
+`issue-825-canary-fleet-r5` at source commit `98d95cb73573307c0e55855d9c3bb2ccd8e97b92`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
-on any SHA drift, missing credential, invalid two-provider expected-fleet
+on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,
 unexpected unit drop-in, stale systemd fragment, or changed three-minute
 canary budget. The one allowed canary drop-in is the updater's exact root-owned
@@ -144,7 +144,11 @@ From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
 fragments. Provision all four `LoadCredential` inputs as exact `0600` files,
 remove the retired environment file, and reload systemd without enabling either
-schedule:
+schedule. The reviewed expected-fleet JSON must enumerate the complete live
+protected provider fleet, not a two-provider sample: every protected provider
+ID must be unique, duplicate model IDs are allowed when several providers serve
+the same model, and the distinct model set must match the canary service's
+`CANARY_MODELS` list exactly.
 
 ```bash
 sudo install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
@@ -372,7 +376,7 @@ sudo test ! -e /run/macprovider-canary-buyer/legacy-rollback.json
    required evidence that the old coordinator cannot authorize the substitute;
    it is not serving proof. After the updater activates the reviewed bridge,
    the new coordinator may classify those same exact ID/model/version rows
-   `legacy_bridge`; r4 accepts that classification only as a substitute for the
+   `legacy_bridge`; r5 accepts that classification only as a substitute for the
    missing direct signal while retaining every pool, routing, connection, and
    heartbeat invariant. Before that canary starts, the updater requires three
    consecutive authenticated public `/poolz` samples that contain every exact
@@ -577,14 +581,19 @@ archive/stats services are restored before their timers, and no timer is
 restored until that full serving proof succeeds. Even then the canary timer
 remains stopped if its enable gate is missing or its emergency-disable sentinel
 exists, including when either kill switch changes during timer restoration.
-When restoring a pre-direct-telemetry backend, r4 may create
+When restoring a pre-direct-telemetry backend, r5 may create
 `/run/macprovider-canary-buyer/legacy-rollback.json` only inside the active
 phase-journal restoration. That root-owned `0644` control binds the exact
-captured two-provider ID/model fleet, the exact prior advertised binary
+captured protected provider ID/model fleet, the exact prior advertised binary
 version, the 64-hex transaction ID, and an expiry no more than 15 minutes away.
 It substitutes only for missing provider v2 signals on unclassified legacy
-rows; bridge/current/previous modes, wrong versions/models/IDs, stale sessions,
-capacity loss, and all other canary failures remain rejected. The updater
+rows and, during the scoped legacy rollback recovery/final-serving window only,
+tolerates readiness/signal/count loss or disappearance for one unexercised
+duplicate-model row when another authorized same-model provider is ready,
+routable, and fresh. If the duplicate row is still present, it must remain
+unclassified and identity/version/session-stable. Bridge/current/previous modes,
+wrong versions/models/IDs, stale sessions, exercised-provider loss,
+unique-model capacity loss, and all other canary failures remain rejected. The updater
 removes the control on every success or failure exit. Its presence outside a
 restoration blocks an ordinary rollout canary.
 The Better Stack heartbeat is then returned to its exact pre-maintenance paused

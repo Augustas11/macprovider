@@ -481,6 +481,117 @@ price_low_to_high
         XCTAssertEqual(try argumentValue(call.arguments, key: "sort_by") as? String, "price_low_to_high")
     }
 
+    // Regression: MCP-namespaced tool names contain hyphens (e.g. buzz-dev-mcp__shell).
+    // These are valid OpenAI/MCP function names but were rejected by the old
+    // Python-identifier validator, so Qwen3-Coder's <function=…> tool calls leaked as
+    // raw text and never became structured tool_calls (Buzz reply never posted).
+    func testQwen3CoderHyphenatedMCPToolName_WrappedForm() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"""
+<tool_call>
+<function=buzz-dev-mcp__shell>
+<parameter=command>
+buzz messages send --channel 7d5f1966-d036-431e-821e-3a4083f145fe --content "buzz-smoke-ok" --broadcast
+</parameter>
+</function>
+</tool_call>
+"""#,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+
+        XCTAssertNil(parsed.cleanedContent)
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "buzz-dev-mcp__shell")
+        XCTAssertEqual(
+            try argumentValue(call.arguments, key: "command") as? String,
+            "buzz messages send --channel 7d5f1966-d036-431e-821e-3a4083f145fe --content \"buzz-smoke-ok\" --broadcast"
+        )
+    }
+
+    // Exact shape captured on the wire from Qwen3-Coder on the Malibu gateway: a bare
+    // <function=…> block with an orphan trailing </tool_call> and no opening <tool_call>.
+    func testQwen3CoderHyphenatedMCPToolName_BareFunctionFormWithOrphanClose() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: "<function=buzz-dev-mcp__shell>\n<parameter=command>\necho hi\n</parameter>\n</function>\n</tool_call>",
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "buzz-dev-mcp__shell")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "command") as? String, "echo hi")
+    }
+
+    // Broadening the name charset must NOT weaken the allowlist boundary: a hyphenated
+    // name that is not among the declared tools still fails closed (leaks as text).
+    func testQwen3CoderHyphenatedUndeclaredFunctionStillFailsClosed() {
+        let raw = #"<tool_call><function=evil-dev-mcp__wipe><parameter=path>/</parameter></function></tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+        XCTAssertEqual(parsed.cleanedContent, raw)
+    }
+
+    // Names longer than the 64-char OpenAI limit are rejected (fail closed).
+    func testQwen3CoderOverlongFunctionNameFailsClosed() {
+        let longName = String(repeating: "a", count: 65)
+        let raw = "<tool_call><function=\(longName)><parameter=x>1</parameter></function></tool_call>"
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: [longName]
+        )
+
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    // MCP/JSON-Schema property names are not restricted to Python identifiers; the XML
+    // <parameter=…> parser must accept hyphenated parameter names (they become JSON keys).
+    func testQwen3CoderHyphenatedParameterName() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call><function=buzz-dev-mcp__shell><parameter=work-dir>/tmp</parameter></function></tool_call>"#,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "buzz-dev-mcp__shell")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "work-dir") as? String, "/tmp")
+    }
+
+    // Security: parameters from a LATER (undeclared) function block must not be attributed to a
+    // declared first function. Parsing is bound to the first <function>…</function> block.
+    func testQwen3CoderNestedUndeclaredFunctionDoesNotLeakParameters() {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call><function=buzz-dev-mcp__shell></function><function=evil-dev-mcp__wipe><parameter=command>rm -rf "$HOME/.ssh"</parameter></function></tool_call>"#,
+            modelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            allowedFunctionNames: ["buzz-dev-mcp__shell"]
+        )
+        // Acceptable outcomes: the declared first function with EMPTY args, or fully fail-closed.
+        // What must NOT happen: the undeclared second function's `command` leaks into the call.
+        for call in parsed.toolCalls {
+            XCTAssertEqual(call.functionName, "buzz-dev-mcp__shell")
+            XCTAssertFalse(call.arguments.contains("rm -rf"), "later-block params must not leak into the declared call")
+        }
+    }
+
+    // Function-XML is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). A Llama modelID must not
+    // synthesize tool calls from `<function=…>` markup.
+    func testLlamaModelIDDoesNotParseFunctionXML() {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<function=search><parameter=q>x</parameter></function>"#,
+            modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            allowedFunctionNames: ["search"]
+        )
+        XCTAssertTrue(parsed.toolCalls.isEmpty, "function-XML must not parse for non-Qwen families")
+    }
+
     func testQwen3CoderNemotronXMLUndeclaredFunctionFailsClosed() {
         let raw = #"<tool_call><function=delete_symbol><parameter=symbol>x</parameter></function></tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(

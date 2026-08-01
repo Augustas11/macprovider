@@ -115,8 +115,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-585-integration-r7"
-CANARY_AUTHORITY_COMMIT = "43138cee6dd26f18a11934390fc6b3b0623f1e00"
+CANARY_AUTHORITY_VERSION = "issue-825-canary-fleet-r5"
+CANARY_AUTHORITY_COMMIT = "98d95cb73573307c0e55855d9c3bb2ccd8e97b92"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -134,11 +134,11 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "73d47710a0a1a33c1f2b474f11a273f555b89d99118b5347be29492baba42a5d",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "65c07f1c8e111bc402e5e22f6a1871d66186bb6f618175a8f2aafebfa7ab743c",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "3b29494164e526e95f83c3de522b00a1fa8dd18479b5e6db0b6aa125d0250c55",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "03111b34d7ea86c0869be41ca54ed7057f437a0611e4637fc5d315aeb602f632",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
-    Path("/etc/systemd/system/canary-buyer.service"): "fcc5413a717373af4112d2cc62a2eabc9eeb7e48e3a5233b3cc81f4ca3bbfabb",
+    Path("/etc/systemd/system/canary-buyer.service"): "e7f028164d7ca58adaebfb4b1d194016a587dfae78af3f3a0b456ae374efea8a",
     Path("/etc/systemd/system/canary-buyer.timer"): "deb5e3acf67b8d713f61b3167224e908c6754e65e143d84840dba8fea3eb7a18",
 }
 CANARY_AUTHORITY_FILE_MODES = {
@@ -157,8 +157,11 @@ CANARY_EXPECTED_MODELS = frozenset(
     {
         "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
         "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "mlx-community/Qwen3-8B-4bit",
     }
 )
+CANARY_MIN_EXPECTED_PROVIDERS = len(CANARY_EXPECTED_MODELS)
+CANARY_MAX_EXPECTED_PROVIDERS = 100
 CANARY_AUTHORITY_PRIVATE_FILES = {
     CANARY_BUYER_TOKEN: "canary buyer token",
     CANARY_HEARTBEAT_URL: "canary heartbeat URL",
@@ -2713,15 +2716,16 @@ class Updater:
             not isinstance(document, dict)
             or document.get("schema_version") != 1
             or not isinstance(providers, list)
-            or len(providers) != 2
+            or len(providers) < CANARY_MIN_EXPECTED_PROVIDERS
+            or len(providers) > CANARY_MAX_EXPECTED_PROVIDERS
             or any(not isinstance(row, dict) for row in providers)
             or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)
-            or len(set(provider_ids)) != 2
-            or len(set(model_ids)) != 2
+            or len(set(provider_ids)) != len(provider_ids)
+            or not set(model_ids).issubset(CANARY_EXPECTED_MODELS)
             or set(model_ids) != CANARY_EXPECTED_MODELS
         ):
             raise UpdateError(
-                "canary expected fleet must bind exactly two unique providers to the pinned service models"
+                "canary expected fleet must bind unique protected providers to the pinned service models"
             )
         return normalized
 
@@ -4841,7 +4845,7 @@ class Updater:
         )
         return current, decision
 
-    def protected_provider_fleet_ready(self) -> bool:
+    def protected_provider_fleet_ready(self, *, require_previous_baseline: bool = True) -> bool:
         if not self.previous_protected_providers:
             return True
         poolz = self.get_authorized_json(
@@ -4853,11 +4857,13 @@ class Updater:
         if not isinstance(summary, dict) or not isinstance(rows, list):
             raise UpdateError("public protected-fleet sample omitted pool or summary")
         ready = summary.get("ready")
-        required_ready = max(
-            self.config.minimum_pool_ready_after_rollout,
-            self.previous_pool_ready or 0,
-            len(self.previous_protected_providers),
-        )
+        required_ready = self.config.minimum_pool_ready_after_rollout
+        if require_previous_baseline:
+            required_ready = max(
+                required_ready,
+                self.previous_pool_ready or 0,
+                len(self.previous_protected_providers),
+            )
         if type(ready) is not int or ready < required_ready:
             return False
         current: dict[str, dict[str, Any]] = {}
@@ -4870,6 +4876,13 @@ class Updater:
             if provider_id in current:
                 raise UpdateError("public protected-fleet sample contains duplicate provider identities")
             current[provider_id] = row
+        if not require_previous_baseline:
+            ready_rows = sum(
+                1
+                for row in current.values()
+                if row.get("state") == "ready" and row.get("routing_eligible") is True
+            )
+            return ready_rows >= max(required_ready, len(current))
         return all(
             provider_id in current
             and current[provider_id].get("state") == "ready"
@@ -4896,11 +4909,17 @@ class Updater:
         )
         if self.previous_protected_providers:
             stable_samples = 0
+            relax_previous_baseline = (
+                legacy_rollback_version is not None
+                and self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
+            )
 
             def protected_fleet_stable() -> bool:
                 nonlocal stable_samples
                 try:
-                    ready = self.protected_provider_fleet_ready()
+                    ready = self.protected_provider_fleet_ready(
+                        require_previous_baseline=not relax_previous_baseline
+                    )
                 except Exception:
                     stable_samples = 0
                     raise

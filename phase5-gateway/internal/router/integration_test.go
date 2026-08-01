@@ -387,6 +387,9 @@ func assertNoStoreCacheHeaders(t *testing.T, resp *httptest.ResponseRecorder) {
 	if !strings.Contains(varyJoined, "Authorization") {
 		t.Errorf("Vary=%q must contain Authorization", varyJoined)
 	}
+	if !strings.Contains(varyJoined, "X-Api-Key") {
+		t.Errorf("Vary=%q must contain X-Api-Key", varyJoined)
+	}
 	if !strings.Contains(varyJoined, "X-Demo-Token") {
 		t.Errorf("Vary=%q must contain X-Demo-Token", varyJoined)
 	}

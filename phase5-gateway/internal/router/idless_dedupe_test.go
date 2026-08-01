@@ -1085,8 +1085,9 @@ func TestIdlessDedupeIndex_WaiterCapAndContextExpiry(t *testing.T) {
 func TestIdlessRequestFingerprintIsKeyedOnEveryPart(t *testing.T) {
 	base := idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`))
 	cases := map[string]string{
-		"same inputs":         idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
-		"other entrypoint":    idlessRequestFingerprint(idlessDedupeEntrypointResponses, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"same inputs":            idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"other entrypoint":       idlessRequestFingerprint(idlessDedupeEntrypointResponses, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
+		"messages entrypoint":    idlessRequestFingerprint(idlessDedupeEntrypointMessages, "acct", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
 		"other account":       idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct2", "demo-hash", "thread-1", "", []byte(`{"a":1}`)),
 		"other demo token":    idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash-2", "thread-1", "", []byte(`{"a":1}`)),
 		"other conversation":  idlessRequestFingerprint(idlessDedupeEntrypointChat, "acct", "demo-hash", "thread-2", "", []byte(`{"a":1}`)),

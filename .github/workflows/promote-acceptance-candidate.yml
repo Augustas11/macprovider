@@ -469,6 +469,15 @@ jobs:
             echo "FAIL: origin/main moved under bound exception authority before undraft" >&2
             exit 1
           fi
+          echo "::group::Verify live coordinator release gate"
+          env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
+            python3 scripts/verify-live-coordinator-release-gate.py \
+            --tag "$TAG" \
+            --pearl-release-json "$accepted/pearl-release.json" \
+            --trusted-keys "$accepted/trusted-keys.json" \
+            --coordinator-url https://coordinator.streamvc.live \
+            --openssl "$OPENSSL_BIN"
+          echo "::endgroup::"
           # Repository rules and the production-release environment serialize
           # the sole owner publication path. Re-fetch the exact numeric draft
           # and tag immediately before this irreversible transition.

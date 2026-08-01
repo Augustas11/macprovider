@@ -20,51 +20,98 @@ narrative**, the SPEC body is the source of truth on contract.
 
 ## 1. Hot wallet provisioning + funding (SPEC §9.1 + §6.1)
 
-### 1.1 Generate a fresh hot wallet
+### 1.1 + 1.2 Generate and encrypt the hot wallet (one vetted tool)
 
 The hot wallet is the secp256k1 keypair that signs payout
-transactions. It **MUST** be generated offline on a clean
-machine; never paste a key from a chat client or copy across
-the network.
+transactions. Generate AND encrypt it with the checked-in
+`payout-wallet-encrypt` tool, which uses the **exact** AES-256-GCM
+format the coordinator decrypts (`LoadLocalFileSigner`), so the file
+cannot be format-mismatched into an unloadable (funds-locked) wallet.
+The plaintext private key is held only in memory and never written to
+disk — there is no `/tmp/payout.key` to shred.
+
+**Run offline on a dedicated, network-isolated machine.** Never paste
+a key from a chat client or copy plaintext across the network.
 
 ```bash
-# On a dedicated, network-isolated machine:
-# 1. Generate the keypair.
-openssl ecparam -genkey -name secp256k1 -noout -out /tmp/payout.key
-# 2. Derive the EIP-55 checksummed address.
-PUBKEY=$(openssl ec -in /tmp/payout.key -pubout -outform der \
-  | tail -c +24 | xxd -p -c 65)
-# (then derive address via keccak256 of the uncompressed pubkey;
-# any reputable offline tool — etherwallet, mycrypto, ethers.js
-# in an air-gapped node — produces the EIP-55 form)
+# 1. Generate a fresh 32-byte KEK (AES-256).
+openssl rand -hex 32 > kek.hex        # 64 hex chars
+
+# 2. Build the tool from this repo checkout (offline machine).
+#    The Go module root is phase4-coordinator/, so build from there.
+(cd phase4-coordinator && go build -o ../payout-wallet-encrypt ./cmd/payout-wallet-encrypt)
+
+# 3. Generate the wallet, encrypt under the KEK, write the file.
+#    Prints ONLY the EIP-55 address (never the private key or KEK).
+./payout-wallet-encrypt -kek-file kek.hex -out payout-wallet.hex
+# -> hot wallet address (EIP-55): 0x....
+#    encrypted wallet written:    payout-wallet.hex (mode 0600, OnDiskHex=true)
 ```
 
-Record the address in `dist/coordinator.yaml`:
+Record the printed address in `dist/coordinator.yaml`:
 
 ```yaml
 payout:
   security:
-    hot_wallet_address: "0x<EIP-55 checksummed>"
+    hot_wallet_address: "0x<EIP-55 from the tool output>"
+    encrypted_wallet_path: "/etc/macprovider/payout-wallet.hex"
+    encrypted_wallet_on_disk_hex: true   # REQUIRED: the tool writes hex.
+    # The config default is false (raw bytes); leaving this unset/false
+    # makes LoadLocalFileSigner read the hex file as raw bytes and fail
+    # GCM decrypt at startup — payouts blocked after funding.
 ```
 
-### 1.2 Encrypt the wallet with the KEK
+Transfer ONLY `payout-wallet.hex` to the coordinator host (mode 0600,
+owned by the service user). Deliver `kek.hex` to the host as a systemd
+credential — `LoadCredential=payout-wallet-kek:/path/to/kek.hex` on the
+unit (preferred) or, only if LoadCredential is unavailable, the
+`MACPROVIDER_PAYOUT_WALLET_KEK` env var. **Back up `payout-wallet.hex`
+AND `kek.hex` on separate media (SPEC §9.8) BEFORE destroying the
+originals** — losing either permanently locks the funds. Once backups
+and the host credential are verified, `shred -u kek.hex` on the offline
+machine.
 
-The on-disk wallet file is AES-256-GCM encrypted; the KEK is
-supplied at runtime via systemd LoadCredential (preferred) or
-the `MACPROVIDER_PAYOUT_WALLET_KEK` env var.
+> To re-encrypt an EXISTING raw key (e.g. migrating custody), pass it as
+> 64 hex chars in a file: `payout-wallet-encrypt -kek-file kek.hex
+> -key-file existing-key.hex -out payout-wallet.hex`.
+
+### 1.2b Prove the deployed wallet loads — BEFORE funding
+
+The coordinator does NOT load the signer while `payout.enabled: false`, so a
+wrong `encrypted_wallet_on_disk_hex`, a mismatched KEK, or a corrupted transfer
+is otherwise not caught until you flip enabled — AFTER the wallet is already
+funded. Run `-verify` on the coordinator host against the EXACT deployed file +
+KEK, and confirm it derives the address you are about to fund:
 
 ```bash
-# Generate a fresh 32-byte KEK on the same offline machine.
-KEK=$(openssl rand -hex 32)
-# Encrypt the wallet bytes with AES-256-GCM (use the helper at
-# phase4-coordinator/scripts/encrypt-payout-wallet.sh OR any
-# vetted AES-GCM tool with a fresh 12-byte nonce per file).
+# On the coordinator host. Point -kek-file at the SAME 32-byte KEK the unit
+# loads. $CREDENTIALS_DIRECTORY is only set inside the systemd unit context,
+# so in a plain shell use the KEK file you deployed/backed up:
+payout-wallet-encrypt -verify \
+  -kek-file /root/payout-kek.hex \
+  -wallet-file /etc/macprovider/payout-wallet.hex \
+  -expect-address 0x<the address from §1.1> \
+  -on-disk-hex
+# -> OK: wallet loads and controls 0x... — safe to fund this address.
+# A MISMATCH or load failure here means DO NOT FUND — fix the tuple first.
 ```
 
-Transfer ONLY the encrypted file to the coordinator host.
-The KEK is loaded via systemd credentials at boot; the
-plaintext key file MUST be destroyed on the offline machine
-immediately after encryption (`shred -u` or equivalent).
+To exercise the EXACT `LoadCredential=` delivery path instead of a loose KEK
+file (recommended when the KEK is only ever a systemd credential), run the same
+check under `systemd-run`, which populates `$CREDENTIALS_DIRECTORY`:
+
+```bash
+# Wrap in sh -c so $CREDENTIALS_DIRECTORY is expanded by a shell inside the
+# credential context (systemd-run runs the command directly, without a shell).
+systemd-run --pipe --wait \
+  -p "LoadCredential=payout-wallet-kek:/root/payout-kek.hex" \
+  sh -c 'payout-wallet-encrypt -verify \
+    -kek-file "$CREDENTIALS_DIRECTORY/payout-wallet-kek" \
+    -wallet-file /etc/macprovider/payout-wallet.hex \
+    -expect-address 0x<the address from §1.1> -on-disk-hex'
+```
+
+Only proceed to §1.3 once this prints OK.
 
 ### 1.3 First-time funding
 
