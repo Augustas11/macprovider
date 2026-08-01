@@ -1138,6 +1138,29 @@
   ],
   "requirements": [
     {
+      "requirement_id": "SPEC-001-R001",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func setSleepAssertionDesired",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runReconnectLoop",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func drainFromCoordinator"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionSurvivesDisconnectAndReleasesOnStop",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionFollowsServingIntent",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/854",
+        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (§6.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+      }
+    },
+    {
       "requirement_id": "SPEC-002-R001",
       "spec_id": "SPEC-002",
       "state": "pending",
