@@ -84,14 +84,29 @@ funded. Run `-verify` on the coordinator host against the EXACT deployed file +
 KEK, and confirm it derives the address you are about to fund:
 
 ```bash
-# On the coordinator host, using the deployed wallet + the KEK credential.
+# On the coordinator host. Point -kek-file at the SAME 32-byte KEK the unit
+# loads. $CREDENTIALS_DIRECTORY is only set inside the systemd unit context,
+# so in a plain shell use the KEK file you deployed/backed up:
 payout-wallet-encrypt -verify \
-  -kek-file "$CREDENTIALS_DIRECTORY/payout-wallet-kek" \
+  -kek-file /root/payout-kek.hex \
   -wallet-file /etc/macprovider/payout-wallet.hex \
   -expect-address 0x<the address from §1.1> \
   -on-disk-hex
 # -> OK: wallet loads and controls 0x... — safe to fund this address.
 # A MISMATCH or load failure here means DO NOT FUND — fix the tuple first.
+```
+
+To exercise the EXACT `LoadCredential=` delivery path instead of a loose KEK
+file (recommended when the KEK is only ever a systemd credential), run the same
+check under `systemd-run`, which populates `$CREDENTIALS_DIRECTORY`:
+
+```bash
+systemd-run --pipe --wait \
+  -p "LoadCredential=payout-wallet-kek:/root/payout-kek.hex" \
+  payout-wallet-encrypt -verify \
+    -kek-file "\$CREDENTIALS_DIRECTORY/payout-wallet-kek" \
+    -wallet-file /etc/macprovider/payout-wallet.hex \
+    -expect-address 0x<the address from §1.1> -on-disk-hex
 ```
 
 Only proceed to §1.3 once this prints OK.
