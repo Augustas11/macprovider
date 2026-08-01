@@ -862,6 +862,19 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     now,
   ).some((reason) => reason.includes('provider-c')));
 
+  const duplicatePoolIdentity = structuredClone(missingDuplicate);
+  const duplicateProviderB = structuredClone(
+    duplicatePoolIdentity.operator_pool.find((row) => row.provider_id === 'provider-b'),
+  );
+  duplicateProviderB.assigned_id = 'duplicate-session';
+  duplicatePoolIdentity.operator_pool.push(duplicateProviderB);
+  assert.ok(safetyObservationReasons(observation, duplicatePoolIdentity, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => reason.includes('provider-c')));
+
   const expandedExpectedFleet = [
     ...expectedFleet,
     { provider_id: 'provider-d', model_id: 'model-b' },

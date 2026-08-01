@@ -1129,6 +1129,17 @@ function legacyRollbackRowAuthorized(row, expected, authorizedProviders, nowMs) 
     && row?.binary_version === authorization.binary_version;
 }
 
+function hasDuplicateProviderIDs(rows) {
+  const seen = new Set();
+  for (const row of rows) {
+    const providerID = row?.provider_id;
+    if (typeof providerID !== 'string' || providerID.length === 0) continue;
+    if (seen.has(providerID)) return true;
+    seen.add(providerID);
+  }
+  return false;
+}
+
 function legacyIdleDuplicateDropAllowance(
   observations,
   expectedFleet,
@@ -1144,6 +1155,8 @@ function legacyIdleDuplicateDropAllowance(
   const providerIDs = new Set();
   for (const observed of observedList) {
     const rows = Array.isArray(observed?.operator_pool) ? observed.operator_pool : [];
+    if (hasDuplicateProviderIDs(rows)) return empty;
+    if (hasDuplicateProviderIDs(Array.isArray(observed?.providers) ? observed.providers : [])) return empty;
     const currentByID = new Map(rows.map((row) => [row.provider_id, row]));
     for (const expected of expectedFleet) {
       const id = expected.provider_id;
