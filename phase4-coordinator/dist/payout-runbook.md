@@ -75,6 +75,27 @@ machine.
 > 64 hex chars in a file: `payout-wallet-encrypt -kek-file kek.hex
 > -key-file existing-key.hex -out payout-wallet.hex`.
 
+### 1.2b Prove the deployed wallet loads — BEFORE funding
+
+The coordinator does NOT load the signer while `payout.enabled: false`, so a
+wrong `encrypted_wallet_on_disk_hex`, a mismatched KEK, or a corrupted transfer
+is otherwise not caught until you flip enabled — AFTER the wallet is already
+funded. Run `-verify` on the coordinator host against the EXACT deployed file +
+KEK, and confirm it derives the address you are about to fund:
+
+```bash
+# On the coordinator host, using the deployed wallet + the KEK credential.
+payout-wallet-encrypt -verify \
+  -kek-file "$CREDENTIALS_DIRECTORY/payout-wallet-kek" \
+  -wallet-file /etc/macprovider/payout-wallet.hex \
+  -expect-address 0x<the address from §1.1> \
+  -on-disk-hex
+# -> OK: wallet loads and controls 0x... — safe to fund this address.
+# A MISMATCH or load failure here means DO NOT FUND — fix the tuple first.
+```
+
+Only proceed to §1.3 once this prints OK.
+
 ### 1.3 First-time funding
 
 After the encrypted wallet is deployed AND `payout.enabled: false`

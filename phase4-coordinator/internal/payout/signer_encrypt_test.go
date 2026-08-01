@@ -1,11 +1,63 @@
 package payout
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// TestValidatePrivateKeyScalar_RejectsInvalid proves the write-side paths
+// reject a zero key and an out-of-range (>= N) scalar — secp256k1.PrivKeyFromBytes
+// would otherwise accept zero and silently reduce overflow, deriving an address
+// the operator does not control (locked-funds hazard on -key-file import).
+func TestValidatePrivateKeyScalar_RejectsInvalid(t *testing.T) {
+	zeroKey := make([]byte, 32)
+	overflow := make([]byte, 32)
+	for i := range overflow {
+		overflow[i] = 0xff // 0xffff...ff > curve order N
+	}
+	kek := make([]byte, 32)
+	for _, tc := range []struct {
+		name string
+		key  []byte
+	}{{"zero", zeroKey}, {"overflow_all_ff", overflow}} {
+		if _, err := WalletAddressForKey(tc.key); err == nil {
+			t.Fatalf("%s: WalletAddressForKey accepted invalid scalar", tc.name)
+		}
+		if _, err := EncryptWalletKey(tc.key, kek); err == nil {
+			t.Fatalf("%s: EncryptWalletKey accepted invalid scalar", tc.name)
+		}
+	}
+}
+
+// TestLoadLocalFileSigner_RejectsInvalidDecryptedScalar proves the READ path
+// also validates: a wallet file that decrypts to a zero key (hand-sealed here,
+// since EncryptWalletKey now refuses to produce one) must be rejected at load.
+func TestLoadLocalFileSigner_RejectsInvalidDecryptedScalar(t *testing.T) {
+	kek := make([]byte, 32)
+	block, err := aes.NewCipher(kek)
+	if err != nil {
+		t.Fatalf("aes: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("gcm: %v", err)
+	}
+	nonce := make([]byte, 12)
+	ct := gcm.Seal(nil, nonce, make([]byte, 32), nil) // seal an all-zero "key"
+	raw := append(append([]byte{}, nonce...), ct...)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "w.hex")
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(raw)), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadLocalFileSigner(EncryptedWalletFile{Path: path, OnDiskHex: true}, kek); err == nil {
+		t.Fatal("LoadLocalFileSigner accepted a zero-scalar decrypted key")
+	}
+}
 
 // TestEncryptWalletKey_RoundTripsThroughLoadLocalFileSigner is the
 // load-bearing parity test: a key encrypted by EncryptWalletKey MUST be

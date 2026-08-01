@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/payout"
 )
@@ -46,8 +47,16 @@ func main() {
 func run() error {
 	kekFile := flag.String("kek-file", "", "path to a file containing the 32-byte KEK as 64 hex chars (required)")
 	keyFile := flag.String("key-file", "", "optional path to an existing raw secp256k1 private key as 64 hex chars; if omitted a fresh key is generated")
-	out := flag.String("out", "", "output path for the encrypted wallet file (required; refuses to overwrite)")
+	out := flag.String("out", "", "output path for the encrypted wallet file (required unless -verify; refuses to overwrite)")
+	verify := flag.Bool("verify", false, "verify mode: decrypt an EXISTING wallet with the KEK and confirm it loads to -expect-address (run BEFORE funding)")
+	walletFile := flag.String("wallet-file", "", "verify mode: path to the deployed encrypted wallet file")
+	expectAddr := flag.String("expect-address", "", "verify mode: the EIP-55 address you are about to fund; must match the decrypted wallet")
+	onDiskHex := flag.Bool("on-disk-hex", true, "verify mode: whether the wallet file is hex-encoded (this tool writes hex)")
 	flag.Parse()
+
+	if *verify {
+		return runVerify(*kekFile, *walletFile, *expectAddr, *onDiskHex)
+	}
 
 	if *kekFile == "" || *out == "" {
 		return fmt.Errorf("both -kek-file and -out are required")
@@ -107,6 +116,34 @@ func run() error {
 	fmt.Println("next: set payout.security.hot_wallet_address to the address above,")
 	fmt.Println("      deploy the encrypted file as payout.security.encrypted_wallet_path,")
 	fmt.Println("      and load the KEK via systemd LoadCredential=payout-wallet-kek.")
+	return nil
+}
+
+// runVerify decrypts an already-deployed encrypted wallet with the KEK and
+// confirms the derived address matches -expect-address. Run this on the
+// coordinator host against the EXACT deployed wallet file + KEK BEFORE any
+// funding: it proves the full tuple (encrypted_wallet_path + KEK +
+// on-disk-hex) loads to the intended address, so USDC is never sent to an
+// address the coordinator cannot actually sign for.
+func runVerify(kekFile, walletFile, expectAddr string, onDiskHex bool) error {
+	if kekFile == "" || walletFile == "" || expectAddr == "" {
+		return fmt.Errorf("-verify requires -kek-file, -wallet-file, and -expect-address")
+	}
+	kek, err := readHexFile(kekFile, 32)
+	if err != nil {
+		return fmt.Errorf("read KEK: %w", err)
+	}
+	defer zero(kek)
+
+	signer, err := payout.LoadLocalFileSigner(payout.EncryptedWalletFile{Path: walletFile, OnDiskHex: onDiskHex}, kek)
+	if err != nil {
+		return fmt.Errorf("wallet did NOT load (bad KEK, wrong on-disk-hex, or corrupt file): %w", err)
+	}
+	got := signer.FromAddress()
+	if !strings.EqualFold(strings.TrimSpace(expectAddr), got) {
+		return fmt.Errorf("address MISMATCH: wallet decrypts to %s but -expect-address is %s — DO NOT FUND", got, expectAddr)
+	}
+	fmt.Printf("OK: wallet loads and controls %s — safe to fund this address.\n", got)
 	return nil
 }
 

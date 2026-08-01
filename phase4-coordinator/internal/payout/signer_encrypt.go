@@ -5,11 +5,35 @@ import (
 	"crypto/cipher"
 	crand "crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
+
+// validatePrivateKeyScalar rejects private-key bytes that are not a valid
+// secp256k1 scalar in [1, N-1]. secp256k1.PrivKeyFromBytes does NOT enforce
+// this: it accepts an all-zero key and silently reduces values >= the curve
+// order N. Either would derive an address the operator does not actually
+// control with the intended key material — a locked-funds hazard on the
+// -key-file import path and on any corrupted decrypt. Callers MUST run this
+// before PrivKeyFromBytes.
+func validatePrivateKeyScalar(privKey []byte) error {
+	if len(privKey) != 32 {
+		return fmt.Errorf("private key must be 32 bytes (got %d)", len(privKey))
+	}
+	var s secp256k1.ModNScalar
+	overflow := s.SetByteSlice(privKey)
+	defer s.Zero()
+	if overflow {
+		return errors.New("private key is not a valid secp256k1 scalar (>= curve order N)")
+	}
+	if s.IsZero() {
+		return errors.New("private key is zero, not a valid secp256k1 scalar")
+	}
+	return nil
+}
 
 // This file is the WRITE side of the v0.1.x wallet format whose READ
 // side is LoadLocalFileSigner (signer.go). It exists so the SPEC-016
@@ -37,10 +61,11 @@ func GenerateWalletKey() (*secp256k1.PrivateKey, error) {
 // WalletAddressForKey derives the EIP-55-checksummed address for a raw
 // 32-byte secp256k1 private key, matching LoadLocalFileSigner's derivation.
 func WalletAddressForKey(privKey []byte) (string, error) {
-	if len(privKey) != 32 {
-		return "", fmt.Errorf("WalletAddressForKey: privKey must be 32 bytes (got %d)", len(privKey))
+	if err := validatePrivateKeyScalar(privKey); err != nil {
+		return "", fmt.Errorf("WalletAddressForKey: %w", err)
 	}
 	priv := secp256k1.PrivKeyFromBytes(privKey)
+	defer priv.Zero()
 	return deriveEthereumAddress(priv.PubKey())
 }
 
@@ -57,8 +82,8 @@ func WalletAddressForKey(privKey []byte) (string, error) {
 // the KEK is logged; callers MUST NOT log the returned value either (it
 // is ciphertext, but treat the whole flow as secret-handling).
 func EncryptWalletKey(privKey []byte, kek []byte) (string, error) {
-	if len(privKey) != 32 {
-		return "", fmt.Errorf("EncryptWalletKey: privKey must be 32 bytes (got %d)", len(privKey))
+	if err := validatePrivateKeyScalar(privKey); err != nil {
+		return "", fmt.Errorf("EncryptWalletKey: %w", err)
 	}
 	if len(kek) != 32 {
 		return "", fmt.Errorf("EncryptWalletKey: KEK must be 32 bytes (got %d)", len(kek))
