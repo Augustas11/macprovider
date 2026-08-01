@@ -862,6 +862,65 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     now,
   ).some((reason) => reason.includes('provider-c')));
 
+  const expandedExpectedFleet = [
+    ...expectedFleet,
+    { provider_id: 'provider-d', model_id: 'model-b' },
+  ];
+  const expandedDocument = {
+    ...document,
+    providers: expandedExpectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const expandedAuthorized = validateLegacyRollbackAuthorization(expandedDocument, expandedExpectedFleet, now);
+  const providerDRow = {
+    provider_id: 'provider-d',
+    assigned_id: 'session-3',
+    model_id: 'model-b',
+    state: 'ready',
+    routing_eligible: true,
+    binary_version: '1.8.30',
+    connected_at: new Date(now - 60_000).toISOString(),
+    last_heartbeat_at: new Date(now - 1_000).toISOString(),
+    last_activity_at: new Date(now - 1_000).toISOString(),
+  };
+  const expandedObservation = structuredClone(observation);
+  expandedObservation.gateway.pool.total_providers = 4;
+  expandedObservation.gateway.pool.ready = 4;
+  expandedObservation.gateway.models[1].provider_count = 3;
+  expandedObservation.gateway.models[1].ready_provider_count = 3;
+  expandedObservation.gateway.models[1].slots_free = 3;
+  expandedObservation.operator_pool = poolzSnapshot({
+    pool: [
+      ...expandedObservation.operator_pool,
+      providerDRow,
+    ],
+  }, now);
+  expandedObservation.providers = [
+    ...expandedObservation.providers,
+    safetyProvider('provider-d', 'model-b', 'session-3', {
+      binary_version: '1.8.30',
+      observation_id: 'provider-d-initial',
+      observed_at: new Date(now - 1_000).toISOString(),
+    }),
+  ];
+  const twoMissingDuplicates = structuredClone(expandedObservation);
+  twoMissingDuplicates.gateway.pool.total_providers = 2;
+  twoMissingDuplicates.gateway.pool.ready = 2;
+  twoMissingDuplicates.gateway.models[1].provider_count = 1;
+  twoMissingDuplicates.gateway.models[1].ready_provider_count = 1;
+  twoMissingDuplicates.gateway.models[1].slots_free = 1;
+  twoMissingDuplicates.operator_pool = twoMissingDuplicates.operator_pool.filter(
+    (row) => !['provider-c', 'provider-d'].includes(row.provider_id),
+  );
+  twoMissingDuplicates.providers = twoMissingDuplicates.providers.filter(
+    (provider) => !['provider-c', 'provider-d'].includes(provider.provider_id),
+  );
+  assert.ok(safetyObservationReasons(expandedObservation, twoMissingDuplicates, expandedExpectedFleet, {
+    legacyRollbackProviders: expandedAuthorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => reason.includes('provider-c') || reason.includes('provider-d')));
+
   const uniqueLoss = structuredClone(recoveryTwo);
   const providerA = uniqueLoss.operator_pool.find((row) => row.provider_id === 'provider-a');
   providerA.state = 'unavailable';

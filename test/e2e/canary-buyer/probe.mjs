@@ -1175,9 +1175,9 @@ function legacyIdleDuplicateDropAllowance(
       });
       if (substituteReady) providerIDs.add(id);
     }
-  }
-  if (!providerIDs.size) return empty;
-  const byModel = new Map();
+	  }
+	  if (providerIDs.size !== 1) return empty;
+	  const byModel = new Map();
   for (const id of providerIDs) {
     const model = expectedByID.get(id)?.model_id || '';
     if (model) byModel.set(model, (byModel.get(model) || 0) + 1);

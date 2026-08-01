@@ -4877,7 +4877,12 @@ class Updater:
                 raise UpdateError("public protected-fleet sample contains duplicate provider identities")
             current[provider_id] = row
         if not require_previous_baseline:
-            return True
+            ready_rows = sum(
+                1
+                for row in current.values()
+                if row.get("state") == "ready" and row.get("routing_eligible") is True
+            )
+            return ready_rows >= max(required_ready, len(current))
         return all(
             provider_id in current
             and current[provider_id].get("state") == "ready"
@@ -4904,12 +4909,16 @@ class Updater:
         )
         if self.previous_protected_providers:
             stable_samples = 0
+            relax_previous_baseline = (
+                legacy_rollback_version is not None
+                and self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
+            )
 
             def protected_fleet_stable() -> bool:
                 nonlocal stable_samples
                 try:
                     ready = self.protected_provider_fleet_ready(
-                        require_previous_baseline=legacy_rollback_version is None
+                        require_previous_baseline=not relax_previous_baseline
                     )
                 except Exception:
                     stable_samples = 0
