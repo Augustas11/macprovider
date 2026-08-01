@@ -681,7 +681,11 @@ def check_expiry_self_extension(
             )
 
 
-def validate_stale_register(doc: dict[str, Any], result: ValidationResult) -> None:
+def validate_stale_register(
+    doc: dict[str, Any],
+    result: ValidationResult,
+    now: datetime | None = None,
+) -> None:
     """Structural validation for a stale/backup register before sync simulation.
 
     Historical mode: do not require tombstones for removed rows (stale may
@@ -692,7 +696,17 @@ def validate_stale_register(doc: dict[str, Any], result: ValidationResult) -> No
         return
     # Full structural validation, then drop historical-only missing_tombstone
     # findings that cannot apply to pre-tombstone backups.
-    historical = validate_register(doc, tombstones={"schema_version": TOMBSTONE_SCHEMA_VERSION, "updated_at": "1970-01-01T00:00:00Z", "updated_by": "historical", "environment": ENVIRONMENT, "tombstones": []})
+    historical = validate_register(
+        doc,
+        now=now,
+        tombstones={
+            "schema_version": TOMBSTONE_SCHEMA_VERSION,
+            "updated_at": "1970-01-01T00:00:00Z",
+            "updated_by": "historical",
+            "environment": ENVIRONMENT,
+            "tombstones": [],
+        },
+    )
     for finding in historical.findings:
         if finding.code == "missing_tombstone":
             continue
@@ -708,11 +722,12 @@ def simulate_config_sync_restore(
     current_doc: dict[str, Any],
     stale_authoritative_doc: dict[str, Any],
     tombstones: dict[str, Any],
+    now: datetime | None = None,
 ) -> ValidationResult:
     """Model a sync/rollback that re-applies stale authoritative exception rows."""
     result = ValidationResult()
-    result.extend(validate_register(current_doc, tombstones=tombstones))
-    validate_stale_register(stale_authoritative_doc, result)
+    result.extend(validate_register(current_doc, now=now, tombstones=tombstones))
+    validate_stale_register(stale_authoritative_doc, result, now=now)
     if result.errors:
         # Malformed current/stale/tombstones already fail closed; do not pretend OK.
         return result.dedupe()
@@ -1129,10 +1144,11 @@ def cmd_sync_check(args: argparse.Namespace) -> int:
     root = Path(args.root) if args.root else repo_root_from_here()
     current = load_json(Path(args.current))
     stale = load_json(Path(args.stale))
+    now = parse_rfc3339(args.now) if args.now else datetime.now(timezone.utc)
     tombstones = load_json(
         Path(args.tombstones) if args.tombstones else default_tombstone_path(root)
     )
-    result = simulate_config_sync_restore(current, stale, tombstones)
+    result = simulate_config_sync_restore(current, stale, tombstones, now=now)
     for finding in result.findings:
         print(finding.format(), file=sys.stderr if finding.severity == "error" else sys.stdout)
     if result.errors:
