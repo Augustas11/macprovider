@@ -114,9 +114,9 @@ First deploy the #585 integration revision of #584's redesigned canary buyer
 exactly as reviewed, including its root-only `LoadCredential` files, safety
 observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-585-integration-r7` at source commit `43138cee6dd26f18a11934390fc6b3b0623f1e00`;
+`issue-825-canary-fleet-r1` at source commit `9875d9c6e81fa992a57f5221ff18f4e413cf7fc3`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
-on any SHA drift, missing credential, invalid two-provider expected-fleet
+on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,
 unexpected unit drop-in, stale systemd fragment, or changed three-minute
 canary budget. The one allowed canary drop-in is the updater's exact root-owned
@@ -144,7 +144,11 @@ From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
 fragments. Provision all four `LoadCredential` inputs as exact `0600` files,
 remove the retired environment file, and reload systemd without enabling either
-schedule:
+schedule. The reviewed expected-fleet JSON must enumerate the complete live
+protected provider fleet, not a two-provider sample: every protected provider
+ID must be unique, duplicate model IDs are allowed when several providers serve
+the same model, and the distinct model set must match the canary service's
+`CANARY_MODELS` list exactly.
 
 ```bash
 sudo install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
@@ -580,7 +584,7 @@ exists, including when either kill switch changes during timer restoration.
 When restoring a pre-direct-telemetry backend, r4 may create
 `/run/macprovider-canary-buyer/legacy-rollback.json` only inside the active
 phase-journal restoration. That root-owned `0644` control binds the exact
-captured two-provider ID/model fleet, the exact prior advertised binary
+captured protected provider ID/model fleet, the exact prior advertised binary
 version, the 64-hex transaction ID, and an expiry no more than 15 minutes away.
 It substitutes only for missing provider v2 signals on unclassified legacy
 rows; bridge/current/previous modes, wrong versions/models/IDs, stale sessions,
