@@ -93,6 +93,9 @@ test('gateway pre/post invariants match exact active non-routable aggregation lo
   assert.deepEqual(gatewayInvariantReasons(initial, active, {
     minReadyProviders: 2, activeModelID: 'model-a',
   }), []);
+  assert.deepEqual(gatewayInvariantReasons(initial, initial, {
+    minReadyProviders: 2, activeModelID: 'model-a',
+  }), []);
   const inventedDegradedRow = structuredClone(initial);
   inventedDegradedRow.pool.ready = 1;
   inventedDegradedRow.pool.degraded = 1;
