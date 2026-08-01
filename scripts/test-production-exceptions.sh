@@ -390,7 +390,7 @@ removed = {
     "owner": "ops/test",
     "issue": "https://github.com/Augustas11/macprovider/issues/615",
     "created_at": "2026-07-01T00:00:00Z",
-    "expires_at": "2026-08-01T00:00:00Z",
+    "expires_at": "2099-01-01T00:00:00Z",
     "scope": "test",
     "removal_condition": "done",
     "rollback_command": "echo",

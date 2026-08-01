@@ -20,6 +20,7 @@ import production_exceptions as pe  # noqa: E402
 
 
 NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)
+FUTURE_EXPIRES_AT = "2099-01-01T00:00:00Z"
 
 
 def _minimal_entry(**overrides):
@@ -34,7 +35,7 @@ def _minimal_entry(**overrides):
         "owner": "ops/test",
         "issue": "https://github.com/Augustas11/macprovider/issues/615",
         "created_at": "2026-07-01T00:00:00Z",
-        "expires_at": "2026-08-01T00:00:00Z",
+        "expires_at": FUTURE_EXPIRES_AT,
         "scope": "unit-test only; must not widen to arbitrary providers",
         "removal_condition": "test complete",
         "rollback_command": "echo rollback",
@@ -189,7 +190,13 @@ class ProductionExceptionsTests(unittest.TestCase):
         removed = _minimal_entry(id="exc-removed-sample", status="removed")
         current = _minimal_register([removed])
         stale = _minimal_register(
-            [_minimal_entry(id="exc-removed-sample", status="active", expires_at="2026-08-01T00:00:00Z")]
+            [
+                _minimal_entry(
+                    id="exc-removed-sample",
+                    status="active",
+                    expires_at=FUTURE_EXPIRES_AT,
+                )
+            ]
         )
         tombstones = _tombstones(
             [

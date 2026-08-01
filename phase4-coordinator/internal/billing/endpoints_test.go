@@ -946,6 +946,7 @@ func TestEarningsEndpointIncludesProviderSettlementReceiptReasonCodes(t *testing
 	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
+	setSettlementReceiptNow(store, time.UnixMilli(input.ReceiptReceivedUnixMS).UTC().Add(24*time.Hour).UnixMilli())
 	seedSettlementReceiptEvidence(t, store, input)
 	insertCredit(t, store.db, input.ProviderID, time.Now().UTC(), 500)
 
@@ -1061,6 +1062,7 @@ func TestProvidersEndpointIncludesRedactedSettlementReceiptDiagnostics(t *testin
 	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
+	setSettlementReceiptNow(store, time.UnixMilli(input.ReceiptReceivedUnixMS).UTC().Add(24*time.Hour).UnixMilli())
 	seedSettlementReceiptEvidence(t, store, input)
 	insertCredit(t, store.db, input.ProviderID, time.Now().UTC(), 500)
 

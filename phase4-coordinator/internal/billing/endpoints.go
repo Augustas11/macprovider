@@ -573,7 +573,7 @@ SELECT lrc.provider_id,
 			providerIDs = append(providerIDs, providerID)
 		}
 	}
-	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), time.Time{}, time.Time{}, false)
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.now().UTC(), time.Time{}, time.Time{}, false)
 	summaries, err := h.settlementReceiptSummariesForProviders(ctx, providerIDs, diagnosticsFrom, diagnosticsTo, true, 3)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -963,7 +963,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp["idle_prewarm"] = idlePrewarm
-	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), rangeFrom, rangeTo, hasRange)
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.now().UTC(), rangeFrom, rangeTo, hasRange)
 	summaries, err := h.settlementReceiptSummariesForProviders(r.Context(), []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())

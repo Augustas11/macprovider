@@ -23,9 +23,10 @@ make_fixture() {
   local generated_at="${4:-2026-07-30T12:00:00Z}"
   local demand_generated_at="${5:-$generated_at}"
   local signer="${6:-streamvc-autotune-static-v4}"
+  local recommended_version="${7:-${tag#v}}"
   rm -rf "$directory"
   mkdir -p "$directory/live"
-  python3 - "$directory" "$tag" "$live_version" "$generated_at" "$demand_generated_at" "$signer" <<'PY'
+  python3 - "$directory" "$tag" "$live_version" "$generated_at" "$demand_generated_at" "$signer" "$recommended_version" <<'PY'
 import hashlib
 import json
 import base64
@@ -39,6 +40,7 @@ live_version = sys.argv[3]
 generated_at = sys.argv[4]
 demand_generated_at = sys.argv[5]
 signer = sys.argv[6]
+recommended_version = sys.argv[7]
 live = directory / "live"
 policy_version = "autotune-policy-v1"
 key_path = directory / "autotune-test-ed25519.pem"
@@ -114,7 +116,10 @@ for feed_name, sig_name in (
         "key_id": signer,
         "signature": base64.b64encode(signature).decode("ascii"),
     })
-write_endpoint("healthz.json", {"status": "ok", "version": live_version})
+healthz = {"status": "ok", "version": live_version}
+if recommended_version != "__absent__":
+    healthz["recommended_binary_version"] = recommended_version
+write_endpoint("healthz.json", healthz)
 
 (directory / "trusted-keys.json").write_text(
     json.dumps({
@@ -204,6 +209,30 @@ if run_guard "$work/stale-healthz" >"$work/stale-healthz.out" 2>&1; then
   fail "accepted a coordinator older than the shipped CLI release"
 fi
 grep -q "/healthz version 'v1.8.67' is older than release 1.8.68" "$work/stale-healthz.out"
+
+make_fixture "$work/missing-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 __absent__
+if run_guard "$work/missing-recommended" >"$work/missing-recommended.out" 2>&1; then
+  fail "accepted a live coordinator without recommended_binary_version"
+fi
+grep -q "/healthz missing recommended_binary_version" "$work/missing-recommended.out"
+
+make_fixture "$work/malformed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 latest
+if run_guard "$work/malformed-recommended" >"$work/malformed-recommended.out" 2>&1; then
+  fail "accepted a malformed recommended_binary_version"
+fi
+grep -q "/healthz recommended_binary_version is not vX.Y.Z or X.Y.Z: 'latest'" "$work/malformed-recommended.out"
+
+make_fixture "$work/suffixed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.68-2-gabcdef0
+if run_guard "$work/suffixed-recommended" >"$work/suffixed-recommended.out" 2>&1; then
+  fail "accepted a git-describe recommended_binary_version"
+fi
+grep -q "/healthz recommended_binary_version is not vX.Y.Z or X.Y.Z: '1.8.68-2-gabcdef0'" "$work/suffixed-recommended.out"
+
+make_fixture "$work/lagging-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if run_guard "$work/lagging-recommended" >"$work/lagging-recommended.out" 2>&1; then
+  fail "accepted a live coordinator advertising a stale recommended_binary_version"
+fi
+grep -q "/healthz recommended_binary_version '1.8.67' does not match release 1.8.68" "$work/lagging-recommended.out"
 
 make_fixture "$work/hash-drift"
 printf '\n' >> "$work/hash-drift/live/v1_rate-card"
