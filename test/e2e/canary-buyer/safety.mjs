@@ -199,6 +199,7 @@ export function poolzInvariantReasons(initial, current, {
   maxHeartbeatAgeMs = 90_000,
   requireHeartbeatAdvance = false,
   activeProviderID = '',
+  heartbeatAdvanceProviderIDs = null,
 } = {}) {
   const before = Array.isArray(initial) ? initial : poolzSnapshot(initial);
   const after = Array.isArray(current) ? current : poolzSnapshot(current);
@@ -236,7 +237,9 @@ export function poolzInvariantReasons(initial, current, {
         && observed.last_heartbeat_at_ms < expected.last_heartbeat_at_ms) {
       reasons.push(`${id}:heartbeat_regressed`);
     }
-    if (requireHeartbeatAdvance) {
+    const requireProviderHeartbeatAdvance = requireHeartbeatAdvance
+      && (!heartbeatAdvanceProviderIDs || heartbeatAdvanceProviderIDs.has(id));
+    if (requireProviderHeartbeatAdvance) {
       const heartbeatAdvanced = expected.last_heartbeat_at_ms != null
         && observed.last_heartbeat_at_ms != null
         && observed.last_heartbeat_at_ms > expected.last_heartbeat_at_ms;
@@ -629,6 +632,7 @@ export function recoverySoakReasons({
       reasons.push(...poolzInvariantReasons(poolzSamples[0], poolzSamples[poolzSamples.length - 1], {
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
         requireHeartbeatAdvance: true,
+        heartbeatAdvanceProviderIDs: options.heartbeatAdvanceProviderIDs || null,
       }).map((reason) => `final:${reason}`));
     }
   }
@@ -644,7 +648,8 @@ export function recoverySoakReasons({
           const previous = previousSet.find((sample) => sample.provider_id === initial.provider_id) || initial;
           reasons.push(...providerSignalReasons(previous, current, {
           ...options,
-          requireObservationAdvance: true,
+          requireObservationAdvance: !options.heartbeatAdvanceProviderIDs
+            || options.heartbeatAdvanceProviderIDs.has(initial.provider_id),
         }).map((reason) => `sample_${index}:${reason}`));
         }
       }

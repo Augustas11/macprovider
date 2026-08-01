@@ -463,7 +463,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r2',
+    authority: 'issue-825-canary-fleet-r3',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -604,6 +604,110 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   ]) {
     assert.throws(() => validateLegacyRollbackAuthorization(invalid, expectedFleet, now));
   }
+});
+
+test('legacy rollback recovery requires heartbeat advance only from exercised providers', () => {
+  const now = Date.parse('2026-08-01T10:21:58Z');
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+    { provider_id: 'provider-c', model_id: 'model-b' },
+  ];
+  const document = {
+    schema_version: 1,
+    kind: 'legacy_rollback',
+    authority: 'issue-825-canary-fleet-r3',
+    transaction_id: 'b'.repeat(64),
+    expires_at: new Date(now + 300_000).toISOString(),
+    providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const authorized = validateLegacyRollbackAuthorization(document, expectedFleet, now);
+  const gateway = gatewaySnapshot({
+    status: 'up',
+    degraded: false,
+    coordinator: { status: 'up', checked_at: new Date(now).toISOString() },
+    pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+    models: [
+      { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, availability: 'available', degraded: false },
+      { id: 'model-b', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, availability: 'available', degraded: false },
+    ],
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id,
+    assigned_id: `session-${index}`,
+    model_id,
+    state: 'ready',
+    routing_eligible: true,
+    binary_version: '1.8.30',
+    connected_at: new Date(now - 60_000).toISOString(),
+    last_heartbeat_at: new Date(now - 1_000).toISOString(),
+    last_activity_at: new Date(now - 1_000).toISOString(),
+  })) }, now);
+  const providers = expectedFleet.map(({ provider_id, model_id }, index) => safetyProvider(
+    provider_id,
+    model_id,
+    `session-${index}`,
+    {
+      binary_version: '1.8.30',
+      observation_id: `${provider_id}-initial`,
+      observed_at: new Date().toISOString(),
+    },
+  ));
+  const observation = { gateway, operator_pool: operatorPool, providers };
+  const recoveryOne = structuredClone(observation);
+  const recoveryTwo = structuredClone(observation);
+  const exercisedProviderIDs = new Set(['provider-a', 'provider-b']);
+
+  for (const [index, sample] of [recoveryOne, recoveryTwo].entries()) {
+    for (const row of sample.operator_pool) {
+      if (exercisedProviderIDs.has(row.provider_id)) {
+        row.last_heartbeat_at_ms += (index + 1) * 30_000;
+        row.last_activity_at_ms += (index + 1) * 30_000;
+      }
+      row.heartbeat_age_ms = 0;
+      row.activity_age_ms = 0;
+    }
+    for (const provider of sample.providers) {
+      if (exercisedProviderIDs.has(provider.provider_id)) {
+        provider.observation_id = `${provider.provider_id}-sample-${index + 1}`;
+        provider.observed_at_ms += (index + 1) * 30_000;
+      }
+      provider.observation_age_ms = 0;
+    }
+  }
+
+  const scopedAdvance = {
+    minReadyProviders: 3,
+    maxHeartbeatAgeMs: 90_000,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  };
+  assert.deepEqual(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    scopedAdvance,
+    now,
+  ), []);
+  assert.deepEqual(safetyObservationReasons(observation, recoveryTwo, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }), []);
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    { minReadyProviders: 3, maxHeartbeatAgeMs: 90_000 },
+    now,
+  ).some((reason) => reason.includes('provider-c')));
+  assert.ok(safetyObservationReasons(observation, recoveryTwo, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+  }).some((reason) => reason.includes('provider-c')));
 });
 
 test('post-request recovery outlives the gateway active-loss cache window', async () => {

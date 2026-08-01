@@ -110,11 +110,11 @@ legacy git-describe bootstrap is no longer accepted.
 
 ## One-time installation
 
-First deploy the issue #825 r2 active-count revision of #584's redesigned
+First deploy the issue #825 r3 exercised-provider recovery revision of #584's redesigned
 canary buyer exactly as reviewed, including its root-only `LoadCredential`
 files, safety observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-825-canary-fleet-r2` at source commit `d2b31d0f2e18631764f9a5f4c1c5b28cc0b46142`;
+`issue-825-canary-fleet-r3` at source commit `e742e42672d78a3f656f7665ac1cb129f731cc19`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
 on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,

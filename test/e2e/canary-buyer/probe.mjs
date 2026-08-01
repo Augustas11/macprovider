@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r2';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r3';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -1259,6 +1259,7 @@ async function loadLegacyRollbackAuthorization(expectedFleet) {
 
 export function safetyObservationReasons(initial, observed, expectedFleet, {
   requireHeartbeatAdvance = false,
+  heartbeatAdvanceProviderIDs = null,
   activeModelID = '',
   activeProviderIDHint = '',
   cachedGatewayModelID = '',
@@ -1306,6 +1307,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
     maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
     requireHeartbeatAdvance,
+    heartbeatAdvanceProviderIDs,
     activeProviderID: qualification ? '' : activeProviderID,
   }));
 
@@ -1368,12 +1370,14 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         continue;
       }
       const before = initialByID.get(expected.provider_id) || current;
+      const requireProviderHeartbeatAdvance = requireHeartbeatAdvance
+        && (!heartbeatAdvanceProviderIDs || heartbeatAdvanceProviderIDs.has(expected.provider_id));
       reasons.push(...providerSignalReasons(before, current, {
         maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
         maxMemoryFraction: CONFIG.maxMemoryFraction,
         maxRequestsInFlight: activeProviderID === current.provider_id ? 1 : 0,
         allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
-        requireObservationAdvance: requireHeartbeatAdvance,
+        requireObservationAdvance: requireProviderHeartbeatAdvance,
       }));
       if (current.model_id !== expected.model_id) {
         reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
@@ -1767,6 +1771,9 @@ async function main() {
       ...(record.error ? [`${record.phase}:${record.error}`] : []),
       ...record.reasons.map((reason) => `${record.phase}:${reason}`),
     ]);
+    const heartbeatAdvanceProviderIDs = legacyRollbackProviders?.size && budget.providers.size
+      ? new Set([...budget.providers.keys()].filter(Boolean))
+      : null;
     recoveryReasons.push(...recoverySoakObservationReasons(
       initial,
       recoverySamples,
@@ -1780,12 +1787,14 @@ async function main() {
         maxMemoryFraction: CONFIG.maxMemoryFraction,
         requireNominalThermal: CONFIG.mode === 'qualification',
         allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
+        heartbeatAdvanceProviderIDs,
       },
     ));
     const finalRecovery = recoverySamples.at(-1);
     if (finalRecovery) {
       recoveryReasons.push(...safetyObservationReasons(initial, finalRecovery, expectedFleet, {
         requireHeartbeatAdvance: true,
+        heartbeatAdvanceProviderIDs,
         allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
         legacyRollbackProviders,
       }).map((reason) => `recovery_final:${reason}`));
