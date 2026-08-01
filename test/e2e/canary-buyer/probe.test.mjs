@@ -875,6 +875,50 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     heartbeatAdvanceProviderIDs: exercisedProviderIDs,
   }).some((reason) => reason.includes('provider-c')));
 
+  const rogueProviderSignal = structuredClone(missingDuplicate);
+  rogueProviderSignal.providers.push(safetyProvider('rogue-provider', 'model-b', 'rogue-session', {
+    binary_version: '1.8.30',
+    observation_id: 'rogue-provider-observation',
+    observed_at: new Date(now - 1_000).toISOString(),
+  }));
+  assert.ok(safetyObservationReasons(observation, rogueProviderSignal, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).includes('provider_signal_unexpected_rogue-provider'));
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, rogueProviderSignal],
+    expectedFleet,
+    authorized,
+    scopedAdvance,
+    now,
+  ).includes('sample_2:provider_signal_unexpected_rogue-provider'));
+
+  const missingProviderIDDirectSignal = structuredClone(missingDuplicate);
+  const anonymousSignal = safetyProvider('provider-c', 'model-b', 'session-2', {
+    binary_version: '1.8.30',
+    observation_id: 'anonymous-provider-observation',
+    observed_at: new Date(now - 1_000).toISOString(),
+  });
+  delete anonymousSignal.provider_id;
+  missingProviderIDDirectSignal.providers.push(anonymousSignal);
+  assert.ok(safetyObservationReasons(observation, missingProviderIDDirectSignal, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).includes('provider_signal_identity_missing_2'));
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, missingProviderIDDirectSignal],
+    expectedFleet,
+    authorized,
+    scopedAdvance,
+    now,
+  ).includes('sample_2:provider_signal_identity_missing_2'));
+
   const expandedExpectedFleet = [
     ...expectedFleet,
     { provider_id: 'provider-d', model_id: 'model-b' },

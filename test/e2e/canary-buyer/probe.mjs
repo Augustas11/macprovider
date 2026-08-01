@@ -1262,6 +1262,28 @@ function hasDirectProviderSignal(signal) {
   );
 }
 
+function directProviderSignalIdentityReasons(providers, expectedFleet) {
+  const expectedIDs = new Set(expectedFleet.map((row) => row.provider_id));
+  const seen = new Set();
+  const reasons = [];
+  for (const [index, signal] of providers.entries()) {
+    if (!hasDirectProviderSignal(signal)) continue;
+    const providerID = signal?.provider_id;
+    if (typeof providerID !== 'string' || providerID.length === 0) {
+      reasons.push(`provider_signal_identity_missing_${index}`);
+      continue;
+    }
+    if (!expectedIDs.has(providerID)) {
+      reasons.push(`provider_signal_unexpected_${providerID}`);
+    }
+    if (seen.has(providerID)) {
+      reasons.push(`provider_signal_duplicate_${providerID}`);
+    }
+    seen.add(providerID);
+  }
+  return reasons;
+}
+
 function recoveryProviderSignals(
   observation,
   expectedFleet,
@@ -1330,6 +1352,12 @@ export function recoverySoakObservationReasons(
       ),
     ),
   }, soakOptions);
+  for (const [index, sample] of samples.entries()) {
+    reasons.push(...directProviderSignalIdentityReasons(
+      Array.isArray(sample?.providers) ? sample.providers : [],
+      expectedFleet,
+    ).map((reason) => `sample_${index + 1}:${reason}`));
+  }
   return filterLegacyIdleDuplicateRecoveryReasons(reasons, {
     observations: samples,
     expectedFleet,
@@ -1492,6 +1520,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     if (observed.providers.length !== expectedFleet.length) {
       reasons.push(`provider_signal_count_${observed.providers.length}_ne_${expectedFleet.length}`);
     }
+    reasons.push(...directProviderSignalIdentityReasons(observed.providers, expectedFleet));
     const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
     const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
     const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
