@@ -3377,7 +3377,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r5")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "fe8028ee345815dd6b633dbf49290f6626514833",
+            "a9aaf2c3b33b8f2f34d26b3f2c52024718541d9d",
         )
         subprocess.run(
             ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
