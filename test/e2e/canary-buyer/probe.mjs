@@ -1236,23 +1236,29 @@ function legacyIdleDuplicateReasonAllowed(reason, allowance) {
       return true;
     }
   }
-  let match = unscopedReason.match(/^ready_(\d+)_lt_(\d+)$/);
-  if (match && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
-  match = unscopedReason.match(/^pool_unavailable_(\d+)_ne_0$/);
-  if (match && Number(match[1]) <= allowance.count) return true;
-  match = unscopedReason.match(/^ready_changed_(\d+)_to_(\d+)$/);
-  if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
-  match = unscopedReason.match(/^total_providers_changed_(\d+)_to_(\d+)$/);
-  if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
-  match = unscopedReason.match(/^provider_count_changed_(\d+)_to_(\d+)$/);
-  if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
-  match = unscopedReason.match(/^provider_signal_count_(\d+)_ne_(\d+)$/);
-  if (match && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
-  match = unscopedReason.match(/^(.*):ready_provider_count_changed_(\d+)_to_(\d+)$/);
-  if (match) {
-    const allowedLoss = allowance.byModel.get(match[1]) || 0;
-    if (Number(match[2]) - Number(match[3]) <= allowedLoss) return true;
-  }
+	  let match = unscopedReason.match(/^ready_(\d+)_lt_(\d+)$/);
+	  if (match && Number(match[2]) - Number(match[1]) >= 1
+	      && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^pool_unavailable_(\d+)_ne_0$/);
+	  if (match && Number(match[1]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^ready_changed_(\d+)_to_(\d+)$/);
+	  if (match && Number(match[1]) - Number(match[2]) >= 1
+	      && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^total_providers_changed_(\d+)_to_(\d+)$/);
+	  if (match && Number(match[1]) - Number(match[2]) >= 1
+	      && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^provider_count_changed_(\d+)_to_(\d+)$/);
+	  if (match && Number(match[1]) - Number(match[2]) >= 1
+	      && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^provider_signal_count_(\d+)_ne_(\d+)$/);
+	  if (match && Number(match[2]) - Number(match[1]) >= 1
+	      && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^(.*):ready_provider_count_changed_(\d+)_to_(\d+)$/);
+	  if (match) {
+	    const allowedLoss = allowance.byModel.get(match[1]) || 0;
+	    if (Number(match[2]) - Number(match[3]) >= 1
+	        && Number(match[2]) - Number(match[3]) <= allowedLoss) return true;
+	  }
   return false;
 }
 
@@ -1521,12 +1527,13 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       reasons.push(`provider_signal_count_${observed.providers.length}_ne_${expectedFleet.length}`);
     }
     reasons.push(...directProviderSignalIdentityReasons(observed.providers, expectedFleet));
-    const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
-    const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
-    const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
-    for (const expected of expectedFleet) {
-      const current = currentByID.get(expected.provider_id);
-      if (!current) {
+	    const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
+	    const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
+	    const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
+	    for (const expected of expectedFleet) {
+	      const current = currentByID.get(expected.provider_id);
+	      const rollbackAuthorization = legacyRollbackProviders?.get(expected.provider_id);
+	      if (!current) {
         const poolRow = currentPoolByID.get(expected.provider_id);
         const poolIndex = observed.operator_pool.indexOf(poolRow);
         const poolSlotSignal = poolIndex >= 0 ? observed.providers[poolIndex] : null;
@@ -1561,11 +1568,20 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
         requireObservationAdvance: requireProviderHeartbeatAdvance,
       }));
-      if (current.model_id !== expected.model_id) {
-        reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
-      }
-    }
-  }
+	      if (current.model_id !== expected.model_id) {
+	        reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
+	      }
+	      if (rollbackAuthorization) {
+	        const poolRow = currentPoolByID.get(expected.provider_id);
+	        if (current.binary_version !== rollbackAuthorization.binary_version) {
+	          reasons.push(`${expected.provider_id}:telemetry_binary_${current.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
+	        }
+	        if (poolRow?.binary_version !== rollbackAuthorization.binary_version) {
+	          reasons.push(`${expected.provider_id}:pool_binary_${poolRow?.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
+	        }
+	      }
+	    }
+	  }
   return [...new Set(filterLegacyIdleDuplicateRecoveryReasons(reasons, {
     observations: observed,
     expectedFleet,

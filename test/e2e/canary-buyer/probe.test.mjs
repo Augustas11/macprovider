@@ -919,6 +919,55 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     now,
   ).includes('sample_2:provider_signal_identity_missing_2'));
 
+  const wrongDirectRollbackVersion = structuredClone(observation);
+  wrongDirectRollbackVersion.providers.find(
+    (provider) => provider.provider_id === 'provider-b',
+  ).binary_version = '1.8.31';
+  assert.ok(safetyObservationReasons(observation, wrongDirectRollbackVersion, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }).includes('provider-b:telemetry_binary_1.8.31_ne_1.8.30'));
+
+  const wrongPoolRollbackVersion = structuredClone(observation);
+  wrongPoolRollbackVersion.operator_pool.find(
+    (row) => row.provider_id === 'provider-b',
+  ).binary_version = '1.8.31';
+  assert.ok(safetyObservationReasons(observation, wrongPoolRollbackVersion, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }).includes('provider-b:pool_binary_1.8.31_ne_1.8.30'));
+
+  const aggregateIncrease = structuredClone(missingDuplicate);
+  aggregateIncrease.gateway.pool.total_providers = 4;
+  aggregateIncrease.gateway.pool.ready = 4;
+  aggregateIncrease.gateway.models[1].provider_count = 3;
+  aggregateIncrease.gateway.models[1].ready_provider_count = 3;
+  aggregateIncrease.gateway.models[1].slots_free = 3;
+  assert.ok(safetyObservationReasons(observation, aggregateIncrease, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => (
+    reason === 'total_providers_changed_3_to_4'
+    || reason === 'ready_changed_3_to_4'
+    || reason === 'provider_count_changed_2_to_3'
+    || reason === 'model-b:ready_provider_count_changed_2_to_3'
+  )));
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, aggregateIncrease],
+    expectedFleet,
+    authorized,
+    scopedAdvance,
+    now,
+  ).some((reason) => (
+    reason === 'sample_1:total_providers_changed_3_to_4'
+    || reason === 'sample_1:ready_changed_3_to_4'
+    || reason === 'sample_1:provider_count_changed_2_to_3'
+    || reason === 'sample_1:model-b:ready_provider_count_changed_2_to_3'
+  )));
+
   const expandedExpectedFleet = [
     ...expectedFleet,
     { provider_id: 'provider-d', model_id: 'model-b' },
