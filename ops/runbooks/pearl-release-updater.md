@@ -110,11 +110,11 @@ legacy git-describe bootstrap is no longer accepted.
 
 ## One-time installation
 
-First deploy the issue #825 r3 exercised-provider recovery revision of #584's redesigned
+First deploy the issue #825 r4 legacy duplicate recovery revision of #584's redesigned
 canary buyer exactly as reviewed, including its root-only `LoadCredential`
 files, safety observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-825-canary-fleet-r3` at source commit `e742e42672d78a3f656f7665ac1cb129f731cc19`;
+`issue-825-canary-fleet-r4` at source commit `63577a81c3fba02c98ef3048d66946b918fe7721`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
 on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,
@@ -587,8 +587,13 @@ phase-journal restoration. That root-owned `0644` control binds the exact
 captured protected provider ID/model fleet, the exact prior advertised binary
 version, the 64-hex transaction ID, and an expiry no more than 15 minutes away.
 It substitutes only for missing provider v2 signals on unclassified legacy
-rows; bridge/current/previous modes, wrong versions/models/IDs, stale sessions,
-capacity loss, and all other canary failures remain rejected. The updater
+rows and, during the scoped legacy rollback recovery/final-serving window only,
+tolerates readiness/signal/count loss for an unexercised duplicate-model row
+that remains present, unclassified, identity/version/session-stable, and backed
+by another authorized same-model provider that is ready, routable, and fresh.
+Bridge/current/previous modes, wrong versions/models/IDs, stale sessions,
+provider disappearance, exercised-provider loss, unique-model capacity loss, and
+all other canary failures remain rejected. The updater
 removes the control on every success or failure exit. Its presence outside a
 restoration blocks an ordinary rollout canary.
 The Better Stack heartbeat is then returned to its exact pre-maintenance paused

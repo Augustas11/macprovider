@@ -463,7 +463,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r3',
+    authority: 'issue-825-canary-fleet-r4',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -566,7 +566,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     malformedDirectSignal,
     expectedFleet,
     { legacyRollbackProviders: authorized, nowMs: now },
-  ).includes('provider-a:provider_signal_missing'));
+  ).some((reason) => reason.startsWith('provider-a:')));
 
   const replacementSession = structuredClone(observation);
   replacementSession.operator_pool[0].assigned_id = 'replacement-session';
@@ -616,7 +616,7 @@ test('legacy rollback recovery requires heartbeat advance only from exercised pr
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r3',
+    authority: 'issue-825-canary-fleet-r4',
     transaction_id: 'b'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -708,6 +708,242 @@ test('legacy rollback recovery requires heartbeat advance only from exercised pr
     nowMs: now,
     requireHeartbeatAdvance: true,
   }).some((reason) => reason.includes('provider-c')));
+});
+
+test('legacy rollback recovery tolerates only unexercised duplicate provider readiness loss', () => {
+  const now = Date.parse('2026-08-01T10:53:42Z');
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+    { provider_id: 'provider-c', model_id: 'model-b' },
+  ];
+  const document = {
+    schema_version: 1,
+    kind: 'legacy_rollback',
+    authority: 'issue-825-canary-fleet-r4',
+    transaction_id: 'c'.repeat(64),
+    expires_at: new Date(now + 300_000).toISOString(),
+    providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const authorized = validateLegacyRollbackAuthorization(document, expectedFleet, now);
+  const gateway = gatewaySnapshot({
+    status: 'up',
+    degraded: false,
+    coordinator: { status: 'up', checked_at: new Date(now).toISOString() },
+    pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+    models: [
+      { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, availability: 'available', degraded: false },
+      { id: 'model-b', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, availability: 'available', degraded: false },
+    ],
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id,
+    assigned_id: `session-${index}`,
+    model_id,
+    state: 'ready',
+    routing_eligible: true,
+    binary_version: '1.8.30',
+    connected_at: new Date(now - 60_000).toISOString(),
+    last_heartbeat_at: new Date(now - 1_000).toISOString(),
+    last_activity_at: new Date(now - 1_000).toISOString(),
+  })) }, now);
+  const providers = expectedFleet.map(({ provider_id, model_id }, index) => safetyProvider(
+    provider_id,
+    model_id,
+    `session-${index}`,
+    {
+      binary_version: '1.8.30',
+      observation_id: `${provider_id}-initial`,
+      observed_at: new Date(now - 1_000).toISOString(),
+    },
+  ));
+  const observation = { gateway, operator_pool: operatorPool, providers };
+  const exercisedProviderIDs = new Set(['provider-a', 'provider-b']);
+  const recoveryOne = structuredClone(observation);
+  const recoveryTwo = structuredClone(observation);
+  for (const [index, sample] of [recoveryOne, recoveryTwo].entries()) {
+    for (const row of sample.operator_pool) {
+      if (exercisedProviderIDs.has(row.provider_id)) {
+        row.last_heartbeat_at_ms += (index + 1) * 30_000;
+        row.last_activity_at_ms += (index + 1) * 30_000;
+      }
+      row.heartbeat_age_ms = 0;
+      row.activity_age_ms = 0;
+    }
+    for (const provider of sample.providers) {
+      if (exercisedProviderIDs.has(provider.provider_id)) {
+        provider.observation_id = `${provider.provider_id}-sample-${index + 1}`;
+        provider.observed_at_ms += (index + 1) * 30_000;
+      }
+      provider.observation_age_ms = 0;
+    }
+  }
+  recoveryTwo.gateway.pool.ready = 2;
+  recoveryTwo.gateway.pool.unavailable = 1;
+  recoveryTwo.gateway.models[1].ready_provider_count = 1;
+  const droppedDuplicate = recoveryTwo.operator_pool.find((row) => row.provider_id === 'provider-c');
+  droppedDuplicate.state = 'unavailable';
+  droppedDuplicate.routing_eligible = false;
+  droppedDuplicate.heartbeat_age_ms = 120_000;
+
+  const scopedAdvance = {
+    minReadyProviders: 3,
+    maxHeartbeatAgeMs: 90_000,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  };
+  assert.deepEqual(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    scopedAdvance,
+    now,
+  ), []);
+  assert.deepEqual(safetyObservationReasons(observation, recoveryTwo, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }), []);
+  assert.ok(safetyObservationReasons(observation, recoveryTwo, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+  }).map((reason) => `recovery_soak:${reason}`).some((reason) => reason.includes('provider-c')));
+  assert.deepEqual(safetyObservationReasons(observation, recoveryTwo, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).map((reason) => `recovery_soak:${reason}`), []);
+
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    { ...scopedAdvance, heartbeatAdvanceProviderIDs: new Set(['provider-a', 'provider-b', 'provider-c']) },
+    now,
+  ).some((reason) => reason.includes('provider-c')));
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    null,
+    scopedAdvance,
+    now,
+  ).some((reason) => reason.includes('provider-c')));
+
+  const missingDuplicate = structuredClone(recoveryTwo);
+  missingDuplicate.gateway.pool.total_providers = 2;
+  missingDuplicate.operator_pool = missingDuplicate.operator_pool.filter((row) => row.provider_id !== 'provider-c');
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, missingDuplicate],
+    expectedFleet,
+    authorized,
+    scopedAdvance,
+    now,
+  ).some((reason) => reason.includes('provider-c')));
+
+  const uniqueLoss = structuredClone(recoveryTwo);
+  const providerA = uniqueLoss.operator_pool.find((row) => row.provider_id === 'provider-a');
+  providerA.state = 'unavailable';
+  providerA.routing_eligible = false;
+  uniqueLoss.gateway.models[0].available = false;
+  uniqueLoss.gateway.models[0].degraded = true;
+  uniqueLoss.gateway.models[0].ready_provider_count = 0;
+  assert.ok(safetyObservationReasons(observation, uniqueLoss, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => reason.includes('provider-a')));
+
+  const currentCatalogMode = structuredClone(recoveryTwo);
+  currentCatalogMode.operator_pool.find((row) => row.provider_id === 'provider-c').catalog_admission_mode = 'current';
+  assert.ok(safetyObservationReasons(observation, currentCatalogMode, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => reason.includes('provider-c')));
+
+  const wrongProviderSignal = structuredClone(recoveryTwo);
+  const duplicateSignalIndex = wrongProviderSignal.providers.findIndex((provider) => provider.provider_id === 'provider-c');
+  wrongProviderSignal.providers[duplicateSignalIndex].provider_id = 'wrong-provider';
+  assert.ok(safetyObservationReasons(observation, wrongProviderSignal, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => reason.includes('provider-c:provider_signal_identity_mismatch_wrong-provider')));
+  const missingProviderIDSignal = structuredClone(recoveryTwo);
+  const missingProviderIDSignalIndex = missingProviderIDSignal.providers.findIndex((provider) => provider.provider_id === 'provider-c');
+  delete missingProviderIDSignal.providers[missingProviderIDSignalIndex].provider_id;
+  assert.ok(safetyObservationReasons(observation, missingProviderIDSignal, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }).some((reason) => reason.includes('provider-c:provider_signal_identity_mismatch_missing')));
+
+  const substringExpectedFleet = [
+    { provider_id: 'a', model_id: 'model-b' },
+    { provider_id: 'provider-a', model_id: 'model-b' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const substringDocument = {
+    ...document,
+    providers: substringExpectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const substringAuthorized = validateLegacyRollbackAuthorization(substringDocument, substringExpectedFleet, now);
+  const substringInitial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date(now).toISOString() },
+      pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-b', provider_count: 3, ready_provider_count: 3, slots_free: 3, available: true, availability: 'available', degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: substringExpectedFleet.map(({ provider_id, model_id }, index) => ({
+      provider_id,
+      assigned_id: `substring-session-${index}`,
+      model_id,
+      state: 'ready',
+      routing_eligible: true,
+      binary_version: '1.8.30',
+      connected_at: new Date(now - 60_000).toISOString(),
+      last_heartbeat_at: new Date(now - 1_000).toISOString(),
+      last_activity_at: new Date(now - 1_000).toISOString(),
+    })) }, now),
+    providers: substringExpectedFleet.map(({ provider_id, model_id }, index) => safetyProvider(
+      provider_id,
+      model_id,
+      `substring-session-${index}`,
+      {
+        binary_version: '1.8.30',
+        observation_id: `${provider_id}-initial`,
+        observed_at: new Date(now - 1_000).toISOString(),
+      },
+    )),
+  };
+  const substringObserved = structuredClone(substringInitial);
+  substringObserved.operator_pool.find((row) => row.provider_id === 'a').state = 'unavailable';
+  substringObserved.operator_pool.find((row) => row.provider_id === 'a').routing_eligible = false;
+  substringObserved.operator_pool.find((row) => row.provider_id === 'provider-a').state = 'unavailable';
+  substringObserved.operator_pool.find((row) => row.provider_id === 'provider-a').routing_eligible = false;
+  substringObserved.gateway.pool.ready = 1;
+  substringObserved.gateway.pool.unavailable = 2;
+  substringObserved.gateway.models[0].ready_provider_count = 1;
+  assert.ok(safetyObservationReasons(substringInitial, substringObserved, substringExpectedFleet, {
+    legacyRollbackProviders: substringAuthorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: new Set(['provider-a', 'provider-b']),
+  }).some((reason) => reason.includes('provider-a:expected_provider_not_ready')));
 });
 
 test('post-request recovery outlives the gateway active-loss cache window', async () => {
