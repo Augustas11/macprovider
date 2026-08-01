@@ -444,8 +444,10 @@ payout:
     # §6.3 wallet path. Encrypted on disk; KEK supplied via systemd
     # LoadCredential=payout-wallet-kek (preferred) or
     # MACPROVIDER_PAYOUT_WALLET_KEK env var.
-    encrypted_wallet_path: "/etc/macprovider/payout-wallet.enc"
-    encrypted_wallet_on_disk_hex: false
+    # The payout-wallet-encrypt tool (cmd/payout-wallet-encrypt) writes
+    # HEX, so encrypted_wallet_on_disk_hex MUST be true for its output.
+    encrypted_wallet_path: "/etc/macprovider/payout-wallet.hex"
+    encrypted_wallet_on_disk_hex: true
 
     # NEVER enable in production. Dev path requires explicit opt-in
     # AND MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY env var.
