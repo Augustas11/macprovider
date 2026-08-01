@@ -5345,6 +5345,56 @@ final class CoordinatorClientTests: XCTestCase {
         }
         XCTFail("Timed out waiting for condition")
     }
+
+    // Regression: the system sleep assertion must be held for the whole serving
+    // lifetime — acquired once, surviving per-connection cleanup (disconnect),
+    // and released only on stop(). Previously it was torn down in
+    // cleanupConnection() on every disconnect, letting a battery/8GB Mac sleep
+    // during reconnect backoff and flap online only ~1 min every ~30 min.
+    func testSleepAssertionSurvivesDisconnectAndReleasesOnStop() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "mp-0123456789abcdef0123456789abcdef"
+        config.model = "model-a"
+
+        let spy = SpySleepAssertionFactory()
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            sleepAssertionFactory: { spy.make() }
+        ))
+
+        // Acquire once (as the reconnect loop / session-accept does).
+        await client.ensureSleepAssertionForTest()
+        var held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertTrue(held)
+        XCTAssertEqual(spy.startCount, 1)
+
+        // Idempotent: a re-accept after reconnect must not churn the child.
+        await client.ensureSleepAssertionForTest()
+        XCTAssertEqual(spy.startCount, 1)
+        XCTAssertEqual(spy.assertion.stopCount, 0)
+
+        // A disconnect (cleanupConnection) must NOT release the assertion.
+        await client.cleanupConnectionForTest()
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertTrue(held, "sleep assertion must survive a disconnect")
+        XCTAssertEqual(spy.assertion.stopCount, 0, "disconnect must not stop caffeinate")
+
+        // Terminal shutdown releases it exactly once.
+        await client.stop()
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertFalse(held)
+        XCTAssertEqual(spy.assertion.stopCount, 1)
+    }
 }
 
 private enum CoordinatorClientTestError: Error {
@@ -5352,6 +5402,34 @@ private enum CoordinatorClientTestError: Error {
     case sendStateUpdateFailed
     case missingProviderECDHPublicKey
     case closedByCoordinator
+}
+
+// Spy sleep assertion + factory: count start()/stop() so a test can prove the
+// assertion is held for the serving lifetime rather than churned per session.
+private final class SpySleepAssertion: ProviderSleepAssertion, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _stopCount = 0
+    var stopCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _stopCount
+    }
+    func stop() {
+        lock.lock(); _stopCount += 1; lock.unlock()
+    }
+}
+
+private final class SpySleepAssertionFactory: @unchecked Sendable {
+    let assertion = SpySleepAssertion()
+    private let lock = NSLock()
+    private var _startCount = 0
+    var startCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _startCount
+    }
+    func make() -> ProviderSleepAssertion? {
+        lock.lock(); _startCount += 1; lock.unlock()
+        return assertion
+    }
 }
 
 // Issue #189: thread-safe sink for the injected watchdog exit hook.

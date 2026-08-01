@@ -252,6 +252,22 @@ actor CoordinatorClient {
     private let watchdogExitHook: @Sendable (String) -> Void
     private var swapHeartbeatTask: Task<Void, Never>?
     private var sleepAssertion: ProviderSleepAssertion?
+    // The system sleep assertion is held for the ENTIRE provider serving
+    // lifetime (the reconnect loop), not just while a coordinator session is
+    // live. Acquiring/releasing it per session let the Mac sleep during
+    // reconnect backoff, so a battery/8GB Mac would only dark-wake ~every 30
+    // minutes, reconnect for ~60s, then drop again — a self-reinforcing flap
+    // that kept the provider effectively offline. These helpers keep the
+    // caffeinate child alive across disconnects; it is released only on
+    // terminal shutdown of the loop. Idempotent so reconnects do not churn it.
+    private func ensureSleepAssertion() {
+        guard sleepAssertion == nil else { return }
+        sleepAssertion = sleepAssertionFactory()
+    }
+    private func releaseSleepAssertion() {
+        sleepAssertion?.stop()
+        sleepAssertion = nil
+    }
     private let sendOverride: SendOverride?
     private let streamInterval: Int
     private let credentialBootstrap: Bool
@@ -503,8 +519,7 @@ actor CoordinatorClient {
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
         swapHeartbeatTask?.cancel()
-        sleepAssertion?.stop()
-        sleepAssertion = nil
+        releaseSleepAssertion()
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
@@ -622,6 +637,12 @@ actor CoordinatorClient {
     }
 
     private func runReconnectLoop() async {
+        // Hold the system sleep assertion for the whole serving lifetime so the
+        // Mac cannot sleep between a disconnect and the next reconnect. Released
+        // only when the loop exits for good (cancellation, terminal version-floor
+        // rejection, terminal bootstrap failure, or the auth watchdog).
+        ensureSleepAssertion()
+        defer { releaseSleepAssertion() }
         var backoffNanoseconds = reconnectInitialBackoffNanoseconds
         var failedAttempts = 0
         var consecutiveAuthProtocolFailures = 0
@@ -1753,8 +1774,10 @@ actor CoordinatorClient {
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
-        sleepAssertion?.stop()
-        sleepAssertion = nil
+        // Deliberately do NOT release the sleep assertion here: cleanupConnection
+        // runs on every disconnect, and the reconnect loop must keep the Mac
+        // awake until it reconnects. The assertion is released when the loop
+        // exits for good (see runReconnectLoop's defer) or on stop().
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
@@ -2159,6 +2182,22 @@ actor CoordinatorClient {
 
     func sendHeartbeatForTest() async throws {
         try await sendHeartbeat()
+    }
+
+    // Test seam — the sleep assertion is held for the whole serving lifetime
+    // and must survive a per-connection cleanup (disconnect). These expose the
+    // acquire/held/cleanup surface so a test can prove the assertion is not
+    // released on disconnect and only released on stop().
+    func sleepAssertionIsHeldForTest() -> Bool {
+        sleepAssertion != nil
+    }
+
+    func ensureSleepAssertionForTest() {
+        ensureSleepAssertion()
+    }
+
+    func cleanupConnectionForTest() async {
+        await cleanupConnection()
     }
 
     // Issue #189: test seam — exercise the 5s timeout against an
@@ -2644,8 +2683,10 @@ actor CoordinatorClient {
         if let tier = payload["tier"] as? String {
             print("Coordinator tier: \(tier)")
         }
-        sleepAssertion?.stop()
-        sleepAssertion = sleepAssertionFactory()
+        // Belt-and-suspenders: the reconnect loop already holds the assertion
+        // for the serving lifetime, but a receipt-key-rotation session can run
+        // outside that loop, so ensure it is held whenever a session is live.
+        ensureSleepAssertion()
 	        startHeartbeat(intervalSeconds: interval)
 	        try await sendStateUpdate(state: nil, reason: reason)
 	        if operatorPaused {
@@ -4032,8 +4073,10 @@ actor CoordinatorClient {
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
-        sleepAssertion?.stop()
-        sleepAssertion = nil
+        // Keep the sleep assertion: a drain is a coordinator restart, after
+        // which the reconnect loop reconnects. Releasing here would let the Mac
+        // sleep during the drain grace window and stall the reconnect. The loop
+        // releases it on terminal exit; stop() releases it on shutdown.
         // v1.1.4: reset local state for the next coordinator session.
         // Local HTTP server kept serving throughout drain; provider is ready.
         await providerStatus.setState(.ready, reason: "drain_complete")
