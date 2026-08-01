@@ -252,6 +252,58 @@ actor CoordinatorClient {
     private let watchdogExitHook: @Sendable (String) -> Void
     private var swapHeartbeatTask: Task<Void, Never>?
     private var sleepAssertion: ProviderSleepAssertion?
+    // Whether the provider currently *intends* to keep the Mac awake. The
+    // system sleep assertion is bound to serving INTENT, not to a single
+    // coordinator session or the reconnect loop's lifetime. Acquiring/releasing
+    // it per session let the Mac sleep during reconnect backoff, so a
+    // battery/8GB Mac would only dark-wake ~every 30 minutes, reconnect for
+    // ~60s, then drop again — a self-reinforcing flap that kept the provider
+    // effectively offline.
+    //
+    // Intent is true while the provider is serving (or trying to reconnect to
+    // serve) and false when it is intentionally not serving: operator pause,
+    // terminal loop exit, or shutdown. Binding to intent (not the loop) means a
+    // transient disconnect keeps the Mac awake, while an operator pause lets it
+    // sleep, and a receipt-key rotation — which cancels the reconnect loop
+    // mid-flight — does NOT drop the assertion, because intent stays true across
+    // the rotation handshake.
+    private var wantsSleepAssertion = false
+    // Terminal latch: once the provider has permanently stopped serving
+    // (shutdown), it must never re-arm keep-awake, even if a suspended
+    // rotation/session-accept/resume path resumes afterward via actor reentrancy.
+    private var stopped = false
+
+    // True only while the provider can still serve or reconnect to serve. After
+    // stop(), or a terminal reconnect-loop exit (below-floor version / terminal
+    // bootstrap referral failure), the provider cannot serve until restart, so
+    // it must be allowed to sleep.
+    private var canServe: Bool {
+        !stopped
+            && terminalVersionFloorRejection == nil
+            && terminalBootstrapReferralFailure == nil
+    }
+
+    // Declare serving intent and immediately reconcile the assertion to match.
+    // Arming is gated on `canServe`: a request to keep the Mac awake is refused
+    // once the provider can never serve again, so a late resume or a reentrant
+    // rotation/session-accept cannot re-hold caffeinate with no serving path.
+    private func setSleepAssertionDesired(_ desired: Bool) {
+        wantsSleepAssertion = desired && canServe
+        reconcileSleepAssertion()
+    }
+
+    // Bring the held assertion in line with intent. Idempotent: safe to call on
+    // every reconnect/session-accept without churning the caffeinate child.
+    private func reconcileSleepAssertion() {
+        if wantsSleepAssertion {
+            if sleepAssertion == nil {
+                sleepAssertion = sleepAssertionFactory()
+            }
+        } else {
+            sleepAssertion?.stop()
+            sleepAssertion = nil
+        }
+    }
     private let sendOverride: SendOverride?
     private let streamInterval: Int
     private let credentialBootstrap: Bool
@@ -499,12 +551,14 @@ actor CoordinatorClient {
     }
 
     func stop() async {
+        // Latch shutdown before cancelling so any suspended arm path that
+        // resumes after this cannot re-hold the sleep assertion (canServe=false).
+        stopped = true
         runTask?.cancel()
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
         swapHeartbeatTask?.cancel()
-        sleepAssertion?.stop()
-        sleepAssertion = nil
+        setSleepAssertionDesired(false)
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
@@ -622,6 +676,17 @@ actor CoordinatorClient {
     }
 
     private func runReconnectLoop() async {
+        // Entering the reconnect loop means the provider intends to serve, so
+        // keep the Mac awake across disconnects and backoff — UNLESS the loop
+        // is entered in a durable operator-paused state, in which case a paused
+        // provider must be allowed to sleep. NOTE: no `defer` release here — the
+        // loop is also cancelled mid-flight by receipt-key rotation, which then
+        // continues serving on a fresh socket; releasing on every loop exit
+        // would drop the assertion during the rotation handshake. Intent is
+        // cleared explicitly at the terminal exits below and on stop()/pause.
+        if !operatorPaused {
+            setSleepAssertionDesired(true)
+        }
         var backoffNanoseconds = reconnectInitialBackoffNanoseconds
         var failedAttempts = 0
         var consecutiveAuthProtocolFailures = 0
@@ -697,11 +762,13 @@ actor CoordinatorClient {
                         reasonCode: "binary_version_unsupported"
                     )
                     Self.emitVersionFloorUpgradeDirective(floorRejection)
+                    setSleepAssertionDesired(false)
                     return
                 }
                 if credentialBootstrap,
                    let terminalFailure = Self.terminalBootstrapReferralFailure(for: error) {
                     terminalBootstrapReferralFailure = terminalFailure
+                    setSleepAssertionDesired(false)
                     return
                 }
                 let classification = Self.lifecycleClassification(for: error)
@@ -721,6 +788,7 @@ actor CoordinatorClient {
                     let reason = "coordinator auth handshake failed \(consecutiveAuthProtocolFailures) consecutive times before session acceptance; last_error=\(lastError)"
                     FileHandle.standardError.write(Data("FATAL coordinator auth watchdog: \(reason)\n".utf8))
                     watchdogExitHook(reason)
+                    setSleepAssertionDesired(false)
                     return
                 }
                 if failedAttempts >= 3 {
@@ -1753,8 +1821,11 @@ actor CoordinatorClient {
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
-        sleepAssertion?.stop()
-        sleepAssertion = nil
+        // Deliberately do NOT release the sleep assertion here: cleanupConnection
+        // runs on every disconnect, and the provider must keep the Mac awake
+        // while reconnecting. Serving intent is cleared explicitly instead — at
+        // the terminal loop exits, on operator pause, and on stop() — never on a
+        // transient disconnect.
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
@@ -2159,6 +2230,22 @@ actor CoordinatorClient {
 
     func sendHeartbeatForTest() async throws {
         try await sendHeartbeat()
+    }
+
+    // Test seam — the sleep assertion is held for the whole serving lifetime
+    // and must survive a per-connection cleanup (disconnect). These expose the
+    // acquire/held/cleanup surface so a test can prove the assertion is not
+    // released on disconnect and only released on stop().
+    func sleepAssertionIsHeldForTest() -> Bool {
+        sleepAssertion != nil
+    }
+
+    func setSleepAssertionDesiredForTest(_ desired: Bool) {
+        setSleepAssertionDesired(desired)
+    }
+
+    func cleanupConnectionForTest() async {
+        await cleanupConnection()
     }
 
     // Issue #189: test seam — exercise the 5s timeout against an
@@ -2644,8 +2731,12 @@ actor CoordinatorClient {
         if let tier = payload["tier"] as? String {
             print("Coordinator tier: \(tier)")
         }
-        sleepAssertion?.stop()
-        sleepAssertion = sleepAssertionFactory()
+        // A live, non-paused session means the provider is serving. This is
+        // load-bearing for the receipt-key-rotation session that runs outside
+        // runReconnectLoop(); it is idempotent for the ordinary loop path.
+        if !operatorPaused {
+            setSleepAssertionDesired(true)
+        }
 	        startHeartbeat(intervalSeconds: interval)
 	        try await sendStateUpdate(state: nil, reason: reason)
 	        if operatorPaused {
@@ -3900,6 +3991,9 @@ actor CoordinatorClient {
         }
 
         operatorPaused = true
+        // A paused provider is fenced from buyer work and is not serving, so it
+        // must be allowed to sleep: drop the keep-awake assertion until resume.
+        setSleepAssertionDesired(false)
         await providerStatus.setState(.unavailable, reason: "operator_paused")
         do {
             try await sendStateUpdate(state: nil, reason: "operator_paused")
@@ -3929,6 +4023,11 @@ actor CoordinatorClient {
         }
 
         operatorPaused = false
+        // Resuming means the provider intends to serve again: re-arm keep-awake
+        // so the reconnect/serving path cannot let the Mac sleep. The canServe
+        // gate makes this a no-op if the loop already exited terminally (e.g.
+        // below-floor version), so a resume cannot keep a non-serving Mac awake.
+        setSleepAssertionDesired(true)
         await providerStatus.setState(.ready, reason: "operator_resumed")
         do {
             try await sendStateUpdate(state: nil, reason: "operator_resumed")
@@ -4032,8 +4131,10 @@ actor CoordinatorClient {
         heartbeatTask = nil
         heartbeatWatchdogTask?.cancel()
         heartbeatWatchdogTask = nil
-        sleepAssertion?.stop()
-        sleepAssertion = nil
+        // Keep the sleep assertion: a drain is a coordinator restart, after
+        // which the reconnect loop reconnects. Releasing here would let the Mac
+        // sleep during the drain grace window and stall the reconnect. The loop
+        // releases it on terminal exit; stop() releases it on shutdown.
         // v1.1.4: reset local state for the next coordinator session.
         // Local HTTP server kept serving throughout drain; provider is ready.
         await providerStatus.setState(.ready, reason: "drain_complete")
