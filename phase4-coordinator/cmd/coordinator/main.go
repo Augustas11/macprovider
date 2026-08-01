@@ -860,7 +860,12 @@ func main() {
 	if statsPools != nil {
 		idlePrewarmReader = statsprewarm.NewReader(statsPools.Reader)
 	}
-	billingHandler := billingStore.HandlersWithQuarantineGatesAndIdlePrewarm(
+	// SPEC-005 vX.Y+1 §9.5b — the `/admin/ledger/payout-ready`
+	// reorg-compensation endpoint caps provider_credits at the same
+	// immutable §5.2 per-payout ceiling the runner enforces
+	// (payout.security.per_payout_cap_usdc_base_units). payout.security.*
+	// is not live-reloaded, so the cap is threaded in as a scalar here.
+	billingHandler := billingStore.HandlersWithQuarantineGatesIdlePrewarmAndPayoutCap(
 		cfg.Auth.OperatorKey,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
@@ -868,6 +873,7 @@ func main() {
 		cfg.Billing.QuarantineResolutionForceVoidEnabled,
 		cfg.Billing.QuarantineResolutionForceCreditEnabled,
 		idlePrewarmReader,
+		cfg.Payout.Security.PerPayoutCapUSDCBaseUnits,
 	)
 	// §11.5 launch-gate item 10 — operator-visible startup state.
 	logger.Info().
