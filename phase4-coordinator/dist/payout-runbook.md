@@ -101,12 +101,14 @@ file (recommended when the KEK is only ever a systemd credential), run the same
 check under `systemd-run`, which populates `$CREDENTIALS_DIRECTORY`:
 
 ```bash
+# Wrap in sh -c so $CREDENTIALS_DIRECTORY is expanded by a shell inside the
+# credential context (systemd-run runs the command directly, without a shell).
 systemd-run --pipe --wait \
   -p "LoadCredential=payout-wallet-kek:/root/payout-kek.hex" \
-  payout-wallet-encrypt -verify \
-    -kek-file "\$CREDENTIALS_DIRECTORY/payout-wallet-kek" \
+  sh -c 'payout-wallet-encrypt -verify \
+    -kek-file "$CREDENTIALS_DIRECTORY/payout-wallet-kek" \
     -wallet-file /etc/macprovider/payout-wallet.hex \
-    -expect-address 0x<the address from §1.1> -on-disk-hex
+    -expect-address 0x<the address from §1.1> -on-disk-hex'
 ```
 
 Only proceed to §1.3 once this prints OK.
