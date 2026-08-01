@@ -128,7 +128,11 @@ The same signed network-release manifest also binds:
 - the exact catalog release directory selected as the next `current`; the
   activation transaction derives `previous` from the verified live pointer and
   snapshots it before mutation;
-- coordinator configuration that advertises the same provider version.
+- coordinator configuration that advertises the same provider version. The
+  stable public release gate must prove live
+  `/healthz.recommended_binary_version` equals the provider CLI release before
+  undrafting and moving `latest`; prerelease canaries do not require fleet-wide
+  advertisement.
 
 No generated output is edited independently. CI, packaging, coordinator
 startup, and deploy all verify the same release before accepting it.

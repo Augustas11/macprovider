@@ -155,6 +155,9 @@ func LoadLocalFileSigner(wallet EncryptedWalletFile, kek []byte) (*LocalFileSign
 	if len(pt) != 32 {
 		return nil, fmt.Errorf("LoadLocalFileSigner: decrypted key length = %d, want 32", len(pt))
 	}
+	if err := validatePrivateKeyScalar(pt); err != nil {
+		return nil, fmt.Errorf("LoadLocalFileSigner: %w", err)
+	}
 	priv := secp256k1.PrivKeyFromBytes(pt)
 	address, err := deriveEthereumAddress(priv.PubKey())
 	if err != nil {

@@ -1447,8 +1447,9 @@ func TestTrustedUntrustedXFF(t *testing.T) {
 	reader := readerPool(t, fx)
 
 	// Untrusted-proxy case: limiter keys on r.RemoteAddr,
-	// ignoring rotated XFF. After 300 invalid-bearer requests
-	// from the same r.RemoteAddr, request 301 returns 429.
+	// ignoring rotated XFF. Send enough invalid-bearer requests
+	// that one fixed-window minute rollover cannot split the
+	// sample below the 300 rpm auth-failure cap in both windows.
 	muxUntrusted := stats.NewMux(
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
@@ -1460,7 +1461,7 @@ func TestTrustedUntrustedXFF(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer mpk_invalid_xff")
 	var rate429 int
-	for i := 0; i < 350; i++ {
+	for i := 0; i < 650; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/v1/stats/leaderboard", nil)
 		req.Header.Set("Authorization", "Bearer mpk_invalid_xff")
 		// Rotate XFF; the untrusted limiter ignores it.
