@@ -426,7 +426,7 @@
     {
       "spec_id": "SPEC-016",
       "title": "Provider payout pipeline (USDC on Base)",
-      "version": "0.1.24",
+      "version": "0.1.25",
       "path": "specs/SPEC-016-payout-pipeline.md",
       "status": "draft",
       "owner": "@Augustas11",
