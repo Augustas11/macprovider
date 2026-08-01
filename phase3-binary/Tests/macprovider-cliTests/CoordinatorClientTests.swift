@@ -5372,18 +5372,19 @@ final class CoordinatorClientTests: XCTestCase {
             sleepAssertionFactory: { spy.make() }
         ))
 
-        // Acquire once (as the reconnect loop / session-accept does).
-        await client.ensureSleepAssertionForTest()
+        // Serving intent acquires once (as the reconnect loop / session-accept does).
+        await client.setSleepAssertionDesiredForTest(true)
         var held = await client.sleepAssertionIsHeldForTest()
         XCTAssertTrue(held)
         XCTAssertEqual(spy.startCount, 1)
 
         // Idempotent: a re-accept after reconnect must not churn the child.
-        await client.ensureSleepAssertionForTest()
+        await client.setSleepAssertionDesiredForTest(true)
         XCTAssertEqual(spy.startCount, 1)
         XCTAssertEqual(spy.assertion.stopCount, 0)
 
-        // A disconnect (cleanupConnection) must NOT release the assertion.
+        // A disconnect (cleanupConnection) must NOT release the assertion —
+        // the reconnect backoff must keep the Mac awake.
         await client.cleanupConnectionForTest()
         held = await client.sleepAssertionIsHeldForTest()
         XCTAssertTrue(held, "sleep assertion must survive a disconnect")
@@ -5393,6 +5394,98 @@ final class CoordinatorClientTests: XCTestCase {
         await client.stop()
         held = await client.sleepAssertionIsHeldForTest()
         XCTAssertFalse(held)
+        XCTAssertEqual(spy.assertion.stopCount, 1)
+    }
+
+    // Serving intent is the boundary, not "connected": clearing intent (operator
+    // pause / terminal exit) releases the assertion so a paused provider may
+    // sleep, and re-declaring it (resume) re-arms keep-awake. This pins the
+    // audit fix for the operator-pause over-hold.
+    func testSleepAssertionFollowsServingIntent() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "mp-0123456789abcdef0123456789abcdef"
+        config.model = "model-a"
+
+        let spy = SpySleepAssertionFactory()
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            sleepAssertionFactory: { spy.make() }
+        ))
+
+        // Serving → held.
+        await client.setSleepAssertionDesiredForTest(true)
+        var held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertTrue(held)
+        XCTAssertEqual(spy.startCount, 1)
+
+        // Pause / terminal exit clears intent → released (paused Mac may sleep).
+        await client.setSleepAssertionDesiredForTest(false)
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertFalse(held, "cleared serving intent must let the Mac sleep")
+        XCTAssertEqual(spy.assertion.stopCount, 1)
+
+        // Resume re-declares intent → re-armed.
+        await client.setSleepAssertionDesiredForTest(true)
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertTrue(held)
+        XCTAssertEqual(spy.startCount, 2)
+
+        await client.stop()
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertFalse(held)
+        XCTAssertEqual(spy.assertion.stopCount, 2)
+    }
+
+    // stop() is a terminal latch: after shutdown, a late/reentrant arm request
+    // (a suspended rotation/session-accept/resume resuming after stop) must NOT
+    // re-hold the assertion — the Mac must be allowed to sleep once the provider
+    // has permanently stopped serving. Pins the audit fix for the stop()
+    // reentrancy race and the resume-after-terminal-exit over-hold.
+    func testSleepAssertionRefusesReArmAfterStop() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "mp-0123456789abcdef0123456789abcdef"
+        config.model = "model-a"
+
+        let spy = SpySleepAssertionFactory()
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            sleepAssertionFactory: { spy.make() }
+        ))
+
+        await client.setSleepAssertionDesiredForTest(true)
+        var held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertTrue(held)
+
+        await client.stop()
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertFalse(held)
+        XCTAssertEqual(spy.assertion.stopCount, 1)
+
+        // A reentrant arm after stop must be refused (canServe == false).
+        await client.setSleepAssertionDesiredForTest(true)
+        held = await client.sleepAssertionIsHeldForTest()
+        XCTAssertFalse(held, "stop() must latch: no re-arm after shutdown")
+        XCTAssertEqual(spy.startCount, 1, "no new caffeinate child after stop")
         XCTAssertEqual(spy.assertion.stopCount, 1)
     }
 }
