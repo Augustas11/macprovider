@@ -109,11 +109,11 @@ export function gatewayInvariantReasons(initial, current, {
   const reasons = [];
   const beforeModels = new Map((before?.models || []).map((model) => [model.id, model]));
   const afterModels = new Map((after.models || []).map((model) => [model.id, model]));
-  // The gateway excludes a coordinator row as soon as it becomes
-  // non-routable. An active request may therefore remove exactly one provider
-  // from the buyer-facing aggregate. The model disappears only when that was
-  // the model's sole ready provider; duplicate-provider models must remain
-  // available with one fewer ready provider.
+  // The gateway may exclude a coordinator row as soon as it becomes
+  // non-routable, but some runtimes keep the active row buyer-visible while the
+  // request is in flight. Accept either stable counts or one active-provider
+  // loss. The model may disappear only when that was its sole ready provider;
+  // duplicate-provider models must remain available.
   const activeModelBefore = activeModelID ? beforeModels.get(activeModelID) : null;
   const activeModelDropped = Boolean(activeModelBefore && !afterModels.has(activeModelID));
   const activeProviderLossAllowed = Boolean(activeModelBefore);
@@ -138,14 +138,14 @@ export function gatewayInvariantReasons(initial, current, {
     reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
   }
   if (Number.isInteger(before?.pool?.total_providers)) {
-    const expectedTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
-    if (after.pool.total_providers !== expectedTotal) {
+    const minTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
+    if (after.pool.total_providers < minTotal || after.pool.total_providers > before.pool.total_providers) {
       reasons.push(`total_providers_changed_${before.pool.total_providers}_to_${after.pool.total_providers}`);
     }
   }
   if (Number.isInteger(before?.pool?.ready)) {
-    const expectedReady = before.pool.ready - (activeProviderLossAllowed ? 1 : 0);
-    if (after.pool.ready !== expectedReady) {
+    const minReady = before.pool.ready - (activeProviderLossAllowed ? 1 : 0);
+    if (after.pool.ready < minReady || after.pool.ready > before.pool.ready) {
       reasons.push(`ready_changed_${before.pool.ready}_to_${after.pool.ready}`);
     }
   }
@@ -159,9 +159,11 @@ export function gatewayInvariantReasons(initial, current, {
     if (observed.degraded || !observed.available) {
       reasons.push(`${id}:model_not_stably_available`);
     }
-    if (Number.isInteger(model.ready_provider_count)
-        && observed.ready_provider_count !== model.ready_provider_count - (activeProviderLossAllowed && id === activeModelID ? 1 : 0)) {
-      reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
+    if (Number.isInteger(model.ready_provider_count)) {
+      const minReady = model.ready_provider_count - (activeProviderLossAllowed && id === activeModelID ? 1 : 0);
+      if (observed.ready_provider_count < minReady || observed.ready_provider_count > model.ready_provider_count) {
+        reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
+      }
     }
   }
   return reasons;
