@@ -3277,10 +3277,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 hashlib.sha256(source_at_authority).hexdigest(),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r2")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r3")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "d2b31d0f2e18631764f9a5f4c1c5b28cc0b46142",
+            "e742e42672d78a3f656f7665ac1cb129f731cc19",
         )
         subprocess.run(
             ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
@@ -3427,7 +3427,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-825-canary-fleet-r2",
+                "authority": "issue-825-canary-fleet-r3",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [
