@@ -1002,6 +1002,11 @@ func TestEarningsEndpointIncludesProviderSettlementReceiptReasonCodes(t *testing
 		t.Fatalf("zero settlement state=%#v, want valid zero_settled", zeroState)
 	}
 
+	// The fixture stamps receipts at a fixed ~2026-07-01 terminal_state_ts; the
+	// default diagnostics window is a rolling 31 days, so re-stamp the seeded
+	// verdicts to now (receipts are recent relative to an earnings query) to keep
+	// this assertion from drifting out of the window over calendar time.
+	restampSettlementVerdictsToNow(t, store)
 	req := httptest.NewRequest(http.MethodGet, "/providers/"+input.ProviderID+"/earnings", nil)
 	req.Header.Set("Authorization", "Bearer good")
 	w := httptest.NewRecorder()
@@ -1078,6 +1083,10 @@ func TestProvidersEndpointIncludesRedactedSettlementReceiptDiagnostics(t *testin
 		t.Fatal(err)
 	}
 
+	// The /admin/ledger/providers diagnostics window is a fixed rolling 31 days
+	// (not range-parameterized), so re-stamp the seeded verdicts to now to keep
+	// this assertion from drifting out of the window over calendar time.
+	restampSettlementVerdictsToNow(t, store)
 	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/providers", nil)
 	req.Header.Set("Authorization", "Bearer operator")
 	w := httptest.NewRecorder()

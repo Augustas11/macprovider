@@ -201,7 +201,7 @@ class ProductionExceptionsTests(unittest.TestCase):
                 }
             ]
         )
-        result = pe.simulate_config_sync_restore(current, stale, tombstones)
+        result = pe.simulate_config_sync_restore(current, stale, tombstones, now=NOW)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
     def test_health_report_allowlists_and_omits_free_prose(self):
@@ -527,6 +527,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tombs),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(register),
@@ -538,6 +540,8 @@ class ProductionExceptionsTests(unittest.TestCase):
             # Documented form with --tombstones after subcommand also works.
             rc_sync2 = pe.main(
                 [
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(register),
