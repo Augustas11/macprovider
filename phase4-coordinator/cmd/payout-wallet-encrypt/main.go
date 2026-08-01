@@ -31,7 +31,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
+	"runtime"
 
 	"github.com/augstar/macprovider-coordinator/internal/payout"
 )
@@ -74,6 +74,7 @@ func run() error {
 			return gerr
 		}
 		keyBytes = priv.Serialize()
+		priv.Zero() // wipe the private-key object once serialized
 	}
 	defer zero(keyBytes)
 
@@ -117,20 +118,33 @@ func readHexFile(path string, wantBytes int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := strings.TrimSpace(string(raw))
-	b, err := hex.DecodeString(s)
+	// Decode from []byte (no string(raw) copy that would linger in the
+	// heap until GC), and wipe the raw file buffer once decoded. This is
+	// best-effort GC-era cleanup, NOT secure-memory erasure — Go does not
+	// guarantee the bytes are gone from all copies/pages.
+	defer zero(raw)
+	trimmed := bytes.TrimSpace(raw)
+	b := make([]byte, hex.DecodedLen(len(trimmed)))
+	n, err := hex.Decode(b, trimmed)
 	if err != nil {
+		zero(b)
 		return nil, fmt.Errorf("not valid hex: %w", err)
 	}
+	b = b[:n]
 	if len(b) != wantBytes {
+		zero(b)
 		return nil, fmt.Errorf("expected %d bytes (%d hex chars), got %d bytes", wantBytes, wantBytes*2, len(b))
 	}
 	return b, nil
 }
 
+// zero wipes b in place. Best-effort only: Go exposes no secure-memory
+// primitive at this version, so a copy may survive in freed heap/pages
+// until GC. runtime.KeepAlive keeps b reachable across the wipe so the
+// compiler cannot elide the writes to a soon-dead slice.
 func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
-	_ = bytes.Equal(b, b) // prevent the wipe from being optimized away
+	runtime.KeepAlive(b)
 }

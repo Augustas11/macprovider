@@ -38,7 +38,8 @@ a key from a chat client or copy plaintext across the network.
 openssl rand -hex 32 > kek.hex        # 64 hex chars
 
 # 2. Build the tool from this repo checkout (offline machine).
-go build -o payout-wallet-encrypt ./phase4-coordinator/cmd/payout-wallet-encrypt
+#    The Go module root is phase4-coordinator/, so build from there.
+(cd phase4-coordinator && go build -o ../payout-wallet-encrypt ./cmd/payout-wallet-encrypt)
 
 # 3. Generate the wallet, encrypt under the KEK, write the file.
 #    Prints ONLY the EIP-55 address (never the private key or KEK).
@@ -54,7 +55,10 @@ payout:
   security:
     hot_wallet_address: "0x<EIP-55 from the tool output>"
     encrypted_wallet_path: "/etc/macprovider/payout-wallet.hex"
-    # encrypted_wallet_on_disk_hex: true   # matches the tool's output
+    encrypted_wallet_on_disk_hex: true   # REQUIRED: the tool writes hex.
+    # The config default is false (raw bytes); leaving this unset/false
+    # makes LoadLocalFileSigner read the hex file as raw bytes and fail
+    # GCM decrypt at startup — payouts blocked after funding.
 ```
 
 Transfer ONLY `payout-wallet.hex` to the coordinator host (mode 0600,
