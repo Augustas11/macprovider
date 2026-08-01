@@ -290,6 +290,54 @@ test('active-request safety correlates exact busy pool row, dropped gateway mode
   }), []);
 });
 
+test('active-request safety accepts a non-first duplicate-model provider without dropping the model', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+    { provider_id: 'provider-c', model_id: 'model-b' },
+  ];
+  const gateway = gatewaySnapshot({
+    status: 'up', degraded: false, coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+    models: [
+      { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, availability: 'available', degraded: false },
+      { id: 'model-b', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, availability: 'available', degraded: false },
+    ],
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id, assigned_id: `session-${index}`, model_id, state: 'ready', routing_eligible: true,
+    connected_at: stamp(-60_000), last_heartbeat_at: stamp(-1_000), last_activity_at: stamp(-500),
+  })) }, now);
+  const providers = [
+    safetyProvider('provider-a', 'model-a', 'session-0'),
+    safetyProvider('provider-b', 'model-b', 'session-1'),
+    safetyProvider('provider-c', 'model-b', 'session-2'),
+  ];
+  const initial = { gateway, operator_pool: operatorPool, providers };
+  const observed = structuredClone(initial);
+  observed.operator_pool[2].state = 'busy';
+  observed.operator_pool[2].routing_eligible = false;
+  observed.providers[2].status = 'busy';
+  observed.providers[2].requests_in_flight = 1;
+  observed.gateway.pool.total_providers = 2;
+  observed.gateway.pool.ready = 2;
+  observed.gateway.models[1].ready_provider_count = 1;
+  observed.gateway.models[1].slots_free = 1;
+
+  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
+    activeModelID: 'model-b',
+  }), []);
+
+  const droppedDuplicateModel = structuredClone(observed);
+  droppedDuplicateModel.gateway.models = droppedDuplicateModel.gateway.models.filter((model) => model.id !== 'model-b');
+  assert.ok(safetyObservationReasons(initial, droppedDuplicateModel, expectedFleet, {
+    activeModelID: 'model-b',
+  }).includes('model-b:model_disappeared'));
+});
+
 test('liveness substitutes missing v2 signals only for exact legacy-bridge provider rows', () => {
   const now = Date.now();
   const stamp = (offset) => new Date(now + offset).toISOString();
@@ -379,7 +427,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-585-integration-r7',
+    authority: 'issue-825-canary-fleet-r1',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
