@@ -114,7 +114,7 @@ First deploy the issue #825 r5 legacy duplicate recovery revision of #584's rede
 canary buyer exactly as reviewed, including its root-only `LoadCredential`
 files, safety observer, emergency stop, and classified no-load exits. The
 updater pins that complete runtime, service, and timer as rollout authority
-`issue-825-canary-fleet-r5` at source commit `c633794fbe0c7c25f4c88bd63922bae71e929f5d`;
+`issue-825-canary-fleet-r5` at source commit `98d95cb73573307c0e55855d9c3bb2ccd8e97b92`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
 on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,
