@@ -197,6 +197,12 @@ if run_guard "$work/dirty-healthz" >"$work/dirty-healthz.out" 2>&1; then
 fi
 grep -q "/healthz version is not vX.Y.Z or X.Y.Z: 'v1.8.68-dirty'" "$work/dirty-healthz.out"
 
+make_fixture "$work/padded-healthz" v1.8.68 " v1.8.68 "
+if run_guard "$work/padded-healthz" >"$work/padded-healthz.out" 2>&1; then
+  fail "accepted a padded coordinator health version"
+fi
+grep -q "/healthz version is not vX.Y.Z or X.Y.Z: ' v1.8.68 '" "$work/padded-healthz.out"
+
 make_fixture "$work/missing-sig"
 rm "$work/missing-sig/live/v1_rate-card.sig"
 if run_guard "$work/missing-sig" >"$work/missing-sig.out" 2>&1; then
@@ -214,25 +220,56 @@ make_fixture "$work/missing-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 20
 if run_guard "$work/missing-recommended" >"$work/missing-recommended.out" 2>&1; then
   fail "accepted a live coordinator without recommended_binary_version"
 fi
-grep -q "/healthz missing recommended_binary_version" "$work/missing-recommended.out"
+grep -q '/healthz recommended_binary_version is missing or not a version string' "$work/missing-recommended.out"
 
 make_fixture "$work/malformed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 latest
 if run_guard "$work/malformed-recommended" >"$work/malformed-recommended.out" 2>&1; then
   fail "accepted a malformed recommended_binary_version"
 fi
-grep -q "/healthz recommended_binary_version is not vX.Y.Z or X.Y.Z: 'latest'" "$work/malformed-recommended.out"
+grep -q "/healthz recommended_binary_version is not X.Y.Z: 'latest'" "$work/malformed-recommended.out"
 
 make_fixture "$work/suffixed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.68-2-gabcdef0
 if run_guard "$work/suffixed-recommended" >"$work/suffixed-recommended.out" 2>&1; then
   fail "accepted a git-describe recommended_binary_version"
 fi
-grep -q "/healthz recommended_binary_version is not vX.Y.Z or X.Y.Z: '1.8.68-2-gabcdef0'" "$work/suffixed-recommended.out"
+grep -q "/healthz recommended_binary_version is not X.Y.Z: '1.8.68-2-gabcdef0'" "$work/suffixed-recommended.out"
 
-make_fixture "$work/lagging-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
-if run_guard "$work/lagging-recommended" >"$work/lagging-recommended.out" 2>&1; then
-  fail "accepted a live coordinator advertising a stale recommended_binary_version"
+make_fixture "$work/zero-padded-tag" v01.8.68 v1.8.68
+if python3 "$guard" \
+  --tag v01.8.68 \
+  --pearl-release-json "$work/zero-padded-tag/pearl-release.json" \
+  --trusted-keys "$work/zero-padded-tag/trusted-keys.json" \
+  --coordinator-url https://coordinator.fixture.invalid \
+  --coordinator-dir "$work/zero-padded-tag/live" \
+  --now 2026-07-30T12:05:00Z \
+  >"$work/zero-padded-tag.out" 2>&1; then
+  fail "accepted a zero-padded release tag"
 fi
-grep -q "/healthz recommended_binary_version '1.8.67' does not match release 1.8.68" "$work/lagging-recommended.out"
+grep -q -- '--tag must be vX.Y.Z' "$work/zero-padded-tag.out"
+
+make_fixture "$work/stale-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if run_guard "$work/stale-recommended" >"$work/stale-recommended.out" 2>&1; then
+  fail "accepted a live coordinator recommending an older CLI than the release"
+fi
+grep -q "/healthz recommended_binary_version '1.8.67' does not match release 1.8.68" "$work/stale-recommended.out"
+
+make_fixture "$work/padded-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 " 1.8.68 "
+if run_guard "$work/padded-recommended" >"$work/padded-recommended.out" 2>&1; then
+  fail "accepted a live coordinator with padded recommended_binary_version"
+fi
+grep -q "/healthz recommended_binary_version is not X.Y.Z: ' 1.8.68 '" "$work/padded-recommended.out"
+
+make_fixture "$work/zero-padded-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 01.8.68
+if run_guard "$work/zero-padded-recommended" >"$work/zero-padded-recommended.out" 2>&1; then
+  fail "accepted a live coordinator with zero-padded recommended_binary_version"
+fi
+grep -q "/healthz recommended_binary_version is not X.Y.Z: '01.8.68'" "$work/zero-padded-recommended.out"
+
+make_fixture "$work/future-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.69
+if run_guard "$work/future-recommended" >"$work/future-recommended.out" 2>&1; then
+  fail "accepted a live coordinator recommending a different CLI than the release"
+fi
+grep -q "/healthz recommended_binary_version '1.8.69' does not match release 1.8.68" "$work/future-recommended.out"
 
 make_fixture "$work/hash-drift"
 printf '\n' >> "$work/hash-drift/live/v1_rate-card"
