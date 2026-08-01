@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r3';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r4';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -1115,6 +1115,123 @@ function isLegacyRollbackProviderSignalSubstitute(
     && row?.binary_version === authorization.binary_version;
 }
 
+function legacyRollbackRowAuthorized(row, expected, authorizedProviders, nowMs) {
+  const authorization = authorizedProviders?.get(expected?.provider_id || '');
+  return authorization?.model_id === expected?.model_id
+    && Number.isFinite(authorization?.expires_at_ms)
+    && nowMs < authorization.expires_at_ms
+    && row?.provider_id === expected.provider_id
+    && typeof row?.assigned_id === 'string'
+    && row.assigned_id.length > 0
+    && row?.model_id === expected.model_id
+    && Number.isFinite(row?.connected_at_ms)
+    && row?.catalog_admission_mode == null
+    && row?.binary_version === authorization.binary_version;
+}
+
+function legacyIdleDuplicateDropAllowance(
+  observations,
+  expectedFleet,
+  legacyRollbackProviders,
+  heartbeatAdvanceProviderIDs,
+  nowMs,
+) {
+  const empty = { providerIDs: new Set(), byModel: new Map(), count: 0 };
+  if (!legacyRollbackProviders?.size || !heartbeatAdvanceProviderIDs) return empty;
+  const observedList = Array.isArray(observations) ? observations.filter(Boolean) : [observations].filter(Boolean);
+  if (!observedList.length) return empty;
+  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
+  const providerIDs = new Set();
+  for (const observed of observedList) {
+    const rows = Array.isArray(observed?.operator_pool) ? observed.operator_pool : [];
+    const currentByID = new Map(rows.map((row) => [row.provider_id, row]));
+    for (const expected of expectedFleet) {
+      const id = expected.provider_id;
+      if (heartbeatAdvanceProviderIDs.has(id) || !legacyRollbackProviders.has(id)) continue;
+      const row = currentByID.get(id);
+      const rowAuthorized = row && legacyRollbackRowAuthorized(row, expected, legacyRollbackProviders, nowMs);
+      if (!rowAuthorized) continue;
+      const rowReady = row
+        && rowAuthorized
+        && row.state === 'ready'
+        && row.routing_eligible === true
+        && Number.isFinite(row.heartbeat_age_ms)
+        && row.heartbeat_age_ms <= CONFIG.maxHeartbeatAgeMs;
+      if (rowReady) continue;
+      const substituteReady = rows.some((candidate) => {
+        if (!candidate?.provider_id || candidate.provider_id === id) return false;
+        const candidateExpected = expectedByID.get(candidate.provider_id);
+        if (!candidateExpected || candidateExpected.model_id !== expected.model_id) return false;
+        return legacyRollbackRowAuthorized(candidate, candidateExpected, legacyRollbackProviders, nowMs)
+          && candidate.state === 'ready'
+          && candidate.routing_eligible === true
+          && Number.isFinite(candidate.heartbeat_age_ms)
+          && candidate.heartbeat_age_ms <= CONFIG.maxHeartbeatAgeMs;
+      });
+      if (substituteReady) providerIDs.add(id);
+    }
+  }
+  if (!providerIDs.size) return empty;
+  const byModel = new Map();
+  for (const id of providerIDs) {
+    const model = expectedByID.get(id)?.model_id || '';
+    if (model) byModel.set(model, (byModel.get(model) || 0) + 1);
+  }
+  return { providerIDs, byModel, count: providerIDs.size };
+}
+
+function filterLegacyIdleDuplicateRecoveryReasons(reasons, {
+  observations,
+  expectedFleet,
+  legacyRollbackProviders,
+  heartbeatAdvanceProviderIDs,
+  nowMs,
+}) {
+  const allowance = legacyIdleDuplicateDropAllowance(
+    observations,
+    expectedFleet,
+    legacyRollbackProviders,
+    heartbeatAdvanceProviderIDs,
+    nowMs,
+  );
+  if (!allowance.count) return reasons;
+  return reasons.filter((reason) => !legacyIdleDuplicateReasonAllowed(reason, allowance));
+}
+
+function legacyIdleDuplicateReasonAllowed(reason, allowance) {
+  const unscopedReason = reason.replace(/^(?:sample_\d+|final|recovery_final|recovery_soak):/, '');
+  for (const id of allowance.providerIDs) {
+    if (!unscopedReason.startsWith(`${id}:`)) continue;
+    const suffix = unscopedReason.slice(id.length + 1);
+    if (
+      suffix === 'expected_provider_not_ready'
+      || suffix === 'heartbeat_signal_missing'
+      || suffix === 'provider_signal_missing'
+      || /^state_[^:]+_not_ready$/.test(suffix)
+      || /^heartbeat_stale_\d+(?:\.\d+)?ms_gt_\d+ms$/.test(suffix)
+      || /^telemetry_observation_stale_\d+ms_gt_\d+ms$/.test(suffix)
+      || /^provider_state_[^:]+_not_allowed$/.test(suffix)
+      || suffix === 'coordinator_disconnected'
+    ) {
+      return true;
+    }
+  }
+  let match = unscopedReason.match(/^ready_(\d+)_lt_(\d+)$/);
+  if (match && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
+  match = unscopedReason.match(/^pool_unavailable_(\d+)_ne_0$/);
+  if (match && Number(match[1]) <= allowance.count) return true;
+  match = unscopedReason.match(/^ready_changed_(\d+)_to_(\d+)$/);
+  if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+  match = unscopedReason.match(/^provider_signal_count_(\d+)_ne_(\d+)$/);
+  if (match && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
+  match = unscopedReason.match(/^(.*):ready_provider_count_changed_(\d+)_to_(\d+)$/);
+  if (match) {
+    const allowedLoss = allowance.byModel.get(match[1]) || 0;
+    if (Number(match[2]) - Number(match[3]) <= allowedLoss) return true;
+  }
+  return false;
+}
+
 function hasDirectProviderSignal(signal) {
   return Object.entries(signal || {}).some(
     ([field, value]) => field !== 'source' && value != null,
@@ -1165,7 +1282,7 @@ export function recoverySoakObservationReasons(
     allowLegacyBridgeProviderSignals = false,
     ...soakOptions
   } = options;
-  return recoverySoakReasons({
+  const reasons = recoverySoakReasons({
     gatewayInitial: initial.gateway,
     gatewaySamples: samples.map((sample) => sample.gateway),
     poolzInitial: expectedPoolRows(initial.operator_pool, expectedFleet),
@@ -1189,6 +1306,13 @@ export function recoverySoakObservationReasons(
       ),
     ),
   }, soakOptions);
+  return filterLegacyIdleDuplicateRecoveryReasons(reasons, {
+    observations: samples,
+    expectedFleet,
+    legacyRollbackProviders,
+    heartbeatAdvanceProviderIDs: soakOptions.heartbeatAdvanceProviderIDs || null,
+    nowMs,
+  });
 }
 
 export function validateLegacyRollbackAuthorization(document, expectedFleet, nowMs = Date.now()) {
@@ -1352,8 +1476,9 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       if (!current) {
         const poolRow = currentPoolByID.get(expected.provider_id);
         const poolIndex = observed.operator_pool.indexOf(poolRow);
-        const directSignalMissing = poolIndex >= 0
-          && !hasDirectProviderSignal(observed.providers[poolIndex]);
+        const poolSlotSignal = poolIndex >= 0 ? observed.providers[poolIndex] : null;
+        const directSignalPresent = poolIndex >= 0 && hasDirectProviderSignal(poolSlotSignal);
+        const directSignalMissing = poolIndex >= 0 && !directSignalPresent;
         if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
           continue;
         }
@@ -1364,6 +1489,10 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
           nowMs,
           activeProviderID,
         )) {
+          continue;
+        }
+        if (directSignalPresent && poolSlotSignal?.provider_id !== expected.provider_id) {
+          reasons.push(`${expected.provider_id}:provider_signal_identity_mismatch_${poolSlotSignal?.provider_id || 'missing'}`);
           continue;
         }
         reasons.push(`${expected.provider_id}:provider_signal_missing`);
@@ -1384,7 +1513,13 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       }
     }
   }
-  return [...new Set(reasons)];
+  return [...new Set(filterLegacyIdleDuplicateRecoveryReasons(reasons, {
+    observations: observed,
+    expectedFleet,
+    legacyRollbackProviders,
+    heartbeatAdvanceProviderIDs,
+    nowMs,
+  }))];
 }
 
 function createControl(initial, baselines, expectedFleet, budget, legacyRollbackProviders) {
@@ -1744,6 +1879,9 @@ async function main() {
       )
     );
   }
+  const heartbeatAdvanceProviderIDs = legacyRollbackProviders?.size && budget.providers.size
+    ? new Set([...budget.providers.keys()].filter(Boolean))
+    : null;
   let post = null;
   const recoverySamples = [];
   const recoveryRecords = [];
@@ -1760,7 +1898,7 @@ async function main() {
         recoveryRecords.push({ observed: null, reasons: [], error: budget.timeReason() || 'hard_deadline_exhausted', phase: 'recovery_soak' });
         break;
       }
-      const record = await control.observeRaw('recovery_soak');
+      const record = await control.observeRaw('recovery_soak', { heartbeatAdvanceProviderIDs });
       recoveryRecords.push(record);
       if (record.observed) {
         post = record.observed;
@@ -1771,9 +1909,6 @@ async function main() {
       ...(record.error ? [`${record.phase}:${record.error}`] : []),
       ...record.reasons.map((reason) => `${record.phase}:${reason}`),
     ]);
-    const heartbeatAdvanceProviderIDs = legacyRollbackProviders?.size && budget.providers.size
-      ? new Set([...budget.providers.keys()].filter(Boolean))
-      : null;
     recoveryReasons.push(...recoverySoakObservationReasons(
       initial,
       recoverySamples,
