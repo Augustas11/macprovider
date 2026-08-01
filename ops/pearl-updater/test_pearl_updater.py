@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import grp
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -3134,6 +3135,10 @@ class PearlUpdaterTests(unittest.TestCase):
                             "provider_id": "provider-b",
                             "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
                         },
+                        {
+                            "provider_id": "provider-c",
+                            "model_id": "mlx-community/Qwen3-8B-4bit",
+                        },
                     ],
                 }
             )
@@ -3236,7 +3241,7 @@ class PearlUpdaterTests(unittest.TestCase):
             with self.assertRaisesRegex(updater_module.UpdateError, "pinned service models"):
                 self.updater.verify_canary_authority()
 
-    def test_canary_rollout_authority_hashes_match_issue_585_integration_runtime(self):
+    def test_canary_rollout_authority_hashes_match_issue_825_duplicate_fleet_runtime(self):
         sources = {
             Path("/opt/macprovider-canary-buyer/probe.mjs"):
                 REPO_ROOT / "test/e2e/canary-buyer/probe.mjs",
@@ -3254,14 +3259,33 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(set(updater_module.CANARY_AUTHORITY_FILES), set(sources))
         self.assertEqual(set(updater_module.CANARY_AUTHORITY_FILE_MODES), set(sources))
         for installed, source in sources.items():
+            source_at_authority = subprocess.run(
+                [
+                    "git",
+                    "show",
+                    f"{updater_module.CANARY_AUTHORITY_COMMIT}:{source.relative_to(REPO_ROOT).as_posix()}",
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+            ).stdout
             self.assertEqual(
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 updater_module.sha256_file(source),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-585-integration-r7")
+            self.assertEqual(
+                updater_module.CANARY_AUTHORITY_FILES[installed],
+                hashlib.sha256(source_at_authority).hexdigest(),
+            )
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r1")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "43138cee6dd26f18a11934390fc6b3b0623f1e00",
+            "9875d9c6e81fa992a57f5221ff18f4e413cf7fc3",
+        )
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
+            cwd=REPO_ROOT,
+            check=True,
         )
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_FILE_MODES,
@@ -3279,12 +3303,14 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
                 "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                "mlx-community/Qwen3-8B-4bit",
             },
         )
         service_models = "Environment=CANARY_MODELS=" + ",".join(
             (
                 "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
                 "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                "mlx-community/Qwen3-8B-4bit",
             )
         )
         self.assertIn(
@@ -3292,6 +3318,48 @@ class PearlUpdaterTests(unittest.TestCase):
             (REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.service").read_text(),
         )
         self.assertEqual(updater_module.CANARY_UNIT_BUDGET_S, 180)
+
+    def test_canary_expected_fleet_accepts_full_protected_duplicate_model_inventory(self):
+        expected_fleet = self.root / "five-provider-fleet.json"
+        providers = [
+            {
+                "provider_id": "provider-a",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-b",
+                "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-c",
+                "model_id": "mlx-community/Qwen3-8B-4bit",
+            },
+            {
+                "provider_id": "provider-d",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-e",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+        ]
+        expected_fleet.write_text(
+            json.dumps({"schema_version": 1, "providers": providers}) + "\n"
+        )
+        expected_fleet.chmod(0o600)
+
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
+            self.assertEqual(self.updater._canary_expected_fleet(), providers)
+
+        providers[0] = {**providers[0], "model_id": "unexpected-model"}
+        expected_fleet.write_text(
+            json.dumps({"schema_version": 1, "providers": providers}) + "\n"
+        )
+        with (
+            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
+            self.assertRaisesRegex(updater_module.UpdateError, "pinned service models"),
+        ):
+            self.updater._canary_expected_fleet()
 
     def test_legacy_rollback_authorization_is_exact_and_removed_after_gate(self):
         expected_fleet = self.root / "rollback-expected-fleet.json"
@@ -3304,6 +3372,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 "provider_id": "provider-b",
                 "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
             },
+            {
+                "provider_id": "provider-c",
+                "model_id": "mlx-community/Qwen3-8B-4bit",
+            },
         ]
         expected_fleet.write_text(
             json.dumps({"schema_version": 1, "providers": providers}) + "\n"
@@ -3313,8 +3385,8 @@ class PearlUpdaterTests(unittest.TestCase):
             "macprovider-coordinator.service": True,
             "macprovider-gateway.service": True,
         }
-        self.updater.previous_pool_ready = 2
-        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.previous_pool_ready = 3
+        self.updater.previous_protected_providers = ["provider-a", "provider-b", "provider-c"]
         self.updater.journal = {
             "transaction_id": "a" * 64,
             "previous_advertised_version": "1.8.30",
@@ -3355,7 +3427,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-585-integration-r7",
+                "authority": "issue-825-canary-fleet-r1",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [
@@ -3375,6 +3447,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 "provider_id": "provider-b",
                 "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
             },
+            {
+                "provider_id": "provider-c",
+                "model_id": "mlx-community/Qwen3-8B-4bit",
+            },
         ]
         expected_fleet.write_text(
             json.dumps({"schema_version": 1, "providers": providers}) + "\n"
@@ -3384,8 +3460,8 @@ class PearlUpdaterTests(unittest.TestCase):
             "macprovider-coordinator.service": True,
             "macprovider-gateway.service": True,
         }
-        self.updater.previous_pool_ready = 2
-        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.previous_pool_ready = 3
+        self.updater.previous_protected_providers = ["provider-a", "provider-b", "provider-c"]
         self.updater.journal = {
             "transaction_id": "a" * 64,
             "previous_advertised_version": "1.8.30",
@@ -3456,14 +3532,18 @@ class PearlUpdaterTests(unittest.TestCase):
                             "provider_id": "provider-b",
                             "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
                         },
+                        {
+                            "provider_id": "provider-c",
+                            "model_id": "mlx-community/Qwen3-8B-4bit",
+                        },
                     ],
                 }
             )
             + "\n"
         )
         expected_fleet.chmod(0o600)
-        self.updater.previous_pool_ready = 2
-        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.previous_pool_ready = 3
+        self.updater.previous_protected_providers = ["provider-a", "provider-b", "provider-c"]
         self.updater.journal = {
             "transaction_id": "b" * 64,
             "previous_advertised_version": "1.8.30",
@@ -3490,8 +3570,9 @@ class PearlUpdaterTests(unittest.TestCase):
         expected_fleet = self.root / "expected-fleet.json"
         expected_fleet.write_text(
             '{"schema_version":1,"providers":['
-            '{"provider_id":"a","model_id":"model-a"},'
-            '{"provider_id":"b","model_id":"model-b"}]}'
+            '{"provider_id":"a","model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"},'
+            '{"provider_id":"b","model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit"},'
+            '{"provider_id":"c","model_id":"mlx-community/Qwen3-8B-4bit"}]}'
         )
         expected_fleet.chmod(0o600)
 
@@ -3526,8 +3607,9 @@ class PearlUpdaterTests(unittest.TestCase):
         expected_fleet = self.root / "expected-fleet.json"
         expected_fleet.write_text(
             '{"schema_version":1,"providers":['
-            '{"provider_id":"a","model_id":"model-a"},'
-            '{"provider_id":"b","model_id":"model-b"}]}'
+            '{"provider_id":"a","model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"},'
+            '{"provider_id":"b","model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit"},'
+            '{"provider_id":"c","model_id":"mlx-community/Qwen3-8B-4bit"}]}'
         )
         expected_fleet.chmod(0o600)
         control_dir = self.root / "canary-control"

@@ -263,11 +263,19 @@ test('expected fleet and qualification isolation require exact provider/model/ro
     targetProviderID: 'provider-b', targetModel: 'model-b', maxHeartbeatAgeMs: 90_000,
     localProviderSignal: provider({ provider_id: 'provider-b', model_id: 'model-b', coordinator_session_id: 'session-b' }),
   }).includes('isolation_target_still_routable'));
+  assert.deepEqual(validateExpectedFleetDocument({ schema_version: 1, providers: [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-a' },
+    { provider_id: 'provider-c', model_id: 'model-c' },
+  ] }, { requireUniqueModels: false }), [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-a' },
+    { provider_id: 'provider-c', model_id: 'model-c' },
+  ]);
   assert.throws(() => validateExpectedFleetDocument({ schema_version: 1, providers: [
     { provider_id: 'provider-a', model_id: 'model-a' },
     { provider_id: 'provider-b', model_id: 'model-b' },
-    { provider_id: 'provider-c', model_id: 'model-c' },
-  ] }), /exactly 2/);
+  ] }, { expectedProviderCount: 3 }), /exactly 3/);
   assert.throws(() => validateExpectedFleetDocument({ schema_version: 1, providers: [
     { provider_id: 'provider-a', model_id: 'model-a' },
     { provider_id: 'provider-b', model_id: 'model-a' },
@@ -283,6 +291,22 @@ test('response attribution requires exact provider and model in both canary mode
   assert.deepEqual(responseIdentityReasons({ provider: '', responseModel: 'model-b' }, 'model-a', fleet), [
     'model-a:response_model_model-b_ne_model-a',
     'model-a:response_provider_missing_ne_provider-a',
+  ]);
+  const duplicateModelFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-a' },
+  ];
+  assert.deepEqual(responseIdentityReasons({ provider: 'provider-b', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), []);
+  assert.deepEqual(responseIdentityReasons({ provider: 'provider-c', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), [
+    'model-a:response_provider_provider-c_ne_provider-a|provider-b',
+  ]);
+  assert.deepEqual(responseIdentityReasons(
+    { provider: 'provider-b', responseModel: 'model-a' },
+    'model-a',
+    duplicateModelFleet,
+    { expectedProviderID: 'provider-a' },
+  ), [
+    'model-a:response_provider_provider-b_ne_provider-a',
   ]);
 });
 

@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r7';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r1';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -101,7 +101,7 @@ const CONFIG = {
   minDecodeTpsP50: numberEnv('CANARY_MIN_DECODE_TPS_P50', 15),
   minCachedPromptRatio: numberEnv('CANARY_MIN_CACHED_PROMPT_RATIO', 0.1),
   minReadyProviders: intEnv('CANARY_MIN_READY_PROVIDERS', 2, 1, 100),
-  expectedProviderCount: 2,
+  expectedProviderCount: intEnv('CANARY_EXPECTED_PROVIDER_COUNT', 0, 0, 100),
   maxRequestsPerProvider: intEnv('CANARY_MAX_REQUESTS_PER_PROVIDER', isQualification ? 17 : 4, 1, 100),
   maxCompletionTokensPerProvider: intEnv('CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER', isQualification ? 512 : 32, 1, 4096),
   maxRunDurationMs: intEnv('CANARY_MAX_RUN_DURATION_MS', isQualification ? 300000 : 90000, 10000, 900000),
@@ -1006,8 +1006,9 @@ async function loadExpectedFleet() {
     throw new Error(`cannot read CANARY_EXPECTED_FLEET_FILE: ${error.message || error}`);
   }
   return validateExpectedFleetDocument(parsed, {
-    expectedProviderCount: CONFIG.expectedProviderCount,
-    requireUniqueModels: true,
+    expectedProviderCount: CONFIG.expectedProviderCount || null,
+    minProviderCount: CONFIG.minReadyProviders,
+    requireUniqueModels: CONFIG.mode === 'qualification',
   });
 }
 
@@ -1060,6 +1061,26 @@ export async function pollPostRequestRecovery({
 function expectedPoolRows(poolRows, expectedFleet) {
   const ids = new Set(expectedFleet.map((row) => row.provider_id));
   return poolRows.filter((row) => ids.has(row.provider_id));
+}
+
+function activeExpectedProviderID(observed, expectedFleet, activeModelID, {
+  qualification = false,
+  activeProviderIDHint = '',
+} = {}) {
+  if (!activeModelID) return '';
+  if (qualification) return CONFIG.isolatedProviderID;
+  const candidateIDs = new Set(
+    expectedFleet
+      .filter((row) => row.model_id === activeModelID)
+      .map((row) => row.provider_id),
+  );
+  if (!candidateIDs.size) return '';
+  if (activeProviderIDHint && candidateIDs.has(activeProviderIDHint)) return activeProviderIDHint;
+  const busy = (observed.operator_pool || []).filter((row) => candidateIDs.has(row.provider_id)
+    && row.state === 'busy'
+    && row.routing_eligible === false);
+  if (busy.length === 1) return busy[0].provider_id;
+  return candidateIDs.size === 1 ? [...candidateIDs][0] : '';
 }
 
 function isLegacyBridgeProviderSignalSubstitute(row, expected) {
@@ -1239,17 +1260,17 @@ async function loadLegacyRollbackAuthorization(expectedFleet) {
 export function safetyObservationReasons(initial, observed, expectedFleet, {
   requireHeartbeatAdvance = false,
   activeModelID = '',
+  activeProviderIDHint = '',
   cachedGatewayModelID = '',
   allowLegacyBridgeProviderSignals = false,
   legacyRollbackProviders = null,
   nowMs = Date.now(),
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
-  const activeProviderID = activeModelID
-    ? (qualification
-      ? CONFIG.isolatedProviderID
-      : expectedFleet.find((row) => row.model_id === activeModelID)?.provider_id || '')
-    : '';
+  const activeProviderID = activeExpectedProviderID(observed, expectedFleet, activeModelID, {
+    qualification,
+    activeProviderIDHint,
+  });
   const activePoolRow = activeProviderID
     ? (observed.operator_pool || []).find((row) => row.provider_id === activeProviderID)
     : null;
@@ -1386,12 +1407,13 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
   const observeAndCheck = async (phase, {
     timeoutMs = CONFIG.reqTimeoutMs,
     activeModelID = '',
+    activeProviderIDHint = '',
   } = {}) => {
     if (failure) return null;
     try {
       const observed = await observeSafety(budget, timeoutMs);
       observations.push(observed);
-      const reasons = observationReasons(observed, { activeModelID });
+      const reasons = observationReasons(observed, { activeModelID, activeProviderIDHint });
       if (reasons.length) fail(classifySignalReasons(reasons), reasons, phase);
       return observed;
     } catch (error) {
@@ -1402,7 +1424,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
     }
   };
 
-  const observeAfterRequest = async (model) => {
+  const observeAfterRequest = async (model, activeProviderIDHint = '') => {
     const phase = `after_request_${budget.requests}`;
     try {
       const result = await pollPostRequestRecovery({
@@ -1414,6 +1436,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
         strictReasons: (observed) => observationReasons(observed, {}),
         transientReasons: (observed) => observationReasons(observed, {
           activeModelID: model,
+          activeProviderIDHint,
           cachedGatewayModelID: model,
         }),
         maxWaitMs: Math.min(CONFIG.postRequestRecoveryMs, budget.remainingDurationMs()),
@@ -1490,7 +1513,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
       // that exact correlated shape while polling through the cache TTL plus
       // one poll/observer margin, then require a fully strict snapshot before
       // another request can start.
-      await observeAfterRequest(model);
+      await observeAfterRequest(model, result.provider || '');
     },
     async monitorDuringRequest(requestAbort, stopSignal, activeModelID) {
       let sample = 0;

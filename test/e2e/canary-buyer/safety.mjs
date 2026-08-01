@@ -110,22 +110,24 @@ export function gatewayInvariantReasons(initial, current, {
   const beforeModels = new Map((before?.models || []).map((model) => [model.id, model]));
   const afterModels = new Map((after.models || []).map((model) => [model.id, model]));
   // The gateway excludes a coordinator row as soon as it becomes
-  // non-routable. With one provider per model, an active request therefore
-  // removes exactly one provider and its model from the buyer-facing
-  // aggregate; it does not surface as pool.degraded=1.
+  // non-routable. An active request may therefore remove exactly one provider
+  // from the buyer-facing aggregate. The model disappears only when that was
+  // the model's sole ready provider; duplicate-provider models must remain
+  // available with one fewer ready provider.
   const activeModelBefore = activeModelID ? beforeModels.get(activeModelID) : null;
   const activeModelDropped = Boolean(activeModelBefore && !afterModels.has(activeModelID));
-  const activeLossAllowed = activeModelDropped && activeModelBefore.provider_count === 1;
-  if (!['up', ...(activeLossAllowed ? ['degraded'] : [])].includes(after.status)
+  const activeProviderLossAllowed = Boolean(activeModelBefore);
+  const activeModelLossAllowed = activeModelDropped && activeModelBefore.provider_count === 1;
+  if (!['up', ...(activeModelLossAllowed ? ['degraded'] : [])].includes(after.status)
       || after.coordinator_status !== 'up') reasons.push('gateway_or_coordinator_not_up');
-  if (after.degraded !== (after.status === 'degraded') || (after.degraded && !activeLossAllowed)) {
+  if (after.degraded !== (after.status === 'degraded') || (after.degraded && !activeModelLossAllowed)) {
     reasons.push('gateway_degraded');
   }
   if (!Number.isInteger(after.pool.total_providers) || !Number.isInteger(after.pool.ready)) {
     reasons.push('pool_signal_missing');
     return reasons;
   }
-  const minimumReady = Math.max(0, minReadyProviders - (activeLossAllowed ? 1 : 0));
+  const minimumReady = Math.max(0, minReadyProviders - (activeProviderLossAllowed ? 1 : 0));
   if (after.pool.ready < minimumReady) reasons.push(`ready_${after.pool.ready}_lt_${minimumReady}`);
   for (const state of ['degraded', 'unavailable']) {
     if (!Number.isInteger(after.pool[state])) reasons.push(`pool_${state}_signal_missing`);
@@ -136,13 +138,13 @@ export function gatewayInvariantReasons(initial, current, {
     reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
   }
   if (Number.isInteger(before?.pool?.total_providers)) {
-    const expectedTotal = before.pool.total_providers - (activeLossAllowed ? 1 : 0);
+    const expectedTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
     if (after.pool.total_providers !== expectedTotal) {
       reasons.push(`total_providers_changed_${before.pool.total_providers}_to_${after.pool.total_providers}`);
     }
   }
   if (Number.isInteger(before?.pool?.ready)) {
-    const expectedReady = before.pool.ready - (activeLossAllowed ? 1 : 0);
+    const expectedReady = before.pool.ready - (activeProviderLossAllowed ? 1 : 0);
     if (after.pool.ready !== expectedReady) {
       reasons.push(`ready_changed_${before.pool.ready}_to_${after.pool.ready}`);
     }
@@ -151,14 +153,14 @@ export function gatewayInvariantReasons(initial, current, {
     if (!id) continue;
     const observed = afterModels.get(id);
     if (!observed) {
-      if (!(activeLossAllowed && id === activeModelID)) reasons.push(`${id}:model_disappeared`);
+      if (!(activeModelLossAllowed && id === activeModelID)) reasons.push(`${id}:model_disappeared`);
       continue;
     }
     if (observed.degraded || !observed.available) {
       reasons.push(`${id}:model_not_stably_available`);
     }
     if (Number.isInteger(model.ready_provider_count)
-        && observed.ready_provider_count !== model.ready_provider_count) {
+        && observed.ready_provider_count !== model.ready_provider_count - (activeProviderLossAllowed && id === activeModelID ? 1 : 0)) {
       reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
     }
   }
@@ -462,9 +464,10 @@ export function responseIdentityReasons(result, requestedModel, expectedFleet, {
     reasons.push(`${requestedModel}:response_model_${result?.responseModel || 'missing'}_ne_${requestedModel}`);
   }
   const matching = expectedFleet.filter((row) => row.model_id === requestedModel);
-  const expectedProvider = expectedProviderID || (matching.length === 1 ? matching[0].provider_id : '');
-  if (!expectedProvider) reasons.push(`${requestedModel}:expected_provider_mapping_missing_or_ambiguous`);
-  if (result?.provider !== expectedProvider) {
+  const expectedProviders = expectedProviderID ? [expectedProviderID] : matching.map((row) => row.provider_id);
+  if (!expectedProviders.length) reasons.push(`${requestedModel}:expected_provider_mapping_missing`);
+  if (!expectedProviders.includes(result?.provider || '')) {
+    const expectedProvider = expectedProviderID || (expectedProviders.length ? expectedProviders.join('|') : 'unresolved');
     reasons.push(`${requestedModel}:response_provider_${result?.provider || 'missing'}_ne_${expectedProvider || 'unresolved'}`);
   }
   return reasons;
@@ -486,10 +489,29 @@ export function performanceRegressionReasons(result, baseline, sampleClass) {
   return reasons;
 }
 
-export function validateExpectedFleetDocument(document, { expectedProviderCount = 2, requireUniqueModels = true } = {}) {
-  if (document?.schema_version !== 1 || !Array.isArray(document?.providers)
-      || document.providers.length !== expectedProviderCount) {
-    throw new Error(`expected fleet file must contain schema_version=1 and exactly ${expectedProviderCount} providers`);
+export function validateExpectedFleetDocument(document, {
+  expectedProviderCount = null,
+  minProviderCount = 1,
+  maxProviderCount = 100,
+  requireUniqueModels = true,
+} = {}) {
+  if (expectedProviderCount != null
+      && (!Number.isSafeInteger(expectedProviderCount) || expectedProviderCount < 1)) {
+    throw new Error('expectedProviderCount must be a positive integer when set');
+  }
+  if (!Number.isSafeInteger(minProviderCount) || minProviderCount < 1
+      || !Number.isSafeInteger(maxProviderCount) || maxProviderCount < minProviderCount) {
+    throw new Error('expected fleet provider bounds are invalid');
+  }
+  if (document?.schema_version !== 1 || !Array.isArray(document?.providers)) {
+    throw new Error('expected fleet file must contain schema_version=1 and a providers list');
+  }
+  const actualCount = document.providers.length;
+  if (expectedProviderCount != null && actualCount !== expectedProviderCount) {
+    throw new Error(`expected fleet file must contain exactly ${expectedProviderCount} providers`);
+  }
+  if (actualCount < minProviderCount || actualCount > maxProviderCount) {
+    throw new Error(`expected fleet file must contain between ${minProviderCount} and ${maxProviderCount} providers`);
   }
   const seen = new Set();
   const models = new Set();
