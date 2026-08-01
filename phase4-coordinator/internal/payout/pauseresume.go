@@ -155,6 +155,7 @@ func (s *PauseResumeService) serveFlip(
 		s.log.Warn().Err(err).
 			Int64("audit_id", result.AuditID).
 			Str("event", "payout_runtime_flag_sync_emit_failed").
+			Str("severity", "PAGE").
 			Send()
 	}
 
