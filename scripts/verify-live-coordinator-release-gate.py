@@ -26,9 +26,15 @@ PRIMARY_FEEDS = ("autotune-candidates.json", "demand-rank.json", "rate-card.json
 SIG_FEEDS = ("autotune-candidates.json.sig", "demand-rank.json.sig", "rate-card.json.sig")
 RELEASE_CATALOG_FILES = tuple(FEEDS) + ("trusted-keys.json",)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-TAG_RE = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
-VERSION_RE = re.compile(r"^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[0-9]+-g[0-9a-f]{7,40})?$")
-RECOMMENDED_VERSION_RE = re.compile(r"^[vV]?([0-9]+)\.([0-9]+)\.([0-9]+)$")
+VERSION_COMPONENT = r"(0|[1-9][0-9]*)"
+TAG_RE = re.compile(rf"^v{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}$")
+VERSION_RE = re.compile(
+    rf"^v?{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}"
+    r"(?:-[0-9]+-g[0-9a-f]{7,40})?$"
+)
+ADVERTISED_VERSION_RE = re.compile(
+    rf"^{VERSION_COMPONENT}\.{VERSION_COMPONENT}\.{VERSION_COMPONENT}$"
+)
 ED25519_SPKI_DER_PREFIX = bytes.fromhex("302a300506032b6570032100")
 TRUSTED_KEY_STATUSES = {"active", "bridge"}
 FUTURE_TOLERANCE = datetime.timedelta(minutes=10)
@@ -58,18 +64,18 @@ def read_json(path: pathlib.Path, label: str) -> object:
 def parse_semver(value: object, label: str) -> tuple[int, int, int]:
     if not isinstance(value, str):
         fail(f"{label} is not a version string")
-    match = VERSION_RE.fullmatch(value.strip())
+    match = VERSION_RE.fullmatch(value)
     if match is None:
         fail(f"{label} is not vX.Y.Z or X.Y.Z: {value!r}")
     return tuple(int(part) for part in match.groups())
 
 
-def parse_recommended_semver(value: object, label: str) -> tuple[int, int, int]:
+def parse_advertised_version(value: object, label: str) -> tuple[int, int, int]:
     if not isinstance(value, str):
-        fail(f"{label} is not a version string")
-    match = RECOMMENDED_VERSION_RE.fullmatch(value.strip())
+        fail(f"{label} is missing or not a version string")
+    match = ADVERTISED_VERSION_RE.fullmatch(value)
     if match is None:
-        fail(f"{label} is not vX.Y.Z or X.Y.Z: {value!r}")
+        fail(f"{label} is not X.Y.Z: {value!r}")
     return tuple(int(part) for part in match.groups())
 
 
@@ -379,17 +385,15 @@ def main() -> int:
                 f"/healthz version {healthz.get('version')!r} is older than "
                 f"release {expected_version}"
             )
-        if "recommended_binary_version" not in healthz:
-            fail("/healthz missing recommended_binary_version")
-        recommended_version = parse_recommended_semver(
-            healthz.get("recommended_binary_version"),
+        recommended_value = healthz.get("recommended_binary_version")
+        recommended_version = parse_advertised_version(
+            recommended_value,
             "/healthz recommended_binary_version",
         )
-        if recommended_version != required_version:
+        if recommended_version != required_version or recommended_value != expected_version:
             fail(
-                f"/healthz recommended_binary_version "
-                f"{healthz.get('recommended_binary_version')!r} does not match "
-                f"release {expected_version}"
+                f"/healthz recommended_binary_version {recommended_value!r} "
+                f"does not match release {expected_version}"
             )
 
         print(
@@ -397,7 +401,7 @@ def main() -> int:
             f"{args.coordinator_url.rstrip('/')} serves {args.tag} feed set "
             f"generated_at={generated_at} policy_version={policy_version} "
             f"healthz_version={healthz.get('version')} "
-            f"recommended_binary_version={healthz.get('recommended_binary_version')}"
+            f"recommended_binary_version={recommended_value}"
         )
         return 0
     except GateError as exc:

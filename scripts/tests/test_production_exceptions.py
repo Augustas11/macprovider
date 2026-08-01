@@ -208,7 +208,7 @@ class ProductionExceptionsTests(unittest.TestCase):
                 }
             ]
         )
-        result = pe.simulate_config_sync_restore(current, stale, tombstones)
+        result = pe.simulate_config_sync_restore(current, stale, tombstones, now=NOW)
         self.assertTrue(any(f.code == "resurrection" for f in result.errors))
 
     def test_health_report_allowlists_and_omits_free_prose(self):
@@ -377,7 +377,7 @@ class ProductionExceptionsTests(unittest.TestCase):
             ),
         ]
         for stale, expect_prefix in cases:
-            result = pe.simulate_config_sync_restore(current, stale, _tombstones())
+            result = pe.simulate_config_sync_restore(current, stale, _tombstones(), now=NOW)
             self.assertTrue(
                 any(f.code.startswith(expect_prefix) for f in result.errors),
                 msg=f"expected {expect_prefix} in {[f.code for f in result.errors]} for {stale!r}",
@@ -485,7 +485,7 @@ class ProductionExceptionsTests(unittest.TestCase):
     def test_sync_check_fails_on_malformed_stale(self):
         current = _minimal_register()
         stale = {"schema_version": "wrong", "environment": "nope", "exceptions": {}}
-        result = pe.simulate_config_sync_restore(current, stale, _tombstones())
+        result = pe.simulate_config_sync_restore(current, stale, _tombstones(), now=NOW)
         self.assertTrue(any(f.code.startswith("stale_") for f in result.errors))
 
     def test_cli_gate_report_and_sync_roundtrip(self):
@@ -534,6 +534,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tombs),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(register),
@@ -545,6 +547,8 @@ class ProductionExceptionsTests(unittest.TestCase):
             # Documented form with --tombstones after subcommand also works.
             rc_sync2 = pe.main(
                 [
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(register),
@@ -585,6 +589,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tmp_path / "tombs.json"),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(tmp_path / "current.json"),
@@ -597,6 +603,8 @@ class ProductionExceptionsTests(unittest.TestCase):
                 [
                     "--tombstones",
                     str(tmp_path / "empty.json"),
+                    "--now",
+                    "2026-07-22T12:00:00Z",
                     "sync-check",
                     "--current",
                     str(tmp_path / "current.json"),
