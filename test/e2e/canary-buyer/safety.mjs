@@ -138,14 +138,16 @@ export function gatewayInvariantReasons(initial, current, {
     reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
   }
   if (Number.isInteger(before?.pool?.total_providers)) {
-    const expectedTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
-    if (after.pool.total_providers !== expectedTotal) {
+    const expectedTotal = before.pool.total_providers;
+    const allowedTotalLoss = activeProviderLossAllowed ? 1 : 0;
+    if (!countWithinLossAllowance(after.pool.total_providers, expectedTotal, allowedTotalLoss)) {
       reasons.push(`total_providers_changed_${before.pool.total_providers}_to_${after.pool.total_providers}`);
     }
   }
   if (Number.isInteger(before?.pool?.ready)) {
-    const expectedReady = before.pool.ready - (activeProviderLossAllowed ? 1 : 0);
-    if (after.pool.ready !== expectedReady) {
+    const expectedReady = before.pool.ready;
+    const allowedReadyLoss = activeProviderLossAllowed ? 1 : 0;
+    if (!countWithinLossAllowance(after.pool.ready, expectedReady, allowedReadyLoss)) {
       reasons.push(`ready_changed_${before.pool.ready}_to_${after.pool.ready}`);
     }
   }
@@ -159,12 +161,18 @@ export function gatewayInvariantReasons(initial, current, {
     if (observed.degraded || !observed.available) {
       reasons.push(`${id}:model_not_stably_available`);
     }
+    const allowedReadyLoss = activeProviderLossAllowed && id === activeModelID ? 1 : 0;
     if (Number.isInteger(model.ready_provider_count)
-        && observed.ready_provider_count !== model.ready_provider_count - (activeProviderLossAllowed && id === activeModelID ? 1 : 0)) {
+        && !countWithinLossAllowance(observed.ready_provider_count, model.ready_provider_count, allowedReadyLoss)) {
       reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
     }
   }
   return reasons;
+}
+
+function countWithinLossAllowance(observed, expected, allowedLoss) {
+  if (!Number.isInteger(observed) || !Number.isInteger(expected)) return false;
+  return observed <= expected && observed >= expected - allowedLoss;
 }
 
 export function poolzSnapshot(payload, nowMs = Date.now()) {

@@ -84,6 +84,9 @@ test('hard request, token, and time budgets never admit an over-budget request',
 test('gateway pre/post invariants match exact active non-routable aggregation loss', () => {
   const initial = healthyGateway();
   assert.deepEqual(gatewayInvariantReasons(initial, initial, { minReadyProviders: 2 }), []);
+  assert.deepEqual(gatewayInvariantReasons(initial, initial, {
+    minReadyProviders: 2, activeModelID: 'model-a',
+  }), []);
   const active = structuredClone(initial);
   active.status = 'degraded';
   active.degraded = true;
@@ -102,6 +105,26 @@ test('gateway pre/post invariants match exact active non-routable aggregation lo
   assert.ok(gatewayInvariantReasons(initial, inventedDegradedRow, {
     minReadyProviders: 2, activeModelID: 'model-a',
   }).length > 0);
+  const duplicateActive = gatewaySnapshot({
+    status: 'up',
+    degraded: false,
+    coordinator: { status: 'up', checked_at: '2026-07-14T12:00:00Z' },
+    pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+    models: [
+      { id: 'model-a', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+      { id: 'model-b', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+    ],
+  });
+  assert.deepEqual(gatewayInvariantReasons(duplicateActive, duplicateActive, {
+    minReadyProviders: 3, activeModelID: 'model-a',
+  }), []);
+  const duplicateActiveLoss = structuredClone(duplicateActive);
+  duplicateActiveLoss.pool.total_providers = 2;
+  duplicateActiveLoss.pool.ready = 2;
+  duplicateActiveLoss.models[0].ready_provider_count = 1;
+  assert.deepEqual(gatewayInvariantReasons(duplicateActive, duplicateActiveLoss, {
+    minReadyProviders: 3, activeModelID: 'model-a',
+  }), []);
   const changed = structuredClone(initial);
   changed.pool.ready = 1;
   changed.pool.draining = 1;
