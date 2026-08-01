@@ -91,35 +91,46 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.release_source.outputs.tag }}"
+          artifact_dir="$RUNNER_TEMP/pearl-runtime-build"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
           (
             cd phase4-coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w -X main.version=$tag" \
-              -o "$GITHUB_WORKSPACE/coordinator-linux-amd64" ./cmd/coordinator
+              -o "$artifact_dir/coordinator-linux-amd64" ./cmd/coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w" \
-              -o "$GITHUB_WORKSPACE/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+              -o "$artifact_dir/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
           )
           (
             cd phase5-gateway
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w -X main.version=$tag" \
-              -o "$GITHUB_WORKSPACE/gateway-linux-amd64" ./cmd/gateway
+              -o "$artifact_dir/gateway-linux-amd64" ./cmd/gateway
           )
-          file coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 | tee pearl-file.txt
-          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          strings coordinator-linux-amd64 > coordinator-linux-amd64.strings
-          strings gateway-linux-amd64 > gateway-linux-amd64.strings
-          grep -Fq "$tag" coordinator-linux-amd64.strings
-          grep -Fq "$tag" gateway-linux-amd64.strings
+          file \
+            "$artifact_dir/coordinator-linux-amd64" \
+            "$artifact_dir/coordinator-cli-linux-amd64" \
+            "$artifact_dir/gateway-linux-amd64" | tee "$artifact_dir/pearl-file.txt"
+          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          strings "$artifact_dir/coordinator-linux-amd64" > "$artifact_dir/coordinator-linux-amd64.strings"
+          strings "$artifact_dir/gateway-linux-amd64" > "$artifact_dir/gateway-linux-amd64.strings"
+          grep -Fq "$tag" "$artifact_dir/coordinator-linux-amd64.strings"
+          grep -Fq "$tag" "$artifact_dir/gateway-linux-amd64.strings"
           EXPECTED_REVISION="${{ steps.release_source.outputs.commit }}" \
             python3 scripts/verify-pearl-go-binaries.py \
-            coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64
+            "$artifact_dir/coordinator-linux-amd64" \
+            "$artifact_dir/coordinator-cli-linux-amd64" \
+            "$artifact_dir/gateway-linux-amd64"
+          install -m 0755 "$artifact_dir/coordinator-linux-amd64" coordinator-linux-amd64
+          install -m 0755 "$artifact_dir/coordinator-cli-linux-amd64" coordinator-cli-linux-amd64
+          install -m 0755 "$artifact_dir/gateway-linux-amd64" gateway-linux-amd64
 
       - name: Sign Pearl runtime metadata and checksums
         id: assets

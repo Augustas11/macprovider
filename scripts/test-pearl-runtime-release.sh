@@ -37,6 +37,19 @@ if 'RELEASE_PRERELEASE_INPUT: "true"' not in workflow:
     raise SystemExit("runtime workflow must force GitHub prerelease publication")
 if 'EXPECTED_REVISION="${{ steps.release_source.outputs.commit }}"' not in workflow:
     raise SystemExit("runtime workflow must bind Pearl Go binary verification to the reviewed commit")
+build = workflow.split("- name: Build Pearl linux-amd64 runtime pair", 1)[1].split(
+    "- name: Sign Pearl runtime metadata and checksums", 1
+)[0]
+if 'artifact_dir="$RUNNER_TEMP/pearl-runtime-build"' not in build:
+    raise SystemExit("runtime workflow must build Pearl Go binaries outside the git worktree")
+if '-o "$GITHUB_WORKSPACE/' in build:
+    raise SystemExit("runtime workflow must not write Go build outputs into the git worktree")
+if 'python3 scripts/verify-pearl-go-binaries.py \\\n            "$artifact_dir/coordinator-linux-amd64" \\\n            "$artifact_dir/coordinator-cli-linux-amd64" \\\n            "$artifact_dir/gateway-linux-amd64"' not in build:
+    raise SystemExit("runtime workflow must verify the out-of-worktree Pearl Go binaries")
+verify_position = build.find("python3 scripts/verify-pearl-go-binaries.py")
+install_position = build.find('install -m 0755 "$artifact_dir/coordinator-linux-amd64" coordinator-linux-amd64')
+if verify_position < 0 or install_position < 0 or install_position < verify_position:
+    raise SystemExit("runtime workflow must copy release assets into the workspace only after binary verification")
 patch_position = publish.find("gh api --method PATCH")
 if patch_position < 0:
     raise SystemExit("runtime workflow must publish by numeric-ID PATCH")
