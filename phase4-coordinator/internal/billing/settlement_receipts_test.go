@@ -712,17 +712,22 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 }
 
 // restampSettlementVerdictsToNow moves every seeded settlement_receipt_verdicts
-// row's received_at_unix_ms to the current time. Fixtures carry a fixed
-// terminal_state_ts (~2026-07-01), but the earnings/providers diagnostics
-// summaries filter on a rolling ~31-day window, so a fixed fixture timestamp
-// drifts out of range as calendar time advances. The verdict outcome (which the
-// summary counts) is unchanged; only the window-membership timestamp is updated.
+// row's received_at_unix_ms to just inside the rolling diagnostics window.
+// Fixtures carry a fixed terminal_state_ts (~2026-07-01), but the
+// earnings/providers diagnostics summaries filter on a rolling ~31-day window
+// ending at now, so a fixed fixture timestamp drifts out of range as calendar
+// time advances. Stamping one hour before now (not exactly now) keeps the row
+// strictly inside [now-31d, now) regardless of the test runner's wall clock —
+// stamping exactly at now lands on the window's exclusive upper bound and is
+// dropped. Only the window-membership timestamp changes; verdict outcome (which
+// the summary counts) is untouched.
 func restampSettlementVerdictsToNow(t *testing.T, store *Store) {
 	t.Helper()
+	within := time.Now().UTC().Add(-time.Hour).UnixMilli()
 	if _, err := store.db.ExecContext(
 		context.Background(),
 		"UPDATE settlement_receipt_verdicts SET received_at_unix_ms = ?",
-		time.Now().UTC().UnixMilli(),
+		within,
 	); err != nil {
 		t.Fatal(err)
 	}
