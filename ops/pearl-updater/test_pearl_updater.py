@@ -2831,6 +2831,37 @@ class PearlUpdaterTests(unittest.TestCase):
         }
         self.assertFalse(self.updater.protected_provider_fleet_ready())
 
+    def test_public_protected_fleet_sample_relaxes_stale_baseline_for_rollback(self):
+        self.updater.previous_pool_ready = 5
+        self.updater.previous_protected_providers = [
+            "provider-a",
+            "provider-b",
+            "provider-c",
+            "provider-d",
+            "provider-e",
+        ]
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        rows = [
+            {"provider_id": f"provider-{suffix}", "state": "ready", "routing_eligible": True}
+            for suffix in ("a", "b", "c", "d")
+        ]
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={"summary": {"ready": 4}, "pool": rows}
+        )
+
+        self.assertFalse(self.updater.protected_provider_fleet_ready())
+        self.assertTrue(
+            self.updater.protected_provider_fleet_ready(require_previous_baseline=False)
+        )
+
+        self.updater.get_authorized_json.return_value = {
+            "summary": {"ready": 0},
+            "pool": rows,
+        }
+        self.assertFalse(
+            self.updater.protected_provider_fleet_ready(require_previous_baseline=False)
+        )
+
     def test_snapshot_failure_restores_previously_active_services(self):
         release = self.verify()
         order = []
@@ -3277,7 +3308,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 hashlib.sha256(source_at_authority).hexdigest(),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r4")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r5")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
             "63577a81c3fba02c98ef3048d66946b918fe7721",
@@ -3427,7 +3458,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-825-canary-fleet-r4",
+                "authority": "issue-825-canary-fleet-r5",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [

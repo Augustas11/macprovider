@@ -463,7 +463,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r4',
+    authority: 'issue-825-canary-fleet-r5',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -616,7 +616,7 @@ test('legacy rollback recovery requires heartbeat advance only from exercised pr
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r4',
+    authority: 'issue-825-canary-fleet-r5',
     transaction_id: 'b'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -720,7 +720,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r4',
+    authority: 'issue-825-canary-fleet-r5',
     transaction_id: 'c'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -836,12 +836,28 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
 
   const missingDuplicate = structuredClone(recoveryTwo);
   missingDuplicate.gateway.pool.total_providers = 2;
+  missingDuplicate.gateway.pool.unavailable = 0;
   missingDuplicate.operator_pool = missingDuplicate.operator_pool.filter((row) => row.provider_id !== 'provider-c');
-  assert.ok(recoverySoakObservationReasons(
+  missingDuplicate.providers = missingDuplicate.providers.filter((provider) => provider.provider_id !== 'provider-c');
+  assert.deepEqual(recoverySoakObservationReasons(
     observation,
     [recoveryOne, missingDuplicate],
     expectedFleet,
     authorized,
+    scopedAdvance,
+    now,
+  ), []);
+  assert.deepEqual(safetyObservationReasons(observation, missingDuplicate, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+    requireHeartbeatAdvance: true,
+    heartbeatAdvanceProviderIDs: exercisedProviderIDs,
+  }), []);
+  assert.ok(recoverySoakObservationReasons(
+    observation,
+    [recoveryOne, missingDuplicate],
+    expectedFleet,
+    null,
     scopedAdvance,
     now,
   ).some((reason) => reason.includes('provider-c')));

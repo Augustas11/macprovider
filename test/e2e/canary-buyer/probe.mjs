@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r4';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r5';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -1148,9 +1148,14 @@ function legacyIdleDuplicateDropAllowance(
     for (const expected of expectedFleet) {
       const id = expected.provider_id;
       if (heartbeatAdvanceProviderIDs.has(id) || !legacyRollbackProviders.has(id)) continue;
+      const authorization = legacyRollbackProviders.get(id);
+      const idAuthorized = authorization?.model_id === expected.model_id
+        && Number.isFinite(authorization?.expires_at_ms)
+        && nowMs < authorization.expires_at_ms;
+      if (!idAuthorized) continue;
       const row = currentByID.get(id);
       const rowAuthorized = row && legacyRollbackRowAuthorized(row, expected, legacyRollbackProviders, nowMs);
-      if (!rowAuthorized) continue;
+      if (row && !rowAuthorized) continue;
       const rowReady = row
         && rowAuthorized
         && row.state === 'ready'
@@ -1205,8 +1210,10 @@ function legacyIdleDuplicateReasonAllowed(reason, allowance) {
     const suffix = unscopedReason.slice(id.length + 1);
     if (
       suffix === 'expected_provider_not_ready'
+      || suffix === 'expected_provider_missing'
       || suffix === 'heartbeat_signal_missing'
       || suffix === 'provider_signal_missing'
+      || suffix === 'provider_disappeared'
       || /^state_[^:]+_not_ready$/.test(suffix)
       || /^heartbeat_stale_\d+(?:\.\d+)?ms_gt_\d+ms$/.test(suffix)
       || /^telemetry_observation_stale_\d+ms_gt_\d+ms$/.test(suffix)
@@ -1221,6 +1228,10 @@ function legacyIdleDuplicateReasonAllowed(reason, allowance) {
   match = unscopedReason.match(/^pool_unavailable_(\d+)_ne_0$/);
   if (match && Number(match[1]) <= allowance.count) return true;
   match = unscopedReason.match(/^ready_changed_(\d+)_to_(\d+)$/);
+  if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+  match = unscopedReason.match(/^total_providers_changed_(\d+)_to_(\d+)$/);
+  if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+  match = unscopedReason.match(/^provider_count_changed_(\d+)_to_(\d+)$/);
   if (match && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
   match = unscopedReason.match(/^provider_signal_count_(\d+)_ne_(\d+)$/);
   if (match && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
