@@ -60,11 +60,14 @@ jobs:
             phase5-gateway/go.sum
 
       - name: Select and verify reviewed release toolchain
+        id: release_toolchain
         shell: bash
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
-          bash scripts/verify-release-toolchain.sh release-toolchain.json
+          toolchain_json="$RUNNER_TEMP/release-toolchain.json"
+          bash scripts/verify-release-toolchain.sh "$toolchain_json"
+          printf 'json=%s\n' "$toolchain_json" >> "$GITHUB_OUTPUT"
 
       - name: Seal OpenSSL 3 for protected runtime signing
         id: protected_openssl
@@ -94,6 +97,12 @@ jobs:
           artifact_dir="$RUNNER_TEMP/pearl-runtime-build"
           rm -rf "$artifact_dir"
           mkdir -p "$artifact_dir"
+          git_status="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$git_status" ]; then
+            echo "::error::runtime checkout is dirty before Pearl Go build" >&2
+            printf '%s\n' "$git_status" >&2
+            exit 1
+          fi
           (
             cd phase4-coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
@@ -153,6 +162,7 @@ jobs:
           trap cleanup_release_signing_key EXIT
           printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
           chmod 600 "$release_signing_key"
+          install -m 0644 "${{ steps.release_toolchain.outputs.json }}" release-toolchain.json
           coordinator_sha="$(shasum -a 256 coordinator-linux-amd64 | awk '{print $1}')"
           coordinator_cli_sha="$(shasum -a 256 coordinator-cli-linux-amd64 | awk '{print $1}')"
           gateway_sha="$(shasum -a 256 gateway-linux-amd64 | awk '{print $1}')"
