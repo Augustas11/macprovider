@@ -2698,6 +2698,65 @@ class PearlUpdaterTests(unittest.TestCase):
             ),
         )
 
+    def test_rollback_serving_proof_relaxes_baseline_only_with_required_canary(self):
+        identity = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
+        self.updater.run_canary_gate = mock.Mock()
+
+        def wait_until_success(_description, _timeout, check):
+            for _ in range(4):
+                if check():
+                    return
+            self.fail("wait_for check did not succeed")
+
+        self.updater.wait_for = wait_until_success
+
+        self.updater.prove_serving_recovery(identity, legacy_rollback_version="1.8.30")
+
+        self.assertEqual(
+            self.updater.protected_provider_fleet_ready.call_args_list,
+            [mock.call(require_previous_baseline=False)] * 3,
+        )
+        self.updater.run_canary_gate.assert_called_once_with(
+            legacy_rollback_version="1.8.30"
+        )
+
+    def test_disabled_rollback_serving_proof_keeps_exact_baseline(self):
+        identity = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
+        )
+        self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
+        self.updater.gateway_serving_ready = mock.Mock(return_value=True)
+        self.updater.public_identity_ready = mock.Mock(return_value=True)
+        self.updater.protected_provider_fleet_ready = mock.Mock(return_value=True)
+        self.updater.verify_disabled_buyer_canary_posture = mock.Mock()
+        self.updater.run_canary_gate = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        def wait_until_success(_description, _timeout, check):
+            for _ in range(4):
+                if check():
+                    return
+            self.fail("wait_for check did not succeed")
+
+        self.updater.wait_for = wait_until_success
+
+        self.updater.prove_serving_recovery(identity, legacy_rollback_version="1.8.30")
+
+        self.assertEqual(
+            self.updater.protected_provider_fleet_ready.call_args_list,
+            [mock.call(require_previous_baseline=True)] * 3,
+        )
+        self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
+        self.updater.run_canary_gate.assert_not_called()
+
     def test_runtime_only_rollout_requires_buyer_canary_mode(self):
         self.make_bundle(runtime_only=True)
         release = self.verify()
@@ -2830,6 +2889,44 @@ class PearlUpdaterTests(unittest.TestCase):
             "pool": [{**rows[0], "routing_eligible": False}, rows[1]],
         }
         self.assertFalse(self.updater.protected_provider_fleet_ready())
+
+    def test_public_protected_fleet_sample_relaxes_stale_baseline_for_rollback(self):
+        self.updater.previous_pool_ready = 5
+        self.updater.previous_protected_providers = [
+            "provider-a",
+            "provider-b",
+            "provider-c",
+            "provider-d",
+            "provider-e",
+        ]
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        rows = [
+            {"provider_id": f"provider-{suffix}", "state": "ready", "routing_eligible": True}
+            for suffix in ("a", "b", "c", "d")
+        ]
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={"summary": {"ready": 4}, "pool": rows}
+        )
+
+        self.assertFalse(self.updater.protected_provider_fleet_ready())
+        self.assertTrue(
+            self.updater.protected_provider_fleet_ready(require_previous_baseline=False)
+        )
+
+        self.updater.get_authorized_json.return_value = {
+            "summary": {"ready": 0},
+            "pool": rows,
+        }
+        self.assertFalse(
+            self.updater.protected_provider_fleet_ready(require_previous_baseline=False)
+        )
+        self.updater.get_authorized_json.return_value = {
+            "summary": {"ready": 4},
+            "pool": [{**rows[0], "routing_eligible": False}, *rows[1:]],
+        }
+        self.assertFalse(
+            self.updater.protected_provider_fleet_ready(require_previous_baseline=False)
+        )
 
     def test_snapshot_failure_restores_previously_active_services(self):
         release = self.verify()
@@ -3277,10 +3374,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 hashlib.sha256(source_at_authority).hexdigest(),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r4")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r5")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "63577a81c3fba02c98ef3048d66946b918fe7721",
+            "98d95cb73573307c0e55855d9c3bb2ccd8e97b92",
         )
         subprocess.run(
             ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
@@ -3427,7 +3524,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-825-canary-fleet-r4",
+                "authority": "issue-825-canary-fleet-r5",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [
