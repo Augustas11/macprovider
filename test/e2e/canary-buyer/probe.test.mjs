@@ -290,6 +290,42 @@ test('active-request safety correlates exact busy pool row, dropped gateway mode
   }), []);
 });
 
+test('active-request safety accepts unchanged gateway counts while provider is busy', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const gateway = gatewaySnapshot({
+    status: 'up', degraded: false, coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+    models: expectedFleet.map(({ model_id }) => ({
+      id: model_id, provider_count: 1, ready_provider_count: 1, slots_free: 1,
+      available: true, availability: 'available', degraded: false,
+    })),
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id, assigned_id: `session-${index}`, model_id, state: 'ready', routing_eligible: true,
+    connected_at: stamp(-60_000), last_heartbeat_at: stamp(-1_000), last_activity_at: stamp(-500),
+  })) }, now);
+  const providers = [
+    safetyProvider('provider-a', 'model-a', 'session-0'),
+    safetyProvider('provider-b', 'model-b', 'session-1'),
+  ];
+  const initial = { gateway, operator_pool: operatorPool, providers };
+  const observed = structuredClone(initial);
+  observed.operator_pool[0].state = 'busy';
+  observed.operator_pool[0].routing_eligible = false;
+  observed.providers[0].status = 'busy';
+  observed.providers[0].requests_in_flight = 1;
+
+  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
+    activeModelID: 'model-a',
+  }), []);
+});
+
 test('active-request safety accepts a non-first duplicate-model provider without dropping the model', () => {
   const now = Date.now();
   const stamp = (offset) => new Date(now + offset).toISOString();
