@@ -134,7 +134,7 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "9a4609a03fd1c78439e0f8d9bb8e3029fd83b9261df9ea0585b5a3823459f338",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "a2f3088ccfd39bd87c8d2ffdc3ca697490b703ff8b515ca560b8e41864dd80eb",
     Path("/opt/macprovider-canary-buyer/safety.mjs"): "ec06ca88bd0b537a36d1957416b059e3637e95a02f0e6c289fb074e69f692653",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
