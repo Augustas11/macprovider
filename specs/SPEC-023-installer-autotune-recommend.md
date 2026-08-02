@@ -1,11 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.9.1
+version: v0.9.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-08-02
 
 ## Change log
+
+- **v0.9.2 (2026-08-02)** — oMLX Stage-1 activation gate & forward-declaration (#687, r4 re-scope).
+  1. **The oMLX schema is FORWARD-DECLARED, not activated.** `bench_gate.provenance.source == "omlx_seeded"`, `bench_gate.gate_seed`, and the `verified_provider_matrix` provenance value MUST NOT be emitted into any signed or served candidate catalog until the §12.2 activation gate is satisfied. This prevents the #813 forward-incompatibility trap: deployed coordinator Go validators and CLI Swift strict decoders would reject the new schema and fail-close the fleet.
+  2. **Activation gate (§12.2).** All catalog consumers must accept the new schema without integrity failure (forward-compat), and the Stage-2 enforcement (admission-identity exclusion of advisory `bench_gate`, network-connected `recommendable`-only enforcement, row-scoped quarantine, and evidence-bound `verified_provider_matrix` promotion) must have shipped. Until then a signed/served catalog MUST NOT contain any `omlx_seeded` row (§12.2, AC-OMLX-11).
+  3. **`verified_provider_matrix` is reserved and inert in Stage 1.** Any catalog row created or modified with `provenance.source == "verified_provider_matrix"` MUST be rejected at authoring/lint/signing; no such row may exist until Stage-2 evidence binding exists (AC-OMLX-12).
+  4. **Field-laundering prohibition.** oMLX data MAY seed ONLY `bench_gate.min_sustained_tps` (plus its `gate_seed` metadata). It MUST NOT create or change `min_ram_gb`, `min_bandwidth_tier`, `runtime_status`, model identity, demand-rank, or rate-card/pricing/admission/routing fields (AC-OMLX-13).
+  5. **`gate_seed.target_cell` is row-bound; invalid oMLX rows are row-scoped quarantined.** A seed targeting a different model than its row is a catalog-integrity failure (AC-OMLX-14); a single semantically-invalid oMLX row is row-scoped-quarantined and never fleet-blocking (§12.3, AC-OMLX-15).
+  6. **Stage-2 prerequisites are declared, not implemented.** §12.2 lists the coordinator/CLI enforcement (i)-(iv) as normative Stage-2 requirements; this amendment ships no Go/Swift code.
 
 - **v0.9.1 (2026-08-02)** — oMLX-seeded provisional catalog gates (#687).
   1. **oMLX seeds are provisional only.** Unattested oMLX data MAY seed the STARTING advisory `bench_gate.min_sustained_tps` of a non-default provisional row only. It MUST NEVER set or hold a recommendable gate, raise a verified gate, hard-block a provider, or be sole or partial promotion evidence. Verified provider autotune is the only admission/promotion authority.
@@ -336,11 +344,12 @@ Field rules:
 - Every downloadable row (`candidate`, `listed`, or `recommendable`) MUST include both `model_revision` and `model_sha256`. If either is absent, the row is ineligible before download or benchmark, including donor mode.
 - `min_ram_gb` and `min_bandwidth_tier` are authoritative for §5. `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets only; they do not veto paid or donor selection.
 - `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, `legacy_unverified`, `omlx_seeded`, or `verified_provider_matrix`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. Newly generated catalog releases, direct CLI catalog decoding, and current coordinator feed loading MUST fail closed when `bench_gate.provenance` is absent. During A4 feed activation only, implementations MAY accept the exact `published-2026-07-10-catalog-recovery-v1` candidate catalog with SHA-256 `776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda` as a signed live fetch or `previous-target` rollback input; every other missing-provenance candidate catalog remains an integrity failure.
-- `verified_provider_matrix` is the canonical provenance value denoting a gate recomputed solely from `N` verified provider autotune measurements on eligible hardware (§12 promotion). It is the required value a row promoted away from `omlx_seeded` MUST carry (§5, §12). Unlike `measured_single_host` (one host) or `runtime_validated_only` (no trusted throughput gate), it denotes the verified-provider matrix that is the sole promotion/admission authority for a formerly provisional row.
+- `verified_provider_matrix` is the canonical provenance value denoting a gate recomputed solely from `N` verified provider autotune measurements on eligible hardware (§12 promotion). It is the required value a row promoted away from `omlx_seeded` MUST carry (§5, §12). Unlike `measured_single_host` (one host) or `runtime_validated_only` (no trusted throughput gate), it denotes the verified-provider matrix that is the sole promotion/admission authority for a formerly provisional row. It is RESERVED and inert in Stage 1: any newly created or modified row carrying `verified_provider_matrix` MUST be rejected at catalog authoring, lint, and signing until the Stage-2 evidence binding ships (§12.4, AC-OMLX-12).
 - `bench_gate.gate_seed` is REQUIRED when `bench_gate.provenance.source == "omlx_seeded"` and MUST be absent for every other provenance source. The requirement is symmetric: a row with `bench_gate.provenance.source == "omlx_seeded"` and a missing, malformed, or incomplete `gate_seed` is a catalog-integrity failure at the SAME boundaries as the forbidden-seed-on-non-oMLX-row case — it MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode (and is likewise ineligible before download or benchmark). A row whose `bench_gate.provenance.source != "omlx_seeded"` that nonetheless carries a `bench_gate.gate_seed` is equally a catalog-integrity failure that MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode (it MUST NOT be treated as a benign extra field — carrying seed identity on a non-provisional row is exactly the provenance-laundering this rule closes). `gate_seed` records the oMLX snapshot and derivation inputs used to produce the provisional advisory `min_sustained_tps`; it is not runtime evidence and does not admit or promote a provider.
-- `bench_gate.gate_seed.target_cell` is the canonical normalized cell identity the seed is derived from and MUST carry `chip_normalized`, `ram_gb`, `model_key`, `quant`, and `context`. It binds the seed to exactly ONE normalized chip/RAM/model/quant/context cell; `board_p25_tg` and `observations_used_n` are the p25 and observation count OF THAT ONE cell. `bench_gate.gate_seed.omlx_snapshot_sha256` is a lowercase 64-hex digest of the immutable oMLX snapshot / observation manifest the observations were drawn from, so a validator can pin the observation set. Observations spanning more than one normalized cell (a mix of chips, RAM classes, models, quants, or context lengths) MUST NOT be aggregated into one seed; a `gate_seed` whose observations are not all within its declared `target_cell` is a catalog-integrity failure.
+- `bench_gate.gate_seed.target_cell` is the canonical normalized cell identity the seed is derived from and MUST carry `chip_normalized`, `ram_gb`, `model_key`, `quant`, and `context`. It binds the seed to exactly ONE normalized chip/RAM/model/quant/context cell; `board_p25_tg` and `observations_used_n` are the p25 and observation count OF THAT ONE cell. `target_cell.model_key` MUST equal the enclosing catalog row's normalized `model_key`, and `target_cell` model/quant/context MUST be consistent with the row's model identity; a seed whose `target_cell` targets a different model than its row is a catalog-integrity failure (§12.4, AC-OMLX-14). `bench_gate.gate_seed.omlx_snapshot_sha256` is a lowercase 64-hex digest of the immutable oMLX snapshot / observation manifest the observations were drawn from, so a validator can pin the observation set. Observations spanning more than one normalized cell (a mix of chips, RAM classes, models, quants, or context lengths) MUST NOT be aggregated into one seed; a `gate_seed` whose observations are not all within its declared `target_cell` is a catalog-integrity failure.
 - `bench_gate.gate_seed.observations_used_n` is a positive integer (`>= 1`; and it MUST be `>= K`, the §12 oMLX seed threshold). It is the minimum post-dedup/outlier oMLX **observation** count within the single `target_cell` above (not a count of distinct cells). `board_release_tag` MUST identify a stable oMLX release, not a `.dev` prerelease. `board_p25_tg` MUST be the filtered 4k-token, matching-quantization p25 generation (decode) throughput of that cell after duplicate and outlier handling. `engine_delta_applied` MUST record the runtime delta used by the §12 seed formula and MUST be the exact `engine_delta` value bound into that formula. `mtp_discounted` MUST be `true` when MTP or speculative-decode board rows were discounted; accelerated rows that cannot be excluded or discounted MUST NOT seed a gate.
 - The seed formula is binding: `min_sustained_tps` on an `omlx_seeded` row MUST equal `max(8, floor(board_p25_tg * engine_delta_applied * 0.90))` exactly, using the row's own `gate_seed` values (§12). A `min_sustained_tps` that does not equal that computed value is a formula mismatch and a catalog-integrity failure (fail-closed per the semantic-failure rule below).
+- Field-laundering is forbidden: oMLX data MAY seed ONLY `bench_gate.min_sustained_tps` and its `gate_seed` metadata. An `omlx_seeded` row (or its seed) MUST NOT create or change `min_ram_gb`, `min_bandwidth_tier`, `runtime_status`, model identity (`model_key`/`model_revision`/`model_sha256`), demand-rank, rate-card/pricing, or any admission/routing field; any such row is a catalog-integrity failure. An oMLX-derived `min_ram_gb` in particular is forbidden because SPEC-032 would consume it for `autotune_model_cap_exceeded` and hard-block a provider on unattested data (§12.4, AC-OMLX-13).
 - `gate_seed` freshness reference: `seeded_at` is the seed derivation time and is the reference point for the §12 120-day date window (oMLX rows used for the seed MUST be dated within 120 days of, and on or after 2026-05-01 relative to, `seeded_at`). An `omlx_seeded` row whose `seeded_at` (or underlying board snapshot) is older than the 120-day freshness window is ineligible and MUST be re-seeded; a seed MUST NOT remain provisional indefinitely (§12).
 - Semantic seed failures fail closed on the CATALOG/CLIENT paths only. A `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source rows (`mtp_discounted` false while accelerated rows were used), duplicate or cross-bucket cells, an invalid/out-of-order/future `seeded_at` or `measured_at` timestamp, a stale-beyond-window seed, or a seed-formula mismatch is a catalog-integrity failure. Such a row MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode, and MUST NOT be downloaded, benchmarked, donor-committed, or recommended (paid-default or donor selection). It is not merely "does not seed a gate" — it fails closed on every one of those paths. A row-level oMLX `gate_seed` integrity failure MUST NOT affect or block any provider's SPEC-032 verified-hardware coordinator admission: oMLX data (valid or invalid) NEVER hard-blocks a provider. Provider admission is governed solely by verified-hardware evidence (SPEC-032), which does not read `bench_gate` advisory/seed fields.
 - `runtime_status` is one of `candidate`, `listed`, `recommendable`, or `blocked`. Only `recommendable` rows may become paid defaults, and the demand-rank row must also have `recommendable: true`.
@@ -931,6 +940,16 @@ AC-OMLX-9 (TTFT not tightened): `max_4k_ttft_ms` is never tightened from oMLX PP
 
 AC-OMLX-10 (semantic-failure fail-closed): An `omlx_seeded` row with a `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source, duplicate/cross-bucket cells, an invalid/out-of-order/future timestamp, a `seeded_at` older than the 120-day freshness window, or a seed-formula mismatch is a catalog-integrity failure that blocks catalog authoring/lint/signing, CLI catalog decode, download, benchmark, donor selection, and recommendation. It MUST NOT block, gate, or otherwise affect any provider's SPEC-032 verified-hardware coordinator admission — oMLX data (valid or invalid) never hard-blocks a provider.
 
+AC-OMLX-11 (Stage-1 activation-gate safety boundary): Before the §12.2 activation gate is satisfied, a signed or served candidate catalog contains NO `omlx_seeded` row; a release process that publishes or serves an `omlx_seeded` row (or any `gate_seed` / `verified_provider_matrix` value) into a signed/served catalog before all activation-gate conditions (forward-compat across coordinator Go validators and CLI Swift decoders, plus the shipped Stage-2 enforcement (i)-(iv)) are met is a release-process violation and is rejected.
+
+AC-OMLX-12 (`verified_provider_matrix` reserved): Any newly created or modified catalog row with `bench_gate.provenance.source == "verified_provider_matrix"` is rejected at catalog authoring, lint, and signing. In Stage 1 no such row may exist; the value is inert until the Stage-2 verified-evidence-record mechanism ships.
+
+AC-OMLX-13 (field-laundering forbidden): An `omlx_seeded` row (or its `gate_seed`) that creates or changes any field other than `bench_gate.min_sustained_tps` and its `gate_seed` metadata — in particular `min_ram_gb`, `min_bandwidth_tier`, `runtime_status`, `model_key` / `model_revision` / `model_sha256`, demand-rank, or rate-card/pricing/admission/routing fields — is a catalog-integrity failure. Specifically, an oMLX-derived or oMLX-modified `min_ram_gb` (which SPEC-032 would use for `autotune_model_cap_exceeded`) is rejected.
+
+AC-OMLX-14 (seed↔row binding): An `omlx_seeded` row whose `gate_seed.target_cell.model_key` does not equal the enclosing row's normalized `model_key`, or whose `target_cell` model/quant/context is inconsistent with the row's model identity, is a catalog-integrity failure.
+
+AC-OMLX-15 (row-scoped quarantine, not fleet-blocking): Once activated, a single semantically-invalid `omlx_seeded` row is row-scoped quarantined — excluded from download, benchmark, donor selection, and recommendation — and does NOT cause a whole-catalog decode/integrity failure, does NOT block coordinator join, and does NOT affect SPEC-032 admission. Whole-catalog `candidate_catalog_integrity_failure` (AC-6) remains reserved for signature failure, global-schema failure, or a non-oMLX-row integrity failure.
+
 ## 12. oMLX-seeded provisional catalog gates
 
 
@@ -1020,6 +1039,105 @@ verified measurements back the recomputed gate.
 The `RESEARCH_231` prompt asked for cells that are "statistically reliable enough" to inform catalog rows, and explicitly required conservative calibration: p25-based gate slack, uncertainty bands, and advisory-only treatment until macprovider repros the result. `RESEARCH_231`'s `n >= 10` is a per-cell sample-size threshold: a normalized chip/RAM/model/quant/context cell is percentile-reliable enough to seed a p25-based gate only once it holds at least 10 oMLX observations after duplicate collapse and outlier trimming. We adopt `K = 10` as exactly that minimum intra-cell observation count (`gate_seed.observations_used_n`); it is the number of observations required WITHIN the one target cell, not a requirement that 10 distinct cells exist or agree. A cell with fewer than 10 post-dedup/outlier observations does not clear the memo's percentile-reliability bar and MUST NOT seed a gate.
 
 `N` serves a different purpose than `K`. Whereas `K` is the intra-cell sample size that makes a single oMLX cell's p25 statistically usable as a provisional seed, `N` counts repeated verified provider autotune measurements on eligible hardware before replacing provisional oMLX evidence with verified-provider evidence. The purpose of `N` is to reduce the likelihood that a single anomalous benchmark run (for example due to transient system load, thermal state, or other run-to-run variability) determines promotion of a catalog row.
+
+### 12.2 Stage-1 forward-declaration & activation gate
+
+The oMLX-seeded schema defined by this SPEC — `bench_gate.provenance.source ==
+"omlx_seeded"`, the `bench_gate.gate_seed` object, and the
+`verified_provider_matrix` provenance value — is **FORWARD-DECLARED** in Stage 1.
+It defines the normative contract but is **NOT activated**: it MUST NOT be
+emitted into any signed or served candidate catalog until the activation gate
+below is satisfied. This is deliberate. The deployed coordinator Go feed
+validators and CLI Swift strict decoders were built before this schema and
+fail-close on unknown provenance/`gate_seed` shapes; publishing an `omlx_seeded`
+row into a live signed catalog now would reproduce the #813
+forward-incompatibility trap and fail-close the fleet (integrity failure on the
+whole catalog, blocking autoupdate and coordinator join).
+
+**Activation gate — all of the following are required before any `omlx_seeded`
+row may appear in a signed or served candidate catalog:**
+
+(a) **Forward-compat across every consumer.** Every catalog consumer — the
+coordinator Go feed validators AND the CLI Swift strict decoders — accepts the
+new schema (`omlx_seeded`, `gate_seed`, `verified_provider_matrix`) without
+integrity failure.
+
+(b) **Stage-2 enforcement has shipped.** The following are normative Stage-2
+requirements the implementation MUST satisfy (they cross-reference the r3 audit's
+implementation findings; none is implemented by this docs-only amendment):
+
+  (i) **Admission-identity excludes advisory fields.** Coordinator admission
+  identity / verified-evidence match MUST NOT include the advisory
+  `bench_gate.min_sustained_tps` / `max_4k_ttft_ms`, `bench_gate.provenance`, or
+  `bench_gate.gate_seed`; a separate admission identity (SPEC-032 FR-HG3/FR-HG4,
+  §5) is enforced instead, so unattested oMLX data can never hard-block a
+  provider.
+
+  (ii) **Network-connected providers are `recommendable`-only.** The coordinator
+  enforces `runtime_status == "recommendable"` for network-connected providers;
+  provisional (`candidate` / `listed`, including every `omlx_seeded`) rows are
+  local-only and never buyer-routable.
+
+  (iii) **Row-scoped quarantine (§12.3).** An invalid `omlx_seeded` row is
+  row-scoped quarantined and MUST NOT cause whole-catalog decode/integrity
+  failure, block coordinator join, or affect SPEC-032 admission.
+
+  (iv) **Evidence-bound promotion.** `verified_provider_matrix` promotion is
+  bound to the Stage-2 verified-evidence-record mechanism (signed immutable
+  per-measurement references + deterministic aggregation, §5/§12); until it
+  exists the value is reserved and inert.
+
+Until the gate is satisfied, a signed or served candidate catalog MUST NOT
+contain any `omlx_seeded` row. Publishing or serving such a row before the gate
+is a **release-process violation**. This is the Stage-1 safety boundary
+(AC-OMLX-11): the contract is fully specified so Stage-2 can build to it, while
+the live fleet sees no schema change and cannot be fail-closed by it.
+
+### 12.3 Row-scoped quarantine of invalid oMLX rows
+
+Once activated (§12.2), a semantically-invalid `omlx_seeded` row (any §3.2
+catalog-integrity failure: malformed/incomplete `gate_seed`, seed-formula
+mismatch, `.dev` board, undiscounted acceleration, cross-cell observations,
+stale-beyond-window seed, or a mis-bound `target_cell`) MUST be **row-scoped
+quarantined**: that single row is excluded from download, benchmark, donor
+selection, and recommendation, and MUST NOT be emitted as an active row. A
+single invalid oMLX row MUST NOT cause a whole-catalog decode or integrity
+failure, MUST NOT block coordinator join, and MUST NOT affect any provider's
+SPEC-032 verified-hardware admission.
+
+This reconciles with the §3.5 static-feed integrity contract and AC-6:
+whole-catalog admission failure (`candidate_catalog_integrity_failure`, blocking
+paid recommendation and coordinator join) remains reserved for **signature
+failure, global-schema failure, or a non-oMLX-row integrity failure**. A single
+malformed `omlx_seeded` row is row-scoped-quarantined, never fleet-blocking. (The
+row-scoped-quarantine enforcement is Stage-2 prerequisite §12.2(b)(iii); this
+subsection is the normative obligation it must satisfy.)
+
+### 12.4 Field-laundering prohibition, reserved provenance & seed↔row binding
+
+**Field-laundering prohibition.** oMLX data MAY seed ONLY
+`bench_gate.min_sustained_tps` (together with its `bench_gate.gate_seed`
+metadata). It MUST NOT create or change `min_ram_gb`, `min_bandwidth_tier`,
+`runtime_status`, model identity (`model_key`, `model_revision`, `model_sha256`),
+demand-rank fields, rate-card / pricing fields, or ANY admission/routing field.
+This is load-bearing: an oMLX-derived `min_ram_gb`, for example, would flow into
+SPEC-032's capacity ceiling and let `autotune_model_cap_exceeded` hard-block a
+provider on unattested community data — exactly the invariant violation this
+prohibition forecloses (AC-OMLX-13).
+
+**`verified_provider_matrix` reserved in Stage 1.** No catalog row may carry
+`bench_gate.provenance.source == "verified_provider_matrix"` yet, because the
+Stage-2 evidence binding that justifies it does not exist. Any newly created or
+modified catalog row using that provenance value MUST be rejected at catalog
+authoring, lint, and signing (AC-OMLX-12). The value is inert until Stage-2
+evidence binding ships; it closes the provenance-laundering path at the
+schema/signing layer, not merely in prose.
+
+**Seed↔row binding.** `bench_gate.gate_seed.target_cell.model_key` MUST equal the
+enclosing catalog row's normalized `model_key`, and the cell's model / quant /
+context MUST be consistent with the row's own model identity. A `gate_seed`
+whose `target_cell` targets a different model than the row that carries it is a
+catalog-integrity failure (AC-OMLX-14).
 
 Therefore `N = 3` is adopted as a conservative verification policy rather than a value derived from the oMLX dataset. One run cannot distinguish a repeatable result from a transient outlier, while two runs provide no tie-break when they disagree. Three independent verified provider autotune measurements provide a majority-consistency check before promotion while keeping verification operationally practical.
 

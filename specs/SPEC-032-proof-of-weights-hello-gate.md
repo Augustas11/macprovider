@@ -1,6 +1,6 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.2.3-draft
+**Status:** v0.2.4-draft
 **Date:** 2026-08-02
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
@@ -180,6 +180,20 @@ ceiling because its submitted sustained-TPS is below, or its TTFT above, the adv
 **separate catalog field** backed by trusted-provider (verified-provider-matrix)
 evidence, distinct from the advisory `bench_gate`; that separate-field mechanism is
 deferred to a later stage.
+
+**[normative — admission identity MUST exclude advisory `bench_gate` (#687
+Stage-2 prerequisite)].** The hello-gate's **admission identity** — the key set the
+gate uses to match a provider against verified hardware evidence and resolve its
+ceiling — MUST NOT include the advisory `bench_gate.min_sustained_tps` /
+`max_4k_ttft_ms`, `bench_gate.provenance`, or `bench_gate.gate_seed`. Those fields are
+advisory (SPEC-023 §5) and may be `omlx_seeded` from unattested community data;
+including any of them in the admission identity or evidence-match would let unattested
+oMLX data influence a hard admission decision, violating the #687 trust invariant.
+When the SPEC-023 oMLX schema activates (SPEC-023 §12.2 activation gate, condition
+(b)(i)), the Stage-2 implementation MUST provide this **separate admission identity**
+that reads only the hardware/identity predicates (thermal, catalog-SHA / model-id /
+artifact-SHA256) and `MinRAMGB`. This is a normative requirement on the Stage-2
+implementation; it is not implemented by this docs-only amendment and touches no code.
 
 **FR-HG4 — Gate outcome taxonomy (normative), classified by evidence stance.**
 Every gate non-admission or sandboxing outcome MUST use exactly one of the following
@@ -666,6 +680,15 @@ smaller box), which is why v0.2.2 ships no automatic buyer-routable probation.
   design is the other candidate substrate for FR-PW3.
 
 ## Changelog
+
+- **v0.2.4-draft (2026-08-02, #687 r4)** — Separate admission identity (Stage-2
+  prerequisite). Added a normative requirement to FR-HG3 that the hello-gate's
+  admission identity / verified-evidence match MUST NOT include the advisory
+  `bench_gate.min_sustained_tps` / `max_4k_ttft_ms`, `bench_gate.provenance`, or
+  `bench_gate.gate_seed`; when the SPEC-023 oMLX schema activates (SPEC-023 §12.2
+  activation gate, condition (b)(i)) the Stage-2 implementation MUST provide a separate
+  admission identity reading only hardware/identity predicates and `MinRAMGB`.
+  Docs-only; no code touched.
 
 - **v0.2.3-draft (2026-08-02, #687)** — Advisory bench_gate is never an admission
   veto. Amended FR-HG3 and FR-HG4 so the hello-gate MUST NOT resolve the capacity
