@@ -352,6 +352,42 @@ final class Spec028PlumbingTests: XCTestCase {
         XCTAssertEqual(loadPath, "/models/local-smoke")
     }
 
+    /// Round-2 code MEDIUM-3 (Fix E): an autotune candidate with a draft model
+    /// configured (via flag/env/config, all collapsing into the resolved
+    /// AppConfig) must resolve to NO draft model, so the speculative route —
+    /// whose decode loop never fires the outer decode timer — is never taken
+    /// and the probe always exercises the main, timed decode path.
+    func testAutotuneCandidateSuppressesResolvedDraftModel() {
+        var config = AppConfig.defaults()
+        config.draftModel = "/models/draft"
+        config.draftModelArtifactSHA256 = String(repeating: "a", count: 64)
+
+        ServeCommand.applyAutotuneCandidateDraftSuppression(&config, autotuneCandidate: true)
+
+        XCTAssertNil(config.draftModel,
+            "autotune candidate must resolve to no draft model (speculative decode disabled)")
+        XCTAssertNil(config.draftModelArtifactSHA256,
+            "the draft artifact hash must be cleared alongside the draft model")
+
+        // Downstream capacity preflight must now be a no-op (no draft model).
+        var followOn = config
+        XCTAssertNoThrow(try ServeCommand.runSpecDecodeCapacityPreflight(&followOn))
+    }
+
+    /// Non-candidate serve must keep its configured draft model untouched.
+    func testNonAutotuneCandidateKeepsResolvedDraftModel() {
+        var config = AppConfig.defaults()
+        config.draftModel = "/models/draft"
+        let hash = String(repeating: "b", count: 64)
+        config.draftModelArtifactSHA256 = hash
+
+        ServeCommand.applyAutotuneCandidateDraftSuppression(&config, autotuneCandidate: false)
+
+        XCTAssertEqual(config.draftModel, "/models/draft",
+            "a normal serve must retain its draft model")
+        XCTAssertEqual(config.draftModelArtifactSHA256, hash)
+    }
+
     func testTokenizerArtifactFingerprintBindsTokenizerFiles() throws {
         let first = try makeTokenizerSnapshot(tokenizerJSON: #"{"model":"same"}"#, configJSON: #"{"eos_token":"</s>"}"#)
         let matching = try makeTokenizerSnapshot(tokenizerJSON: #"{"model":"same"}"#, configJSON: #"{"eos_token":"</s>"}"#)

@@ -83,6 +83,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 completionTokens: 0,
                 generatedCompletionTokens: 7,
                 ttftMilliseconds: 7,
+                generationMilliseconds: 350,
                 toolCalls: [
                     ToolCall(
                         id: "call_fixture",
@@ -99,6 +100,16 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(response.status, .ok, response.body)
         XCTAssertEqual(parsed.tuple["tokens_out"] as? Int, 7)
         XCTAssertTrue(response.body.contains(#""completion_tokens":0"#), response.body)
+        // The `usage` object also exposes the honest total decode count
+        // (all channels incl. suppressed reasoning) as an additive vendor
+        // field, WITHOUT changing `completion_tokens`. The autotune
+        // throughput probe reads this so reasoning models (whose visible
+        // final count can be 0 on a probe prompt) measure non-zero tok/s.
+        XCTAssertTrue(response.body.contains(#""macprovider_generated_completion_tokens":7"#), response.body)
+        // The provider-measured warm-decode wall-time is surfaced in the same
+        // `usage` object so the autotune probe can divide total decoded tokens
+        // by it. Additive; does not change `completion_tokens`.
+        XCTAssertTrue(response.body.contains(#""macprovider_generation_ms":350"#), response.body)
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
     }
 
