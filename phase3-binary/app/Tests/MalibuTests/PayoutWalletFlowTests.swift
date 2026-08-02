@@ -412,6 +412,117 @@ final class PayoutWalletFlowTests: XCTestCase {
         server.stop()
     }
 
+    // MARK: - MED forced/raced cancellation orderings (exactly-once)
+    //
+    // The CheckedContinuation fatalErrors on ANY double-resume, so an
+    // iteration that double-resolved would crash the test process. Completing
+    // every iteration without a crash — plus asserting a single outcome and
+    // listener teardown — is the exactly-once proof. Ordering #3 is
+    // outcome-invariant (cancel before OR after registration both yield
+    // .cancelled + teardown); #1/#2 are best-effort probabilistic races run
+    // many times with jitter; #4 is deterministic in both guard directions.
+    // No production/test-only hook was needed — all use existing seams.
+
+    // #1 cancel-vs-callback: race a cancel against a valid /cb delivery.
+    func testCancelVsCallbackRaceResolvesExactlyOnce() async throws {
+        for _ in 0..<25 {
+            let (server, port) = try await makeStartedServer()
+            let task = Task { () -> Bool in
+                do { _ = try await server.awaitCallback(timeout: 30); return true }
+                catch { return false }
+            }
+            // Tiny jitter so the cancel and the callback interleave differently
+            // across iterations.
+            try? await Task.sleep(nanoseconds: UInt64.random(in: 0...1_000_000))
+            async let delivered: Int = (try? await post(port: port, path: "/cb", jsonObject: validBody())) ?? -1
+            task.cancel()
+            _ = await task.value      // exactly one resolution here, or a crash
+            _ = await delivered
+            // Whichever side won, the flow is resolved and torn down.
+            XCTAssertFalse(server.isListenerActiveForTest,
+                           "listener must be torn down after the race resolves")
+            server.stop()
+        }
+    }
+
+    // #2 cancel-vs-timeout: cancel near the timeout boundary.
+    func testCancelVsTimeoutRaceResolvesExactlyOnce() async throws {
+        for _ in 0..<25 {
+            let (server, _) = try await makeStartedServer()
+            let task = Task { () -> PayoutWalletFlowError? in
+                do { _ = try await server.awaitCallback(timeout: 0.12); return nil }
+                catch let e as PayoutWalletFlowError { return e }
+                catch { return .cancelled }
+            }
+            try? await Task.sleep(nanoseconds: UInt64.random(in: 100_000_000...140_000_000))
+            task.cancel()
+            let err = await task.value // one resolution: timedOut or cancelled
+            XCTAssertTrue(err == .timedOut || err == .cancelled,
+                          "expected exactly one of timedOut/cancelled, got \(String(describing: err))")
+            XCTAssertFalse(server.isListenerActiveForTest)
+            server.stop()
+        }
+    }
+
+    // #3 cancel-before-registration: cancel immediately (frequently before the
+    // continuation registers). Outcome is ordering-invariant: .cancelled,
+    // promptly, torn down.
+    func testCancelBeforeRegistrationReturnsCancelledPromptly() async throws {
+        for _ in 0..<25 {
+            let (server, _) = try await makeStartedServer()
+            let start = Date()
+            let task = Task { () -> Error? in
+                do { _ = try await server.awaitCallback(timeout: 300); return nil }
+                catch { return error }
+            }
+            task.cancel() // no sleep → often pre-registration
+            let err = await task.value
+            XCTAssertLessThan(Date().timeIntervalSince(start), 5,
+                              "must resolve via cancel, not the 300s timeout")
+            XCTAssertEqual(err as? PayoutWalletFlowError, .cancelled,
+                           "expected .cancelled, got \(String(describing: err))")
+            XCTAssertFalse(server.isListenerActiveForTest,
+                           "cancel-before-registration must not leak the listener")
+            server.stop()
+        }
+    }
+
+    // #4 callback-claim-vs-cancellation: the finished/claimed guard must hold
+    // in BOTH directions — a winner never lets the loser resume a second time.
+    func testCallbackClaimVsCancellationGuardHolds() async throws {
+        // (a) callback claims + wins; a LATER cancel/stop/inject must no-op.
+        do {
+            let (server, port) = try await makeStartedServer()
+            let task = Task { try await server.awaitCallback(timeout: 30) }
+            let code = try await post(port: port, path: "/cb", jsonObject: validBody())
+            XCTAssertEqual(code, 200)
+            let payload = try await task.value
+            XCTAssertEqual(payload.address, CB.address)
+            // finished == true now: every late resolution path must be inert.
+            task.cancel()
+            server.stop()
+            server.injectPostReadyListenerFailureForTest()
+            XCTAssertFalse(server.isListenerActiveForTest)
+        }
+        // (b) cancel wins; a LATER valid callback must NOT resolve again.
+        do {
+            let (server, port) = try await makeStartedServer()
+            let task = Task { () -> Error? in
+                do { _ = try await server.awaitCallback(timeout: 300); return nil }
+                catch { return error }
+            }
+            task.cancel()
+            let err = await task.value
+            XCTAssertEqual(err as? PayoutWalletFlowError, .cancelled)
+            // The one-shot is spent + torn down: a late callback cannot be
+            // accepted (connection refused → -1, or 409), never a 2nd 200.
+            let code = (try? await post(port: port, path: "/cb", jsonObject: validBody())) ?? -1
+            XCTAssertNotEqual(code, 200,
+                              "a cancelled one-shot must not accept a second callback")
+            server.stop()
+        }
+    }
+
     // H2: the signer resources must be packaged UNDER payout-signer/ in the
     // built host bundle, resolved via the SAME Bundle.main lookup the runtime
     // (captureSignature) uses. A flat-packaging regression fails this test.
