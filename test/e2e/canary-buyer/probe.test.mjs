@@ -88,12 +88,39 @@ test('liveness precondition follows live fleet instead of stale expected provide
       { provider_id: 'provider-c', assigned_id: 'session-c', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
     ] }),
     providers: [
-      safetyProvider('provider-a', 'new-model', 'session-a', { memory_pressure: 'warning' }),
+      safetyProvider('provider-a', 'new-model', 'session-a'),
       safetyProvider('provider-b', 'model-b', 'session-b'),
       safetyProvider('provider-c', 'model-b', 'session-c'),
     ],
   };
   assert.deepEqual(preconditionReasons(observed, staleExpectedFleet, null), []);
+});
+
+test('liveness still validates live provider telemetry without static fleet equality', () => {
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'provider-a', model_id: 'old-model-b' },
+    { provider_id: 'missing-b', model_id: 'old-model-c' },
+  ];
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'new-model', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'new-model', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'new-model', 'session-a', { memory_pressure: 'warning' }),
+    ],
+  };
+  assert.ok(preconditionReasons(observed, staleExpectedFleet, null)
+    .includes('provider-a:memory_pressure_warning'));
 });
 
 test('explicit safety abort classification always fails the run', () => {
@@ -445,7 +472,8 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   };
   const authorized = validateLegacyRollbackAuthorization(document, expectedFleet, now);
 
-  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
+  assert.ok(safetyObservationReasons(initial, observed, expectedFleet)
+    .includes('provider-a:provider_signal_missing'));
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     allowLegacyBridgeProviderSignals: true,
   }), []);
@@ -461,7 +489,8 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   assert.deepEqual(preconditionReasons(initial, expectedFleet, authorized, true), []);
   assert.ok(preconditionReasons(initial, expectedFleet, authorized)
     .includes('provider-a:provider_signal_missing'));
-  assert.deepEqual(preconditionReasons(initial, expectedFleet, null), []);
+  assert.ok(preconditionReasons(initial, expectedFleet, null)
+    .includes('provider-a:provider_signal_missing'));
 
   const recoveryOne = structuredClone(initial);
   const recoveryTwo = structuredClone(initial);
@@ -554,6 +583,34 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     operator_pool: operatorPool,
     providers: operatorPool.map((row) => row.safety_telemetry),
   };
+  const staticExpectedFleet = [
+    ...expectedFleet,
+    { provider_id: 'stale-provider', model_id: 'stale-model' },
+  ];
+  const driftAuthorized = validateLegacyRollbackAuthorization(document, staticExpectedFleet, now);
+  assert.equal(driftAuthorized.size, 2);
+  assert.deepEqual(safetyObservationReasons(observation, observation, staticExpectedFleet, {
+    legacyRollbackProviders: driftAuthorized,
+    nowMs: now,
+  }), []);
+  const driftRecoveryOne = structuredClone(observation);
+  const driftRecoveryTwo = structuredClone(observation);
+  for (const [index, sample] of [driftRecoveryOne, driftRecoveryTwo].entries()) {
+    for (const row of sample.operator_pool) {
+      row.last_heartbeat_at_ms += (index + 1) * 30_000;
+      row.last_activity_at_ms += (index + 1) * 30_000;
+      row.heartbeat_age_ms = 0;
+      row.activity_age_ms = 0;
+    }
+  }
+  assert.deepEqual(recoverySoakObservationReasons(
+    observation,
+    [driftRecoveryOne, driftRecoveryTwo],
+    staticExpectedFleet,
+    driftAuthorized,
+    { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
+    now,
+  ), []);
   assert.deepEqual(safetyObservationReasons(observation, observation, expectedFleet, {
     legacyRollbackProviders: authorized,
     nowMs: now,
@@ -665,7 +722,8 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     { ...document, expires_at: new Date(now).toISOString() },
     { ...document, expires_at: new Date(now + (16 * 60_000)).toISOString() },
     { ...document, authority: 'issue-585-integration-r3' },
-    { ...document, providers: document.providers.slice(1) },
+    { ...document, providers: [] },
+    { ...document, providers: [{ ...document.providers[0], provider_id: 'unknown-provider' }] },
   ]) {
     assert.throws(() => validateLegacyRollbackAuthorization(invalid, expectedFleet, now));
   }

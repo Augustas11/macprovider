@@ -1039,6 +1039,16 @@ function livenessModelsFromStatus(gateway, configuredModels) {
   return uniqueLive.length ? uniqueLive : configuredModels;
 }
 
+function rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders) {
+  if (!legacyRollbackProviders?.size) return [];
+  return expectedFleet
+    .filter((row) => legacyRollbackProviders.has(row.provider_id))
+    .map((row) => ({
+      provider_id: row.provider_id,
+      model_id: legacyRollbackProviders.get(row.provider_id)?.model_id || row.model_id,
+    }));
+}
+
 function classifySignalReasons(reasons) {
   const joined = reasons.join(' ');
   if (/thermal/.test(joined)) return 'thermal_regression';
@@ -1364,6 +1374,9 @@ export function recoverySoakObservationReasons(
     ...soakOptions
   } = options;
   const staticFleet = CONFIG.mode === 'qualification' || Boolean(legacyRollbackProviders?.size);
+  const safetyFleet = legacyRollbackProviders?.size
+    ? rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders)
+    : expectedFleet;
   if (!staticFleet) {
     return recoverySoakReasons({
       gatewayInitial: initial.gateway,
@@ -1377,13 +1390,13 @@ export function recoverySoakObservationReasons(
   const reasons = recoverySoakReasons({
     gatewayInitial: initial.gateway,
     gatewaySamples: samples.map((sample) => sample.gateway),
-    poolzInitial: expectedPoolRows(initial.operator_pool, expectedFleet),
+    poolzInitial: expectedPoolRows(initial.operator_pool, safetyFleet),
     poolzSamples: samples.map(
-      (sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet),
+      (sample) => expectedPoolRows(sample.operator_pool || [], safetyFleet),
     ),
     providerInitial: recoveryProviderSignals(
       initial,
-      expectedFleet,
+      safetyFleet,
       legacyRollbackProviders,
       nowMs,
       allowLegacyBridgeProviderSignals,
@@ -1391,7 +1404,7 @@ export function recoverySoakObservationReasons(
     providerSamples: samples.map(
       (sample) => recoveryProviderSignals(
         sample,
-        expectedFleet,
+        safetyFleet,
         legacyRollbackProviders,
         nowMs,
         allowLegacyBridgeProviderSignals,
@@ -1401,12 +1414,12 @@ export function recoverySoakObservationReasons(
   for (const [index, sample] of samples.entries()) {
     reasons.push(...directProviderSignalIdentityReasons(
       Array.isArray(sample?.providers) ? sample.providers : [],
-      expectedFleet,
+      safetyFleet,
     ).map((reason) => `sample_${index + 1}:${reason}`));
   }
   return filterLegacyIdleDuplicateRecoveryReasons(reasons, {
     observations: samples,
-    expectedFleet,
+    expectedFleet: safetyFleet,
     legacyRollbackProviders,
     heartbeatAdvanceProviderIDs: soakOptions.heartbeatAdvanceProviderIDs || null,
     nowMs,
@@ -1431,7 +1444,7 @@ export function validateLegacyRollbackAuthorization(document, expectedFleet, now
       || expiresAtMs > nowMs + LEGACY_ROLLBACK_MAX_VALIDITY_MS) {
     throw new Error('legacy rollback authorization expiry is invalid');
   }
-  if (document.providers.length !== expectedFleet.length) {
+  if (document.providers.length < 1 || document.providers.length > expectedFleet.length) {
     throw new Error('legacy rollback authorization fleet size is invalid');
   }
   const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
@@ -1491,7 +1504,12 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
   const staticFleet = qualification || Boolean(legacyRollbackProviders?.size);
-  const safetyFleet = staticFleet ? expectedFleet : liveReadyFleet(observed);
+  const safetyFleet = legacyRollbackProviders?.size
+    ? rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders)
+    : (staticFleet ? expectedFleet : liveReadyFleet(observed));
+  const legacyRollbackAuthorizationUnknown = Boolean(
+    legacyRollbackProviders?.size && safetyFleet.length !== legacyRollbackProviders.size,
+  );
   const activeProviderID = activeExpectedProviderID(observed, expectedFleet, activeModelID, {
     qualification,
     activeProviderIDHint,
@@ -1516,13 +1534,16 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     : (recoveredDirectSignals ? cachedGatewayModelID : '');
   const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
     minReadyProviders: staticFleet
-      ? Math.max(CONFIG.minReadyProviders, expectedFleet.length)
+      ? Math.max(CONFIG.minReadyProviders, safetyFleet.length)
       : CONFIG.minReadyProviders,
     maxDrainingProviders: qualification ? 1 : 0,
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
     enforceStableProviderCounts: staticFleet,
     enforceStableModelSet: staticFleet,
   });
+  if (legacyRollbackAuthorizationUnknown) {
+    reasons.push('legacy_rollback_authorization_provider_unknown');
+  }
   if (!observed.operator_pool) return [...new Set([...reasons, 'operator_pool_signal_missing'])];
 
   reasons.push(...expectedFleetReasons(observed.operator_pool, safetyFleet, {
@@ -1532,8 +1553,8 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     allowUnexpectedProviders: !staticFleet,
   }));
   if (staticFleet) {
-    const initialExpected = expectedPoolRows(initial.operator_pool || [], expectedFleet);
-    const currentExpected = expectedPoolRows(observed.operator_pool, expectedFleet);
+    const initialExpected = expectedPoolRows(initial.operator_pool || [], safetyFleet);
+    const currentExpected = expectedPoolRows(observed.operator_pool, safetyFleet);
     reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
       maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
       requireHeartbeatAdvance,
@@ -1572,15 +1593,12 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       }
     }
   } else {
-    if (staticFleet && observed.providers.length !== expectedFleet.length) {
-      reasons.push(`provider_signal_count_${observed.providers.length}_ne_${expectedFleet.length}`);
+    if (staticFleet && observed.providers.length !== safetyFleet.length) {
+      reasons.push(`provider_signal_count_${observed.providers.length}_ne_${safetyFleet.length}`);
     }
     reasons.push(...directProviderSignalIdentityReasons(observed.providers, safetyFleet, {
       allowUnexpectedProviders: !staticFleet,
     }));
-    if (!staticFleet) {
-      return [...new Set(reasons)];
-    }
     const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
     const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
     const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
@@ -1622,7 +1640,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
         requireObservationAdvance: requireProviderHeartbeatAdvance,
       }));
-      if (staticFleet && current.model_id !== expected.model_id) {
+      if (current.model_id !== expected.model_id) {
         reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
       }
       if (rollbackAuthorization) {
