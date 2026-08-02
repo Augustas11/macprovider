@@ -139,9 +139,10 @@ document's provider cardinality or model set to match the current live fleet.
 Instead it derives the protected liveness fleet from the initial Ready/routable
 `/poolz` rows, probes each unique model in that live fleet, validates any
 provider that becomes live during the run, and ignores non-live provider rows
-for ordinary liveness/recovery. `CANARY_MODELS` remains an explicit
-configuration sanity check and the qualification workload source, but scheduled
-liveness does not require it to equal the expected-fleet model set. The shipped
+for ordinary liveness/recovery. `CANARY_MODELS` remains the qualification
+workload source, but scheduled liveness derives its workload from live `/poolz`
+and does not require a configured static model list or expected-fleet model-set
+match. The shipped
 schedules list Pearl's historically reviewed models:
 `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` and
 `mlx-community/Llama-3.2-3B-Instruct-4bit`, and

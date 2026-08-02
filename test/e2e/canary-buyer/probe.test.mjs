@@ -923,6 +923,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     operator_pool: operatorPool,
     providers: operatorPool.map((row) => row.safety_telemetry),
   };
+  assert.deepEqual(runtimeProtectedFleet(observation, [{ provider_id: 'stale-provider', model_id: 'stale-model' }], authorized), expectedFleet);
   const staticExpectedFleet = [
     ...expectedFleet,
     { provider_id: 'stale-provider', model_id: 'stale-model' },
@@ -1063,7 +1064,8 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     { ...document, expires_at: new Date(now + (16 * 60_000)).toISOString() },
     { ...document, authority: 'issue-585-integration-r3' },
     { ...document, providers: [] },
-    { ...document, providers: [{ ...document.providers[0], provider_id: 'unknown-provider' }] },
+    { ...document, providers: [{ ...document.providers[0], provider_id: '' }] },
+    { ...document, providers: [{ ...document.providers[0] }, { ...document.providers[0] }] },
   ]) {
     assert.throws(() => validateLegacyRollbackAuthorization(invalid, expectedFleet, now));
   }

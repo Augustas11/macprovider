@@ -28,7 +28,7 @@
  * Config (env; safety inputs are required and fail closed):
  *   MACPROVIDER_BUYER_TOKEN | MALIBU_API_KEY   buyer bearer token (liveness)
  *   CANARY_BASE            gateway base URL (default https://api.streamvc.live)
- *   CANARY_MODELS         exact expected model ids (qualification: exactly one)
+ *   CANARY_MODELS         qualification model id (liveness derives live models)
  *   CANARY_POOLZ_URL      authenticated coordinator /poolz URL
  *   CANARY_OPERATOR_TOKEN operator bearer token
  *   CANARY_EXPECTED_FLEET_FILE exact provider/model inventory JSON
@@ -76,6 +76,7 @@ const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
 const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r6';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
+const LEGACY_ROLLBACK_MAX_PROVIDERS = 100;
 
 const CONFIG = {
   mode: selectedMode,
@@ -1080,14 +1081,14 @@ function liveFleetGatewayModelReasons(gateway, modelIDs, {
   return reasons;
 }
 
-function rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders) {
+function rollbackAuthorizationFleet(legacyRollbackProviders) {
   if (!legacyRollbackProviders?.size) return [];
-  return expectedFleet
-    .filter((row) => legacyRollbackProviders.has(row.provider_id))
-    .map((row) => ({
-      provider_id: row.provider_id,
-      model_id: legacyRollbackProviders.get(row.provider_id)?.model_id || row.model_id,
-    }));
+  return [...legacyRollbackProviders.entries()]
+    .map(([providerID, row]) => ({
+      provider_id: row.provider_id || providerID,
+      model_id: row.model_id,
+    }))
+    .sort((a, b) => a.provider_id.localeCompare(b.provider_id));
 }
 
 function mergeFleetByProviderID(...fleets) {
@@ -1106,7 +1107,7 @@ function mergeFleetByProviderID(...fleets) {
 
 export function runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders) {
   if (legacyRollbackProviders?.size) {
-    return rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders);
+    return rollbackAuthorizationFleet(legacyRollbackProviders);
   }
   return CONFIG.mode === 'qualification' ? expectedFleet : liveReadyFleet(initial);
 }
@@ -1519,7 +1520,10 @@ export function recoverySoakObservationReasons(
   });
 }
 
-export function validateLegacyRollbackAuthorization(document, expectedFleet, nowMs = Date.now()) {
+export function validateLegacyRollbackAuthorization(document, expectedFleetOrNowMs = Date.now(), maybeNowMs = null) {
+  const nowMs = Number.isFinite(expectedFleetOrNowMs)
+    ? expectedFleetOrNowMs
+    : (Number.isFinite(maybeNowMs) ? maybeNowMs : Date.now());
   const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join('\u0000') === [...expected].sort().join('\u0000');
   if (!exactKeys(document, ['schema_version', 'kind', 'authority', 'transaction_id', 'expires_at', 'providers'])
@@ -1537,25 +1541,24 @@ export function validateLegacyRollbackAuthorization(document, expectedFleet, now
       || expiresAtMs > nowMs + LEGACY_ROLLBACK_MAX_VALIDITY_MS) {
     throw new Error('legacy rollback authorization expiry is invalid');
   }
-  if (document.providers.length < 1 || document.providers.length > expectedFleet.length) {
+  if (document.providers.length < 1 || document.providers.length > LEGACY_ROLLBACK_MAX_PROVIDERS) {
     throw new Error('legacy rollback authorization fleet size is invalid');
   }
-  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
   const authorized = new Map();
   for (const row of document.providers) {
     if (!exactKeys(row, ['provider_id', 'model_id', 'binary_version'])
         || typeof row.provider_id !== 'string'
         || typeof row.model_id !== 'string'
         || typeof row.binary_version !== 'string'
+        || !row.provider_id
+        || row.provider_id.length > 256
+        || !row.model_id
         || !/^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row.binary_version)
         || authorized.has(row.provider_id)) {
       throw new Error('legacy rollback authorization provider row is invalid');
     }
-    const expected = expectedByID.get(row.provider_id);
-    if (!expected || expected.model_id !== row.model_id) {
-      throw new Error('legacy rollback authorization provider identity is invalid');
-    }
     authorized.set(row.provider_id, {
+      provider_id: row.provider_id,
       model_id: row.model_id,
       binary_version: row.binary_version,
       expires_at_ms: expiresAtMs,
@@ -1564,7 +1567,7 @@ export function validateLegacyRollbackAuthorization(document, expectedFleet, now
   return authorized;
 }
 
-async function loadLegacyRollbackAuthorization(expectedFleet) {
+async function loadLegacyRollbackAuthorization() {
   const path = CONFIG.legacyRollbackAuthorizationFile;
   if (!path) return null;
   const fs = await import('node:fs/promises');
@@ -1582,7 +1585,7 @@ async function loadLegacyRollbackAuthorization(expectedFleet) {
       || (parentInfo.mode & 0o777) !== 0o755) {
     throw new Error('legacy rollback authorization file is not a trusted root control');
   }
-  return validateLegacyRollbackAuthorization(JSON.parse(await fs.readFile(path, 'utf8')), expectedFleet);
+  return validateLegacyRollbackAuthorization(JSON.parse(await fs.readFile(path, 'utf8')));
 }
 
 export function safetyObservationReasons(initial, observed, expectedFleet, {
@@ -2014,7 +2017,6 @@ async function main() {
   if (!CONFIG.poolzURL) required.push('CANARY_POOLZ_URL');
   if (!CONFIG.operatorToken) required.push('CANARY_OPERATOR_TOKEN');
   if (!CONFIG.expectedFleetFile) required.push('CANARY_EXPECTED_FLEET_FILE');
-  if (CONFIG.models.length < 1) required.push('explicit CANARY_MODELS values');
   if (CONFIG.mode === 'liveness' && !CONFIG.token) {
     required.push('MACPROVIDER_BUYER_TOKEN or MALIBU_API_KEY');
   }
@@ -2067,7 +2069,7 @@ async function main() {
     }
     if (CONFIG.mode === 'qualification') baselines = await loadBaselines();
     if (CONFIG.mode === 'liveness') {
-      legacyRollbackProviders = await loadLegacyRollbackAuthorization(expectedFleet);
+      legacyRollbackProviders = await loadLegacyRollbackAuthorization();
     }
   } catch (e) {
     console.error(`FAIL: ${redact(e.message)}`);
