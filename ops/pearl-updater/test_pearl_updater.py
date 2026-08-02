@@ -1628,8 +1628,16 @@ class PearlUpdaterTests(unittest.TestCase):
             ["provider-0", "provider-1", "provider-2"],
         )
         self.assertEqual(
+            self.updater.previous_protected_fleet,
+            expected_providers,
+        )
+        self.assertEqual(
             self.updater._journal_transition.call_args.kwargs["previous_pool_ready"],
             3,
+        )
+        self.assertEqual(
+            self.updater._journal_transition.call_args.kwargs["previous_protected_fleet"],
+            expected_providers,
         )
 
     def test_capture_rollout_state_requires_rollback_allowlist_coverage(self):
@@ -3549,6 +3557,7 @@ class PearlUpdaterTests(unittest.TestCase):
         }
         self.updater.previous_pool_ready = 3
         self.updater.previous_protected_providers = ["provider-a", "provider-b", "provider-c"]
+        self.updater.previous_protected_fleet = providers
         self.updater.journal = {
             "transaction_id": "a" * 64,
             "previous_advertised_version": "1.8.30",
@@ -3638,6 +3647,7 @@ class PearlUpdaterTests(unittest.TestCase):
         }
         self.updater.previous_pool_ready = 3
         self.updater.previous_protected_providers = ["provider-a", "provider-b", "provider-c"]
+        self.updater.previous_protected_fleet = providers
         self.updater.journal = {
             "transaction_id": "a" * 64,
             "previous_advertised_version": "1.8.30",
@@ -3734,6 +3744,20 @@ class PearlUpdaterTests(unittest.TestCase):
         expected_fleet.chmod(0o600)
         self.updater.previous_pool_ready = 3
         self.updater.previous_protected_providers = ["provider-a", "provider-b", "provider-c"]
+        self.updater.previous_protected_fleet = [
+            {
+                "provider_id": "provider-a",
+                "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-b",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            },
+            {
+                "provider_id": "provider-c",
+                "model_id": "mlx-community/Qwen3-8B-4bit",
+            },
+        ]
         self.updater.journal = {
             "transaction_id": "b" * 64,
             "previous_advertised_version": "1.8.30",
@@ -3764,6 +3788,45 @@ class PearlUpdaterTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(updater_module.UpdateError, "captured protected providers"):
                 self.updater._write_legacy_rollback_authorization("1.8.30")
+
+    def test_legacy_rollback_authorization_rejects_restored_model_drift(self):
+        self.updater.previous_services = {
+            "macprovider-coordinator.service": True,
+            "macprovider-gateway.service": True,
+        }
+        self.updater.previous_pool_ready = 1
+        self.updater.previous_protected_providers = ["provider-a"]
+        self.updater.previous_protected_fleet = [
+            {"provider_id": "provider-a", "model_id": "model-before-rollout"},
+        ]
+        self.updater.journal = {
+            "transaction_id": "c" * 64,
+            "previous_advertised_version": "1.8.30",
+            "rollback_armed": True,
+            "rollback_in_progress": True,
+            "live_mutation_started": True,
+            "success_persisted": False,
+        }
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={
+                "pool": [
+                    {
+                        "provider_id": "provider-a",
+                        "model_id": "model-after-rollout",
+                        "state": "ready",
+                        "routing_eligible": True,
+                        "binary_version": "1.8.30",
+                    }
+                ]
+            }
+        )
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "captured protected providers",
+        ):
+            self.updater._write_legacy_rollback_authorization("1.8.30")
 
     def test_canary_rollout_readiness_requires_reviewed_enable_gate(self):
         files = {}
@@ -5573,6 +5636,44 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater.config.buyer_canary_mode,
             updater_module.BUYER_CANARY_MODE_DISABLED,
         )
+
+    def test_phase_journal_restores_protected_fleet_model_baseline(self):
+        release = self.verify()
+        protected_fleet = [
+            {"provider_id": "provider-a", "model_id": "model-a"},
+            {"provider_id": "provider-b", "model_id": "model-b"},
+        ]
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
+        self.updater.journal.update(
+            {
+                "previous_protected_providers": ["provider-a", "provider-b"],
+                "previous_protected_fleet": protected_fleet,
+            }
+        )
+        self.updater._journal_transition("runtime_state_captured")
+
+        self.assertTrue(self.updater.reconcile())
+        self.assertEqual(self.updater.previous_protected_providers, ["provider-a", "provider-b"])
+        self.assertEqual(self.updater.previous_protected_fleet, protected_fleet)
+
+    def test_reconcile_rejects_mismatched_protected_fleet_model_baseline(self):
+        release = self.verify()
+        self.updater._start_journal(release, updater_module.SemVer.parse("1.8.26"))
+        self.updater.journal.update(
+            {
+                "previous_protected_providers": ["provider-a"],
+                "previous_protected_fleet": [
+                    {"provider_id": "provider-b", "model_id": "model-b"},
+                ],
+            }
+        )
+        self.updater._journal_transition("runtime_state_captured")
+
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "model baseline mismatches protected identities",
+        ):
+            self.updater.reconcile()
 
     def test_reconcile_rejects_invalid_journal_buyer_canary_mode(self):
         release = self.verify()

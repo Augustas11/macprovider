@@ -1111,6 +1111,12 @@ export function runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProv
   return CONFIG.mode === 'qualification' ? expectedFleet : liveReadyFleet(initial);
 }
 
+export function responseAttributionFleet(initial, observations, expectedFleet, legacyRollbackProviders) {
+  const protectedFleet = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders);
+  if (CONFIG.mode === 'qualification' || legacyRollbackProviders?.size) return protectedFleet;
+  return mergeFleetByProviderID(protectedFleet, liveReadyFleet(observations?.at(-1) || initial));
+}
+
 function classifySignalReasons(reasons) {
   const joined = reasons.join(' ');
   if (/thermal/.test(joined)) return 'thermal_regression';
@@ -1638,7 +1644,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   if (!staticFleet) {
     reasons.push(...liveFleetGatewayModelReasons(
       observed.gateway,
-      liveFleetModels(safetyFleet),
+      liveFleetModels(telemetryFleet),
       { activeModelID: gatewayAllowanceModelID },
     ));
   }
@@ -1767,7 +1773,6 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
 function createControl(initial, baselines, expectedFleet, budget, legacyRollbackProviders) {
   let failure = null;
   const observations = [initial];
-  const responseFleet = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders);
 
   const fail = (failureClass, reasons, phase) => {
     if (failure) return;
@@ -1864,7 +1869,12 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
           [`${model}:${bucket}`], `request_${budget.requests}`);
         return;
       }
-      const identityReasons = responseIdentityReasons(result, model, responseFleet, {
+      const identityReasons = responseIdentityReasons(result, model, responseAttributionFleet(
+        initial,
+        observations,
+        expectedFleet,
+        legacyRollbackProviders,
+      ), {
         expectedProviderID: CONFIG.mode === 'qualification' ? CONFIG.isolatedProviderID : '',
       });
       if (identityReasons.length) {
