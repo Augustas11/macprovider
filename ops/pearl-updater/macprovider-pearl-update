@@ -2757,19 +2757,7 @@ class Updater:
             return [dict(row) for row in self.previous_protected_fleet]
         if not self.previous_protected_providers:
             return []
-        expected = {
-            row["provider_id"]: row["model_id"]
-            for row in self._canary_expected_fleet()
-        }
-        fleet: list[dict[str, str]] = []
-        for provider_id in self.previous_protected_providers:
-            model_id = expected.get(provider_id)
-            if not isinstance(model_id, str) or not model_id:
-                raise UpdateError(
-                    "phase journal protected provider model baseline is unavailable"
-                )
-            fleet.append({"provider_id": provider_id, "model_id": model_id})
-        return sorted(fleet, key=lambda row: row["provider_id"])
+        raise UpdateError("phase journal protected provider model baseline is unavailable")
 
     def _rollback_authorization_fleet(self, previous_version: str) -> list[dict[str, str]]:
         protected_fleet = self._previous_protected_fleet()
@@ -2820,21 +2808,6 @@ class Updater:
         if self.previous_pool_ready is not None and ready_rows < self.previous_pool_ready:
             raise UpdateError("legacy rollback authorization capacity is below the protected rollout baseline")
         return fleet
-
-    def _verify_rollback_expected_fleet_covers(self, protected: list[dict[str, str]]) -> None:
-        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_REQUIRED or not protected:
-            return
-        expected = {
-            row["provider_id"]: row["model_id"]
-            for row in self._canary_expected_fleet()
-        }
-        for row in protected:
-            provider_id = row["provider_id"]
-            model_id = row["model_id"]
-            if expected.get(provider_id) != model_id:
-                raise UpdateError(
-                    "canary expected fleet must cover captured protected providers for legacy rollback"
-                )
 
     def _legacy_rollback_control_directory(self) -> Path:
         directory = self.canary_rollback_authorization.parent
@@ -3628,7 +3601,6 @@ class Updater:
             raise UpdateError("operator pool snapshot contains duplicate protected provider identities")
         if len(protected) != pool_ready:
             raise UpdateError("operator pool snapshot does not match coordinator ready capacity")
-        self._verify_rollback_expected_fleet_covers(protected)
         self.previous_protected_fleet = self._normalize_protected_fleet_rows(
             protected,
             "operator protected provider model baseline",

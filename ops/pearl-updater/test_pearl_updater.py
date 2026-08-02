@@ -1640,7 +1640,7 @@ class PearlUpdaterTests(unittest.TestCase):
             expected_providers,
         )
 
-    def test_capture_rollout_state_requires_rollback_allowlist_coverage(self):
+    def test_capture_rollout_state_uses_live_tuple_baseline_despite_stale_expected_fleet(self):
         expected_fleet = self.root / "stale-capture-expected-fleet.json"
         expected_fleet.write_text(
             json.dumps(
@@ -1652,6 +1652,10 @@ class PearlUpdaterTests(unittest.TestCase):
             + "\n"
         )
         expected_fleet.chmod(0o600)
+        protected_providers = [
+            {"provider_id": f"provider-{index}", "model_id": f"model-{index}"}
+            for index in range(3)
+        ]
         self.updater.capture_database_paths = mock.Mock()
         self.updater.get_json = mock.Mock(
             return_value={"pool_size": 3, "pool_ready": 3}
@@ -1660,26 +1664,48 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.get_authorized_json = mock.Mock(return_value={
             "pool": [
                 {
-                    "provider_id": f"provider-{index}",
-                    "model_id": f"model-{index}",
+                    **row,
                     "state": "ready",
                     "routing_eligible": True,
+                    "binary_version": "1.8.30",
                 }
-                for index in range(3)
+                for row in protected_providers
             ]
         })
         self.updater.config = updater_module.dataclasses.replace(
             self.updater.config, allow_provider_drain=True
         )
         self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.read_installed_versions = mock.Mock(
+            return_value={"coordinator": "v1.8.30", "gateway": "v1.8.30"}
+        )
+        self.updater._journal_transition = mock.Mock()
 
-        with (
-            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
-            self.assertRaisesRegex(updater_module.UpdateError, "cover captured protected providers"),
-        ):
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
             self.updater.capture_rollout_state()
 
-        self.updater.service_active.assert_not_called()
+        self.assertEqual(self.updater.previous_protected_fleet, protected_providers)
+        self.assertEqual(
+            self.updater.previous_protected_providers,
+            ["provider-0", "provider-1", "provider-2"],
+        )
+        self.updater.journal = {
+            "transaction_id": "d" * 64,
+            "previous_advertised_version": "1.8.30",
+            "rollback_armed": True,
+            "rollback_in_progress": True,
+            "live_mutation_started": True,
+            "success_persisted": False,
+        }
+
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
+            self.updater._write_legacy_rollback_authorization("1.8.30")
+
+        document = json.loads(self.updater.canary_rollback_authorization.read_text())
+        self.assertEqual(
+            document["providers"],
+            [{**row, "binary_version": "1.8.30"} for row in protected_providers],
+        )
 
     def test_restart_failure_invokes_rollback(self):
         release = self.verify()
