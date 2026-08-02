@@ -105,6 +105,7 @@ export function gatewayInvariantReasons(initial, current, {
   activeModelID = '',
   enforceStableProviderCounts = true,
   enforceStableModelSet = true,
+  allowedStableModelIDs = null,
 } = {}) {
   const before = initial?.pool ? initial : gatewaySnapshot(initial);
   const after = current?.pool ? current : gatewaySnapshot(current);
@@ -154,6 +155,7 @@ export function gatewayInvariantReasons(initial, current, {
   if (!enforceStableModelSet) return reasons;
   for (const [id, model] of beforeModels) {
     if (!id) continue;
+    if (allowedStableModelIDs && !allowedStableModelIDs.has(id)) continue;
     const observed = afterModels.get(id);
     if (!observed) {
       if (!(activeModelLossAllowed && id === activeModelID)) reasons.push(`${id}:model_disappeared`);

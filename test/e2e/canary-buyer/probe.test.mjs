@@ -164,6 +164,90 @@ test('liveness validates telemetry for providers added after the initial snapsho
     .includes('provider-b:memory_pressure_critical'));
 });
 
+test('liveness ignores unavailable gateway models outside the live fleet', () => {
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+        { id: 'old-model', provider_count: 0, ready_provider_count: 0, slots_free: 0, available: false, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-a', 'session-b'),
+    ],
+  };
+
+  assert.deepEqual(preconditionReasons(observed, [{ provider_id: 'stale-provider', model_id: 'old-model' }], null), []);
+});
+
+test('liveness recovery ignores direct telemetry from providers outside the live fleet', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const gateway = gatewaySnapshot({
+    status: 'up',
+    degraded: false,
+    coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 1, ready: 1, degraded: 0, draining: 1, unavailable: 0 },
+    models: [
+      { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+    ],
+  });
+  const pool = (providerHeartbeatOffset) => poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(providerHeartbeatOffset) },
+    { provider_id: 'provider-draining', assigned_id: 'session-draining', model_id: 'model-a', state: 'draining', routing_eligible: false, last_heartbeat_at: stamp(-1_000) },
+  ] }, now);
+  const providerA = (observationID) => safetyProvider('provider-a', 'model-a', 'session-a', {
+    observation_id: observationID,
+  });
+  const providerDraining = safetyProvider('provider-draining', 'model-a', 'session-draining', {
+    observation_id: 'provider-draining-stale',
+  });
+  const initial = {
+    gateway,
+    operator_pool: pool(-1_000),
+    providers: [
+      providerA('provider-a-initial'),
+      providerDraining,
+    ],
+  };
+  const samples = [
+    {
+      gateway,
+      operator_pool: pool(-500),
+      providers: [
+        providerA('provider-a-sample-1'),
+        providerDraining,
+      ],
+    },
+    {
+      gateway,
+      operator_pool: pool(-100),
+      providers: [
+        providerA('provider-a-sample-2'),
+        providerDraining,
+      ],
+    },
+  ];
+
+  assert.deepEqual(recoverySoakObservationReasons(
+    initial,
+    samples,
+    [{ provider_id: 'stale-provider', model_id: 'old-model' }],
+    null,
+    { maxDrainingProviders: 1 },
+    now,
+  ), []);
+});
+
 test('liveness fails malformed live ready pool rows instead of dropping their telemetry', () => {
   const observed = {
     gateway: gatewaySnapshot({

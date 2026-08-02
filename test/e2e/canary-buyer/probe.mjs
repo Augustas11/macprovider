@@ -1377,12 +1377,15 @@ function recoveryProviderSignals(
   authorizedProviders,
   nowMs,
   allowLegacyBridgeProviderSignals = false,
+  restrictDirectSignalsToExpectedFleet = false,
 ) {
   const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
   const operatorPool = Array.isArray(observation?.operator_pool) ? observation.operator_pool : [];
   const providers = Array.isArray(observation?.providers) ? observation.providers : [];
   return providers.filter((signal, index) => {
-    if (hasDirectProviderSignal(signal)) return true;
+    if (hasDirectProviderSignal(signal)) {
+      return !restrictDirectSignalsToExpectedFleet || expectedByID.has(signal?.provider_id);
+    }
     const poolRow = operatorPool[index];
     const expected = expectedByID.get(poolRow?.provider_id);
     const exactReadyLegacyBridge = expected
@@ -1431,6 +1434,7 @@ export function recoverySoakObservationReasons(
         null,
         nowMs,
         allowLegacyBridgeProviderSignals,
+        true,
       ),
       providerSamples: samples.map(
         (sample) => recoveryProviderSignals(
@@ -1439,12 +1443,14 @@ export function recoverySoakObservationReasons(
           null,
           nowMs,
           allowLegacyBridgeProviderSignals,
+          true,
         ),
       ),
     }, {
       ...soakOptions,
       enforceStableProviderCounts: false,
       enforceStableModelSet: true,
+      allowedStableModelIDs: new Set(safetyFleet.map((row) => row.model_id)),
     });
   }
   const reasons = recoverySoakReasons({
@@ -1568,6 +1574,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   const telemetryFleet = staticFleet
     ? safetyFleet
     : mergeFleetByProviderID(safetyFleet, liveReadyFleet(observed));
+  const safetyModelIDs = new Set(safetyFleet.map((row) => row.model_id));
   const legacyRollbackAuthorizationUnknown = Boolean(
     legacyRollbackProviders?.size && safetyFleet.length !== legacyRollbackProviders.size,
   );
@@ -1601,6 +1608,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
     enforceStableProviderCounts: staticFleet,
     enforceStableModelSet: staticFleet || !qualification,
+    allowedStableModelIDs: staticFleet ? null : safetyModelIDs,
   });
   if (legacyRollbackAuthorizationUnknown) {
     reasons.push('legacy_rollback_authorization_provider_unknown');
