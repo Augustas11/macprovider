@@ -1392,7 +1392,7 @@
     {
       "requirement_id": "SPEC-018-R002",
       "spec_id": "SPEC-018",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:enum ToolCallParser",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter"
@@ -1402,13 +1402,15 @@
         "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests"
       ],
       "journeys": [],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/843",
-        "rationale": "SPEC-018 v0.2.7 defines the <function=…><parameter=…> XML tool-call body grammar (Qwen row) with OpenAI/MCP name charset; conformance remains pending until AC-62/AC-63/AC-64 evidence is formally reconciled against the implementation and regression tests."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:f2fe9f2bcb5b32a263ac92f5ecabdc86724727f0",
+          "source": null,
+          "captured_at": "2026-08-02",
+          "expires_at": "2027-08-02"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-020-R001",
