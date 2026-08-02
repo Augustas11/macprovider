@@ -147,11 +147,13 @@ From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
 fragments. Provision all four `LoadCredential` inputs as exact `0600` files,
 remove the retired environment file, and reload systemd without enabling either
-schedule. The reviewed expected-fleet JSON must enumerate the complete live
-protected provider fleet, not a two-provider sample: every protected provider
-ID must be unique, duplicate model IDs are allowed when several providers serve
-the same model, and the distinct model set must match the canary service's
-`CANARY_MODELS` list exactly.
+schedule. The reviewed expected-fleet JSON remains a qualification and rollback
+identity allowlist: every listed provider ID must be unique, every model value
+must be non-empty, and duplicate model IDs are allowed when several providers
+serve the same model. Ordinary liveness does not require that file's provider
+cardinality or distinct model set to match Pearl's current fleet; it derives the
+run baseline from the initial ready/routable `/poolz` rows and probes the live
+available models from gateway status.
 
 ```bash
 sudo install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
