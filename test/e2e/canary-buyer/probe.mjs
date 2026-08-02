@@ -1070,6 +1070,20 @@ function rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders) {
     }));
 }
 
+function mergeFleetByProviderID(...fleets) {
+  const byID = new Map();
+  for (const fleet of fleets) {
+    for (const row of fleet || []) {
+      if (!row?.provider_id || byID.has(row.provider_id)) continue;
+      byID.set(row.provider_id, {
+        provider_id: row.provider_id,
+        model_id: row.model_id,
+      });
+    }
+  }
+  return [...byID.values()].sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+}
+
 export function runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders) {
   if (legacyRollbackProviders?.size) {
     return rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders);
@@ -1551,6 +1565,9 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   const qualification = CONFIG.mode === 'qualification';
   const staticFleet = qualification || Boolean(legacyRollbackProviders?.size);
   const safetyFleet = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders);
+  const telemetryFleet = staticFleet
+    ? safetyFleet
+    : mergeFleetByProviderID(safetyFleet, liveReadyFleet(observed));
   const legacyRollbackAuthorizationUnknown = Boolean(
     legacyRollbackProviders?.size && safetyFleet.length !== legacyRollbackProviders.size,
   );
@@ -1649,7 +1666,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
     const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
     const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
-    for (const expected of safetyFleet) {
+    for (const expected of telemetryFleet) {
       const current = currentByID.get(expected.provider_id);
       const rollbackAuthorization = legacyRollbackProviders?.get(expected.provider_id);
       if (!current) {

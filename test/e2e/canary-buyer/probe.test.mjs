@@ -129,6 +129,41 @@ test('liveness still validates live provider telemetry without static fleet equa
     .includes('provider-a:memory_pressure_warning'));
 });
 
+test('liveness validates telemetry for providers added after the initial snapshot', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [{ provider_id: 'stale-provider', model_id: 'old-model' }];
+  const initial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: stamp(0) },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+    ],
+  };
+  const observed = structuredClone(initial);
+  observed.operator_pool = poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+    { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+  ] }, now);
+  observed.providers = [
+    safetyProvider('provider-a', 'model-a', 'session-a'),
+    safetyProvider('provider-b', 'model-a', 'session-b', { memory_pressure: 'critical' }),
+  ];
+
+  assert.ok(safetyObservationReasons(initial, observed, staleExpectedFleet)
+    .includes('provider-b:memory_pressure_critical'));
+});
+
 test('liveness fails malformed live ready pool rows instead of dropping their telemetry', () => {
   const observed = {
     gateway: gatewaySnapshot({
