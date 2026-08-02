@@ -1,11 +1,12 @@
 import AppKit
+import CoreFoundation
 import CryptoKit
 import Foundation
 import Network
 
 // Non-custodial "Add wallet" flow (SPEC-016 §3):
 // 1. CLI `payout-address challenge` (provider token never leaves CLI Keychain)
-// 2. Ephemeral 127.0.0.1 loopback + bundled signer.html in the default browser
+// 2. Ephemeral 127.0.0.1-ONLY loopback + bundled signer.html in the default browser
 // 3. Capture {address, nonce, ts_utc, signature, state} via POST /cb
 // 4. CLI `payout-address register` with the public signature only
 //
@@ -21,6 +22,7 @@ enum PayoutWalletFlowError: Error, Equatable {
     case invalidCallback
     case missingResources
     case missingProviderID
+    case rngFailure
 }
 
 struct PayoutChallengeView: Equatable {
@@ -56,20 +58,28 @@ enum PayoutWalletFlow {
     static let callbackTimeout: TimeInterval = 5 * 60
     static let chain = "base-mainnet"
 
-    static func randomNonceHex() -> String {
+    /// CSPRNG nonce (0x + 32 bytes). Fail-closed: a CSPRNG failure
+    /// ABORTS the flow (SPEC-016 §3 non-custodial correlation token
+    /// must be unguessable) rather than falling back to a predictable
+    /// value. FIX-5.
+    static func randomNonceHex() throws -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        if status != errSecSuccess {
-            // Fallback: CryptoKit hash of UUID entropy (still 32 random-looking bytes).
-            let digest = SHA256.hash(data: Data(UUID().uuidString.utf8))
-            bytes = Array(digest)
+        guard status == errSecSuccess else {
+            throw PayoutWalletFlowError.rngFailure
         }
         return "0x" + bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    static func randomState() -> String {
+    /// CSPRNG callback-correlation state (16 bytes hex). Fail-closed:
+    /// on a CSPRNG failure the flow ABORTS instead of emitting a
+    /// weak/empty state a LAN attacker could guess. FIX-5.
+    static func randomState() throws -> String {
         var bytes = [UInt8](repeating: 0, count: 16)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw PayoutWalletFlowError.rngFailure
+        }
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -91,13 +101,35 @@ enum PayoutWalletFlow {
         return "\(prefix)…\(suffix)"
     }
 
+    /// Constant-time equality over UTF-8 bytes. Used for the secret
+    /// correlation `state` so a LAN attacker cannot use response-timing
+    /// to recover it byte-by-byte. FIX-10.
+    static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let ab = Array(a.utf8)
+        let bb = Array(b.utf8)
+        // Length is not secret; a length mismatch is an immediate
+        // non-match, but still fold over the longer buffer so the loop
+        // count does not leak which side was longer.
+        var diff = UInt8(ab.count == bb.count ? 0 : 1)
+        let n = max(ab.count, bb.count)
+        var i = 0
+        while i < n {
+            let x = i < ab.count ? ab[i] : 0
+            let y = i < bb.count ? bb[i] : 0
+            diff |= (x ^ y)
+            i += 1
+        }
+        return diff == 0
+    }
+
     static func validateCallback(
         payload: PayoutSignedPayload,
         expectedState: String,
         expectedNonce: String,
         expectedTsUtc: UInt64
     ) -> Bool {
-        guard payload.state == expectedState else { return false }
+        // state is the secret correlation token → constant-time (FIX-10).
+        guard constantTimeEquals(payload.state, expectedState) else { return false }
         guard payload.nonce == expectedNonce else { return false }
         guard payload.tsUtc == expectedTsUtc else { return false }
         guard payload.address.hasPrefix("0x") || payload.address.hasPrefix("0X") else { return false }
@@ -219,25 +251,55 @@ enum PayoutWalletFlow {
         return "CLI payout-address command failed."
     }
 
-    private static func jsonUInt64(_ value: Any?) -> UInt64? {
-        switch value {
-        case let n as UInt64: return n
-        case let n as Int: return UInt64(n)
-        case let n as Int64: return UInt64(n)
-        case let n as Double: return UInt64(n)
-        case let n as NSNumber: return n.uint64Value
-        default: return nil
+    /// Safe JSON→UInt64 for UNTRUSTED callback/response input. Returns
+    /// nil (never traps) on negative, non-finite, out-of-range, boolean,
+    /// or non-numeric input. FIX-2: `UInt64(-1)` and `UInt64(1e30)`
+    /// previously trapped (unauth DoS) BEFORE validation.
+    static func jsonUInt64(_ value: Any?) -> UInt64? {
+        guard let value else { return nil }
+        // Reject JSON booleans up-front: they bridge to NSNumber and can
+        // otherwise slip through a numeric cast as 0/1.
+        if let num = value as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() {
+            return nil
         }
+        if let n = value as? UInt64 { return n }
+        if let num = value as? NSNumber {
+            let d = num.doubleValue
+            guard d.isFinite, d >= 0, d <= Double(UInt64.max) else { return nil }
+            if d <= Double(Int64.max) {
+                let i = num.int64Value
+                return i >= 0 ? UInt64(i) : nil
+            }
+            return num.uint64Value
+        }
+        if let n = value as? Int { return n >= 0 ? UInt64(n) : nil }
+        if let n = value as? Int64 { return n >= 0 ? UInt64(n) : nil }
+        if let n = value as? Double {
+            guard n.isFinite, n >= 0, n <= Double(UInt64.max) else { return nil }
+            return UInt64(n)
+        }
+        return nil
     }
 
-    private static func jsonInt64(_ value: Any?) -> Int64? {
-        switch value {
-        case let n as Int64: return n
-        case let n as Int: return Int64(n)
-        case let n as Double: return Int64(n)
-        case let n as NSNumber: return n.int64Value
-        default: return nil
+    /// Safe JSON→Int64 for UNTRUSTED input. Returns nil (never traps)
+    /// on non-finite, out-of-range, boolean, or non-numeric input. FIX-2.
+    static func jsonInt64(_ value: Any?) -> Int64? {
+        guard let value else { return nil }
+        if let num = value as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() {
+            return nil
         }
+        if let n = value as? Int64 { return n }
+        if let num = value as? NSNumber {
+            let d = num.doubleValue
+            guard d.isFinite, d >= Double(Int64.min), d <= Double(Int64.max) else { return nil }
+            return num.int64Value
+        }
+        if let n = value as? Int { return Int64(n) }
+        if let n = value as? Double {
+            guard n.isFinite, n >= Double(Int64.min), n <= Double(Int64.max) else { return nil }
+            return Int64(n)
+        }
+        return nil
     }
 
     // MARK: - Loopback capture
@@ -260,7 +322,13 @@ enum PayoutWalletFlow {
         }
 
         let server = LoopbackCaptureServer(resourceDirectory: signerDir)
+        // FIX-6: the server validates every callback against these
+        // expected values BEFORE it resolves the one-shot, so a
+        // malformed/early/wrong-state callback is rejected (4xx) and the
+        // server keeps listening for a valid one.
+        server.expect(state: state, nonce: nonce, tsUtc: tsUtc)
         try await server.start()
+        // FIX-4: teardown on EVERY exit path (success, timeout, cancel, error).
         defer { server.stop() }
 
         var components = URLComponents()
@@ -284,6 +352,7 @@ enum PayoutWalletFlow {
         openURL(url)
 
         let payload = try await server.awaitCallback(timeout: timeout)
+        // Defense-in-depth: the server already validated; re-check here.
         guard validateCallback(
             payload: payload,
             expectedState: state,
@@ -296,19 +365,53 @@ enum PayoutWalletFlow {
     }
 }
 
-// MARK: - Loopback HTTP server (127.0.0.1 only)
+// MARK: - Loopback HTTP server (127.0.0.1 ONLY)
 
 final class LoopbackCaptureServer: @unchecked Sendable {
+    struct Expectation {
+        let state: String
+        let nonce: String
+        let tsUtc: UInt64
+    }
+
+    /// FIX-7 DoS bounds.
+    static let maxConnections = 8
+    static let maxRequestBytes = 32 * 1024 // total header+body cap
+    static let maxContentLength = 16 * 1024
+    static let connectionIdleTimeout: TimeInterval = 20
+
     private let resourceDirectory: URL
     private let queue = DispatchQueue(label: "tech.malibu.payout-loopback")
     private var listener: NWListener?
-    private var connections: [NWConnection] = []
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private var connectionTimeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
     private var continuation: CheckedContinuation<PayoutSignedPayload, Error>?
+    private var pendingResult: Result<PayoutSignedPayload, Error>?
+    private var timeoutWork: DispatchWorkItem?
     private var finished = false
+    private var expectation: Expectation?
     private(set) var port: UInt16 = 0
 
     init(resourceDirectory: URL) {
         self.resourceDirectory = resourceDirectory
+    }
+
+    /// FIX-1: NWParameters that force the listener onto the loopback
+    /// interface ONLY. `requiredLocalEndpoint = 127.0.0.1:.any` pins the
+    /// bound address to IPv4 loopback (the app opens `http://127.0.0.1`),
+    /// and `requiredInterfaceType = .loopback` denies every non-loopback
+    /// interface — so the ~5-minute capture window is never LAN-reachable.
+    static func loopbackParameters() -> NWParameters {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        params.requiredInterfaceType = .loopback
+        return params
+    }
+
+    /// Test hook: set the expected callback values (FIX-6).
+    func expect(state: String, nonce: String, tsUtc: UInt64) {
+        queue.sync { self.expectation = Expectation(state: state, nonce: nonce, tsUtc: tsUtc) }
     }
 
     func start() async throws {
@@ -321,11 +424,7 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                     cont.resume(with: result)
                 }
                 do {
-                    let params = NWParameters.tcp
-                    params.allowLocalEndpointReuse = true
-                    // NWListener binds the wildcard by default; we only advertise
-                    // and open 127.0.0.1 URLs, and serve only the one-shot capture.
-                    let listener = try NWListener(using: params, on: 0)
+                    let listener = try NWListener(using: LoopbackCaptureServer.loopbackParameters())
                     self.listener = listener
                     listener.stateUpdateHandler = { [weak self] state in
                         guard let self else { return }
@@ -357,85 +456,159 @@ final class LoopbackCaptureServer: @unchecked Sendable {
 
     func stop() {
         queue.async {
-            self.listener?.cancel()
-            self.listener = nil
-            for c in self.connections { c.cancel() }
-            self.connections.removeAll()
+            self.teardownLocked()
             if let cont = self.continuation, !self.finished {
-                self.finished = true
                 self.continuation = nil
                 cont.resume(throwing: PayoutWalletFlowError.cancelled)
             }
+            self.finished = true
         }
     }
 
+    /// Awaits the first VALID callback (FIX-6) OR the timeout (FIX-4).
+    /// Single-resolution is guaranteed because every resolution path —
+    /// valid callback, timeout, stop() — funnels through `complete`
+    /// on the serial `queue`, guarded by `finished`.
     func awaitCallback(timeout: TimeInterval) async throws -> PayoutSignedPayload {
-        try await withThrowingTaskGroup(of: PayoutSignedPayload.self) { group in
-            group.addTask {
-                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PayoutSignedPayload, Error>) in
-                    self.queue.async {
-                        if self.finished {
-                            cont.resume(throwing: PayoutWalletFlowError.cancelled)
-                            return
-                        }
-                        self.continuation = cont
-                    }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PayoutSignedPayload, Error>) in
+            queue.async {
+                // A valid callback that arrived BEFORE awaitCallback
+                // registered is delivered here (no lost one-shot).
+                if let pending = self.pendingResult {
+                    self.pendingResult = nil
+                    cont.resume(with: pending)
+                    return
                 }
+                if self.finished {
+                    cont.resume(throwing: PayoutWalletFlowError.cancelled)
+                    return
+                }
+                self.continuation = cont
+                let work = DispatchWorkItem { [weak self] in
+                    self?.complete(with: .failure(PayoutWalletFlowError.timedOut))
+                }
+                self.timeoutWork = work
+                self.queue.asyncAfter(deadline: .now() + timeout, execute: work)
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                throw PayoutWalletFlowError.timedOut
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
         }
+    }
+
+    // MARK: private (all mutate on `queue`)
+
+    private func complete(with result: Result<PayoutSignedPayload, Error>) {
+        guard !finished else { return }
+        finished = true
+        let cont = continuation
+        continuation = nil
+        teardownLocked()
+        if let cont {
+            cont.resume(with: result)
+        } else {
+            // Callback resolved before awaitCallback registered; hand
+            // it to the next awaitCallback caller.
+            pendingResult = result
+        }
+    }
+
+    /// Cancels the timeout, listener, and all live connections. Idempotent.
+    private func teardownLocked() {
+        timeoutWork?.cancel()
+        timeoutWork = nil
+        listener?.cancel()
+        listener = nil
+        for (id, work) in connectionTimeouts {
+            work.cancel()
+            connectionTimeouts[id] = nil
+        }
+        for (_, c) in connections { c.cancel() }
+        connections.removeAll()
     }
 
     private func accept(_ connection: NWConnection) {
-        connections.append(connection)
+        // FIX-7: reject once resolved or over the concurrent-connection cap.
+        if finished || connections.count >= Self.maxConnections {
+            connection.cancel()
+            return
+        }
+        let id = ObjectIdentifier(connection)
+        connections[id] = connection
+        // Per-connection idle/total timeout so a slow-loris / half-open
+        // connection cannot pin the one-shot listener open. FIX-7.
+        let idle = DispatchWorkItem { [weak self, weak connection] in
+            connection?.cancel()
+            self?.removeConnection(id)
+        }
+        connectionTimeouts[id] = idle
+        queue.asyncAfter(deadline: .now() + Self.connectionIdleTimeout, execute: idle)
+
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
-            if case .ready = state {
+            switch state {
+            case .ready:
                 self.receive(on: connection, buffer: Data())
-            }
-            if case .failed = state {
-                connection.cancel()
-            }
-            if case .cancelled = state {
-                connection.cancel()
+            case .failed, .cancelled:
+                self.removeConnection(id)
+            default:
+                break
             }
         }
         connection.start(queue: queue)
     }
 
+    private func removeConnection(_ id: ObjectIdentifier) {
+        connectionTimeouts[id]?.cancel()
+        connectionTimeouts[id] = nil
+        if let c = connections[id] {
+            connections[id] = nil
+            c.cancel()
+        }
+    }
+
     private func receive(on connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+        let id = ObjectIdentifier(connection)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            if let error {
-                connection.cancel()
-                _ = error
+            if error != nil {
+                self.removeConnection(id)
                 return
             }
             var buf = buffer
             if let data { buf.append(data) }
-            if let response = self.tryHandleHTTP(buf, connection: connection) {
-                self.send(response, on: connection)
+            // FIX-7: reject oversized requests instead of buffering unbounded.
+            if buf.count > Self.maxRequestBytes {
+                self.send(
+                    self.httpResponse(status: 413, body: #"{"error":"too_large"}"#, contentType: "application/json"),
+                    on: connection,
+                    then: nil
+                )
+                return
+            }
+            if let outcome = self.tryHandleHTTP(buf) {
+                switch outcome {
+                case let .respond(responseData):
+                    self.send(responseData, on: connection, then: nil)
+                case let .capture(responseData, payload):
+                    // Flush the 200 to the browser FIRST, then resolve.
+                    self.send(responseData, on: connection, then: {
+                        self.complete(with: .success(payload))
+                    })
+                }
                 return
             }
             if isComplete {
-                connection.cancel()
-                return
-            }
-            if buf.count > 256 * 1024 {
-                connection.cancel()
+                self.removeConnection(id)
                 return
             }
             self.receive(on: connection, buffer: buf)
         }
     }
 
-    private func tryHandleHTTP(_ data: Data, connection: NWConnection) -> Data? {
+    private enum RequestOutcome {
+        case respond(Data)                       // send + keep listening
+        case capture(Data, PayoutSignedPayload)  // send + resolve one-shot
+    }
+
+    private func tryHandleHTTP(_ data: Data) -> RequestOutcome? {
         guard let raw = String(data: data, encoding: .utf8),
               let headerEnd = raw.range(of: "\r\n\r\n")
         else {
@@ -446,7 +619,9 @@ final class LoopbackCaptureServer: @unchecked Sendable {
         let lines = headerPart.split(separator: "\r\n", omittingEmptySubsequences: false)
         guard let requestLine = lines.first else { return nil }
         let parts = requestLine.split(separator: " ")
-        guard parts.count >= 2 else { return nil }
+        guard parts.count >= 2 else {
+            return .respond(httpResponse(status: 400, body: "bad request", contentType: "text/plain"))
+        }
         let method = String(parts[0])
         let pathWithQuery = String(parts[1])
         let path = pathWithQuery.split(separator: "?").first.map(String.init) ?? pathWithQuery
@@ -461,17 +636,22 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                 contentLength = Int(v) ?? 0
             }
         }
+        // FIX-7: reject an oversized declared body outright.
+        if contentLength > Self.maxContentLength {
+            return .respond(httpResponse(status: 413, body: #"{"error":"too_large"}"#, contentType: "application/json"))
+        }
         if method == "POST", bodyPart.utf8.count < contentLength {
             return nil // wait for more body
         }
 
         if method == "GET" {
-            return serveStatic(path: path)
+            return .respond(serveStatic(path: path))
         }
-        if method == "POST", path == "/cb" || path.hasPrefix("/cb") {
+        // FIX-6: exact path + method for the one-shot callback.
+        if method == "POST", path == "/cb" {
             return handleCallback(body: bodyPart, contentLength: contentLength)
         }
-        return httpResponse(status: 404, body: "not found", contentType: "text/plain")
+        return .respond(httpResponse(status: 404, body: "not found", contentType: "text/plain"))
     }
 
     private func serveStatic(path: String) -> Data {
@@ -483,26 +663,36 @@ final class LoopbackCaptureServer: @unchecked Sendable {
         } else {
             relative = path
         }
-        // Path traversal guard.
-        if relative.contains("..") || relative.contains("/") && !["signer.html", "ethers.min.js"].contains(relative) {
-            if relative != "signer.html" && relative != "ethers.min.js" {
-                return httpResponse(status: 404, body: "not found", contentType: "text/plain")
-            }
-        }
         let allowed = Set(["signer.html", "ethers.min.js"])
-        let fileName = (relative as NSString).lastPathComponent
-        guard allowed.contains(fileName) else {
+        // Reject traversal / nested paths: only the two bare whitelisted
+        // filenames are served.
+        if relative.contains("..") || relative.contains("/") {
             return httpResponse(status: 404, body: "not found", contentType: "text/plain")
         }
-        let fileURL = resourceDirectory.appendingPathComponent(fileName)
+        guard allowed.contains(relative) else {
+            return httpResponse(status: 404, body: "not found", contentType: "text/plain")
+        }
+        let fileURL = resourceDirectory.appendingPathComponent(relative)
         guard let data = try? Data(contentsOf: fileURL) else {
             return httpResponse(status: 404, body: "missing", contentType: "text/plain")
         }
-        let type = fileName.hasSuffix(".js") ? "application/javascript" : "text/html; charset=utf-8"
+        let type = relative.hasSuffix(".js") ? "application/javascript" : "text/html; charset=utf-8"
         return httpResponse(status: 200, bodyData: data, contentType: type)
     }
 
-    private func handleCallback(body: String, contentLength: Int) -> Data {
+    private var corsHeaders: [String] {
+        [
+            "Access-Control-Allow-Origin: *",
+            "Access-Control-Allow-Methods: POST, GET, OPTIONS",
+            "Access-Control-Allow-Headers: Content-Type",
+        ]
+    }
+
+    /// Parses + fully validates a `/cb` POST. Returns `.capture` ONLY on
+    /// a fully-valid callback (FIX-6); every malformed / negative-ts
+    /// (FIX-2) / wrong-state / wrong-shape callback returns `.respond`
+    /// with a 4xx so the server KEEPS listening for a valid one.
+    private func handleCallback(body: String, contentLength: Int) -> RequestOutcome {
         let payloadData: Data
         if contentLength > 0, body.utf8.count >= contentLength {
             payloadData = Data(body.utf8.prefix(contentLength))
@@ -513,21 +703,13 @@ final class LoopbackCaptureServer: @unchecked Sendable {
               let address = obj["address"] as? String,
               let nonce = obj["nonce"] as? String,
               let signature = obj["signature"] as? String,
-              let state = obj["state"] as? String
+              let state = obj["state"] as? String,
+              let ts = PayoutWalletFlow.jsonUInt64(obj["ts_utc"]) // FIX-2: never traps.
         else {
-            return httpResponse(status: 400, body: #"{"error":"bad_json"}"#, contentType: "application/json")
-        }
-        let ts: UInt64
-        if let n = obj["ts_utc"] as? UInt64 {
-            ts = n
-        } else if let n = obj["ts_utc"] as? Int {
-            ts = UInt64(n)
-        } else if let n = obj["ts_utc"] as? Double {
-            ts = UInt64(n)
-        } else if let n = obj["ts_utc"] as? NSNumber {
-            ts = n.uint64Value
-        } else {
-            return httpResponse(status: 400, body: #"{"error":"missing_ts"}"#, contentType: "application/json")
+            return .respond(httpResponse(
+                status: 400, body: #"{"error":"bad_callback"}"#,
+                contentType: "application/json", extraHeaders: corsHeaders
+            ))
         }
         let signed = PayoutSignedPayload(
             address: address,
@@ -536,30 +718,36 @@ final class LoopbackCaptureServer: @unchecked Sendable {
             signature: signature,
             state: state
         )
-        complete(with: .success(signed))
-        // CORS so browser page on same origin always works; allow simple POST.
-        return httpResponse(
-            status: 200,
-            body: #"{"ok":true}"#,
-            contentType: "application/json",
-            extraHeaders: [
-                "Access-Control-Allow-Origin: *",
-                "Access-Control-Allow-Methods: POST, GET, OPTIONS",
-                "Access-Control-Allow-Headers: Content-Type",
-            ]
+        guard let exp = expectation,
+              PayoutWalletFlow.validateCallback(
+                  payload: signed,
+                  expectedState: exp.state,
+                  expectedNonce: exp.nonce,
+                  expectedTsUtc: exp.tsUtc
+              )
+        else {
+            // Invalid/early/wrong-state → reject, keep listening (FIX-6).
+            return .respond(httpResponse(
+                status: 400, body: #"{"error":"invalid_callback"}"#,
+                contentType: "application/json", extraHeaders: corsHeaders
+            ))
+        }
+        return .capture(
+            httpResponse(
+                status: 200, body: #"{"ok":true}"#,
+                contentType: "application/json", extraHeaders: corsHeaders
+            ),
+            signed
         )
     }
 
-    private func complete(with result: Result<PayoutSignedPayload, Error>) {
-        guard let cont = continuation, !finished else { return }
-        finished = true
-        continuation = nil
-        cont.resume(with: result)
-    }
-
-    private func send(_ data: Data, on connection: NWConnection) {
-        connection.send(content: data, completion: .contentProcessed { _ in
-            connection.cancel()
+    private func send(_ data: Data, on connection: NWConnection, then: (() -> Void)?) {
+        let id = ObjectIdentifier(connection)
+        connection.send(content: data, completion: .contentProcessed { [weak self] _ in
+            guard let self else { return }
+            // Runs on `queue` (connection started with queue).
+            self.removeConnection(id)
+            then?()
         })
     }
 
@@ -583,6 +771,7 @@ final class LoopbackCaptureServer: @unchecked Sendable {
         case 200: reason = "OK"
         case 400: reason = "Bad Request"
         case 404: reason = "Not Found"
+        case 413: reason = "Payload Too Large"
         default: reason = "Error"
         }
         var header = "HTTP/1.1 \(status) \(reason)\r\n"

@@ -98,12 +98,16 @@ struct PayoutAddressClient: Sendable {
         else {
             return nil
         }
-        switch components.scheme {
+        // TLS is mandatory: the provider_token travels as a Bearer
+        // header to this URL, so a plaintext base would leak the
+        // token (→ payout-address hijack). Only https / wss (which
+        // upgrades to https) are accepted; ws / http and every other
+        // scheme are rejected. Matches ClaimCommand.refreshURL and
+        // AutotuneRecommend's https-only enforcement.
+        switch components.scheme?.lowercased() {
         case "wss":
             components.scheme = "https"
-        case "ws":
-            components.scheme = "http"
-        case "https", "http":
+        case "https":
             break
         default:
             return nil
@@ -124,6 +128,7 @@ struct PayoutAddressClient: Sendable {
 
     /// GET challenge — current hot-wallet verifyingContract for EIP-712 domain.
     func fetchPayoutChallenge(bearerToken: String) async throws -> PayoutChallenge {
+        try Self.requireTLS(challengeURL)
         let token = bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { throw PayoutAddressClientError.missingBearer }
         var request = URLRequest(url: challengeURL)
@@ -149,6 +154,7 @@ struct PayoutAddressClient: Sendable {
         tsUtc: UInt64,
         signature: String
     ) async throws -> PayoutAddressRegistrationResult {
+        try Self.requireTLS(registerURL)
         let token = bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else { throw PayoutAddressClientError.missingBearer }
         var request = URLRequest(url: registerURL)
@@ -178,6 +184,16 @@ struct PayoutAddressClient: Sendable {
             return result
         } catch {
             throw PayoutAddressClientError.decodeFailed
+        }
+    }
+
+    /// Fail-closed TLS gate applied BEFORE the bearer token is read
+    /// or attached, so a plaintext (`http://`) endpoint can never
+    /// exfiltrate the provider_token. Covers both the string-parsed
+    /// (`endpoints`) and direct-URL initializers.
+    static func requireTLS(_ url: URL) throws {
+        guard url.scheme?.lowercased() == "https" else {
+            throw PayoutAddressClientError.invalidCoordinatorURL
         }
     }
 

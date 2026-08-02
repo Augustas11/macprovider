@@ -1023,9 +1023,9 @@ final class MalibuAgent: ObservableObject {
                 snapshot.payoutPendingUntilUTC = challenge.pendingUntilUTC
             }
 
-            let nonce = PayoutWalletFlow.randomNonceHex()
+            let nonce = try PayoutWalletFlow.randomNonceHex()
             let ts = PayoutWalletFlow.tsUtc(serverTsUTC: challenge.serverTsUTC)
-            let state = PayoutWalletFlow.randomState()
+            let state = try PayoutWalletFlow.randomState()
 
             let signed: PayoutSignedPayload
             if let pasted {
@@ -1088,6 +1088,8 @@ final class MalibuAgent: ObservableObject {
             return "The bundled wallet signer page is missing from this app build."
         case .missingProviderID:
             return "Provider identity is not configured on this Mac."
+        case .rngFailure:
+            return "Secure random generation failed. Please try again."
         }
     }
 

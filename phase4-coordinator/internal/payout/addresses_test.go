@@ -576,3 +576,59 @@ func intString(n int64) string {
 // the import list honest.
 var _ = io.Discard
 var _ = json.Marshal
+
+// TestServePayoutAddress_RateLimit_429AfterWindowBudget proves the
+// §3.3:833 provider-scoped registration cap (default 6/hr). The
+// limiter is checked AFTER token auth + ownership and BEFORE the
+// body is decoded, so every authenticated attempt — even one that
+// would fail validation downstream — consumes the window. The first
+// registrationRateLimitDefault authenticated POSTs get past the
+// limiter (and fail later at decode/validation); the next one is
+// rejected with 429 + a rate_limited §7.1 log surface.
+func TestServePayoutAddress_RateLimit_429AfterWindowBudget(t *testing.T) {
+	db := openTestDB(t)
+	hotWallet := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	svc := newServiceForTest(t, db, hotWallet, "rl-pid", "tok", &fakePause{})
+	// Freeze the clock so all attempts fall in the same window.
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	svc.Now = func() time.Time { return fixed }
+	r := newRouter(t, svc)
+
+	post := func() int {
+		// Empty body → passes auth+ownership+limiter, then fails at
+		// JSON decode. The point is only whether the limiter admits
+		// the attempt (any non-429) or rejects it (429).
+		req := httptest.NewRequest("POST", "/providers/rl-pid/payout-address", strings.NewReader("{}"))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for i := 0; i < registrationRateLimitDefault; i++ {
+		if code := post(); code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d was rate-limited (429) before the budget of %d was reached", i+1, registrationRateLimitDefault)
+		}
+	}
+	// The (N+1)th authenticated attempt in the same window is 429.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/providers/rl-pid/payout-address", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer tok")
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt %d expected 429, got %d body=%s", registrationRateLimitDefault+1, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rate_limited") {
+		t.Errorf("429 body=%q does not contain rate_limited", rec.Body.String())
+	}
+
+	// A different provider is unaffected (per-provider keying) — but
+	// unauthenticated for this token, so it 401s rather than 429s;
+	// the key point is it is NOT rate-limited by rl-pid's window.
+	// After the window advances past registrationRateWindow the same
+	// provider is admitted again.
+	svc.Now = func() time.Time { return fixed.Add(registrationRateWindow + time.Minute) }
+	if code := post(); code == http.StatusTooManyRequests {
+		t.Fatalf("after window expiry, attempt was still rate-limited (429)")
+	}
+}

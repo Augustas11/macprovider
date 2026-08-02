@@ -103,6 +103,11 @@ type AddressesService struct {
 	Tuning           *TuningProvider
 	Log              zerolog.Logger
 	Now              func() time.Time // injectable for tests
+	// RegLimiter enforces the §3.3:833 provider-scoped
+	// registration cap (default 6/hr). Constructed in
+	// NewAddressesService; a nil limiter fails open (see
+	// registrationRateLimiter.allow).
+	RegLimiter *registrationRateLimiter
 }
 
 // currentCoolingOff returns the live address-registration
@@ -150,6 +155,7 @@ func NewAddressesService(db *sql.DB, sec SecurityConfig, dl *DenyList, tokens pr
 	return &AddressesService{
 		DB: db, Security: sec, DenyList: dl, Tokens: tokens, Identity: identity,
 		Pause: pause, CoolingOffPeriod: coolingOff, Log: log, Now: now,
+		RegLimiter: newRegistrationRateLimiter(registrationRateLimitDefault, registrationRateWindow),
 	}, nil
 }
 
@@ -246,6 +252,20 @@ func (s *AddressesService) ServePayoutAddress(w http.ResponseWriter, r *http.Req
 	if subject != providerID {
 		s.emitFailure(r, providerID, "token_subject_mismatch", "")
 		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	// 2a. §3.3:833 provider-scoped registration rate-limit
+	// (default 6/hr → 429). Enforced AFTER token auth + ownership
+	// so an unauthenticated or foreign-token caller cannot drain a
+	// victim provider's window; a valid token only ever consumes
+	// its own provider_id budget. Every authenticated attempt
+	// (whatever its downstream outcome) consumes the window, so a
+	// failed-registration burst — the stolen-token signal — trips
+	// the limit. §7.1 log emitted on rejection.
+	if !s.RegLimiter.allow(providerID, s.Now()) {
+		s.emitFailure(r, providerID, "rate_limited", "")
+		writeError(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
 

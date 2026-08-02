@@ -233,8 +233,33 @@
     el("fbMeta").textContent = "nonce=" + nonce + "\nts_utc=" + tsUtc + "\nstate=" + state;
   }
 
+  // FIX-11: defense-in-depth. Only ever POST the signature to a
+  // loopback redirect target (http://127.0.0.1:<port> or
+  // http://localhost:<port>). A non-loopback redirect_uri (an attacker
+  // trying to redirect the signed callback off-box) is refused before
+  // any signature leaves this page.
+  function isLoopbackRedirect(uri) {
+    let u;
+    try {
+      u = new URL(uri);
+    } catch (e) {
+      return false;
+    }
+    if (u.protocol !== "http:") return false;
+    const host = u.hostname;
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") {
+      return false;
+    }
+    // A port is expected (ephemeral loopback listener).
+    if (!u.port) return false;
+    return true;
+  }
+
   async function postToLoopback(payload) {
     if (!redirectUri) throw new Error("missing redirect_uri");
+    if (!isLoopbackRedirect(redirectUri)) {
+      throw new Error("refusing non-loopback redirect_uri: " + redirectUri);
+    }
     const res = await fetch(redirectUri, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

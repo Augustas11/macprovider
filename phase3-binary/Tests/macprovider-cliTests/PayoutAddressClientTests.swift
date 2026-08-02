@@ -18,6 +18,72 @@ final class PayoutAddressClientTests: XCTestCase {
         )
     }
 
+    func testPlaintextCoordinatorURLRejected() {
+        // http:// and ws:// bases (which would carry the bearer token
+        // over cleartext) must not produce endpoints at all.
+        XCTAssertNil(PayoutAddressClient.endpoints(
+            from: "http://coordinator.streamvc.live/v2/provider",
+            providerID: "prov-1"
+        ))
+        XCTAssertNil(PayoutAddressClient.endpoints(
+            from: "ws://coordinator.streamvc.live/v2/provider",
+            providerID: "prov-1"
+        ))
+        // https:// and wss:// remain valid.
+        XCTAssertNotNil(PayoutAddressClient.endpoints(
+            from: "https://coordinator.streamvc.live",
+            providerID: "prov-1"
+        ))
+        // Constructing via the throwing initializer surfaces the
+        // rejection as invalidCoordinatorURL.
+        XCTAssertThrowsError(
+            try PayoutAddressClient(coordinatorURL: "http://c.example", providerID: "p")
+        ) { error in
+            XCTAssertEqual(error as? PayoutAddressClientError, .invalidCoordinatorURL)
+        }
+    }
+
+    func testHTTPBaseRejectedBeforeTokenSent() async {
+        // A client constructed directly with a plaintext http URL must
+        // reject before any request (and therefore any bearer token)
+        // reaches the network. The mock protocol asserts it is never
+        // invoked.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PayoutAddressMockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        PayoutAddressMockURLProtocol.requestHandler = { _ in
+            XCTFail("network must not be reached for a plaintext base URL")
+            throw URLError(.badURL)
+        }
+        defer { PayoutAddressMockURLProtocol.requestHandler = nil }
+
+        let client = PayoutAddressClient(
+            challengeURL: URL(string: "http://c.example/providers/p/payout-address/challenge")!,
+            registerURL: URL(string: "http://c.example/providers/p/payout-address")!,
+            providerID: "p",
+            session: session
+        )
+        do {
+            _ = try await client.fetchPayoutChallenge(bearerToken: "secret-token")
+            XCTFail("expected invalidCoordinatorURL")
+        } catch {
+            XCTAssertEqual(error as? PayoutAddressClientError, .invalidCoordinatorURL)
+        }
+        do {
+            _ = try await client.registerPayoutAddress(
+                bearerToken: "secret-token",
+                chain: "base-mainnet",
+                address: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+                nonce: "0x" + String(repeating: "01", count: 32),
+                tsUtc: 1,
+                signature: "0x" + String(repeating: "ab", count: 65)
+            )
+            XCTFail("expected invalidCoordinatorURL")
+        } catch {
+            XCTAssertEqual(error as? PayoutAddressClientError, .invalidCoordinatorURL)
+        }
+    }
+
     func testFetchChallengeDecodesDomainFields() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PayoutAddressMockURLProtocol.self]
