@@ -100,32 +100,25 @@ final class PayoutWalletFlowTests: XCTestCase {
         XCTAssertEqual(loaded?.pendingUntilUTC, "2026-01-09T00:00:00Z")
     }
 
-    // MARK: - FIX-2: safe untrusted JSON→UInt64 (no trap)
+    // MARK: - M1: exact structural ts_utc decoding (JSONDecoder)
 
-    func testJSONUInt64RejectsNegativeHugeAndNonNumeric() throws {
-        // Drive values through JSONSerialization so they are the exact
-        // NSNumber / NSString / CFBoolean types the callback decoder
-        // sees in production.
-        func fromJSON(_ raw: String) throws -> Any? {
-            let obj = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any]
-            return obj?["v"]
+    func testCallbackBodyDecodesTimestampExactly() {
+        func decode(_ tsToken: String) -> PayoutCallbackBody? {
+            let json = #"{"address":"0xabc","nonce":"0x01","ts_utc":\#(tsToken),"signature":"0x02","state":"s"}"#
+            return try? JSONDecoder().decode(PayoutCallbackBody.self, from: Data(json.utf8))
         }
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":-1}"#)))
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":-9999999}"#)))
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":1e30}"#)))          // overflow
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":"not-a-number"}"#)))
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":true}"#)))          // bool ≠ ts
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(nil))
-        // NaN cannot be represented in JSON; assert the NSNumber path directly.
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(NSNumber(value: Double.nan)))
-        // L1: fractional numbers are rejected, not truncated into a
-        // matching integer ts_utc.
-        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":1719234896.9}"#)))
-        XCTAssertNil(PayoutWalletFlow.jsonInt64(try fromJSON(#"{"v":1719234896.9}"#)))
-        // Valid values still decode (including an integral-valued double).
-        XCTAssertEqual(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":0}"#)), 0)
-        XCTAssertEqual(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":42.0}"#)), 42)
-        XCTAssertEqual(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":1719234896}"#)), 1_719_234_896)
+        // Rejected: negative, fractional (L1), 2^64 overflow (M1),
+        // huge-exponent, non-numeric, boolean.
+        XCTAssertNil(decode("-1"))
+        XCTAssertNil(decode("1719234896.9"))
+        XCTAssertNil(decode("18446744073709551616")) // 2^64 — can no longer wrap to 0
+        XCTAssertNil(decode("1e30"))
+        XCTAssertNil(decode("\"not-a-number\""))
+        XCTAssertNil(decode("true"))
+        // Accepted: UInt64.max, an integral-valued double, and a plain int.
+        XCTAssertEqual(decode("18446744073709551615")?.tsUtc, UInt64.max)
+        XCTAssertEqual(decode("42.0")?.tsUtc, 42)
+        XCTAssertEqual(decode("1719234896")?.tsUtc, 1_719_234_896)
     }
 
     // MARK: - FIX-1: loopback-only bind
@@ -175,6 +168,19 @@ final class PayoutWalletFlowTests: XCTestCase {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: jsonObject)
+        let (_, resp) = try await URLSession(configuration: .ephemeral).data(for: req)
+        return (resp as? HTTPURLResponse)?.statusCode ?? -1
+    }
+
+    /// POST a RAW body string (lets us send number tokens like 2^64 that a
+    /// Swift dictionary cannot represent).
+    @discardableResult
+    private func postRaw(port: UInt16, path: String, body: String) async throws -> Int {
+        let url = URL(string: "http://127.0.0.1:\(port)\(path)")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data(body.utf8)
         let (_, resp) = try await URLSession(configuration: .ephemeral).data(for: req)
         return (resp as? HTTPURLResponse)?.statusCode ?? -1
     }
@@ -230,6 +236,11 @@ final class PayoutWalletFlowTests: XCTestCase {
         str["ts_utc"] = "not-a-number"
         let strCode = try await post(port: port, path: "/cb", jsonObject: str)
         XCTAssertEqual(strCode, 400)
+        // M1: 2^64 (a token a Swift dict can't hold) must be rejected, not
+        // wrapped to 0. Sent as a raw JSON body.
+        let overflowBody = #"{"address":"\#(CB.address)","nonce":"\#(CB.nonce)","ts_utc":18446744073709551616,"signature":"\#(CB.sig)","state":"\#(CB.state)"}"#
+        let overflowCode = try await postRaw(port: port, path: "/cb", body: overflowBody)
+        XCTAssertEqual(overflowCode, 400)
         // Still listening.
         let okCode = try await post(port: port, path: "/cb", jsonObject: validBody())
         XCTAssertEqual(okCode, 200)
@@ -341,5 +352,30 @@ final class PayoutWalletFlowTests: XCTestCase {
         XCTAssertFalse(server.isListenerActiveForTest,
                        "a failed listener must be torn down, not retained")
         server.stop() // idempotent after a failed start
+    }
+
+    // H1: a listener that fails AFTER readiness (while awaitCallback is
+    // waiting) must resume the caller with an error promptly — not hang
+    // until (or past) the timeout — and tear everything down.
+    func testPostReadyListenerFailureResumesAwaitNoHang() async throws {
+        let (server, _) = try await makeStartedServer()
+        defer { server.stop() }
+        // Long timeout: the flow must be resolved by the failure routing,
+        // NOT by the timeout (which teardown cancels).
+        async let captured = server.awaitCallback(timeout: 120)
+        // Let awaitCallback register its continuation, then inject the
+        // post-ready failure through the same routing NWListener uses.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        server.injectPostReadyListenerFailureForTest()
+        do {
+            _ = try await captured
+            XCTFail("expected a failure, not a value")
+        } catch let error as PayoutWalletFlowError {
+            guard case .loopbackFailed = error else {
+                return XCTFail("expected loopbackFailed, got \(error)")
+            }
+        }
+        XCTAssertFalse(server.isListenerActiveForTest,
+                       "post-ready failure must tear the listener down")
     }
 }

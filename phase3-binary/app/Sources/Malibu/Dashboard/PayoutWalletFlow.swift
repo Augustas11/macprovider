@@ -1,5 +1,4 @@
 import AppKit
-import CoreFoundation
 import CryptoKit
 import Foundation
 import Network
@@ -52,6 +51,52 @@ struct PayoutSignedPayload: Equatable {
     let tsUtc: UInt64
     let signature: String
     let state: String
+}
+
+/// Structural decode target for the UNTRUSTED `/cb` callback body (M1).
+/// JSONDecoder performs EXACT integer decoding into `tsUtc` — it natively
+/// rejects fractional numbers, negatives, and out-of-range values
+/// (including 2^64, which a Double-based bounds check cannot distinguish
+/// from UInt64.max), so no hand-rolled NSNumber inspection is needed.
+struct PayoutCallbackBody: Decodable, Equatable {
+    let address: String
+    let nonce: String
+    let tsUtc: UInt64
+    let signature: String
+    let state: String
+
+    enum CodingKeys: String, CodingKey {
+        case address, nonce, signature, state
+        case tsUtc = "ts_utc"
+    }
+}
+
+/// Structural decode target for the coordinator/CLI `challenge` response.
+/// Uses JSONDecoder for exact `chain_id` / `server_ts_utc` decoding (M1).
+struct PayoutChallengeResponse: Decodable {
+    let verifyingContract: String
+    let chainID: UInt64
+    let domainName: String
+    let domainVersion: String
+    let chain: String
+    let serverTsUTC: Int64
+    let providerID: String?
+    let registeredAddress: String?
+    let pendingUntilUTC: String?
+    let payoutAllowed: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case verifyingContract = "verifying_contract"
+        case chainID = "chain_id"
+        case domainName = "domain_name"
+        case domainVersion = "domain_version"
+        case chain
+        case serverTsUTC = "server_ts_utc"
+        case providerID = "provider_id"
+        case registeredAddress = "registered_address"
+        case pendingUntilUTC = "pending_until_utc"
+        case payoutAllowed = "payout_allowed"
+    }
 }
 
 enum PayoutWalletFlow {
@@ -152,28 +197,23 @@ enum PayoutWalletFlow {
             let msg = parseCLIError(stderr: stderr, stdout: stdout)
             throw PayoutWalletFlowError.challengeFailed(msg)
         }
-        guard let obj = try JSONSerialization.jsonObject(with: stdout) as? [String: Any],
-              let verifying = obj["verifying_contract"] as? String,
-              let chainID = jsonUInt64(obj["chain_id"]),
-              let domainName = obj["domain_name"] as? String,
-              let domainVersion = obj["domain_version"] as? String,
-              let chain = obj["chain"] as? String,
-              let serverTs = jsonInt64(obj["server_ts_utc"]),
-              let providerID = (obj["provider_id"] as? String) ?? ProviderConfig.readProviderID()
+        // M1: exact numeric decoding via JSONDecoder (no NSNumber round-trip).
+        guard let resp = try? JSONDecoder().decode(PayoutChallengeResponse.self, from: stdout),
+              let providerID = resp.providerID ?? ProviderConfig.readProviderID()
         else {
             throw PayoutWalletFlowError.challengeFailed("Unexpected challenge response.")
         }
         return PayoutChallengeView(
             providerID: providerID,
-            verifyingContract: verifying,
-            chainID: chainID,
-            domainName: domainName,
-            domainVersion: domainVersion,
-            chain: chain,
-            serverTsUTC: serverTs,
-            registeredAddress: obj["registered_address"] as? String,
-            pendingUntilUTC: obj["pending_until_utc"] as? String,
-            payoutAllowed: obj["payout_allowed"] as? Bool
+            verifyingContract: resp.verifyingContract,
+            chainID: resp.chainID,
+            domainName: resp.domainName,
+            domainVersion: resp.domainVersion,
+            chain: resp.chain,
+            serverTsUTC: resp.serverTsUTC,
+            registeredAddress: resp.registeredAddress,
+            pendingUntilUTC: resp.pendingUntilUTC,
+            payoutAllowed: resp.payoutAllowed
         )
     }
 
@@ -251,62 +291,10 @@ enum PayoutWalletFlow {
         return "CLI payout-address command failed."
     }
 
-    /// Safe JSON→UInt64 for UNTRUSTED callback/response input. Returns
-    /// nil (never traps) on negative, non-finite, out-of-range, boolean,
-    /// or non-numeric input. FIX-2: `UInt64(-1)` and `UInt64(1e30)`
-    /// previously trapped (unauth DoS) BEFORE validation.
-    static func jsonUInt64(_ value: Any?) -> UInt64? {
-        guard let value else { return nil }
-        // Reject JSON booleans up-front: they bridge to NSNumber and can
-        // otherwise slip through a numeric cast as 0/1.
-        if let num = value as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() {
-            return nil
-        }
-        if let n = value as? UInt64 { return n }
-        if let num = value as? NSNumber {
-            let d = num.doubleValue
-            guard d.isFinite, d >= 0, d <= Double(UInt64.max) else { return nil }
-            // L1: reject fractional numbers (1719234896.9) instead of
-            // silently truncating them into a matching integer ts_utc.
-            guard d == d.rounded(.towardZero) else { return nil }
-            if d <= Double(Int64.max) {
-                let i = num.int64Value
-                return i >= 0 ? UInt64(i) : nil
-            }
-            return num.uint64Value
-        }
-        if let n = value as? Int { return n >= 0 ? UInt64(n) : nil }
-        if let n = value as? Int64 { return n >= 0 ? UInt64(n) : nil }
-        if let n = value as? Double {
-            guard n.isFinite, n >= 0, n <= Double(UInt64.max) else { return nil }
-            guard n == n.rounded(.towardZero) else { return nil } // L1
-            return UInt64(n)
-        }
-        return nil
-    }
-
-    /// Safe JSON→Int64 for UNTRUSTED input. Returns nil (never traps)
-    /// on non-finite, out-of-range, boolean, or non-numeric input. FIX-2.
-    static func jsonInt64(_ value: Any?) -> Int64? {
-        guard let value else { return nil }
-        if let num = value as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() {
-            return nil
-        }
-        if let n = value as? Int64 { return n }
-        if let num = value as? NSNumber {
-            let d = num.doubleValue
-            guard d.isFinite, d >= Double(Int64.min), d <= Double(Int64.max) else { return nil }
-            guard d == d.rounded(.towardZero) else { return nil } // L1: no truncation
-            return num.int64Value
-        }
-        if let n = value as? Int { return Int64(n) }
-        if let n = value as? Double {
-            guard n.isFinite, n >= Double(Int64.min), n <= Double(Int64.max) else { return nil }
-            guard n == n.rounded(.towardZero) else { return nil } // L1
-            return Int64(n)
-        }
-        return nil
-    }
+    // Numeric parsing is handled structurally by JSONDecoder into
+    // PayoutCallbackBody / PayoutChallengeResponse (M1) — exact integer
+    // decoding rejects fractional, negative, and out-of-range values
+    // (including 2^64) without hand-rolled NSNumber inspection.
 
     // MARK: - Loopback capture
 
@@ -449,11 +437,23 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                             }
                             resumeOnce(.success(()))
                         case let .failed(error):
-                            // M3: tear down before surfacing the failure so a
-                            // failed listener is never left open/retained.
-                            self.teardownLocked()
-                            self.finished = true
-                            resumeOnce(.failure(PayoutWalletFlowError.loopbackFailed(String(describing: error))))
+                            let flowError = PayoutWalletFlowError.loopbackFailed(String(describing: error))
+                            if resumed {
+                                // H1: POST-ready fatal failure. start() has
+                                // already returned, so a resume of the start
+                                // continuation is a no-op — route through
+                                // complete() to resolve the AWAITING flow
+                                // (awaitCallback's continuation / pendingResult)
+                                // exactly once. Guarded by `finished`, so if a
+                                // valid callback already won, this is ignored.
+                                self.failListenerPostReady(flowError)
+                            } else {
+                                // M3: PRE-ready startup failure — fail start()
+                                // and tear down; nothing is awaiting yet.
+                                self.teardownLocked()
+                                self.finished = true
+                                resumeOnce(.failure(flowError))
+                            }
                         default:
                             break
                         }
@@ -523,6 +523,22 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                 self.timeoutWork = work
                 self.queue.asyncAfter(deadline: .now() + timeout, execute: work)
             }
+        }
+    }
+
+    /// H1: routes a post-ready fatal listener failure into the single-
+    /// resolution path so a waiting `awaitCallback` is resumed with an
+    /// error (never left hanging) and everything is torn down. Runs on
+    /// `queue`; idempotent via `complete()`'s `finished` guard.
+    private func failListenerPostReady(_ error: PayoutWalletFlowError) {
+        complete(with: .failure(error))
+    }
+
+    /// Test-only: injects a post-ready listener failure through the exact
+    /// same routing the NWListener `.failed` handler uses (H1 coverage).
+    func injectPostReadyListenerFailureForTest() {
+        queue.async {
+            self.failListenerPostReady(.loopbackFailed("post-ready listener failure (test)"))
         }
     }
 
@@ -722,9 +738,10 @@ final class LoopbackCaptureServer: @unchecked Sendable {
     }
 
     /// Parses + fully validates a `/cb` POST. Returns `.capture` ONLY on
-    /// a fully-valid callback (FIX-6); every malformed / negative-ts
-    /// (FIX-2) / wrong-state / wrong-shape callback returns `.respond`
-    /// with a 4xx so the server KEEPS listening for a valid one.
+    /// a fully-valid callback (FIX-6); every malformed / negative-ts /
+    /// fractional / out-of-range-ts (M1) / wrong-state / wrong-shape
+    /// callback returns `.respond` with a 4xx so the server KEEPS
+    /// listening for a valid one.
     private func handleCallback(body: String, contentLength: Int) -> RequestOutcome {
         let payloadData: Data
         if contentLength > 0, body.utf8.count >= contentLength {
@@ -732,24 +749,21 @@ final class LoopbackCaptureServer: @unchecked Sendable {
         } else {
             payloadData = Data(body.utf8)
         }
-        guard let obj = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-              let address = obj["address"] as? String,
-              let nonce = obj["nonce"] as? String,
-              let signature = obj["signature"] as? String,
-              let state = obj["state"] as? String,
-              let ts = PayoutWalletFlow.jsonUInt64(obj["ts_utc"]) // FIX-2: never traps.
-        else {
+        // M1: structural decode. JSONDecoder's exact UInt64 decoding rejects
+        // negative, fractional, non-numeric, and out-of-range ts_utc
+        // (including 2^64) — no NSNumber round-trip, so no boundary bugs.
+        guard let decoded = try? JSONDecoder().decode(PayoutCallbackBody.self, from: payloadData) else {
             return .respond(httpResponse(
                 status: 400, body: #"{"error":"bad_callback"}"#,
                 contentType: "application/json", extraHeaders: corsHeaders
             ))
         }
         let signed = PayoutSignedPayload(
-            address: address,
-            nonce: nonce,
-            tsUtc: ts,
-            signature: signature,
-            state: state
+            address: decoded.address,
+            nonce: decoded.nonce,
+            tsUtc: decoded.tsUtc,
+            signature: decoded.signature,
+            state: decoded.state
         )
         guard let exp = expectation,
               PayoutWalletFlow.validateCallback(
