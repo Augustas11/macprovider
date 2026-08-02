@@ -1456,6 +1456,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
+            // Total tokens decoded across ALL channels (reasoning/analysis +
+            // final), NOT just the visible final channel that `completion_tokens`
+            // reports. For Harmony/reasoning models (gpt-oss-20b) the analysis
+            // channel is suppressed from `completion_tokens`, so a gibberish
+            // autotune probe can show `completion_tokens` ≈ 0 while real decode
+            // work happened. This namespaced vendor extension (additive; does not
+            // change `completion_tokens`/billing/OpenAI-compat) lets the autotune
+            // throughput probe measure honest decode rate. Origin:
+            // CompletionResult.generatedCompletionTokens (= generationTokenCount).
+            "macprovider_generated_completion_tokens": completion.generatedCompletionTokens,
+            // Provider-measured warm-decode wall-time (ms) from the first
+            // decoded token of ANY channel to the generate result. The autotune
+            // throughput probe divides total decoded tokens by this window to
+            // measure honest decode rate for reasoning models whose analysis
+            // channel is silent in the SSE stream (no deltas, no client-visible
+            // timing). Additive vendor extension; does not affect billing or
+            // OpenAI-compat. NSNull when the serve path did not record timing.
+            "macprovider_generation_ms": completion.generationMilliseconds ?? NSNull(),
         ]
     }
 

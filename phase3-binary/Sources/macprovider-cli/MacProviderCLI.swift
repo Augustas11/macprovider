@@ -394,6 +394,24 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    /// Round-2 code MEDIUM-3: autotune candidates must not use speculative
+    /// decoding. The serve-stream speculative path (`collectSpeculativeText`)
+    /// owns its own decode loop and never fires the outer `decodeTimer`, so a
+    /// candidate launched with a configured draft model would emit
+    /// `macprovider_generation_ms: null` and the Stage 1/2 probe would silently
+    /// fall back to client timing (which cannot see a reasoning model's
+    /// suppressed decode window). Force speculative decoding OFF for candidates
+    /// by clearing the resolved draft model so the probe always exercises the
+    /// main, timed decode path. Incumbent serve is untouched.
+    static func applyAutotuneCandidateDraftSuppression(
+        _ resolved: inout AppConfig,
+        autotuneCandidate: Bool
+    ) {
+        guard autotuneCandidate else { return }
+        resolved.draftModel = nil
+        resolved.draftModelArtifactSHA256 = nil
+    }
+
     static func runDrainTimeoutPreflight(_ resolved: AppConfig) throws {
         if !(5...600).contains(resolved.swapDrainTimeoutSeconds) {
             FileHandle.standardError.write(Data((
@@ -850,6 +868,13 @@ struct ServeCommand: AsyncParsableCommand {
         // preflight bundle repeats this idempotent check after acquiring its
         // dependencies so direct callers retain the same validation contract.
         try Self.runSupportedModelsPreflight(&resolved)
+
+        // Round-2 code MEDIUM-3: clear the resolved draft model for autotune
+        // candidates so the speculative route is never taken and the probe
+        // exercises the main, timed decode path. Applied before the draft-model
+        // capacity/artifact preflights and ModelRuntime construction so nothing
+        // downstream sees a draft model for a candidate.
+        Self.applyAutotuneCandidateDraftSuppression(&resolved, autotuneCandidate: autotuneCandidate)
 
         // Autotune candidates (`--autotune-candidate`, always with `--no-join`)
         // share the incumbent's lifecycle directory but persist to a distinct
