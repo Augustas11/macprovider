@@ -379,6 +379,39 @@ final class PayoutWalletFlowTests: XCTestCase {
                        "post-ready failure must tear the listener down")
     }
 
+    // MED: cancelling the awaiting Task (user backs out of Add Wallet) must
+    // tear down the listener + timeout PROMPTLY and resume exactly once — not
+    // linger until the 5-min timeout, not crash on a double-resume.
+    func testTaskCancellationTearsDownPromptly() async throws {
+        let (server, _) = try await makeStartedServer()
+        defer { server.stop() }
+        // Long timeout: cancellation, not the timeout, must resolve this.
+        let task = Task { try await server.awaitCallback(timeout: 300) }
+        // Let awaitCallback register its continuation, then cancel.
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let start = Date()
+        task.cancel()
+
+        var threw = false
+        do {
+            _ = try await task.value
+        } catch {
+            threw = true
+            if let e = error as? PayoutWalletFlowError {
+                XCTAssertEqual(e, .cancelled)
+            }
+        }
+        XCTAssertTrue(threw, "a cancelled await must throw, not return a value")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5,
+                          "cancellation must return promptly, not via the 300s timeout")
+        XCTAssertFalse(server.isListenerActiveForTest,
+                       "cancellation must tear the listener down")
+        // No double-resume: post-cancel resolution attempts must no-op, not
+        // crash the (already-resumed) checked continuation.
+        server.injectPostReadyListenerFailureForTest()
+        server.stop()
+    }
+
     // H2: the signer resources must be packaged UNDER payout-signer/ in the
     // built host bundle, resolved via the SAME Bundle.main lookup the runtime
     // (captureSignature) uses. A flat-packaging regression fails this test.

@@ -504,31 +504,47 @@ final class LoopbackCaptureServer: @unchecked Sendable {
         }
     }
 
-    /// Awaits the first VALID callback (FIX-6) OR the timeout (FIX-4).
-    /// Single-resolution is guaranteed because every resolution path —
-    /// valid callback, timeout, stop() — funnels through `complete`
-    /// on the serial `queue`, guarded by `finished`.
+    /// Awaits the first VALID callback (FIX-6) OR the timeout (FIX-4) OR
+    /// Swift task cancellation (MED). Single-resolution is guaranteed because
+    /// every resolution path — valid callback, timeout, cancel/stop() —
+    /// funnels through the serial `queue`, guarded by `finished`.
     func awaitCallback(timeout: TimeInterval) async throws -> PayoutSignedPayload {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PayoutSignedPayload, Error>) in
-            queue.async {
-                // A valid callback that arrived BEFORE awaitCallback
-                // registered is delivered here (no lost one-shot).
-                if let pending = self.pendingResult {
-                    self.pendingResult = nil
-                    cont.resume(with: pending)
-                    return
+        // MED: honor task cancellation. If the enclosing Task is cancelled
+        // (user backs out of Add Wallet / view dismissed), stop() tears the
+        // listener + connections + timeout down IMMEDIATELY and resumes the
+        // continuation with .cancelled exactly once (finished-guarded), rather
+        // than lingering until the ~5-min timeout. If a valid callback already
+        // won, stop()'s resume is a no-op; if cancel already fired, the
+        // `finished` checks below (and complete()'s guard) prevent a
+        // double-resume.
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<PayoutSignedPayload, Error>) in
+                queue.async {
+                    // A valid callback that arrived BEFORE awaitCallback
+                    // registered is delivered here (no lost one-shot).
+                    if let pending = self.pendingResult {
+                        self.pendingResult = nil
+                        cont.resume(with: pending)
+                        return
+                    }
+                    // Already resolved — including a cancel/stop() that beat
+                    // us to the queue. Do NOT schedule a timeout in that case.
+                    if self.finished {
+                        cont.resume(throwing: PayoutWalletFlowError.cancelled)
+                        return
+                    }
+                    self.continuation = cont
+                    let work = DispatchWorkItem { [weak self] in
+                        self?.complete(with: .failure(PayoutWalletFlowError.timedOut))
+                    }
+                    self.timeoutWork = work
+                    self.queue.asyncAfter(deadline: .now() + timeout, execute: work)
                 }
-                if self.finished {
-                    cont.resume(throwing: PayoutWalletFlowError.cancelled)
-                    return
-                }
-                self.continuation = cont
-                let work = DispatchWorkItem { [weak self] in
-                    self?.complete(with: .failure(PayoutWalletFlowError.timedOut))
-                }
-                self.timeoutWork = work
-                self.queue.asyncAfter(deadline: .now() + timeout, execute: work)
             }
+        } onCancel: {
+            // Runs promptly on cancellation (possibly off `queue`); stop()
+            // hops onto `queue` for the actual teardown + single resume.
+            self.stop()
         }
     }
 
