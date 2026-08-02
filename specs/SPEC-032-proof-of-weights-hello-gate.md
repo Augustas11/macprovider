@@ -1,6 +1,6 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.2.4-draft
+**Status:** v0.2.5-draft
 **Date:** 2026-08-02
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
@@ -191,9 +191,24 @@ including any of them in the admission identity or evidence-match would let unat
 oMLX data influence a hard admission decision, violating the #687 trust invariant.
 When the SPEC-023 oMLX schema activates (SPEC-023 §12.2 activation gate, condition
 (b)(i)), the Stage-2 implementation MUST provide this **separate admission identity**
-that reads only the hardware/identity predicates (thermal, catalog-SHA / model-id /
-artifact-SHA256) and `MinRAMGB`. This is a normative requirement on the Stage-2
-implementation; it is not implemented by this docs-only amendment and touches no code.
+that reads only the hardware/identity predicates (thermal, catalog-policy digest /
+model-id / artifact-SHA256) and `MinRAMGB`. This is a normative requirement on the
+Stage-2 implementation; it is not implemented by this docs-only amendment and touches
+no code.
+
+**[normative — admission matches the catalog admission-policy digest, NOT the full
+catalog SHA (#687 r5)].** Wherever this spec refers to a "catalog-SHA" match as an
+admission or ceiling-resolution predicate (FR-HG3 above, FR-HG4 policy-staleness),
+the match MUST be against SPEC-023 §3.6's **`admission_policy_sha256`** — the digest
+computed over the catalog with the advisory `bench_gate.min_sustained_tps`,
+`max_4k_ttft_ms`, `provenance`, and `gate_seed` fields EXCLUDED — and MUST NOT be the
+full `candidate_catalog_sha256` (which SPEC-023 hashes over the entire catalog
+including those advisory/oMLX fields, and which SPEC-023 reserves for cache/update
+integrity only). Matching admission on the full catalog SHA would (a) drag unattested
+oMLX advisory values into the hard admission decision, contradicting the exclusion
+above, and (b) spuriously invalidate a provider's verified admission whenever any
+advisory-only catalog field changes. This is the spec-level resolution of that
+self-contradiction; the digest computation is SPEC-023 §12.2(b)(i) Stage-2 work.
 
 **FR-HG4 — Gate outcome taxonomy (normative), classified by evidence stance.**
 Every gate non-admission or sandboxing outcome MUST use exactly one of the following
@@ -680,6 +695,17 @@ smaller box), which is why v0.2.2 ships no automatic buyer-routable probation.
   design is the other candidate substrate for FR-PW3.
 
 ## Changelog
+
+- **v0.2.5-draft (2026-08-02, #687 r5)** — Admission matches the catalog
+  admission-policy digest, not the full catalog SHA. Added a normative FR-HG3
+  requirement that every "catalog-SHA" admission / ceiling-resolution / FR-HG4
+  policy-staleness match uses SPEC-023 §3.6 `admission_policy_sha256` (which
+  excludes advisory `bench_gate.min_sustained_tps`/`max_4k_ttft_ms`/`provenance`/
+  `gate_seed`), NOT the full `candidate_catalog_sha256`. Resolves the
+  self-contradiction between the r4 "admission identity excludes advisory bench_gate"
+  rule and admission matching on the full catalog hash; also stops non-oMLX advisory
+  edits from invalidating verified admission. Docs-only; digest computation is
+  SPEC-023 §12.2(b)(i) Stage-2 work.
 
 - **v0.2.4-draft (2026-08-02, #687 r4)** — Separate admission identity (Stage-2
   prerequisite). Added a normative requirement to FR-HG3 that the hello-gate's

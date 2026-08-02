@@ -1,11 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.9.2
+version: v0.9.3
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-08-02
 
 ## Change log
+
+- **v0.9.3 (2026-08-02)** — oMLX activation-gate hardening (#687, r5 convergence).
+  1. **Provenance-erasure laundering closed.** The §12.2 activation gate now bans deriving a catalog row from oMLX data in ANY form before activation — not only the `omlx_seeded` schema but any value laundered into a `policy` / `measured_single_host` / other provenance label with `gate_seed` stripped. Authoring-process prohibition (AC-OMLX-16), plus an immutable provenance-lineage Stage-2 prerequisite §12.2(b)(v) so post-activation detection is possible.
+  2. **Admission-subset digest defined.** New §3.6 defines `admission_policy_sha256`, a digest over the catalog EXCLUDING `bench_gate.min_sustained_tps`, `max_4k_ttft_ms`, `provenance`, and `gate_seed`. SPEC-032 verified-evidence admission matching uses THAT subset digest, not the full `candidate_catalog_sha256` (which stays cache/update-integrity only). This resolves the SPEC-032 admission self-contradiction and protects verified admission from advisory-only edits.
+  3. **Quarantine phase-qualified.** §12.3/§3.5/AC-OMLX-2/AC-OMLX-10/AC-OMLX-15 now split by activation: PRE-activation any oMLX schema in a served catalog is globally fail-closed (the gate); POST-activation a per-row semantic oMLX error decodes successfully and quarantines ONLY that row. Whole-catalog `candidate_catalog_integrity_failure` stays reserved for signature, global-schema, and non-oMLX-row failures.
+  4. **Docs only.** No Go/Swift code; governance manifest synced to matching versions.
 
 - **v0.9.2 (2026-08-02)** — oMLX Stage-1 activation gate & forward-declaration (#687, r4 re-scope).
   1. **The oMLX schema is FORWARD-DECLARED, not activated.** `bench_gate.provenance.source == "omlx_seeded"`, `bench_gate.gate_seed`, and the `verified_provider_matrix` provenance value MUST NOT be emitted into any signed or served candidate catalog until the §12.2 activation gate is satisfied. This prevents the #813 forward-incompatibility trap: deployed coordinator Go validators and CLI Swift strict decoders would reject the new schema and fail-close the fleet.
@@ -496,7 +502,54 @@ Fetched `rate-card.json`, `demand-rank.json`, and `autotune-candidates.json` MUS
 11. Candidate and demand feeds selected as one live release MUST share `version`, `generated_at`, and `policy_version`; mixed releases fail closed.
 12. `rate-card.json` is release-manifest-bound but versioned by the §3.3 recommendation projection hash, so its `version` MAY differ from the candidate/demand release ID. It MUST share the policy version expected by the baked rate-card snapshot.
 
+oMLX schema and the whole-catalog integrity rule are phase-qualified by the §12.2
+activation state. PRE-activation (before the oMLX schema is supported by every
+consumer), any `omlx_seeded` row / `gate_seed` / `verified_provider_matrix` value
+in a served catalog is treated as invalid/unknown schema and triggers a
+whole-catalog `candidate_catalog_integrity_failure` (blocking paid recommendation
+and coordinator join) — this is the activation gate working as intended.
+POST-activation, a per-row semantic oMLX error decodes successfully at the
+whole-catalog level and is row-scoped quarantined (§12.3), NOT a
+`candidate_catalog_integrity_failure`. Whole-catalog integrity failure remains
+reserved for signature failure, global-schema failure, a non-oMLX-row integrity
+failure, or the pre-activation presence of the unsupported oMLX schema — never a
+single post-activation malformed oMLX row.
+
 Clients MUST keep a release-pinned verifier keyring. Key rotations require a bridge binary that embeds both old and new verifier keys before the feed signer changes. The old key remains trusted until operator telemetry establishes the retirement threshold defined by the release runbook.
+
+### 3.6 Catalog digests: full-integrity vs admission-policy subset
+
+Two distinct digests are computed over the selected candidate catalog, for two
+distinct purposes. Conflating them is the SPEC-032 admission self-contradiction
+this section resolves.
+
+- `candidate_catalog_sha256` (the full hash, §9) is the lowercase hex SHA-256
+  over the EXACT full catalog JSON bytes, including every `bench_gate` field
+  (`min_sustained_tps`, `max_4k_ttft_ms`, `provenance`, `gate_seed`). It is used
+  ONLY for cache identity, update/staleness detection, and byte-level feed
+  integrity. It MUST NOT be used as the coordinator's verified-hardware admission
+  match key, because it changes whenever an advisory-only field (including an
+  `omlx_seeded` seed value) changes, which would spuriously invalidate a
+  provider's verified admission.
+
+- `admission_policy_sha256` (the admission-policy subset digest) is the lowercase
+  hex SHA-256 over a canonical projection of the catalog that EXCLUDES the
+  advisory `bench_gate.min_sustained_tps`, `bench_gate.max_4k_ttft_ms`,
+  `bench_gate.provenance`, and `bench_gate.gate_seed` fields, and retains only the
+  admission-authoritative fields (`model_id`, `model_revision`, `model_sha256`,
+  `min_ram_gb`, `min_bandwidth_tier`, `runtime_status`, and `model_key`). It is
+  computed by removing those excluded `bench_gate` sub-fields, sorting `rows` by
+  normalized model key, and serializing with sorted object keys and no
+  insignificant whitespace (same canonicalization discipline as §3.3).
+
+SPEC-032's autotune hello-gate verified-evidence admission matching MUST match on
+`admission_policy_sha256`, NOT on the full `candidate_catalog_sha256` (SPEC-032
+FR-HG3/FR-HG4). This ensures (a) unattested oMLX advisory values are outside the
+admission match entirely, and (b) a non-oMLX advisory-only edit (e.g. a drift
+target adjustment) does not invalidate an otherwise-valid verified admission. The
+implementation that computes `admission_policy_sha256` and matches admission on it
+is Stage-2 prerequisite §12.2(b)(i); this section is the normative contract it
+must satisfy.
 
 ## 4. Formula (updated v0.8)
 
@@ -916,7 +969,7 @@ AC-39: `candidate_catalog_sha256` is computed over the exact selected catalog JS
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 
-AC-OMLX-2: A row with `bench_gate.provenance.source == "omlx_seeded"` and a missing, malformed, or incomplete `bench_gate.gate_seed` is a catalog-integrity failure rejected fail-closed at the SAME boundaries as the forbidden-seed-on-non-oMLX-row case (AC-OMLX-7): catalog authoring, lint, and signing, and CLI catalog decode (and it is likewise ineligible before download or benchmark).
+AC-OMLX-2: A row with `bench_gate.provenance.source == "omlx_seeded"` and a missing, malformed, or incomplete `bench_gate.gate_seed` is a catalog-integrity failure rejected fail-closed at catalog authoring, lint, and signing (the same authoring boundaries as the forbidden-seed-on-non-oMLX-row case, AC-OMLX-7). At CLI/coordinator decode the effect is phase-qualified (§12.3): PRE-activation the mere presence of the unsupported oMLX schema is a whole-catalog integrity failure; POST-activation the malformed row decodes successfully and is row-scoped quarantined (excluded from download/benchmark/donor/recommendation), never a whole-catalog failure and never blocking coordinator join or SPEC-032 admission.
 
 AC-OMLX-3: `autotune --recommend` never selects an `omlx_seeded` row as the default recommendation.
 
@@ -938,7 +991,7 @@ AC-OMLX-8 (no raise, no hard-block): An `omlx_seeded` gate never raises a gate w
 
 AC-OMLX-9 (TTFT not tightened): `max_4k_ttft_ms` is never tightened from oMLX PP/prefill proxy data; a seeded row either inherits an existing conservative TTFT value or leaves TTFT unset for advisory warning only until verified provider autotune supplies measured TTFT.
 
-AC-OMLX-10 (semantic-failure fail-closed): An `omlx_seeded` row with a `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source, duplicate/cross-bucket cells, an invalid/out-of-order/future timestamp, a `seeded_at` older than the 120-day freshness window, or a seed-formula mismatch is a catalog-integrity failure that blocks catalog authoring/lint/signing, CLI catalog decode, download, benchmark, donor selection, and recommendation. It MUST NOT block, gate, or otherwise affect any provider's SPEC-032 verified-hardware coordinator admission — oMLX data (valid or invalid) never hard-blocks a provider.
+AC-OMLX-10 (semantic-failure fail-closed): An `omlx_seeded` row with a `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source, duplicate/cross-bucket cells, an invalid/out-of-order/future timestamp, a `seeded_at` older than the 120-day freshness window, or a seed-formula mismatch is a catalog-integrity failure that blocks catalog authoring/lint/signing and is excluded from download, benchmark, donor selection, and recommendation. Its decode-time effect is phase-qualified (§12.3): PRE-activation the unsupported oMLX schema is a whole-catalog integrity failure; POST-activation the row decodes successfully and is row-scoped quarantined (not a whole-catalog failure). In neither phase does it block, gate, or otherwise affect any provider's SPEC-032 verified-hardware coordinator admission — oMLX data (valid or invalid) never hard-blocks a provider.
 
 AC-OMLX-11 (Stage-1 activation-gate safety boundary): Before the §12.2 activation gate is satisfied, a signed or served candidate catalog contains NO `omlx_seeded` row; a release process that publishes or serves an `omlx_seeded` row (or any `gate_seed` / `verified_provider_matrix` value) into a signed/served catalog before all activation-gate conditions (forward-compat across coordinator Go validators and CLI Swift decoders, plus the shipped Stage-2 enforcement (i)-(iv)) are met is a release-process violation and is rejected.
 
@@ -948,7 +1001,9 @@ AC-OMLX-13 (field-laundering forbidden): An `omlx_seeded` row (or its `gate_seed
 
 AC-OMLX-14 (seed↔row binding): An `omlx_seeded` row whose `gate_seed.target_cell.model_key` does not equal the enclosing row's normalized `model_key`, or whose `target_cell` model/quant/context is inconsistent with the row's model identity, is a catalog-integrity failure.
 
-AC-OMLX-15 (row-scoped quarantine, not fleet-blocking): Once activated, a single semantically-invalid `omlx_seeded` row is row-scoped quarantined — excluded from download, benchmark, donor selection, and recommendation — and does NOT cause a whole-catalog decode/integrity failure, does NOT block coordinator join, and does NOT affect SPEC-032 admission. Whole-catalog `candidate_catalog_integrity_failure` (AC-6) remains reserved for signature failure, global-schema failure, or a non-oMLX-row integrity failure.
+AC-OMLX-15 (row-scoped quarantine, not fleet-blocking): POST-activation (§12.3), a single semantically-invalid `omlx_seeded` row is row-scoped quarantined — excluded from download, benchmark, donor selection, and recommendation — and does NOT cause a whole-catalog decode/integrity failure, does NOT block coordinator join, and does NOT affect SPEC-032 admission. PRE-activation, by contrast, any oMLX schema in a served catalog is a whole-catalog fail-closed integrity failure (the gate). Whole-catalog `candidate_catalog_integrity_failure` (AC-6) remains reserved for signature failure, global-schema failure, a non-oMLX-row integrity failure, or the pre-activation presence of the unsupported oMLX schema.
+
+AC-OMLX-16 (no-oMLX-derivation gate — anti-erasure-laundering): Before the §12.2 activation gate is satisfied, a signed or served catalog row whose value is DERIVED from oMLX data is a gate violation regardless of its `provenance.source` label — including a row labeled `policy`, `measured_single_host`, or any non-`omlx_seeded` value with `gate_seed` removed. The signer attests no row was oMLX-derived pre-activation; post-activation, immutable provenance lineage (§12.2(b)(v)) records any oMLX origin so an oMLX-derived value cannot be relabeled to escape the oMLX restrictions, and may transition only to evidence-bound `verified_provider_matrix`.
 
 ## 12. oMLX-seeded provisional catalog gates
 
@@ -1087,31 +1142,69 @@ implementation findings; none is implemented by this docs-only amendment):
   per-measurement references + deterministic aggregation, §5/§12); until it
   exists the value is reserved and inert.
 
+  (v) **Immutable provenance lineage.** Every catalog row carries an immutable
+  provenance lineage such that a row ever derived from oMLX data retains that
+  lineage regardless of its current `provenance.source` label. A lineage-marked
+  row may transition ONLY to evidence-bound `verified_provider_matrix` (never to
+  `policy`, `measured_single_host`, or any other label that would erase the oMLX
+  origin). This makes the authoring-process prohibition below detectable
+  post-activation by tooling, not merely a process promise.
+
+**No-oMLX-derivation gate (broadened — closes provenance-erasure laundering).**
+Before the activation gate is satisfied, NO catalog row may be DERIVED from oMLX
+data in ANY form. This is broader than banning the `omlx_seeded` schema: a
+catalog author MUST NOT ingest or derive any field value (a `min_sustained_tps`,
+a `min_ram_gb`, a tier, or anything else) from oMLX community data into a signed
+or served catalog — not as an `omlx_seeded` row, and not laundered into a
+`policy` / `measured_single_host` / any other provenance label with the
+`omlx_seeded` marker and `gate_seed` stripped. All oMLX restrictions in this SPEC
+key off the oMLX-derived nature of a value, not merely off the current
+`provenance.source` string; stripping the label does not launder the value out
+of scope. This is an authoring-process prohibition consistent with the
+signer-trust model: the operator who signs the catalog attests that no row in it
+was derived from oMLX data before activation (AC-OMLX-16).
+
 Until the gate is satisfied, a signed or served candidate catalog MUST NOT
-contain any `omlx_seeded` row. Publishing or serving such a row before the gate
-is a **release-process violation**. This is the Stage-1 safety boundary
-(AC-OMLX-11): the contract is fully specified so Stage-2 can build to it, while
-the live fleet sees no schema change and cannot be fail-closed by it.
+contain any `omlx_seeded` row NOR any row derived from oMLX data under any other
+label. Publishing or serving such a row before the gate is a **release-process
+violation**. This is the Stage-1 safety boundary (AC-OMLX-11 / AC-OMLX-16): the
+contract is fully specified so Stage-2 can build to it, while the live fleet sees
+no schema change and cannot be fail-closed by it.
 
-### 12.3 Row-scoped quarantine of invalid oMLX rows
+### 12.3 Quarantine, phase-qualified by activation
 
-Once activated (§12.2), a semantically-invalid `omlx_seeded` row (any §3.2
-catalog-integrity failure: malformed/incomplete `gate_seed`, seed-formula
-mismatch, `.dev` board, undiscounted acceleration, cross-cell observations,
-stale-beyond-window seed, or a mis-bound `target_cell`) MUST be **row-scoped
-quarantined**: that single row is excluded from download, benchmark, donor
-selection, and recommendation, and MUST NOT be emitted as an active row. A
-single invalid oMLX row MUST NOT cause a whole-catalog decode or integrity
-failure, MUST NOT block coordinator join, and MUST NOT affect any provider's
-SPEC-032 verified-hardware admission.
+The handling of an `omlx_seeded` row splits on the §12.2 activation state, and
+the two phases MUST NOT be conflated:
+
+**PRE-activation (the gate).** No consumer supports the oMLX schema yet, so ANY
+`omlx_seeded` row (or `gate_seed` / `verified_provider_matrix` value) present in a
+signed or served catalog is globally rejected and fail-closed — it is a
+whole-catalog integrity failure (`candidate_catalog_integrity_failure`) that
+blocks paid recommendation and coordinator join, exactly as §3.5 and AC-6 already
+require for unknown/invalid schema. This IS the activation gate: an oMLX schema
+must never reach the pre-activation fleet, and if one does, fail-closed rejection
+is correct. (This is also why the gate forbids emitting such rows at all, §12.2.)
+
+**POST-activation (row-scoped quarantine).** Once activated (§12.2) every consumer
+decodes the oMLX schema successfully. A semantically-invalid `omlx_seeded` row
+(any §3.2 catalog-integrity failure: malformed/incomplete `gate_seed`,
+seed-formula mismatch, `.dev` board, undiscounted acceleration, cross-cell
+observations, stale-beyond-window seed, or a mis-bound `target_cell`) then
+decodes SUCCESSFULLY at the whole-catalog level and MUST be **row-scoped
+quarantined**: that single row alone is excluded from download, benchmark, donor
+selection, and recommendation, and MUST NOT be emitted as an active row. A single
+invalid oMLX row MUST NOT cause a whole-catalog decode or integrity failure, MUST
+NOT block coordinator join, and MUST NOT affect any provider's SPEC-032
+verified-hardware admission.
 
 This reconciles with the §3.5 static-feed integrity contract and AC-6:
 whole-catalog admission failure (`candidate_catalog_integrity_failure`, blocking
 paid recommendation and coordinator join) remains reserved for **signature
-failure, global-schema failure, or a non-oMLX-row integrity failure**. A single
-malformed `omlx_seeded` row is row-scoped-quarantined, never fleet-blocking. (The
-row-scoped-quarantine enforcement is Stage-2 prerequisite §12.2(b)(iii); this
-subsection is the normative obligation it must satisfy.)
+failure, global-schema failure, a non-oMLX-row integrity failure, or (pre-activation
+only) the mere presence of the not-yet-supported oMLX schema**. Post-activation, a
+single malformed `omlx_seeded` row is row-scoped-quarantined, never fleet-blocking.
+(The post-activation row-scoped-quarantine enforcement is Stage-2 prerequisite
+§12.2(b)(iii); this subsection is the normative obligation it must satisfy.)
 
 ### 12.4 Field-laundering prohibition, reserved provenance & seed↔row binding
 
