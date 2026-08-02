@@ -84,5 +84,5 @@ provider_payout_address_change_rejected	WARN	code	-
 provider_payout_address_rejected_unknown_provider	WARN	code	-
 payout_capped	INFO	info	-
 payout_cancel_self_transfer_confirmed	INFO	info	-
-payout_nonce_gap	WARN	spec-only-not-emitted	-
-payout_runner_lease_conflict	PAGE	spec-only-not-emitted	-
+payout_nonce_gap	WARN	code	-
+payout_runner_lease_conflict	PAGE	code	-

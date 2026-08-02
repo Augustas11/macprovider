@@ -123,13 +123,24 @@ func TestNonceCursor_RoundTrip(t *testing.T) {
 	if got != 7 {
 		t.Errorf("got %d, want 7", got)
 	}
-	// Upsert again (bump).
+	// Upsert again with a HIGHER value (forward sync) → cursor advances.
 	if err := UpsertNonceCursor(ctx, db, addr, 8, 8, 8, NowUTC()); err != nil {
 		t.Fatalf("Upsert #2: %v", err)
 	}
 	got, _, _ = ReadNonceCursor(ctx, db, addr)
 	if got != 8 {
-		t.Errorf("got %d, want 8 after upsert", got)
+		t.Errorf("got %d, want 8 after forward upsert", got)
+	}
+	// SPEC-016:1749-1750 monotonicity: a restart whose chosen nonce LAGS
+	// the stored cursor (e.g. chain pending nonce behind the DB cursor
+	// because of an abandoned-unfilled hole) must NOT erase the hole. The
+	// ON CONFLICT takes MAX(stored, incoming), so the cursor stays at 8.
+	if err := UpsertNonceCursor(ctx, db, addr, 5, 5, 5, NowUTC()); err != nil {
+		t.Fatalf("Upsert #3 (lagging): %v", err)
+	}
+	got, _, _ = ReadNonceCursor(ctx, db, addr)
+	if got != 8 {
+		t.Errorf("got %d, want 8 (cursor must not regress below stored value)", got)
 	}
 }
 
