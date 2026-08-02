@@ -81,6 +81,17 @@ test('hard request, token, and time budgets never admit an over-budget request',
   });
 });
 
+test('run budget capacity can only grow to a valid minimum', () => {
+  const budget = new RunBudget({ maxRequests: 2, maxCompletionTokens: 16, maxDurationMs: 1_000, startedAtMs: 100 });
+  budget.ensureMinimumCapacity({ maxRequests: 1, maxCompletionTokens: 8 });
+  assert.equal(budget.snapshot(100).limits.max_requests_per_provider, 2);
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 16);
+  budget.ensureMinimumCapacity({ maxRequests: 5, maxCompletionTokens: 40 });
+  assert.equal(budget.snapshot(100).limits.max_requests_per_provider, 5);
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 40);
+  assert.throws(() => budget.ensureMinimumCapacity({ maxRequests: 0 }), /maxRequests must be a positive safe integer/);
+});
+
 test('gateway pre/post invariants match exact active non-routable aggregation loss', () => {
   const initial = healthyGateway();
   assert.deepEqual(gatewayInvariantReasons(initial, initial, { minReadyProviders: 2 }), []);
@@ -115,6 +126,12 @@ test('gateway pre/post invariants match exact active non-routable aggregation lo
     'ready_changed_2_to_1',
     'model-a:model_not_stably_available',
   ]);
+  assert.deepEqual(gatewayInvariantReasons(initial, changed, {
+    minReadyProviders: 1,
+    maxDrainingProviders: 1,
+    enforceStableProviderCounts: false,
+    enforceStableModelSet: false,
+  }), []);
 });
 
 test('operator pool invariants abort on state, connection, and heartbeat regressions', () => {
@@ -274,6 +291,11 @@ test('expected fleet and qualification isolation require exact provider/model/ro
     { provider_id: 'provider-a', model_id: 'model-a' },
     { provider_id: 'provider-b', model_id: 'model-a' },
     { provider_id: 'provider-c', model_id: 'model-c' },
+  ]);
+  assert.deepEqual(validateExpectedFleetDocument({ schema_version: 1, providers: [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+  ] }, { requireUniqueModels: false }), [
+    { provider_id: 'provider-a', model_id: 'model-a' },
   ]);
   assert.throws(() => validateExpectedFleetDocument({ schema_version: 1, providers: [
     { provider_id: 'provider-a', model_id: 'model-a' },
