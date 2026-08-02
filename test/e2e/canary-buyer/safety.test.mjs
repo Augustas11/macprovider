@@ -281,6 +281,11 @@ test('expected fleet and qualification isolation require exact provider/model/ro
     { provider_id: 'provider-b', model_id: 'model-a' },
     { provider_id: 'provider-c', model_id: 'model-c' },
   ]);
+  assert.deepEqual(validateExpectedFleetDocument({ schema_version: 1, providers: [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+  ] }, { requireUniqueModels: false }), [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+  ]);
   assert.throws(() => validateExpectedFleetDocument({ schema_version: 1, providers: [
     { provider_id: 'provider-a', model_id: 'model-a' },
     { provider_id: 'provider-b', model_id: 'model-b' },

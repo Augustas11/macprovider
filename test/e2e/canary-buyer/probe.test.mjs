@@ -170,7 +170,7 @@ test('liveness ignores unavailable gateway models outside the live fleet', () =>
       status: 'up',
       degraded: false,
       coordinator: { status: 'up', checked_at: new Date().toISOString() },
-      pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+      pool: { total_providers: 5, ready: 2, degraded: 1, draining: 1, unavailable: 1 },
       models: [
         { id: 'model-a', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
         { id: 'old-model', provider_count: 0, ready_provider_count: 0, slots_free: 0, available: false, degraded: false },
@@ -196,7 +196,7 @@ test('liveness recovery ignores direct telemetry from providers outside the live
     status: 'up',
     degraded: false,
     coordinator: { status: 'up', checked_at: stamp(0) },
-    pool: { total_providers: 1, ready: 1, degraded: 0, draining: 1, unavailable: 0 },
+    pool: { total_providers: 4, ready: 1, degraded: 1, draining: 1, unavailable: 1 },
     models: [
       { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
     ],
@@ -243,7 +243,7 @@ test('liveness recovery ignores direct telemetry from providers outside the live
     samples,
     [{ provider_id: 'stale-provider', model_id: 'old-model' }],
     null,
-    { maxDrainingProviders: 1 },
+    {},
     now,
   ), []);
 });

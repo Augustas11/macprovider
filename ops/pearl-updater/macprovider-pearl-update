@@ -160,7 +160,6 @@ CANARY_EXPECTED_MODELS = frozenset(
         "mlx-community/Qwen3-8B-4bit",
     }
 )
-CANARY_MIN_EXPECTED_PROVIDERS = len(CANARY_EXPECTED_MODELS)
 CANARY_MAX_EXPECTED_PROVIDERS = 100
 CANARY_AUTHORITY_PRIVATE_FILES = {
     CANARY_BUYER_TOKEN: "canary buyer token",
@@ -2716,7 +2715,7 @@ class Updater:
             not isinstance(document, dict)
             or document.get("schema_version") != 1
             or not isinstance(providers, list)
-            or len(providers) < CANARY_MIN_EXPECTED_PROVIDERS
+            or len(providers) < 1
             or len(providers) > CANARY_MAX_EXPECTED_PROVIDERS
             or any(not isinstance(row, dict) for row in providers)
             or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)

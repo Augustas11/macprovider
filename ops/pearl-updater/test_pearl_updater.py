@@ -3328,10 +3328,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "providers": [
-                            {"provider_id": "provider-a", "model_id": "model-a"},
-                            {"provider_id": "provider-b", "model_id": "model-b"},
-                        ],
+                        "providers": [],
                     }
                 )
             )
@@ -3447,6 +3444,18 @@ class PearlUpdaterTests(unittest.TestCase):
 
         with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
             self.assertEqual(self.updater._canary_expected_fleet(), providers)
+
+        singleton = [
+            {
+                "provider_id": "provider-a",
+                "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            }
+        ]
+        expected_fleet.write_text(
+            json.dumps({"schema_version": 1, "providers": singleton}) + "\n"
+        )
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
+            self.assertEqual(self.updater._canary_expected_fleet(), singleton)
 
         providers[0] = {**providers[0], "provider_id": "provider-b"}
         expected_fleet.write_text(

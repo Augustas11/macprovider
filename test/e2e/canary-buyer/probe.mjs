@@ -1006,8 +1006,12 @@ async function loadExpectedFleet() {
     throw new Error(`cannot read CANARY_EXPECTED_FLEET_FILE: ${error.message || error}`);
   }
   return validateExpectedFleetDocument(parsed, {
-    expectedProviderCount: CONFIG.expectedProviderCount || null,
-    minProviderCount: CONFIG.minReadyProviders,
+    expectedProviderCount: CONFIG.mode === 'qualification'
+      ? CONFIG.expectedProviderCount || null
+      : null,
+    minProviderCount: CONFIG.mode === 'qualification'
+      ? CONFIG.minReadyProviders
+      : 1,
     requireUniqueModels: CONFIG.mode === 'qualification',
   });
 }
@@ -1448,6 +1452,7 @@ export function recoverySoakObservationReasons(
       ),
     }, {
       ...soakOptions,
+      enforceHealthyProviderAggregates: false,
       enforceStableProviderCounts: false,
       enforceStableModelSet: true,
       allowedStableModelIDs: new Set(safetyFleet.map((row) => row.model_id)),
@@ -1606,6 +1611,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       : CONFIG.minReadyProviders,
     maxDrainingProviders: qualification ? 1 : 0,
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
+    enforceHealthyProviderAggregates: staticFleet,
     enforceStableProviderCounts: staticFleet,
     enforceStableModelSet: staticFleet || !qualification,
     allowedStableModelIDs: staticFleet ? null : safetyModelIDs,

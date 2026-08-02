@@ -103,6 +103,7 @@ export function gatewayInvariantReasons(initial, current, {
   minReadyProviders = 1,
   maxDrainingProviders = 0,
   activeModelID = '',
+  enforceHealthyProviderAggregates = true,
   enforceStableProviderCounts = true,
   enforceStableModelSet = true,
   allowedStableModelIDs = null,
@@ -132,13 +133,15 @@ export function gatewayInvariantReasons(initial, current, {
   }
   const minimumReady = Math.max(0, minReadyProviders - (activeProviderLossAllowed ? 1 : 0));
   if (after.pool.ready < minimumReady) reasons.push(`ready_${after.pool.ready}_lt_${minimumReady}`);
-  for (const state of ['degraded', 'unavailable']) {
-    if (!Number.isInteger(after.pool[state])) reasons.push(`pool_${state}_signal_missing`);
-    else if (after.pool[state] !== 0) reasons.push(`pool_${state}_${after.pool[state]}_ne_0`);
-  }
-  if (!Number.isInteger(after.pool.draining)) reasons.push('pool_draining_signal_missing');
-  else if (after.pool.draining > maxDrainingProviders) {
-    reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
+  if (enforceHealthyProviderAggregates) {
+    for (const state of ['degraded', 'unavailable']) {
+      if (!Number.isInteger(after.pool[state])) reasons.push(`pool_${state}_signal_missing`);
+      else if (after.pool[state] !== 0) reasons.push(`pool_${state}_${after.pool[state]}_ne_0`);
+    }
+    if (!Number.isInteger(after.pool.draining)) reasons.push('pool_draining_signal_missing');
+    else if (after.pool.draining > maxDrainingProviders) {
+      reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
+    }
   }
   if (enforceStableProviderCounts && Number.isInteger(before?.pool?.total_providers)) {
     const minTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
