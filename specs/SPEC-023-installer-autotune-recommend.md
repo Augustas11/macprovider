@@ -7,12 +7,13 @@ last-locked: 2026-07-31
 
 ## Change log
 
-- **v0.9.1 (2026-07-30)** — oMLX-seeded provisional catalog gates (#687).
-  1. **oMLX seeds are provisional only.** oMLX data MAY seed starting advisory throughput gates for non-default rows, but MUST NOT set or hold recommendable gates, raise verified gates, hard-block providers, or serve as sole promotion evidence.
-  2. **K/N thresholds are locked.** `K = 10` distinct oMLX cells are required before a seed is usable; `N = 3` verified provider autotune measurements are required for `listed` to `recommendable` promotion.
-  3. **Catalog provenance is extended.** `bench_gate.provenance.source` gains `omlx_seeded`, with `bench_gate.gate_seed` required only for oMLX-seeded rows.
-  4. **Recommendation eligibility remains verified.** `omlx_seeded` rows may be `candidate` or `listed` only and cannot become paid defaults until verified provider measurements replace the seed.
-  5. **No Stage 2+ behavior ships here.** This is a docs-only governance change; it does not change catalog rows, implementation code, snapshot ingestion, pricing, or promotion automation.
+- **v0.9.1 (2026-08-02)** — oMLX-seeded provisional catalog gates (#687).
+  1. **oMLX seeds are provisional only.** Unattested oMLX data MAY seed the STARTING advisory `bench_gate.min_sustained_tps` of a non-default provisional row only. It MUST NEVER set or hold a recommendable gate, raise a verified gate, hard-block a provider, or be sole or partial promotion evidence. Verified provider autotune is the only admission/promotion authority.
+  2. **Promotion depends solely on verified measurements.** Promotion from `listed` to `recommendable` depends solely on `N = 3` verified provider autotune measurements on eligible hardware; the promoted gate is recomputed solely from those measurements, and the oMLX seed is discarded and is NEVER the pass/fail criterion for promotion.
+  3. **`K` is an intra-cell observation count.** `K = 10` is the minimum post-dedup/outlier oMLX observation count WITHIN one normalized chip/RAM/model/quant/context cell (per `RESEARCH_231`'s ≥10-observations-per-cell percentile-reliability threshold), recorded as `gate_seed.observations_used_n`.
+  4. **Catalog provenance is extended and laundering is fail-closed.** `bench_gate.provenance.source` gains `omlx_seeded` and `verified_provider_matrix`; `bench_gate.gate_seed` is REQUIRED on `omlx_seeded` rows and a catalog-integrity failure on any other row.
+  5. **Cross-spec.** SPEC-032 no longer hard-gates admission on the advisory `bench_gate` drift targets; see SPEC-032 FR-HG3/FR-HG4 and §5/§12 below.
+  6. **No Stage 2+ behavior ships here.** This is a Stage-1 normative governance change; it does not change catalog rows, implementation code, snapshot ingestion, pricing, or promotion automation. The concrete evidence-record (verified-measurement IDs), catalog generation, and promotion automation are deferred to a later stage.
 
 - **v0.9.0 (2026-07-31)** — Swap veto redefined as sustained memory-pressure thrash.
   1. **`swap_detected` now means sustained CRITICAL memory pressure, not any pageout.** The signal is the macOS kernel memory-pressure verdict (`kern.memorystatus_vm_pressure_level`: 1 = Normal, 2 = Warning, 4 = Critical), read in-process across the probe. It replaces the machine-wide cumulative `Pageouts` counter, which on Apple Silicon counts healthy memory compression and is not process-scoped, so any incidental system paging during the probe flipped the old flag and false-rejected legitimate small-model providers (e.g. an 8 GB Mac on llama-3.2-3b).
@@ -287,7 +288,7 @@ The v0.1 candidate catalog schema is:
         "min_sustained_tps": 0.0,
         "max_4k_ttft_ms": 0,
         "provenance": {
-          "source": "legacy_unverified",
+          "source": "omlx_seeded",
           "hardware": "string",
           "measured_at": "YYYY-MM-DD",
           "notes": "string"
@@ -298,7 +299,7 @@ The v0.1 candidate catalog schema is:
           "board_p25_tg": 90.6,
           "engine_delta_applied": 0.85,
           "mtp_discounted": true,
-          "cells_used_n": 12,
+          "observations_used_n": 12,
           "seeded_at": "2026-07-22T00:00:00Z"
         }
       },
@@ -309,6 +310,12 @@ The v0.1 candidate catalog schema is:
 }
 ```
 
+The `gate_seed` block is shown here only because this example row is
+`omlx_seeded`; it MUST be absent on every other provenance source (see the
+field rules below). All `gate_seed` snapshot values above (`board_p25_tg`,
+`engine_delta_applied`, `observations_used_n`, tags, timestamps) are
+illustrative, not normative catalog values.
+
 Field rules:
 
 - `model_key` is the normalized key used for rate-card and demand-rank joins.
@@ -318,9 +325,13 @@ Field rules:
 - SPEC-010 §3.7 owns the name `macprovider.snapshot-manifest.v1`, provider/coordinator wire fields, and comparison authority for this digest. This section defines the canonical manifest bytes only and MUST NOT be used as a second admission authority.
 - Every downloadable row (`candidate`, `listed`, or `recommendable`) MUST include both `model_revision` and `model_sha256`. If either is absent, the row is ineligible before download or benchmark, including donor mode.
 - `min_ram_gb` and `min_bandwidth_tier` are authoritative for §5. `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets only; they do not veto paid or donor selection.
-- `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, `legacy_unverified`, or `omlx_seeded`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. Newly generated catalog releases, direct CLI catalog decoding, and current coordinator feed loading MUST fail closed when `bench_gate.provenance` is absent. During A4 feed activation only, implementations MAY accept the exact `published-2026-07-10-catalog-recovery-v1` candidate catalog with SHA-256 `776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda` as a signed live fetch or `previous-target` rollback input; every other missing-provenance candidate catalog remains an integrity failure.
-- `bench_gate.gate_seed` is REQUIRED when `bench_gate.provenance.source == "omlx_seeded"` and MUST be absent otherwise. A row with `bench_gate.provenance.source == "omlx_seeded"` and a missing, malformed, or incomplete `gate_seed` is ineligible before download or benchmark. `gate_seed` records the oMLX snapshot and derivation inputs used to produce the provisional advisory `min_sustained_tps`; it is not runtime evidence and does not admit or promote a provider.
-- `bench_gate.gate_seed.cells_used_n` MUST be greater than or equal to the §12 oMLX seed threshold `K`. `board_release_tag` MUST identify a stable oMLX release, not a `.dev` prerelease. `board_p25_tg` MUST be the filtered 4k-token, matching-quantization p25 generation throughput after duplicate and outlier handling. `engine_delta_applied` MUST record the runtime delta used by the §12 seed formula. `mtp_discounted` MUST be `true` when MTP or speculative-decode board rows were discounted; accelerated rows that cannot be excluded or discounted MUST NOT seed a gate.
+- `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, `legacy_unverified`, `omlx_seeded`, or `verified_provider_matrix`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. Newly generated catalog releases, direct CLI catalog decoding, and current coordinator feed loading MUST fail closed when `bench_gate.provenance` is absent. During A4 feed activation only, implementations MAY accept the exact `published-2026-07-10-catalog-recovery-v1` candidate catalog with SHA-256 `776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda` as a signed live fetch or `previous-target` rollback input; every other missing-provenance candidate catalog remains an integrity failure.
+- `verified_provider_matrix` is the canonical provenance value denoting a gate recomputed solely from `N` verified provider autotune measurements on eligible hardware (§12 promotion). It is the required value a row promoted away from `omlx_seeded` MUST carry (§5, §12). Unlike `measured_single_host` (one host) or `runtime_validated_only` (no trusted throughput gate), it denotes the verified-provider matrix that is the sole promotion/admission authority for a formerly provisional row.
+- `bench_gate.gate_seed` is REQUIRED when `bench_gate.provenance.source == "omlx_seeded"` and MUST be absent for every other provenance source. A row with `bench_gate.provenance.source == "omlx_seeded"` and a missing, malformed, or incomplete `gate_seed` is ineligible before download or benchmark. A row whose `bench_gate.provenance.source != "omlx_seeded"` that nonetheless carries a `bench_gate.gate_seed` is a catalog-integrity failure that MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode (it MUST NOT be treated as a benign extra field — carrying seed identity on a non-provisional row is exactly the provenance-laundering this rule closes). `gate_seed` records the oMLX snapshot and derivation inputs used to produce the provisional advisory `min_sustained_tps`; it is not runtime evidence and does not admit or promote a provider.
+- `bench_gate.gate_seed.observations_used_n` MUST be greater than or equal to the §12 oMLX seed threshold `K`. It is the minimum post-dedup/outlier oMLX **observation** count within the seed's target normalized chip/RAM/model/quant/context cell (not a count of distinct cells). `board_release_tag` MUST identify a stable oMLX release, not a `.dev` prerelease. `board_p25_tg` MUST be the filtered 4k-token, matching-quantization p25 generation (decode) throughput of that cell after duplicate and outlier handling. `engine_delta_applied` MUST record the runtime delta used by the §12 seed formula and MUST be the exact `engine_delta` value bound into that formula. `mtp_discounted` MUST be `true` when MTP or speculative-decode board rows were discounted; accelerated rows that cannot be excluded or discounted MUST NOT seed a gate.
+- The seed formula is binding: `min_sustained_tps` on an `omlx_seeded` row MUST equal `max(8, floor(board_p25_tg * engine_delta_applied * 0.90))` exactly, using the row's own `gate_seed` values (§12). A `min_sustained_tps` that does not equal that computed value is a formula mismatch and a catalog-integrity failure (fail-closed per the semantic-failure rule below).
+- `gate_seed` freshness reference: `seeded_at` is the seed derivation time and is the reference point for the §12 120-day date window (oMLX rows used for the seed MUST be dated within 120 days of, and on or after 2026-05-01 relative to, `seeded_at`). An `omlx_seeded` row whose `seeded_at` (or underlying board snapshot) is older than the 120-day freshness window is ineligible and MUST be re-seeded; a seed MUST NOT remain provisional indefinitely (§12).
+- Semantic seed failures fail closed. A `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source rows (`mtp_discounted` false while accelerated rows were used), duplicate or cross-bucket cells, an invalid/out-of-order/future `seeded_at` or `measured_at` timestamp, a stale-beyond-window seed, or a seed-formula mismatch is a catalog-integrity failure. Such a row MUST NOT be downloaded, benchmarked, donor-committed, recommended, or admitted; it is not merely "does not seed a gate" — it fails closed on every one of those paths.
 - `runtime_status` is one of `candidate`, `listed`, `recommendable`, or `blocked`. Only `recommendable` rows may become paid defaults, and the demand-rank row must also have `recommendable: true`.
 
 The table below lists the current `published-2026-07-29-inband-provenance-v1` signed candidate-catalog rows and gate values. The baked JSON release artifact MUST also include a release-pinned `model_revision` and `model_sha256` for every non-`blocked` row; the long immutable bindings are omitted from this table for readability.
@@ -531,7 +542,9 @@ A row is eligible only if every gate passes:
 5. The candidate catalog row has `bench_gate.provenance.source != "omlx_seeded"`.
 6. The coordinator rate card has a row for the model either verbatim, through `normalizeModelKey`, or through the §3.3 `default` fallback after those specific lookups miss.
 
-Rows with `bench_gate.provenance.source == "omlx_seeded"` are provisional rows. They MAY appear only with `runtime_status` equal to `candidate` or `listed`; they MUST NOT appear as `recommendable`, MUST NOT become paid defaults, and MUST NOT be the sole evidence for promotion. Promotion from `listed` to `recommendable` requires at least `N` verified provider autotune measurements as defined in §12. On promotion, the advisory gate is recomputed from verified provider measurements, `bench_gate.provenance.source` is changed away from `omlx_seeded`, and `bench_gate.gate_seed` is removed.
+Rows with `bench_gate.provenance.source == "omlx_seeded"` are provisional rows. They MAY appear only with `runtime_status` equal to `candidate` or `listed`; they MUST NOT appear as `recommendable` and MUST NOT become paid defaults. The oMLX seed MUST NOT be sole or partial evidence for promotion. Promotion from `listed` to `recommendable` depends solely on at least `N` verified provider autotune measurements on eligible hardware as defined in §12; the oMLX seed is neither a pass/fail criterion for promotion nor an input to the promoted gate. On promotion, the advisory gate is recomputed solely from those verified provider measurements, `bench_gate.provenance.source` is set to `verified_provider_matrix` (§3.2), and `bench_gate.gate_seed` is removed. A row promoted from a prior `omlx_seeded` state MUST be backed by those `N` verified measurements; the concrete evidence-record binding those measurements (per-measurement IDs, storage, and their audit trail) is a normative obligation whose mechanism is deferred to a later stage.
+
+Note: `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets, never a coordinator admission veto. SPEC-032's autotune hello-gate no longer hard-gates admission on the advisory `bench_gate` (SPEC-032 FR-HG3/FR-HG4); any hard performance admission gate is a separate field backed by verified-provider evidence.
 
 `hardware_fits(model, mac)` rules:
 
@@ -699,6 +712,12 @@ At least one candidate was disqualified because swap was detected under probe lo
 
 Donor-tier path applies when no row passes all §5 gates and only a donor-compatible non-default row remains available for explicit local donor-mode testing.
 
+When the `{best_compatible_model}` shown in the donor transcript is an
+`omlx_seeded` row, the transcript MUST additionally carry the provisional label
+`oMLX-seeded; not macprovider-verified` for that row, so the operator sees that
+the best compatible option is seeded from unattested community data and has not
+been verified by macprovider.
+
 ## 8. Donor-mode UX
 
 v0.1 locks an explicit local donor-mode override:
@@ -750,11 +769,15 @@ Stored state MUST include at least:
   "benchmark_generated_at": "<RFC3339-or-null>",
   "binary_version": "<string>",
   "hardware_identity_hash": "<hex>",
-  "recommended_model": "<model_key-or-null>"
+  "recommended_model": "<model_key-or-null>",
+  "recommended_bench_gate_provenance_source": "<string-or-null>",
+  "recommended_gate_seed_identity": "<string-or-null>"
 }
 ```
 
 `hardware_identity_hash` is an HMAC-SHA256-derived local identity hash. It MUST NOT be a raw serial number, MAC address, device UUID, or unhashed hardware fingerprint.
+
+`recommended_bench_gate_provenance_source` is the selected row's `bench_gate.provenance.source`; `recommended_gate_seed_identity` records the selected row's seed identity (at minimum `gate_seed.omlx_snapshot_id` and `gate_seed.seeded_at`) when the selected row is `omlx_seeded`, and is `null` otherwise. These fields let `macprovider-cli status` render provisional oMLX provenance (AC-OMLX-6) without re-fetching the catalog. When `recommended_bench_gate_provenance_source == "omlx_seeded"`, `macprovider-cli status` MUST render the exact label `oMLX-seeded; not macprovider-verified` alongside the configured model.
 
 Stored hash/version derivation:
 
@@ -873,11 +896,23 @@ AC-OMLX-2: A row with `bench_gate.provenance.source == "omlx_seeded"` and missin
 
 AC-OMLX-3: `autotune --recommend` never selects an `omlx_seeded` row as the default recommendation.
 
-AC-OMLX-4: Promotion to `recommendable` is refused unless at least `N = 3` verified provider autotune measurements on eligible hardware clear the provisional advisory gate. The promoted row has provenance changed away from `omlx_seeded` and no `gate_seed`.
+AC-OMLX-4: Promotion to `recommendable` is refused unless at least `N = 3` verified provider autotune measurements on eligible hardware exist; promotion depends solely on those verified measurements. The oMLX seed is NEVER the pass/fail criterion for promotion and is NEVER an input to the promoted gate: the promoted `min_sustained_tps` is recomputed solely from the `N` verified provider measurements, the promoted row has `bench_gate.provenance.source == "verified_provider_matrix"`, and it carries no `gate_seed`. A promotion computed by testing verified runs against the provisional oMLX gate, or that reuses the oMLX seed value in the promoted gate, is rejected.
 
-AC-OMLX-5: Seeded `min_sustained_tps` is never below 8, never derived from a `.dev` oMLX board release, and never uses undiscounted MTP/speculative-decode rows.
+AC-OMLX-5: Seeded `min_sustained_tps` equals `max(8, floor(board_p25_tg * engine_delta_applied * 0.90))` computed from the row's own `gate_seed` values; a row whose stored `min_sustained_tps` does not equal that computed value is rejected as a catalog-integrity failure. (This AC is NOT satisfied by always emitting `8`: a well-formed seed whose computed value exceeds 8 MUST store that higher value, and a row that stores `8` when the formula yields a higher number is rejected.) A seed derived from a `.dev` oMLX board release or from undiscounted MTP/speculative-decode observations is rejected.
 
-AC-OMLX-6: Recommendation JSON, human `autotune --recommend` output, and `macprovider-cli status` surface oMLX provenance as provisional and not macprovider-verified.
+AC-OMLX-5a (positive fixture): A well-formed `omlx_seeded` row with `board_p25_tg = 90.6`, `engine_delta_applied = 0.85`, `observations_used_n >= K`, a stable (non-`.dev`) `board_release_tag`, `mtp_discounted = true`, and a `seeded_at` within the freshness window computes `min_sustained_tps == max(8, floor(90.6 * 0.85 * 0.90)) == 69` and is accepted (as `candidate` or `listed`).
+
+AC-OMLX-5b (K rejection): An `omlx_seeded` row with `gate_seed.observations_used_n < K` (`K = 10`) is rejected — ineligible and fail-closed before download or benchmark.
+
+AC-OMLX-6: Recommendation JSON, human `autotune --recommend` output, and `macprovider-cli status` surface oMLX provenance as provisional and not macprovider-verified. `macprovider-cli status` reads the persisted recommendation state (§9), which retains the selected row's `bench_gate.provenance.source` and `gate_seed` identity, and MUST render the exact label `oMLX-seeded; not macprovider-verified` for a selected `omlx_seeded` row.
+
+AC-OMLX-7 (no laundering): A catalog row whose `bench_gate.provenance.source != "omlx_seeded"` that carries a `bench_gate.gate_seed` is a catalog-integrity failure, rejected fail-closed at catalog authoring, lint, and signing, and at CLI catalog decode.
+
+AC-OMLX-8 (no raise, no hard-block): An `omlx_seeded` gate never raises a gate whose provenance is verified provider/local evidence and never causes a provider hard-block. The advisory `bench_gate.min_sustained_tps`/`max_4k_ttft_ms` are never a coordinator admission veto; any hard performance admission gate is backed by verified-provider evidence, not the advisory `bench_gate` (see SPEC-032 FR-HG3/FR-HG4 and §5).
+
+AC-OMLX-9 (TTFT not tightened): `max_4k_ttft_ms` is never tightened from oMLX PP/prefill proxy data; a seeded row either inherits an existing conservative TTFT value or leaves TTFT unset for advisory warning only until verified provider autotune supplies measured TTFT.
+
+AC-OMLX-10 (semantic-failure fail-closed): An `omlx_seeded` row with a `.dev` `board_release_tag`, undiscounted MTP/speculative-decode source, duplicate/cross-bucket cells, an invalid/out-of-order/future timestamp, a `seeded_at` older than the 120-day freshness window, or a seed-formula mismatch is a catalog-integrity failure that blocks download, benchmark, donor commit, recommendation, and coordinator admission.
 
 ## 12. oMLX-seeded provisional catalog gates
 
@@ -886,8 +921,12 @@ oMLX community benchmark data is self-reported and unattested. It MAY inform
 the starting advisory `bench_gate.min_sustained_tps` of a non-default candidate
 catalog row only when the row remains provisional. It MUST NOT set or hold the
 `bench_gate` of a `recommendable` row, raise a gate whose provenance is verified
-provider/local evidence, hard-block a provider, or serve as the sole evidence for
-promotion to `recommendable`.
+provider/local evidence, hard-block a provider, or serve as the sole (or partial)
+evidence for promotion to `recommendable`. Because the advisory `bench_gate` is
+never an admission veto, SPEC-032's hello-gate no longer hard-gates admission on
+`bench_gate.min_sustained_tps`/`max_4k_ttft_ms` (SPEC-032 FR-HG3/FR-HG4); a hard
+performance admission gate is a separate field backed by verified-provider
+evidence.
 
 An oMLX-seeded row MUST use `bench_gate.provenance.source == "omlx_seeded"` and
 MUST include `bench_gate.gate_seed` per §3.2. oMLX-seeded rows MAY appear only
@@ -895,11 +934,19 @@ with `runtime_status` equal to `candidate` or `listed`; they MUST NOT appear wit
 `runtime_status == "recommendable"`.
 
 An oMLX-seeded `min_sustained_tps` MUST be derived from the filtered oMLX
-distribution, not copied directly from board TG:
+distribution, not copied directly from board TG. The relationship is binding
+(a mismatch is a catalog-integrity failure, §3.2):
 
 ```text
-min_sustained_tps = max(8, floor(board_p25_tg * engine_delta * 0.90))
+min_sustained_tps == max(8, floor(board_p25_tg * engine_delta_applied * 0.90))
 ```
+
+where `board_p25_tg` is the filtered 4k-context, matching-quantization p25
+generation (decode) throughput of the target normalized cell after duplicate
+and outlier handling, and `engine_delta_applied` is the row's
+`gate_seed.engine_delta_applied` (the current tracked stable oMLX release's
+macprovider runtime delta). The date-window reference point for the filter
+below is the row's `gate_seed.seeded_at`.
 
 `RESEARCH_231`'s "never below 75% of local median when local bench exists"
 clause is intentionally not carried into this formula: an oMLX-seeded row
@@ -909,11 +956,16 @@ not need an oMLX seed. The clause is preserved as a candidate v0.2 input if
 a future workflow ever re-seeds a row that already has partial local
 evidence.
 
-The seed is usable only when at least `K = 10` distinct oMLX cells exist for the
-same normalized chip/RAM/model/quant/context bucket after duplicate and outlier
-handling. Rows used for the seed MUST be 4k-context, matching-quantization rows,
-dated within 120 days, and dated on or after 2026-05-01. Name-only aliases,
-community merges, and non-matching artifacts MUST NOT seed a gate.
+The seed is usable only when at least `K = 10` oMLX **observations** remain
+within the target normalized chip/RAM/model/quant/context cell after duplicate
+collapse and outlier trimming (`gate_seed.observations_used_n >= K`); `K` is an
+intra-cell observation count, not a count of distinct cells. Observations used
+for the seed MUST be 4k-context, matching-quantization observations, dated
+within 120 days of `gate_seed.seeded_at`, and dated on or after 2026-05-01.
+Name-only aliases, community merges, and non-matching artifacts MUST NOT seed a
+gate. A seed whose `seeded_at` or board snapshot is older than the 120-day
+freshness window is stale: the row is ineligible and MUST be re-seeded from a
+fresh oMLX snapshot rather than remaining provisional indefinitely (§3.2).
 
 `engine_delta` MUST reflect the current tracked stable oMLX release and the
 macprovider runtime delta. `.dev` oMLX board releases MUST NOT be used as seed
@@ -925,18 +977,23 @@ accelerated rows MUST NOT seed a gate.
 row may inherit an existing conservative TTFT value or leave TTFT unset for
 advisory warning only until verified provider autotune supplies measured TTFT.
 
-Promotion from `listed` to `recommendable` requires at least `N = 3` verified
-provider autotune measurements on eligible hardware, each clearing the
-provisional advisory gate. On promotion, the operator MUST recompute the
-advisory gate from verified provider measurements, change
-`bench_gate.provenance.source` away from `omlx_seeded`, and remove
-`bench_gate.gate_seed`. The oMLX seed is discarded at promotion.
+Promotion from `listed` to `recommendable` depends solely on at least `N = 3`
+verified provider autotune measurements on eligible hardware. The oMLX seed is
+NEVER the pass/fail criterion for promotion and is NEVER an input to the
+promoted gate: the promoted `min_sustained_tps` (and any `max_4k_ttft_ms`) is
+recomputed solely from those `N` verified provider measurements. On promotion,
+the operator MUST recompute the advisory gate from the verified provider
+measurements alone, set `bench_gate.provenance.source` to
+`verified_provider_matrix` (§3.2), and remove `bench_gate.gate_seed`. The oMLX
+seed is discarded at promotion. The concrete evidence-record binding the `N`
+verified measurements (per-measurement IDs and their storage) is a normative
+obligation whose mechanism is deferred to a later stage.
 
 ### 12.1 K/N threshold justification
 
-The `RESEARCH_231` prompt asked for cells that are "statistically reliable enough" to inform catalog rows, and explicitly required conservative calibration: p25-based gate slack, uncertainty bands, and advisory-only treatment until macprovider repros the result. `RESEARCH_231` therefore treats `n >= 10` normalized oMLX cells as decision-grade after duplicate collapse and outlier trimming. We adopt `K = 10` because it directly matches the research memo's minimum sample size for percentile-based seeding.
+The `RESEARCH_231` prompt asked for cells that are "statistically reliable enough" to inform catalog rows, and explicitly required conservative calibration: p25-based gate slack, uncertainty bands, and advisory-only treatment until macprovider repros the result. `RESEARCH_231`'s `n >= 10` is a per-cell sample-size threshold: a normalized chip/RAM/model/quant/context cell is percentile-reliable enough to seed a p25-based gate only once it holds at least 10 oMLX observations after duplicate collapse and outlier trimming. We adopt `K = 10` as exactly that minimum intra-cell observation count (`gate_seed.observations_used_n`); it is the number of observations required WITHIN the one target cell, not a requirement that 10 distinct cells exist or agree. A cell with fewer than 10 post-dedup/outlier observations does not clear the memo's percentile-reliability bar and MUST NOT seed a gate.
 
-`N` serves a different purpose than `K`. Whereas `K` measures agreement across independent oMLX community benchmark cells, `N` counts repeated verified provider autotune measurements on eligible hardware before replacing provisional oMLX evidence with verified-provider evidence. The purpose of `N` is to reduce the likelihood that a single anomalous benchmark run (for example due to transient system load, thermal state, or other run-to-run variability) determines promotion of a catalog row.
+`N` serves a different purpose than `K`. Whereas `K` is the intra-cell sample size that makes a single oMLX cell's p25 statistically usable as a provisional seed, `N` counts repeated verified provider autotune measurements on eligible hardware before replacing provisional oMLX evidence with verified-provider evidence. The purpose of `N` is to reduce the likelihood that a single anomalous benchmark run (for example due to transient system load, thermal state, or other run-to-run variability) determines promotion of a catalog row.
 
 Therefore `N = 3` is adopted as a conservative verification policy rather than a value derived from the oMLX dataset. One run cannot distinguish a repeatable result from a transient outlier, while two runs provide no tie-break when they disagree. Three independent verified provider autotune measurements provide a majority-consistency check before promotion while keeping verification operationally practical.
 
@@ -989,4 +1046,4 @@ This will not create demand where none exists. SPEC-023 answers "which model sho
 | Donor-mode abuse | Operator commits non-recommendable row and receives paid buyer traffic | §8 keeps donor mode local-only for non-recommendable rows and blocks network-connected paid registration until a separate donor-routing/settlement prerequisite exists | Explicit donor traffic class or rewards policy in v0.2 |
 | Fingerprint leakage | Stable hardware identity links provider across runs or support bundles | §3.1 and §9 require per-install-secret, domain-separated HMAC-derived identities only; AC-28 and AC-33 ban raw fingerprints and HMAC secrets in persisted/output paths | Formal privacy review if identities become network-visible |
 | Misleading earnings claims | Provider interprets displayed tokens/sec as guaranteed realized income | §6 and §7 show per-token rate and per-token formula only; AC-29 enforces transparency | Utilization-adjusted realized projection in v0.2 |
-| Clean-room violation | Competitive framing accidentally depends on Darkbloom source | §2 and §13 restrict Darkbloom references to public surfaces only | None; source inspection remains prohibited |
+| Clean-room violation | Competitive framing accidentally depends on Darkbloom source | §2 and §14 restrict Darkbloom references to public surfaces only | None; source inspection remains prohibited |
