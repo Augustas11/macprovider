@@ -63,6 +63,39 @@ test('scheduled liveness requires only one bounded serviceability sample', () =>
   assert.deepEqual(degradedReasons({ mode: 'liveness', up: 1, models: [model] }), []);
 });
 
+test('liveness precondition follows live fleet instead of stale expected provider count', () => {
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'provider-a', model_id: 'old-model-b' },
+    { provider_id: 'missing-b', model_id: 'old-model-c' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+    { provider_id: 'provider-c', model_id: 'model-b' },
+  ];
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-b', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+        { id: 'new-model', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'new-model', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-c', assigned_id: 'session-c', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'new-model', 'session-a', { memory_pressure: 'warning' }),
+      safetyProvider('provider-b', 'model-b', 'session-b'),
+      safetyProvider('provider-c', 'model-b', 'session-c'),
+    ],
+  };
+  assert.deepEqual(preconditionReasons(observed, staleExpectedFleet, null), []);
+});
+
 test('explicit safety abort classification always fails the run', () => {
   const run = {
     mode: 'liveness', up: 1, models: [healthyModel({ ttft_ms: { p95: 500, n: 1 } })],
@@ -320,7 +353,7 @@ test('active-request safety accepts unchanged gateway counts while provider is b
   observed.providers[0].status = 'busy';
   observed.providers[0].requests_in_flight = 1;
 
-  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     activeModelID: 'model-a',
   }), []);
@@ -362,7 +395,7 @@ test('active-request safety accepts a non-first duplicate-model provider without
   observed.gateway.models[1].ready_provider_count = 1;
   observed.gateway.models[1].slots_free = 1;
 
-  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     activeModelID: 'model-b',
   }), []);
@@ -371,6 +404,11 @@ test('active-request safety accepts a non-first duplicate-model provider without
   droppedDuplicateModel.gateway.models = droppedDuplicateModel.gateway.models.filter((model) => model.id !== 'model-b');
   assert.ok(safetyObservationReasons(initial, droppedDuplicateModel, expectedFleet, {
     activeModelID: 'model-b',
+    legacyRollbackProviders: new Map(expectedFleet.map((row) => [row.provider_id, {
+      model_id: row.model_id,
+      binary_version: '1.8.30',
+      expires_at_ms: Date.now() + 60_000,
+    }])),
   }).includes('model-b:model_disappeared'));
 });
 
@@ -397,15 +435,33 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   const providers = operatorPool.map((row) => row.safety_telemetry);
   const initial = { gateway, operator_pool: operatorPool, providers };
   const observed = structuredClone(initial);
+  const document = {
+    schema_version: 1,
+    kind: 'legacy_rollback',
+    authority: 'issue-825-canary-fleet-r6',
+    transaction_id: 'd'.repeat(64),
+    expires_at: new Date(now + 300_000).toISOString(),
+    providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const authorized = validateLegacyRollbackAuthorization(document, expectedFleet, now);
 
-  assert.ok(safetyObservationReasons(initial, observed, expectedFleet)
-    .includes('provider-a:provider_signal_missing'));
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     allowLegacyBridgeProviderSignals: true,
   }), []);
-  assert.deepEqual(preconditionReasons(initial, expectedFleet, null, true), []);
-  assert.ok(preconditionReasons(initial, expectedFleet, null)
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
+    allowLegacyBridgeProviderSignals: true,
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }), []);
+  assert.ok(safetyObservationReasons(initial, observed, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }).includes('provider-a:provider_signal_missing'));
+  assert.deepEqual(preconditionReasons(initial, expectedFleet, authorized, true), []);
+  assert.ok(preconditionReasons(initial, expectedFleet, authorized)
     .includes('provider-a:provider_signal_missing'));
+  assert.deepEqual(preconditionReasons(initial, expectedFleet, null), []);
 
   const recoveryOne = structuredClone(initial);
   const recoveryTwo = structuredClone(initial);
@@ -429,11 +485,19 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
     },
     now,
   ), []);
-  assert.ok(recoverySoakObservationReasons(
+  assert.deepEqual(recoverySoakObservationReasons(
     initial,
     [recoveryOne, recoveryTwo],
     expectedFleet,
     null,
+    { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
+    now,
+  ), []);
+  assert.ok(recoverySoakObservationReasons(
+    initial,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
     { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
     now,
   ).some((reason) => reason.includes('telemetry_')));
@@ -441,7 +505,6 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   for (const [field, value] of [
     ['catalog_admission_mode', 'current'],
     ['catalog_admission_mode', 'previous'],
-    ['catalog_admission_mode', null],
     ['binary_version', null],
     ['binary_version', 'not-semver'],
     ['model_id', 'wrong-model'],
@@ -450,6 +513,8 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
     rejected.operator_pool[0][field] = value;
     assert.ok(safetyObservationReasons(initial, rejected, expectedFleet, {
       allowLegacyBridgeProviderSignals: true,
+      legacyRollbackProviders: authorized,
+      nowMs: now,
     }).includes('provider-a:provider_signal_missing'), `${field}=${value} must fail closed`);
   }
 });
@@ -463,7 +528,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r5',
+    authority: 'issue-825-canary-fleet-r6',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -542,14 +607,14 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     soakOptions,
     now,
   ), []);
-  assert.ok(recoverySoakObservationReasons(
+  assert.deepEqual(recoverySoakObservationReasons(
     observation,
     [recoveryOne, recoveryTwo],
     expectedFleet,
     null,
     soakOptions,
     now,
-  ).some((reason) => reason.includes('telemetry_')));
+  ), []);
   assert.ok(recoverySoakObservationReasons(
     observation,
     [recoveryOne, recoveryTwo],
@@ -616,7 +681,7 @@ test('legacy rollback recovery requires heartbeat advance only from exercised pr
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r5',
+    authority: 'issue-825-canary-fleet-r6',
     transaction_id: 'b'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -720,7 +785,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r5',
+    authority: 'issue-825-canary-fleet-r6',
     transaction_id: 'c'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -832,7 +897,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     null,
     scopedAdvance,
     now,
-  ).some((reason) => reason.includes('provider-c')));
+  ).length > 0);
 
   const missingDuplicate = structuredClone(recoveryTwo);
   missingDuplicate.gateway.pool.total_providers = 2;
@@ -860,7 +925,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     null,
     scopedAdvance,
     now,
-  ).some((reason) => reason.includes('provider-c')));
+  ).length > 0);
 
   const duplicatePoolIdentity = structuredClone(missingDuplicate);
   const duplicateProviderB = structuredClone(

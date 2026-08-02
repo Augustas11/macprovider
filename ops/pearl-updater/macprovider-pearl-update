@@ -115,7 +115,7 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-825-canary-fleet-r5"
+CANARY_AUTHORITY_VERSION = "issue-825-canary-fleet-r6"
 CANARY_AUTHORITY_COMMIT = "98d95cb73573307c0e55855d9c3bb2ccd8e97b92"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
@@ -134,8 +134,8 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "3b29494164e526e95f83c3de522b00a1fa8dd18479b5e6db0b6aa125d0250c55",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "03111b34d7ea86c0869be41ca54ed7057f437a0611e4637fc5d315aeb602f632",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "d04876a00fd166d3e374f80c11f92c0920086789d298bc016fd7f7de61a9f380",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "ec06ca88bd0b537a36d1957416b059e3637e95a02f0e6c289fb074e69f692653",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
     Path("/etc/systemd/system/canary-buyer.service"): "e7f028164d7ca58adaebfb4b1d194016a587dfae78af3f3a0b456ae374efea8a",
@@ -2721,13 +2721,60 @@ class Updater:
             or any(not isinstance(row, dict) for row in providers)
             or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)
             or len(set(provider_ids)) != len(provider_ids)
-            or not set(model_ids).issubset(CANARY_EXPECTED_MODELS)
-            or set(model_ids) != CANARY_EXPECTED_MODELS
         ):
             raise UpdateError(
-                "canary expected fleet must bind unique protected providers to the pinned service models"
+                "canary expected fleet must bind unique protected providers to non-empty models"
             )
         return normalized
+
+    def _rollback_authorization_fleet(self, previous_version: str) -> list[dict[str, str]]:
+        if not self.previous_protected_providers:
+            return self._canary_expected_fleet()
+        poolz = self.get_authorized_json(
+            "http://127.0.0.1:8444/poolz",
+            self.coordinator_operator_token(),
+        )
+        rows = poolz.get("pool")
+        if not isinstance(rows, list):
+            raise UpdateError("legacy rollback authorization pool snapshot omitted provider rows")
+        expected_ids = set(self.previous_protected_providers)
+        current: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise UpdateError("legacy rollback authorization pool snapshot contains an invalid row")
+            provider_id = row.get("provider_id")
+            if not isinstance(provider_id, str) or not provider_id:
+                raise UpdateError("legacy rollback authorization pool snapshot contains an invalid provider identity")
+            if provider_id in current:
+                raise UpdateError("legacy rollback authorization pool snapshot contains duplicate provider identities")
+            current[provider_id] = row
+        fleet: list[dict[str, str]] = []
+        for provider_id in self.previous_protected_providers:
+            row = current.get(provider_id)
+            model_id = row.get("model_id") if isinstance(row, dict) else None
+            binary_version = row.get("binary_version") if isinstance(row, dict) else None
+            if (
+                row is None
+                or row.get("state") != "ready"
+                or row.get("routing_eligible") is not True
+                or not isinstance(model_id, str)
+                or not model_id
+                or str(SemVer.parse(str(binary_version or ""))) != previous_version
+            ):
+                raise UpdateError(
+                    "legacy rollback authorization requires the captured protected providers to be ready on the restored version"
+                )
+            fleet.append({"provider_id": provider_id, "model_id": model_id})
+        ready_rows = sum(
+            1
+            for provider_id, row in current.items()
+            if provider_id in expected_ids
+            and row.get("state") == "ready"
+            and row.get("routing_eligible") is True
+        )
+        if self.previous_pool_ready is not None and ready_rows < self.previous_pool_ready:
+            raise UpdateError("legacy rollback authorization capacity is below the protected rollout baseline")
+        return fleet
 
     def _legacy_rollback_control_directory(self) -> Path:
         directory = self.canary_rollback_authorization.parent
@@ -2789,12 +2836,10 @@ class Updater:
             raise UpdateError("legacy rollback authorization version is invalid") from exc
         if normalized_version != journal_version:
             raise UpdateError("legacy rollback authorization version mismatches the phase journal")
-        fleet = self._canary_expected_fleet()
+        fleet = self._rollback_authorization_fleet(normalized_version)
         fleet_ids = sorted(row["provider_id"] for row in fleet)
         if fleet_ids != self.previous_protected_providers:
             raise UpdateError("legacy rollback authorization fleet mismatches the protected rollout baseline")
-        if self.previous_pool_ready != len(fleet):
-            raise UpdateError("legacy rollback authorization capacity mismatches the protected rollout baseline")
         directory = self._legacy_rollback_control_directory()
         self._remove_legacy_rollback_authorization()
         validity_s = min(max(self.config.canary_timeout_s + 60, 180), 14 * 60)

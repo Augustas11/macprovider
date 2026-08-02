@@ -115,6 +115,12 @@ test('gateway pre/post invariants match exact active non-routable aggregation lo
     'ready_changed_2_to_1',
     'model-a:model_not_stably_available',
   ]);
+  assert.deepEqual(gatewayInvariantReasons(initial, changed, {
+    minReadyProviders: 1,
+    maxDrainingProviders: 1,
+    enforceStableProviderCounts: false,
+    enforceStableModelSet: false,
+  }), []);
 });
 
 test('operator pool invariants abort on state, connection, and heartbeat regressions', () => {

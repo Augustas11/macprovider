@@ -74,7 +74,7 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r5';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r6';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 
 const CONFIG = {
@@ -1012,6 +1012,33 @@ async function loadExpectedFleet() {
   });
 }
 
+function liveReadyFleet(observed) {
+  const seen = new Set();
+  const rows = [];
+  for (const row of observed?.operator_pool || []) {
+    if (row?.state !== 'ready' || row?.routing_eligible !== true) continue;
+    if (typeof row.provider_id !== 'string' || !row.provider_id) continue;
+    if (typeof row.model_id !== 'string' || !row.model_id) continue;
+    if (seen.has(row.provider_id)) continue;
+    seen.add(row.provider_id);
+    rows.push({ provider_id: row.provider_id, model_id: row.model_id });
+  }
+  return rows.sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+}
+
+function livenessModelsFromStatus(gateway, configuredModels) {
+  const live = (gateway?.models || [])
+    .filter((model) => model?.available === true
+      && model?.degraded !== true
+      && Number.isInteger(model?.ready_provider_count)
+      && model.ready_provider_count > 0
+      && typeof model?.id === 'string'
+      && model.id)
+    .map((model) => model.id);
+  const uniqueLive = [...new Set(live)].sort();
+  return uniqueLive.length ? uniqueLive : configuredModels;
+}
+
 function classifySignalReasons(reasons) {
   const joined = reasons.join(' ');
   if (/thermal/.test(joined)) return 'thermal_regression';
@@ -1268,7 +1295,9 @@ function hasDirectProviderSignal(signal) {
   );
 }
 
-function directProviderSignalIdentityReasons(providers, expectedFleet) {
+function directProviderSignalIdentityReasons(providers, expectedFleet, {
+  allowUnexpectedProviders = false,
+} = {}) {
   const expectedIDs = new Set(expectedFleet.map((row) => row.provider_id));
   const seen = new Set();
   const reasons = [];
@@ -1279,7 +1308,7 @@ function directProviderSignalIdentityReasons(providers, expectedFleet) {
       reasons.push(`provider_signal_identity_missing_${index}`);
       continue;
     }
-    if (!expectedIDs.has(providerID)) {
+    if (!allowUnexpectedProviders && !expectedIDs.has(providerID)) {
       reasons.push(`provider_signal_unexpected_${providerID}`);
     }
     if (seen.has(providerID)) {
@@ -1334,6 +1363,17 @@ export function recoverySoakObservationReasons(
     allowLegacyBridgeProviderSignals = false,
     ...soakOptions
   } = options;
+  const staticFleet = CONFIG.mode === 'qualification' || Boolean(legacyRollbackProviders?.size);
+  if (!staticFleet) {
+    return recoverySoakReasons({
+      gatewayInitial: initial.gateway,
+      gatewaySamples: samples.map((sample) => sample.gateway),
+    }, {
+      ...soakOptions,
+      enforceStableProviderCounts: false,
+      enforceStableModelSet: false,
+    });
+  }
   const reasons = recoverySoakReasons({
     gatewayInitial: initial.gateway,
     gatewaySamples: samples.map((sample) => sample.gateway),
@@ -1450,6 +1490,8 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   nowMs = Date.now(),
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
+  const staticFleet = qualification || Boolean(legacyRollbackProviders?.size);
+  const safetyFleet = staticFleet ? expectedFleet : liveReadyFleet(observed);
   const activeProviderID = activeExpectedProviderID(observed, expectedFleet, activeModelID, {
     qualification,
     activeProviderIDHint,
@@ -1473,25 +1515,32 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     ? activeModelID
     : (recoveredDirectSignals ? cachedGatewayModelID : '');
   const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
-    minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+    minReadyProviders: staticFleet
+      ? Math.max(CONFIG.minReadyProviders, expectedFleet.length)
+      : CONFIG.minReadyProviders,
     maxDrainingProviders: qualification ? 1 : 0,
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
+    enforceStableProviderCounts: staticFleet,
+    enforceStableModelSet: staticFleet,
   });
   if (!observed.operator_pool) return [...new Set([...reasons, 'operator_pool_signal_missing'])];
 
-  reasons.push(...expectedFleetReasons(observed.operator_pool, expectedFleet, {
+  reasons.push(...expectedFleetReasons(observed.operator_pool, safetyFleet, {
     allowedExtraProviderIDs: qualification ? [CONFIG.isolatedProviderID] : [],
     maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
     activeProviderID: qualification ? '' : activeProviderID,
+    allowUnexpectedProviders: !staticFleet,
   }));
-  const initialExpected = expectedPoolRows(initial.operator_pool || [], expectedFleet);
-  const currentExpected = expectedPoolRows(observed.operator_pool, expectedFleet);
-  reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
-    maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
-    requireHeartbeatAdvance,
-    heartbeatAdvanceProviderIDs,
-    activeProviderID: qualification ? '' : activeProviderID,
-  }));
+  if (staticFleet) {
+    const initialExpected = expectedPoolRows(initial.operator_pool || [], expectedFleet);
+    const currentExpected = expectedPoolRows(observed.operator_pool, expectedFleet);
+    reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
+      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+      requireHeartbeatAdvance,
+      heartbeatAdvanceProviderIDs,
+      activeProviderID: qualification ? '' : activeProviderID,
+    }));
+  }
 
   if (qualification) {
     reasons.push(...qualificationIsolationReasons(observed.operator_pool, {
@@ -1523,17 +1572,22 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       }
     }
   } else {
-    if (observed.providers.length !== expectedFleet.length) {
+    if (staticFleet && observed.providers.length !== expectedFleet.length) {
       reasons.push(`provider_signal_count_${observed.providers.length}_ne_${expectedFleet.length}`);
     }
-    reasons.push(...directProviderSignalIdentityReasons(observed.providers, expectedFleet));
-	    const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
-	    const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
-	    const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
-	    for (const expected of expectedFleet) {
-	      const current = currentByID.get(expected.provider_id);
-	      const rollbackAuthorization = legacyRollbackProviders?.get(expected.provider_id);
-	      if (!current) {
+    reasons.push(...directProviderSignalIdentityReasons(observed.providers, safetyFleet, {
+      allowUnexpectedProviders: !staticFleet,
+    }));
+    if (!staticFleet) {
+      return [...new Set(reasons)];
+    }
+    const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
+    const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
+    const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
+    for (const expected of safetyFleet) {
+      const current = currentByID.get(expected.provider_id);
+      const rollbackAuthorization = legacyRollbackProviders?.get(expected.provider_id);
+      if (!current) {
         const poolRow = currentPoolByID.get(expected.provider_id);
         const poolIndex = observed.operator_pool.indexOf(poolRow);
         const poolSlotSignal = poolIndex >= 0 ? observed.providers[poolIndex] : null;
@@ -1568,20 +1622,20 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
         requireObservationAdvance: requireProviderHeartbeatAdvance,
       }));
-	      if (current.model_id !== expected.model_id) {
-	        reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
-	      }
-	      if (rollbackAuthorization) {
-	        const poolRow = currentPoolByID.get(expected.provider_id);
-	        if (current.binary_version !== rollbackAuthorization.binary_version) {
-	          reasons.push(`${expected.provider_id}:telemetry_binary_${current.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
-	        }
-	        if (poolRow?.binary_version !== rollbackAuthorization.binary_version) {
-	          reasons.push(`${expected.provider_id}:pool_binary_${poolRow?.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
-	        }
-	      }
-	    }
-	  }
+      if (staticFleet && current.model_id !== expected.model_id) {
+        reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
+      }
+      if (rollbackAuthorization) {
+        const poolRow = currentPoolByID.get(expected.provider_id);
+        if (current.binary_version !== rollbackAuthorization.binary_version) {
+          reasons.push(`${expected.provider_id}:telemetry_binary_${current.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
+        }
+        if (poolRow?.binary_version !== rollbackAuthorization.binary_version) {
+          reasons.push(`${expected.provider_id}:pool_binary_${poolRow?.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
+        }
+      }
+    }
+  }
   return [...new Set(filterLegacyIdleDuplicateRecoveryReasons(reasons, {
     observations: observed,
     expectedFleet,
@@ -1878,11 +1932,6 @@ async function main() {
     if (configuredModels.length !== CONFIG.models.length) {
       throw new Error('CANARY_MODELS must not contain duplicates');
     }
-    if (CONFIG.mode === 'liveness'
-        && (configuredModels.length !== expectedModels.length
-          || configuredModels.some((model, index) => model !== expectedModels[index]))) {
-      throw new Error('CANARY_MODELS must exactly match the model set in CANARY_EXPECTED_FLEET_FILE');
-    }
     if (CONFIG.mode === 'qualification' && !expectedModels.includes(CONFIG.models[0])) {
       throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
     }
@@ -1930,7 +1979,9 @@ async function main() {
       && preReasons.some((reason) => /isolation_|isolated_provider_/.test(reason));
     control.fail(isolationFailure ? 'isolation_unproven' : 'precondition_failed', preReasons, 'precondition');
   }
-  const models = CONFIG.models;
+  const models = CONFIG.mode === 'liveness'
+    ? livenessModelsFromStatus(initial.gateway, CONFIG.models)
+    : CONFIG.models;
   const results = [];
   for (const model of models) {
     if (control.failed()) break;
@@ -1984,7 +2035,9 @@ async function main() {
       expectedFleet,
       legacyRollbackProviders,
       {
-        minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+        minReadyProviders: legacyRollbackProviders?.size || CONFIG.mode === 'qualification'
+          ? Math.max(CONFIG.minReadyProviders, expectedFleet.length)
+          : CONFIG.minReadyProviders,
         maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
         maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
         maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
@@ -1992,6 +2045,8 @@ async function main() {
         requireNominalThermal: CONFIG.mode === 'qualification',
         allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
         heartbeatAdvanceProviderIDs,
+        enforceStableProviderCounts: Boolean(legacyRollbackProviders?.size || CONFIG.mode === 'qualification'),
+        enforceStableModelSet: Boolean(legacyRollbackProviders?.size || CONFIG.mode === 'qualification'),
       },
     ));
     const finalRecovery = recoverySamples.at(-1);

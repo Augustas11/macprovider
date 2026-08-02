@@ -3335,7 +3335,7 @@ class PearlUpdaterTests(unittest.TestCase):
                     }
                 )
             )
-            with self.assertRaisesRegex(updater_module.UpdateError, "pinned service models"):
+            with self.assertRaisesRegex(updater_module.UpdateError, "unique protected providers"):
                 self.updater.verify_canary_authority()
 
     def test_canary_rollout_authority_hashes_match_issue_825_duplicate_fleet_runtime(self):
@@ -3374,7 +3374,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 hashlib.sha256(source_at_authority).hexdigest(),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r5")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r6")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
             "98d95cb73573307c0e55855d9c3bb2ccd8e97b92",
@@ -3448,13 +3448,13 @@ class PearlUpdaterTests(unittest.TestCase):
         with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
             self.assertEqual(self.updater._canary_expected_fleet(), providers)
 
-        providers[0] = {**providers[0], "model_id": "unexpected-model"}
+        providers[0] = {**providers[0], "provider_id": "provider-b"}
         expected_fleet.write_text(
             json.dumps({"schema_version": 1, "providers": providers}) + "\n"
         )
         with (
             mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
-            self.assertRaisesRegex(updater_module.UpdateError, "pinned service models"),
+            self.assertRaisesRegex(updater_module.UpdateError, "unique protected providers"),
         ):
             self.updater._canary_expected_fleet()
 
@@ -3496,6 +3496,20 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_canary_rollout_readiness = mock.Mock()
         self.updater._journal_transition = mock.Mock()
         self.updater.issue_start_permit = mock.Mock(return_value=None)
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={
+                "pool": [
+                    {
+                        **row,
+                        "state": "ready",
+                        "routing_eligible": True,
+                        "binary_version": "1.8.30",
+                    }
+                    for row in providers
+                ]
+            }
+        )
         observed = {}
 
         def run_canary(argv, **_kwargs):
@@ -3524,7 +3538,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-825-canary-fleet-r5",
+                "authority": "issue-825-canary-fleet-r6",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [
@@ -3572,6 +3586,20 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater._journal_transition = mock.Mock()
         self.updater.issue_start_permit = mock.Mock(return_value=None)
         self.updater.assert_unit_quiescent = mock.Mock()
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={
+                "pool": [
+                    {
+                        **row,
+                        "state": "ready",
+                        "routing_eligible": True,
+                        "binary_version": "1.8.30",
+                    }
+                    for row in providers
+                ]
+            }
+        )
         self.updater.run_command = mock.Mock(
             side_effect=[
                 subprocess.CompletedProcess(
@@ -3655,7 +3683,21 @@ class PearlUpdaterTests(unittest.TestCase):
                 self.updater._write_legacy_rollback_authorization("1.8.30")
             self.updater.journal["rollback_in_progress"] = True
             self.updater.previous_protected_providers = ["provider-a", "wrong-provider"]
-            with self.assertRaisesRegex(updater_module.UpdateError, "fleet mismatches"):
+            self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+            self.updater.get_authorized_json = mock.Mock(
+                return_value={
+                    "pool": [
+                        {
+                            "provider_id": "provider-a",
+                            "model_id": "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+                            "state": "ready",
+                            "routing_eligible": True,
+                            "binary_version": "1.8.30",
+                        }
+                    ]
+                }
+            )
+            with self.assertRaisesRegex(updater_module.UpdateError, "captured protected providers"):
                 self.updater._write_legacy_rollback_authorization("1.8.30")
 
     def test_canary_rollout_readiness_requires_reviewed_enable_gate(self):

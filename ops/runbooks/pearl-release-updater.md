@@ -110,11 +110,14 @@ legacy git-describe bootstrap is no longer accepted.
 
 ## One-time installation
 
-First deploy the issue #825 r5 legacy duplicate recovery revision of #584's redesigned
+First deploy the issue #825 r6 live-fleet liveness revision of #584's redesigned
 canary buyer exactly as reviewed, including its root-only `LoadCredential`
-files, safety observer, emergency stop, and classified no-load exits. The
-updater pins that complete runtime, service, and timer as rollout authority
-`issue-825-canary-fleet-r5` at source commit `98d95cb73573307c0e55855d9c3bb2ccd8e97b92`;
+files, safety observer, emergency stop, and classified no-load exits. Ordinary
+liveness follows the currently ready/routable provider fleet and no longer
+requires the expected-fleet file's static provider count or model set; legacy
+rollback and qualification checks remain scoped to their explicit protected
+fleet. The updater pins that complete runtime, service, and timer as rollout
+authority `issue-825-canary-fleet-r6` at source commit `98d95cb73573307c0e55855d9c3bb2ccd8e97b92`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
 on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,

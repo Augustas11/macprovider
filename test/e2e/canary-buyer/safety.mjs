@@ -103,6 +103,8 @@ export function gatewayInvariantReasons(initial, current, {
   minReadyProviders = 1,
   maxDrainingProviders = 0,
   activeModelID = '',
+  enforceStableProviderCounts = true,
+  enforceStableModelSet = true,
 } = {}) {
   const before = initial?.pool ? initial : gatewaySnapshot(initial);
   const after = current?.pool ? current : gatewaySnapshot(current);
@@ -137,18 +139,19 @@ export function gatewayInvariantReasons(initial, current, {
   else if (after.pool.draining > maxDrainingProviders) {
     reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
   }
-  if (Number.isInteger(before?.pool?.total_providers)) {
+  if (enforceStableProviderCounts && Number.isInteger(before?.pool?.total_providers)) {
     const minTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
     if (after.pool.total_providers < minTotal || after.pool.total_providers > before.pool.total_providers) {
       reasons.push(`total_providers_changed_${before.pool.total_providers}_to_${after.pool.total_providers}`);
     }
   }
-  if (Number.isInteger(before?.pool?.ready)) {
+  if (enforceStableProviderCounts && Number.isInteger(before?.pool?.ready)) {
     const minReady = before.pool.ready - (activeProviderLossAllowed ? 1 : 0);
     if (after.pool.ready < minReady || after.pool.ready > before.pool.ready) {
       reasons.push(`ready_changed_${before.pool.ready}_to_${after.pool.ready}`);
     }
   }
+  if (!enforceStableModelSet) return reasons;
   for (const [id, model] of beforeModels) {
     if (!id) continue;
     const observed = afterModels.get(id);
@@ -200,6 +203,7 @@ export function poolzInvariantReasons(initial, current, {
   requireHeartbeatAdvance = false,
   activeProviderID = '',
   heartbeatAdvanceProviderIDs = null,
+  enforceStableProviderSet = true,
 } = {}) {
   const before = Array.isArray(initial) ? initial : poolzSnapshot(initial);
   const after = Array.isArray(current) ? current : poolzSnapshot(current);
@@ -207,7 +211,9 @@ export function poolzInvariantReasons(initial, current, {
   const beforeByID = new Map(before.map((row) => [row.id, row]));
   const afterByID = new Map(after.map((row) => [row.id, row]));
   if (!before.length || !after.length) reasons.push('provider_pool_signal_missing');
-  if (after.length !== before.length) reasons.push(`provider_count_changed_${before.length}_to_${after.length}`);
+  if (enforceStableProviderSet && after.length !== before.length) {
+    reasons.push(`provider_count_changed_${before.length}_to_${after.length}`);
+  }
   for (const [id, expected] of beforeByID) {
     if (!id) {
       reasons.push('provider_identity_missing');
@@ -215,7 +221,7 @@ export function poolzInvariantReasons(initial, current, {
     }
     const observed = afterByID.get(id);
     if (!observed) {
-      reasons.push(`${id}:provider_disappeared`);
+      if (enforceStableProviderSet) reasons.push(`${id}:provider_disappeared`);
       continue;
     }
     const stateAllowed = READY_STATES.has(observed.state)
@@ -540,6 +546,7 @@ export function expectedFleetReasons(poolRows, expectedFleet, {
   allowedExtraProviderIDs = [],
   maxHeartbeatAgeMs = 90_000,
   activeProviderID = '',
+  allowUnexpectedProviders = false,
 } = {}) {
   const reasons = [];
   const allowed = new Set(allowedExtraProviderIDs);
@@ -561,7 +568,9 @@ export function expectedFleetReasons(poolRows, expectedFleet, {
     }
   }
   for (const id of current.keys()) {
-    if (!expected.has(id) && !allowed.has(id)) reasons.push(`${id || '<missing>'}:unexpected_provider`);
+    if (!allowUnexpectedProviders && !expected.has(id) && !allowed.has(id)) {
+      reasons.push(`${id || '<missing>'}:unexpected_provider`);
+    }
   }
   return reasons;
 }
@@ -626,6 +635,7 @@ export function recoverySoakReasons({
       const previous = index === 0 ? poolzInitial : poolzSamples[index - 1];
       reasons.push(...poolzInvariantReasons(previous, sample, {
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
+        enforceStableProviderSet: options.enforceStableProviderCounts !== false,
       }).map((reason) => `sample_${index}:${reason}`));
     });
     if (poolzSamples.length) {
@@ -633,6 +643,7 @@ export function recoverySoakReasons({
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
         requireHeartbeatAdvance: true,
         heartbeatAdvanceProviderIDs: options.heartbeatAdvanceProviderIDs || null,
+        enforceStableProviderSet: options.enforceStableProviderCounts !== false,
       }).map((reason) => `final:${reason}`));
     }
   }
