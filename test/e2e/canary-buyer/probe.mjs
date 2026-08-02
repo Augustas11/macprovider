@@ -1026,6 +1026,27 @@ function liveReadyFleet(observed) {
   return rows.sort((a, b) => a.provider_id.localeCompare(b.provider_id));
 }
 
+function malformedLiveReadyFleetReasons(observed) {
+  const reasons = [];
+  const seen = new Set();
+  for (const [index, row] of (observed?.operator_pool || []).entries()) {
+    if (row?.state !== 'ready' || row?.routing_eligible !== true) continue;
+    const providerID = row.provider_id;
+    if (typeof providerID !== 'string' || !providerID) {
+      reasons.push(`live_ready_provider_${index}:provider_id_missing`);
+      continue;
+    }
+    if (seen.has(providerID)) {
+      reasons.push(`${providerID}:live_ready_provider_duplicate`);
+    }
+    seen.add(providerID);
+    if (typeof row.model_id !== 'string' || !row.model_id) {
+      reasons.push(`${providerID}:live_ready_model_id_missing`);
+    }
+  }
+  return reasons;
+}
+
 function livenessModelsFromStatus(gateway, configuredModels) {
   const live = (gateway?.models || [])
     .filter((model) => model?.available === true
@@ -1566,6 +1587,9 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   });
   if (legacyRollbackAuthorizationUnknown) {
     reasons.push('legacy_rollback_authorization_provider_unknown');
+  }
+  if (!staticFleet) {
+    reasons.push(...malformedLiveReadyFleetReasons(observed));
   }
   if (!observed.operator_pool) return [...new Set([...reasons, 'operator_pool_signal_missing'])];
 

@@ -129,6 +129,33 @@ test('liveness still validates live provider telemetry without static fleet equa
     .includes('provider-a:memory_pressure_warning'));
 });
 
+test('liveness fails malformed live ready pool rows instead of dropping their telemetry', () => {
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-c', assigned_id: 'session-c', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-a', 'session-b'),
+      safetyProvider('provider-c', 'model-a', 'session-c', { memory_pressure: 'critical' }),
+    ],
+  };
+  const reasons = preconditionReasons(observed, [{ provider_id: 'stale-provider', model_id: 'old-model' }], null);
+  assert.ok(reasons.includes('provider-c:live_ready_model_id_missing'));
+  assert.ok(reasons.length > 0);
+});
+
 test('liveness protects the initial live provider and model set during a canary run', () => {
   const now = Date.now();
   const stamp = (offset) => new Date(now + offset).toISOString();
