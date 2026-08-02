@@ -9,18 +9,28 @@ import { fileURLToPath } from 'node:url';
 import {
   degradedReasons,
   directInvocationDecision,
+  ensureLivenessBudgetCapacity,
   observerFailureClass,
   outcomeBucket,
+  liveFleetModels,
   pollPostRequestRecovery,
   preconditionReasons,
   recoveryCadenceReasons,
   recoverySoakObservationReasons,
+  responseAttributionFleet,
+  runtimeProtectedFleet,
   safetyObservationReasons,
   shouldRunRecovery,
   streamOne,
   validateLegacyRollbackAuthorization,
 } from './probe.mjs';
-import { gatewaySnapshot, poolzSnapshot, providerSignalSnapshot } from './safety.mjs';
+import {
+  gatewaySnapshot,
+  poolzSnapshot,
+  providerSignalSnapshot,
+  responseIdentityReasons,
+  RunBudget,
+} from './safety.mjs';
 
 function safetyProvider(providerID, modelID, sessionID, overrides = {}) {
   return providerSignalSnapshot({ safety_telemetry: {
@@ -61,6 +71,441 @@ test('scheduled liveness requires only one bounded serviceability sample', () =>
     outcomes: { '2xx': 1 },
   });
   assert.deepEqual(degradedReasons({ mode: 'liveness', up: 1, models: [model] }), []);
+});
+
+test('scheduled liveness raises budget only to the live model workload', () => {
+  const budget = new RunBudget({
+    maxRequests: 4,
+    maxCompletionTokens: 32,
+    maxDurationMs: 90_000,
+    startedAtMs: 100,
+  });
+  ensureLivenessBudgetCapacity(budget, 5);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), 'request_budget_exhausted:6_gt_5');
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 40);
+});
+
+test('liveness precondition follows live fleet instead of stale expected provider count', () => {
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'provider-a', model_id: 'old-model-b' },
+    { provider_id: 'missing-b', model_id: 'old-model-c' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+    { provider_id: 'provider-c', model_id: 'model-b' },
+  ];
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-b', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+        { id: 'new-model', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'new-model', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-c', assigned_id: 'session-c', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'new-model', 'session-a'),
+      safetyProvider('provider-b', 'model-b', 'session-b'),
+      safetyProvider('provider-c', 'model-b', 'session-c'),
+    ],
+  };
+  assert.deepEqual(preconditionReasons(observed, staleExpectedFleet, null), []);
+  assert.deepEqual(liveFleetModels(runtimeProtectedFleet(observed, staleExpectedFleet, null)), [
+    'model-b',
+    'new-model',
+  ]);
+});
+
+test('liveness still validates live provider telemetry without static fleet equality', () => {
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'provider-a', model_id: 'old-model-b' },
+    { provider_id: 'missing-b', model_id: 'old-model-c' },
+  ];
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'new-model', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'new-model', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'new-model', 'session-a', { memory_pressure: 'warning' }),
+    ],
+  };
+  assert.ok(preconditionReasons(observed, staleExpectedFleet, null)
+    .includes('provider-a:memory_pressure_warning'));
+});
+
+test('liveness ready floor follows the observed live protected fleet', () => {
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'missing-b', model_id: 'old-model-b' },
+  ];
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'new-model', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'new-model', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'new-model', 'session-a'),
+    ],
+  };
+
+  assert.deepEqual(safetyObservationReasons(observed, observed, staleExpectedFleet), []);
+});
+
+test('liveness validates telemetry for providers added after the initial snapshot', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [{ provider_id: 'stale-provider', model_id: 'old-model' }];
+  const initial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: stamp(0) },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+    ],
+  };
+  const observed = structuredClone(initial);
+  observed.operator_pool = poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+    { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+  ] }, now);
+  observed.providers = [
+    safetyProvider('provider-a', 'model-a', 'session-a'),
+    safetyProvider('provider-b', 'model-a', 'session-b', { memory_pressure: 'critical' }),
+  ];
+
+  assert.ok(safetyObservationReasons(initial, observed, staleExpectedFleet)
+    .includes('provider-b:memory_pressure_critical'));
+});
+
+test('liveness allows ready-provider growth for an initial live model', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [{ provider_id: 'stale-provider', model_id: 'old-model' }];
+  const initial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: stamp(0) },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+    ],
+  };
+  const observed = structuredClone(initial);
+  observed.gateway.pool.total_providers = 2;
+  observed.gateway.pool.ready = 2;
+  observed.gateway.models[0].provider_count = 2;
+  observed.gateway.models[0].ready_provider_count = 2;
+  observed.gateway.models[0].slots_free = 2;
+  observed.operator_pool = poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+    { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+  ] }, now);
+  observed.providers = [
+    safetyProvider('provider-a', 'model-a', 'session-a'),
+    safetyProvider('provider-b', 'model-a', 'session-b'),
+  ];
+
+  assert.deepEqual(safetyObservationReasons(initial, observed, staleExpectedFleet), []);
+});
+
+test('liveness response attribution accepts a provider from the latest validated live fleet', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [{ provider_id: 'stale-provider', model_id: 'old-model' }];
+  const initial = {
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+  };
+  const observed = {
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+    ] }, now),
+  };
+  const responseFleet = responseAttributionFleet(initial, [initial, observed], staleExpectedFleet, null);
+  assert.deepEqual(responseIdentityReasons({
+    ok: true,
+    responseModel: 'model-a',
+    provider: 'provider-b',
+  }, 'model-a', responseFleet), []);
+});
+
+test('liveness fails when a live pool model is absent from gateway status', () => {
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-b', 'session-b'),
+    ],
+  };
+
+  assert.ok(preconditionReasons(observed, [{ provider_id: 'stale-provider', model_id: 'old-model' }], null)
+    .includes('model-b:live_model_missing_from_gateway'));
+});
+
+test('liveness fails when a newly live model is absent from gateway status', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [{ provider_id: 'stale-provider', model_id: 'old-model' }];
+  const initial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: stamp(0) },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+    ],
+  };
+  const observed = structuredClone(initial);
+  observed.gateway.pool.total_providers = 2;
+  observed.gateway.pool.ready = 2;
+  observed.operator_pool = poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+    { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+  ] }, now);
+  observed.providers = [
+    safetyProvider('provider-a', 'model-a', 'session-a'),
+    safetyProvider('provider-b', 'model-b', 'session-b'),
+  ];
+
+  assert.ok(safetyObservationReasons(initial, observed, staleExpectedFleet)
+    .includes('model-b:live_model_missing_from_gateway'));
+});
+
+test('liveness ignores unavailable gateway models outside the live fleet', () => {
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 5, ready: 2, degraded: 1, draining: 1, unavailable: 1 },
+      models: [
+        { id: 'model-a', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+        { id: 'old-model', provider_count: 0, ready_provider_count: 0, slots_free: 0, available: false, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-a', 'session-b'),
+    ],
+  };
+
+  assert.deepEqual(preconditionReasons(observed, [{ provider_id: 'stale-provider', model_id: 'old-model' }], null), []);
+});
+
+test('liveness recovery ignores direct telemetry from providers outside the live fleet', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const gateway = gatewaySnapshot({
+    status: 'up',
+    degraded: false,
+    coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 4, ready: 1, degraded: 1, draining: 1, unavailable: 1 },
+    models: [
+      { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+    ],
+  });
+  const pool = (providerHeartbeatOffset) => poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(providerHeartbeatOffset) },
+    { provider_id: 'provider-draining', assigned_id: 'session-draining', model_id: 'model-a', state: 'draining', routing_eligible: false, last_heartbeat_at: stamp(-1_000) },
+  ] }, now);
+  const providerA = (observationID) => safetyProvider('provider-a', 'model-a', 'session-a', {
+    observation_id: observationID,
+  });
+  const providerDraining = safetyProvider('provider-draining', 'model-a', 'session-draining', {
+    observation_id: 'provider-draining-stale',
+  });
+  const initial = {
+    gateway,
+    operator_pool: pool(-1_000),
+    providers: [
+      providerA('provider-a-initial'),
+      providerDraining,
+    ],
+  };
+  const samples = [
+    {
+      gateway,
+      operator_pool: pool(-500),
+      providers: [
+        providerA('provider-a-sample-1'),
+        providerDraining,
+      ],
+    },
+    {
+      gateway,
+      operator_pool: pool(-100),
+      providers: [
+        providerA('provider-a-sample-2'),
+        providerDraining,
+      ],
+    },
+  ];
+
+  assert.deepEqual(recoverySoakObservationReasons(
+    initial,
+    samples,
+    [{ provider_id: 'stale-provider', model_id: 'old-model' }],
+    null,
+    {},
+    now,
+  ), []);
+});
+
+test('liveness fails malformed live ready pool rows instead of dropping their telemetry', () => {
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-c', assigned_id: 'session-c', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-a', 'session-b'),
+      safetyProvider('provider-c', 'model-a', 'session-c', { memory_pressure: 'critical' }),
+    ],
+  };
+  const reasons = preconditionReasons(observed, [{ provider_id: 'stale-provider', model_id: 'old-model' }], null);
+  assert.ok(reasons.includes('provider-c:live_ready_model_id_missing'));
+  assert.ok(reasons.length > 0);
+});
+
+test('liveness protects the initial live provider and model set during a canary run', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const initial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: stamp(0) },
+      pool: { total_providers: 3, ready: 3, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+        { id: 'model-b', provider_count: 2, ready_provider_count: 2, slots_free: 2, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+      { provider_id: 'provider-c', assigned_id: 'session-c', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-b', 'session-b'),
+      safetyProvider('provider-c', 'model-b', 'session-c'),
+    ],
+  };
+  const observed = structuredClone(initial);
+  observed.gateway.pool.total_providers = 2;
+  observed.gateway.pool.ready = 2;
+  observed.gateway.models = observed.gateway.models.filter((model) => model.id !== 'model-a');
+  observed.operator_pool = observed.operator_pool.filter((row) => row.provider_id !== 'provider-a');
+  observed.providers = observed.providers.filter((provider) => provider.provider_id !== 'provider-a');
+
+  const reasons = safetyObservationReasons(initial, observed, staleExpectedFleet);
+  assert.ok(reasons.includes('model-a:model_disappeared'));
+  assert.ok(reasons.includes('provider-a:expected_provider_missing'));
+  assert.ok(reasons.includes('provider-a:provider_signal_missing'));
+});
+
+test('liveness response attribution follows the live fleet instead of stale expected mappings', () => {
+  const observed = {
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-new', assigned_id: 'session-new', model_id: 'model-new', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+  };
+  const staleExpectedFleet = [{ provider_id: 'old-provider', model_id: 'old-model' }];
+  const liveFleet = runtimeProtectedFleet(observed, staleExpectedFleet, null);
+  assert.deepEqual(liveFleet, [{ provider_id: 'provider-new', model_id: 'model-new' }]);
+  assert.deepEqual(responseIdentityReasons({
+    ok: true,
+    responseModel: 'model-new',
+    provider: 'provider-new',
+  }, 'model-new', liveFleet), []);
 });
 
 test('explicit safety abort classification always fails the run', () => {
@@ -371,6 +816,11 @@ test('active-request safety accepts a non-first duplicate-model provider without
   droppedDuplicateModel.gateway.models = droppedDuplicateModel.gateway.models.filter((model) => model.id !== 'model-b');
   assert.ok(safetyObservationReasons(initial, droppedDuplicateModel, expectedFleet, {
     activeModelID: 'model-b',
+    legacyRollbackProviders: new Map(expectedFleet.map((row) => [row.provider_id, {
+      model_id: row.model_id,
+      binary_version: '1.8.30',
+      expires_at_ms: Date.now() + 60_000,
+    }])),
   }).includes('model-b:model_disappeared'));
 });
 
@@ -397,13 +847,33 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
   const providers = operatorPool.map((row) => row.safety_telemetry);
   const initial = { gateway, operator_pool: operatorPool, providers };
   const observed = structuredClone(initial);
+  const document = {
+    schema_version: 1,
+    kind: 'legacy_rollback',
+    authority: 'issue-825-canary-fleet-r6',
+    transaction_id: 'd'.repeat(64),
+    expires_at: new Date(now + 300_000).toISOString(),
+    providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
+  };
+  const authorized = validateLegacyRollbackAuthorization(document, expectedFleet, now);
 
   assert.ok(safetyObservationReasons(initial, observed, expectedFleet)
     .includes('provider-a:provider_signal_missing'));
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     allowLegacyBridgeProviderSignals: true,
   }), []);
-  assert.deepEqual(preconditionReasons(initial, expectedFleet, null, true), []);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
+    allowLegacyBridgeProviderSignals: true,
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }), []);
+  assert.ok(safetyObservationReasons(initial, observed, expectedFleet, {
+    legacyRollbackProviders: authorized,
+    nowMs: now,
+  }).includes('provider-a:provider_signal_missing'));
+  assert.deepEqual(preconditionReasons(initial, expectedFleet, authorized, true), []);
+  assert.ok(preconditionReasons(initial, expectedFleet, authorized)
+    .includes('provider-a:provider_signal_missing'));
   assert.ok(preconditionReasons(initial, expectedFleet, null)
     .includes('provider-a:provider_signal_missing'));
 
@@ -437,11 +907,18 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
     { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
     now,
   ).some((reason) => reason.includes('telemetry_')));
+  assert.ok(recoverySoakObservationReasons(
+    initial,
+    [recoveryOne, recoveryTwo],
+    expectedFleet,
+    authorized,
+    { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
+    now,
+  ).some((reason) => reason.includes('telemetry_')));
 
   for (const [field, value] of [
     ['catalog_admission_mode', 'current'],
     ['catalog_admission_mode', 'previous'],
-    ['catalog_admission_mode', null],
     ['binary_version', null],
     ['binary_version', 'not-semver'],
     ['model_id', 'wrong-model'],
@@ -450,6 +927,8 @@ test('liveness substitutes missing v2 signals only for exact legacy-bridge provi
     rejected.operator_pool[0][field] = value;
     assert.ok(safetyObservationReasons(initial, rejected, expectedFleet, {
       allowLegacyBridgeProviderSignals: true,
+      legacyRollbackProviders: authorized,
+      nowMs: now,
     }).includes('provider-a:provider_signal_missing'), `${field}=${value} must fail closed`);
   }
 });
@@ -463,7 +942,7 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r5',
+    authority: 'issue-825-canary-fleet-r6',
     transaction_id: 'a'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -489,6 +968,35 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     operator_pool: operatorPool,
     providers: operatorPool.map((row) => row.safety_telemetry),
   };
+  assert.deepEqual(runtimeProtectedFleet(observation, [{ provider_id: 'stale-provider', model_id: 'stale-model' }], authorized), expectedFleet);
+  const staticExpectedFleet = [
+    ...expectedFleet,
+    { provider_id: 'stale-provider', model_id: 'stale-model' },
+  ];
+  const driftAuthorized = validateLegacyRollbackAuthorization(document, staticExpectedFleet, now);
+  assert.equal(driftAuthorized.size, 2);
+  assert.deepEqual(safetyObservationReasons(observation, observation, staticExpectedFleet, {
+    legacyRollbackProviders: driftAuthorized,
+    nowMs: now,
+  }), []);
+  const driftRecoveryOne = structuredClone(observation);
+  const driftRecoveryTwo = structuredClone(observation);
+  for (const [index, sample] of [driftRecoveryOne, driftRecoveryTwo].entries()) {
+    for (const row of sample.operator_pool) {
+      row.last_heartbeat_at_ms += (index + 1) * 30_000;
+      row.last_activity_at_ms += (index + 1) * 30_000;
+      row.heartbeat_age_ms = 0;
+      row.activity_age_ms = 0;
+    }
+  }
+  assert.deepEqual(recoverySoakObservationReasons(
+    observation,
+    [driftRecoveryOne, driftRecoveryTwo],
+    staticExpectedFleet,
+    driftAuthorized,
+    { minReadyProviders: 2, maxHeartbeatAgeMs: 90_000 },
+    now,
+  ), []);
   assert.deepEqual(safetyObservationReasons(observation, observation, expectedFleet, {
     legacyRollbackProviders: authorized,
     nowMs: now,
@@ -600,7 +1108,9 @@ test('legacy rollback authorization is exact, expiring, and limited to unclassif
     { ...document, expires_at: new Date(now).toISOString() },
     { ...document, expires_at: new Date(now + (16 * 60_000)).toISOString() },
     { ...document, authority: 'issue-585-integration-r3' },
-    { ...document, providers: document.providers.slice(1) },
+    { ...document, providers: [] },
+    { ...document, providers: [{ ...document.providers[0], provider_id: '' }] },
+    { ...document, providers: [{ ...document.providers[0] }, { ...document.providers[0] }] },
   ]) {
     assert.throws(() => validateLegacyRollbackAuthorization(invalid, expectedFleet, now));
   }
@@ -616,7 +1126,7 @@ test('legacy rollback recovery requires heartbeat advance only from exercised pr
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r5',
+    authority: 'issue-825-canary-fleet-r6',
     transaction_id: 'b'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -720,7 +1230,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
   const document = {
     schema_version: 1,
     kind: 'legacy_rollback',
-    authority: 'issue-825-canary-fleet-r5',
+    authority: 'issue-825-canary-fleet-r6',
     transaction_id: 'c'.repeat(64),
     expires_at: new Date(now + 300_000).toISOString(),
     providers: expectedFleet.map((row) => ({ ...row, binary_version: '1.8.30' })),
@@ -832,7 +1342,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     null,
     scopedAdvance,
     now,
-  ).some((reason) => reason.includes('provider-c')));
+  ).length > 0);
 
   const missingDuplicate = structuredClone(recoveryTwo);
   missingDuplicate.gateway.pool.total_providers = 2;
@@ -860,7 +1370,7 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     null,
     scopedAdvance,
     now,
-  ).some((reason) => reason.includes('provider-c')));
+  ).length > 0);
 
   const duplicatePoolIdentity = structuredClone(missingDuplicate);
   const duplicateProviderB = structuredClone(

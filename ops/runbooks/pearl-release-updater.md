@@ -110,11 +110,14 @@ legacy git-describe bootstrap is no longer accepted.
 
 ## One-time installation
 
-First deploy the issue #825 r5 legacy duplicate recovery revision of #584's redesigned
+First deploy the issue #825 r6 live-fleet liveness revision of #584's redesigned
 canary buyer exactly as reviewed, including its root-only `LoadCredential`
-files, safety observer, emergency stop, and classified no-load exits. The
-updater pins that complete runtime, service, and timer as rollout authority
-`issue-825-canary-fleet-r5` at source commit `98d95cb73573307c0e55855d9c3bb2ccd8e97b92`;
+files, safety observer, emergency stop, and classified no-load exits. Ordinary
+liveness follows the currently ready/routable provider fleet and no longer
+requires the expected-fleet file's static provider count or model set; legacy
+rollback and qualification checks remain scoped to their explicit protected
+fleet. The updater pins that complete runtime, service, and timer as rollout
+authority `issue-825-canary-fleet-r6` at source commit `3e5627767ace28fa530df47318efd873a1aaf070`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
 on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,
@@ -144,11 +147,13 @@ From the authority commit's reviewed checkout, install the four runtime files
 as executable root-owned files and the two units as non-executable root-owned
 fragments. Provision all four `LoadCredential` inputs as exact `0600` files,
 remove the retired environment file, and reload systemd without enabling either
-schedule. The reviewed expected-fleet JSON must enumerate the complete live
-protected provider fleet, not a two-provider sample: every protected provider
-ID must be unique, duplicate model IDs are allowed when several providers serve
-the same model, and the distinct model set must match the canary service's
-`CANARY_MODELS` list exactly.
+schedule. The reviewed expected-fleet JSON remains a qualification and rollback
+identity allowlist: every listed provider ID must be unique, every model value
+must be non-empty, and duplicate model IDs are allowed when several providers
+serve the same model. Ordinary liveness does not require that file's provider
+cardinality or distinct model set to match Pearl's current fleet; it derives the
+run baseline from the initial ready/routable `/poolz` rows and probes the live
+available models from gateway status.
 
 ```bash
 sudo install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
@@ -376,7 +381,7 @@ sudo test ! -e /run/macprovider-canary-buyer/legacy-rollback.json
    required evidence that the old coordinator cannot authorize the substitute;
    it is not serving proof. After the updater activates the reviewed bridge,
    the new coordinator may classify those same exact ID/model/version rows
-   `legacy_bridge`; r5 accepts that classification only as a substitute for the
+   `legacy_bridge`; r6 accepts that classification only as a substitute for the
    missing direct signal while retaining every pool, routing, connection, and
    heartbeat invariant. Before that canary starts, the updater requires three
    consecutive authenticated public `/poolz` samples that contain every exact
@@ -581,7 +586,7 @@ archive/stats services are restored before their timers, and no timer is
 restored until that full serving proof succeeds. Even then the canary timer
 remains stopped if its enable gate is missing or its emergency-disable sentinel
 exists, including when either kill switch changes during timer restoration.
-When restoring a pre-direct-telemetry backend, r5 may create
+When restoring a pre-direct-telemetry backend, r6 may create
 `/run/macprovider-canary-buyer/legacy-rollback.json` only inside the active
 phase-journal restoration. That root-owned `0644` control binds the exact
 captured protected provider ID/model fleet, the exact prior advertised binary
