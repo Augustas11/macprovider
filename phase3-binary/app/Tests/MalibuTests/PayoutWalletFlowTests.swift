@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import Malibu
 
@@ -117,8 +118,13 @@ final class PayoutWalletFlowTests: XCTestCase {
         XCTAssertNil(PayoutWalletFlow.jsonUInt64(nil))
         // NaN cannot be represented in JSON; assert the NSNumber path directly.
         XCTAssertNil(PayoutWalletFlow.jsonUInt64(NSNumber(value: Double.nan)))
-        // Valid values still decode.
+        // L1: fractional numbers are rejected, not truncated into a
+        // matching integer ts_utc.
+        XCTAssertNil(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":1719234896.9}"#)))
+        XCTAssertNil(PayoutWalletFlow.jsonInt64(try fromJSON(#"{"v":1719234896.9}"#)))
+        // Valid values still decode (including an integral-valued double).
         XCTAssertEqual(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":0}"#)), 0)
+        XCTAssertEqual(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":42.0}"#)), 42)
         XCTAssertEqual(PayoutWalletFlow.jsonUInt64(try fromJSON(#"{"v":1719234896}"#)), 1_719_234_896)
     }
 
@@ -269,5 +275,71 @@ final class PayoutWalletFlowTests: XCTestCase {
         big["padding"] = String(repeating: "A", count: 40 * 1024) // > maxContentLength
         let code = try await post(port: port, path: "/cb", jsonObject: big)
         XCTAssertEqual(code, 413, "oversized body must be rejected")
+    }
+
+    // M1: two concurrently-valid callbacks must claim the one-shot exactly
+    // once. Pre-fix, both flushed a 200 (double-accept race); post-fix only
+    // the first-in-queue is accepted and the flow resolves to that wallet.
+    func testConcurrentValidCallbacksClaimExactlyOnce() async throws {
+        let (server, port) = try await makeStartedServer()
+        defer { server.stop() }
+        async let captured = server.awaitCallback(timeout: 5)
+
+        let addrA = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+        let addrB = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        func body(_ a: String) -> [String: Any] {
+            ["address": a, "nonce": CB.nonce, "ts_utc": CB.ts, "signature": CB.sig, "state": CB.state]
+        }
+        // Failure-tolerant: the loser is EITHER refused 409 (it reached the
+        // claimed gate) OR its connection is dropped when the server tears
+        // down after the winner (URLSession throws → sentinel -1). Both
+        // outcomes prove there was no second acceptance.
+        func tolerantPost(_ a: String) async -> Int {
+            (try? await post(port: port, path: "/cb", jsonObject: body(a))) ?? -1
+        }
+        async let ra = tolerantPost(addrA)
+        async let rb = tolerantPost(addrB)
+        let codeA = await ra
+        let codeB = await rb
+
+        // Exactly one gets 200; the other must NOT be a second 200.
+        XCTAssertTrue((codeA == 200) != (codeB == 200),
+                      "exactly one callback may be accepted; got \(codeA)/\(codeB)")
+        XCTAssertNotEqual(codeA == 200 ? codeB : codeA, 200, "one-shot double-accepted")
+
+        // The resolved wallet is whichever POST won the claim.
+        let payload = try await captured
+        let winner = codeA == 200 ? addrA : addrB
+        XCTAssertEqual(payload.address, winner)
+    }
+
+    // M3: a listener that fails to bind must leave nothing open. We occupy a
+    // loopback port with a healthy server, then force a second server onto
+    // the same port without reuse so its bind fails (EADDRINUSE).
+    func testStartFailureLeavesNothingOpen() async throws {
+        let holder = LoopbackCaptureServer(resourceDirectory: try makeSignerDir())
+        try await holder.start()
+        defer { holder.stop() }
+        let busyPort = holder.port
+        XCTAssertNotEqual(busyPort, 0)
+
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: busyPort)!)
+        params.requiredInterfaceType = .loopback
+
+        let server = LoopbackCaptureServer(resourceDirectory: try makeSignerDir())
+        do {
+            try await server.start(parametersOverride: params)
+            XCTFail("expected start to fail on an in-use port")
+        } catch let error as PayoutWalletFlowError {
+            guard case .loopbackFailed = error else {
+                return XCTFail("expected loopbackFailed, got \(error)")
+            }
+        }
+        XCTAssertEqual(server.port, 0)
+        XCTAssertFalse(server.isListenerActiveForTest,
+                       "a failed listener must be torn down, not retained")
+        server.stop() // idempotent after a failed start
     }
 }

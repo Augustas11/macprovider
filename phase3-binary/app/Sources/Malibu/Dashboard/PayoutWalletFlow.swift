@@ -266,6 +266,9 @@ enum PayoutWalletFlow {
         if let num = value as? NSNumber {
             let d = num.doubleValue
             guard d.isFinite, d >= 0, d <= Double(UInt64.max) else { return nil }
+            // L1: reject fractional numbers (1719234896.9) instead of
+            // silently truncating them into a matching integer ts_utc.
+            guard d == d.rounded(.towardZero) else { return nil }
             if d <= Double(Int64.max) {
                 let i = num.int64Value
                 return i >= 0 ? UInt64(i) : nil
@@ -276,6 +279,7 @@ enum PayoutWalletFlow {
         if let n = value as? Int64 { return n >= 0 ? UInt64(n) : nil }
         if let n = value as? Double {
             guard n.isFinite, n >= 0, n <= Double(UInt64.max) else { return nil }
+            guard n == n.rounded(.towardZero) else { return nil } // L1
             return UInt64(n)
         }
         return nil
@@ -292,11 +296,13 @@ enum PayoutWalletFlow {
         if let num = value as? NSNumber {
             let d = num.doubleValue
             guard d.isFinite, d >= Double(Int64.min), d <= Double(Int64.max) else { return nil }
+            guard d == d.rounded(.towardZero) else { return nil } // L1: no truncation
             return num.int64Value
         }
         if let n = value as? Int { return Int64(n) }
         if let n = value as? Double {
             guard n.isFinite, n >= Double(Int64.min), n <= Double(Int64.max) else { return nil }
+            guard n == n.rounded(.towardZero) else { return nil } // L1
             return Int64(n)
         }
         return nil
@@ -389,6 +395,11 @@ final class LoopbackCaptureServer: @unchecked Sendable {
     private var pendingResult: Result<PayoutSignedPayload, Error>?
     private var timeoutWork: DispatchWorkItem?
     private var finished = false
+    // M1: the one-shot is CLAIMED synchronously on the serial `queue` the
+    // instant a callback validates — before its HTTP response is flushed —
+    // so two concurrently-valid callbacks cannot both reach `complete()`
+    // (first-in-queue wins; the loser gets 409 and never resolves the flow).
+    private var claimed = false
     private var expectation: Expectation?
     private(set) var port: UInt16 = 0
 
@@ -414,7 +425,9 @@ final class LoopbackCaptureServer: @unchecked Sendable {
         queue.sync { self.expectation = Expectation(state: state, nonce: nonce, tsUtc: tsUtc) }
     }
 
-    func start() async throws {
+    /// `parametersOverride` is a test-only seam to force a deterministic
+    /// bind failure (M3 teardown coverage); production passes nil.
+    func start(parametersOverride: NWParameters? = nil) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             queue.async {
                 var resumed = false
@@ -424,7 +437,8 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                     cont.resume(with: result)
                 }
                 do {
-                    let listener = try NWListener(using: LoopbackCaptureServer.loopbackParameters())
+                    let params = parametersOverride ?? LoopbackCaptureServer.loopbackParameters()
+                    let listener = try NWListener(using: params)
                     self.listener = listener
                     listener.stateUpdateHandler = { [weak self] state in
                         guard let self else { return }
@@ -435,6 +449,10 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                             }
                             resumeOnce(.success(()))
                         case let .failed(error):
+                            // M3: tear down before surfacing the failure so a
+                            // failed listener is never left open/retained.
+                            self.teardownLocked()
+                            self.finished = true
                             resumeOnce(.failure(PayoutWalletFlowError.loopbackFailed(String(describing: error))))
                         default:
                             break
@@ -445,13 +463,28 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                     }
                     listener.start(queue: self.queue)
                 } catch {
+                    // M3: NWListener construction failed — nothing was
+                    // started, but clear any partial state defensively.
+                    self.teardownLocked()
+                    self.finished = true
                     resumeOnce(.failure(PayoutWalletFlowError.loopbackFailed(String(describing: error))))
                 }
             }
         }
         if port == 0 {
+            // M3: `.ready` fired without a published port — tear the
+            // listener down instead of leaking it, then fail.
+            queue.sync {
+                self.teardownLocked()
+                self.finished = true
+            }
             throw PayoutWalletFlowError.loopbackFailed("Listener did not publish a port.")
         }
+    }
+
+    /// Test-only: reports whether a listener is currently retained (M3).
+    var isListenerActiveForTest: Bool {
+        queue.sync { self.listener != nil }
     }
 
     func stop() {
@@ -732,6 +765,17 @@ final class LoopbackCaptureServer: @unchecked Sendable {
                 contentType: "application/json", extraHeaders: corsHeaders
             ))
         }
+        // M1: claim the one-shot NOW (still on the serial queue, before the
+        // response is flushed). A second validated callback finds it already
+        // claimed and is refused 409 — it never produces a `.capture` and so
+        // never calls `complete()`, defeating the first-valid-wins swap race.
+        if claimed || finished {
+            return .respond(httpResponse(
+                status: 409, body: #"{"error":"already_claimed"}"#,
+                contentType: "application/json", extraHeaders: corsHeaders
+            ))
+        }
+        claimed = true
         return .capture(
             httpResponse(
                 status: 200, body: #"{"ok":true}"#,

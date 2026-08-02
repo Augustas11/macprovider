@@ -632,3 +632,44 @@ func TestServePayoutAddress_RateLimit_429AfterWindowBudget(t *testing.T) {
 		t.Fatalf("after window expiry, attempt was still rate-limited (429)")
 	}
 }
+
+// TestRegistrationRateLimiter_EvictsEmptyEntriesAfterWindow proves the
+// M2 fix: a provider that stops registering does not leak a map entry
+// forever. Once its timestamps expire, the next allow() (from any
+// provider) runs the periodic global sweep and deletes the stale key.
+func TestRegistrationRateLimiter_EvictsEmptyEntriesAfterWindow(t *testing.T) {
+	limiter := newRegistrationRateLimiter(6, time.Hour)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if !limiter.allow("provider-a", t0) {
+		t.Fatalf("provider-a first attempt should be allowed")
+	}
+	limiter.mu.Lock()
+	_, presentA := limiter.hits["provider-a"]
+	limiter.mu.Unlock()
+	if !presentA {
+		t.Fatalf("provider-a should be tracked after its attempt")
+	}
+
+	// After the full window elapses, a different provider's attempt
+	// triggers the sweep, evicting provider-a's now-expired entry.
+	later := t0.Add(time.Hour + time.Minute)
+	if !limiter.allow("provider-b", later) {
+		t.Fatalf("provider-b first attempt should be allowed")
+	}
+	limiter.mu.Lock()
+	_, stillA := limiter.hits["provider-a"]
+	_, hasB := limiter.hits["provider-b"]
+	total := len(limiter.hits)
+	limiter.mu.Unlock()
+
+	if stillA {
+		t.Fatalf("provider-a should have been evicted by the sweep")
+	}
+	if !hasB {
+		t.Fatalf("provider-b should be tracked")
+	}
+	if total != 1 {
+		t.Fatalf("map should hold exactly provider-b, got %d entries", total)
+	}
+}

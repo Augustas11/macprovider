@@ -29,10 +29,11 @@ const (
 // the §3.3 registration POST. The zero value is not usable; construct
 // with newRegistrationRateLimiter.
 type registrationRateLimiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	hits   map[string][]time.Time
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	hits      map[string][]time.Time
+	lastSweep time.Time
 }
 
 func newRegistrationRateLimiter(limit int, window time.Duration) *registrationRateLimiter {
@@ -60,6 +61,28 @@ func (l *registrationRateLimiter) allow(providerID string, now time.Time) bool {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// M2: periodic global sweep so the map does not grow unbounded under
+	// provider churn. A provider that stops registering is only ever
+	// re-touched by this sweep; without it, its (eventually empty) slice
+	// would be retained forever. Runs at most once per window. Matches
+	// onboarding.MemoryRateLimiter's eviction pattern.
+	if l.lastSweep.IsZero() || !now.Before(l.lastSweep.Add(l.window)) {
+		for key, timestamps := range l.hits {
+			kept := timestamps[:0]
+			for _, ts := range timestamps {
+				if ts.After(cutoff) {
+					kept = append(kept, ts)
+				}
+			}
+			if len(kept) == 0 {
+				delete(l.hits, key)
+			} else {
+				l.hits[key] = kept
+			}
+		}
+		l.lastSweep = now
+	}
 
 	existing := l.hits[providerID]
 	kept := existing[:0]
