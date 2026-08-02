@@ -34,8 +34,10 @@ type LeaseState struct {
 }
 
 // ErrLeaseConflict is returned by Acquire when a fresh holder
-// already owns the lease (heartbeat within window). Caller emits
-// payout_runner_lease_conflict per §7.1 + refuses to start.
+// already owns the lease (heartbeat within window). Acquire itself
+// emits payout_runner_lease_conflict per §7.1 (see the emission
+// inside Acquire below) before returning this error; the caller must
+// NOT re-emit it (avoids a double-emit) and refuses to start.
 var ErrLeaseConflict = errors.New("payout: runner lease conflict (fresh holder)")
 
 // ErrLeaseLost surfaces from Heartbeat / SelfFence when this
@@ -138,7 +140,25 @@ VALUES (1, ?, ?, ?, ?, ?, ?, 0)`,
 	}
 	staleWindow := 3 * runInterval
 	if now.Sub(hbTime) < staleWindow {
-		// Fresh holder — conflict.
+		// Fresh holder — conflict. Emit the §7.1
+		// payout_runner_lease_conflict PAGE event (§4.8b acquire
+		// step 3) before refusing to start. The local_pid /
+		// local_started_at_utc values are exactly the ones this
+		// Acquire would have used for its own INSERT (host/pid line
+		// 64-65; started_at = now, formatUTC(now) — mirrors the fresh
+		// INSERT's holder_started_at_utc). Control flow + the returned
+		// ErrLeaseConflict are unchanged.
+		log.Error().
+			Str("event", "payout_runner_lease_conflict").
+			Str("severity", "PAGE").
+			Int("local_pid", pid).
+			Str("local_started_at_utc", formatUTC(now)).
+			Str("holder_host", existingHost).
+			Int64("holder_pid", existingPID).
+			Str("holder_started_at_utc", existingStartedAt).
+			Str("holder_heartbeat_at_utc", existingHeartbeat).
+			Str("ts_utc", formatUTC(now)).
+			Send()
 		return LeaseState{}, false, fmt.Errorf("%w: holder_host=%s holder_pid=%d holder_started_at_utc=%s heartbeat_at_utc=%s",
 			ErrLeaseConflict, existingHost, existingPID, existingStartedAt, existingHeartbeat)
 	}

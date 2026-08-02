@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	_ "modernc.org/sqlite"
@@ -83,4 +84,30 @@ VALUES (?, '2026-01-01T00:00:00Z', '2026-01-08T00:00:00Z', 7,
 		t.Fatalf("last insert id: %v", err)
 	}
 	return id
+}
+
+// insertPayoutAddress seeds a payout-allowed provider_payout_addresses
+// row for providerID registered against hotWallet, so a ready payout can
+// actually be SELECTed by §4.3 step 1 (SelectReadyPayouts INNER JOINs
+// provider_payout_addresses on registered_against_hot_wallet) and PROCEED
+// to allocate/broadcast when a cycle is meant to continue. Without this
+// row the join returns nothing, so a "proceed" cycle would silently
+// process zero rows and a test could not tell a real proceed apart from a
+// halt. Mirrors the happy-path seeding in runner_test.go.
+func insertPayoutAddress(t *testing.T, db *sql.DB, providerID, hotWallet string) {
+	t.Helper()
+	canonicalHot, err := CanonicalizeEIP55(hotWallet)
+	if err != nil {
+		t.Fatalf("canonicalize hot wallet: %v", err)
+	}
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	providerAddr := "0x000000000000000000000000000000000000dEaD"
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO provider_payout_addresses
+  (provider_id, chain, address, payout_allowed, pending_until_utc,
+   rotated_from, registered_at_utc, registered_against_hot_wallet)
+VALUES (?, 'base-mainnet', ?, 1, ?, NULL, ?, ?)`,
+		providerID, providerAddr, past, past, canonicalHot); err != nil {
+		t.Fatalf("insert payout address: %v", err)
+	}
 }

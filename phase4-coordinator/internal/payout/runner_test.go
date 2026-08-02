@@ -1295,6 +1295,15 @@ VALUES (?, 1, 'base-mainnet', ?, ?, 80, 1, X'02', ?, ?, ?, 100, 0, ?)`,
 	}
 	secondary.txByHashFn = primary.txByHashFn
 
+	// Realistic on-chain pending nonce for the §7.1 pre-check: the prior
+	// confirmed attempt consumed nonce 1, so the chain pending nonce is 2
+	// == the DB cursor (steady state). Without this the mock defaults to 0,
+	// which the fail-CLOSED nonce-gap gate correctly reads as a suspicious
+	// hole (observed 0 < expected 2) and halts. Set it so the gate sees
+	// steady state and lets the fresh row through.
+	primary.txCountFn = pendingFn(2)
+	secondary.txCountFn = pendingFn(2)
+
 	claimer := &mockClaimer{claimed: true}
 	opts := RunnerOptions{
 		DB:                    db,

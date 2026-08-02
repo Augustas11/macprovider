@@ -171,25 +171,26 @@ Reconciling SPEC-016 §9 item 6's enumeration against the coordinator's actual
 emitted event names surfaced money-path spec-vs-code divergences. They are
 recorded here rather than silently resolved:
 
-### A. Enumerated by §9 item 6 but NEVER emitted by the code (`spec-only-not-emitted`)
+### A. Formerly `spec-only-not-emitted` — NOW WIRED (2026-08-02)
 
-- **`payout_nonce_gap` (WARN)** — §7.1 / §9 item 6 list it, but no
-  `phase4-coordinator` source emits a `payout_nonce_gap` event. The nonce-gap
-  condition surfaces instead via `payout_nonce_cold_start_within_tolerance`
-  (INFO) and `payout_invariant_violation`. Either the emission is missing or the
-  spec over-enumerates.
-- **`payout_runner_lease_conflict` (PAGE)** — §7.1 (NEW v0.1.8) / §9 item 6 list
-  it, but the lease code emits `payout_runner_lease_taken_over` and
-  `payout_runner_lease_lost` instead; no `payout_runner_lease_conflict` string
-  exists in the code. (§4.3's "IMPL test required (1)" even asserts this event.)
+Both events below were previously enumerated by §9 item 6 but emitted by no
+`phase4-coordinator` source. That gap is now **closed**: they are wired as
+`code` events in `catalog.tsv` and participate in the default verification set.
 
-These are an **implementation gap**, not a verification item. Because the code
-never emits them, a synthetic alert for them would let an operator "verify" a
-matcher that can never fire from real traffic (false readiness). They are
-therefore **excluded from `./emit.sh`'s default set** and are emitted only by
-`./emit.sh --reserved`, marked `"reserved":true,"not_yet_emitted":true`. Close
-the gap by wiring the emission (then move the row to `code` and it re-enters the
-default verification set), or delete the row if the spec over-enumerated.
+- **`payout_nonce_gap` (WARN)** — emitted by `RunOnce`'s §7.1 pre-check
+  (`checkNonceGap`, `internal/payout/runner.go`) when the on-chain pending nonce
+  falls behind the DB cursor via a real abandon hole. Catalogued `code`.
+- **`payout_runner_lease_conflict` (PAGE)** — emitted by the lease path
+  (`internal/payout/lease*.go`) on a competing-holder conflict. Catalogued
+  `code`.
+
+Related recovery-only diagnostics introduced alongside the R2-HIGH fix are
+**non-alert info events** (no `severity` field) and are listed in
+`non-alert-allowlist.txt`, not `catalog.tsv`:
+`payout_nonce_gap_precheck_skipped`, `payout_nonce_gap_reorg_suspect`, and
+`payout_nonce_gap_recovery_only` (the per-cycle recovery-only diagnostic — a
+rebroadcastable crash-recovery attempt sits at the pending nonce; fresh
+allocation is suppressed for that cycle while the persisted bytes re-broadcast).
 
 ### B. Missing `severity` field on PAGE/WARN events — FIXED (2026-08-01)
 

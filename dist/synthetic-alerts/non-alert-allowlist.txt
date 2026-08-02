@@ -37,6 +37,9 @@ payout_funding_rpc_unavailable	info-event
 payout_hot_wallet_funding	db-table
 payout_id	db-column
 payout_nonce_cold_start_within_tolerance	info-event
+payout_nonce_gap_precheck_skipped	info-event
+payout_nonce_gap_recovery_only	info-event
+payout_nonce_gap_reorg_suspect	info-event
 payout_not_allowed	reason-value
 payout_paid	info-event
 payout_reorg_orphan_resolved	info-event
