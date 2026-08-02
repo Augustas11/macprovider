@@ -134,6 +134,11 @@
   const verifyingContract = params.get("verifying_contract") || "";
   const chainId = Number(params.get("chain_id") || "8453");
   const chain = params.get("chain") || "base-mainnet";
+  // M2: EIP-712 domain name/version come from the coordinator challenge
+  // (single source of truth across a domain migration). Fall back to the
+  // current constants only if the params are absent.
+  const domainName = params.get("domain_name") || "macprovider-payout";
+  const domainVersion = params.get("domain_version") || "1";
   const nonce = params.get("nonce") || "";
   const tsUtc = Number(params.get("ts_utc") || "0");
   const redirectUri = params.get("redirect_uri") || "";
@@ -201,8 +206,8 @@
 
   function buildTypedData(payoutAddress) {
     const domain = {
-      name: "macprovider-payout",
-      version: "1",
+      name: domainName,
+      version: domainVersion,
       chainId: chainId,
       verifyingContract: verifyingContract,
     };

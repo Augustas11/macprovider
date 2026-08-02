@@ -378,4 +378,70 @@ final class PayoutWalletFlowTests: XCTestCase {
         XCTAssertFalse(server.isListenerActiveForTest,
                        "post-ready failure must tear the listener down")
     }
+
+    // H2: the signer resources must be packaged UNDER payout-signer/ in the
+    // built host bundle, resolved via the SAME Bundle.main lookup the runtime
+    // (captureSignature) uses. A flat-packaging regression fails this test.
+    func testSignerResourcesPackagedUnderPayoutSignerFolder() throws {
+        let resources = try XCTUnwrap(Bundle.main.resourceURL,
+                                      "host bundle has no resourceURL")
+        let dir = resources.appendingPathComponent("payout-signer", isDirectory: true)
+        let signer = dir.appendingPathComponent("signer.html")
+        let ethers = dir.appendingPathComponent("ethers.min.js")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: signer.path),
+                      "signer.html must be at Resources/payout-signer/ (H2); missing at \(signer.path)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ethers.path),
+                      "ethers.min.js must be at Resources/payout-signer/ (H2); missing at \(ethers.path)")
+    }
+
+    // M2: the signer URL must carry the coordinator-supplied EIP-712 domain
+    // name/version (and the rotating verifying_contract), so the signer is not
+    // pinned to hardcoded constants across a domain migration. Exercises the
+    // real captureSignature path (which also depends on H2 packaging).
+    func testCaptureSignatureThreadsCoordinatorDomain() async throws {
+        let challenge = PayoutChallengeView(
+            providerID: "prov-x",
+            verifyingContract: "0x52908400098527886E0F7030069857D2E4169EE7",
+            chainID: 8453,
+            domainName: "macprovider-payout-v2", // migrated (non-default) values
+            domainVersion: "2",
+            chain: "base-mainnet",
+            serverTsUTC: 1_719_234_896,
+            registeredAddress: nil,
+            pendingUntilUTC: nil,
+            payoutAllowed: nil
+        )
+        var capturedURL: URL?
+        let signed = try await PayoutWalletFlow.captureSignature(
+            challenge: challenge,
+            nonce: CB.nonce,
+            tsUtc: CB.ts,
+            state: CB.state,
+            timeout: 5,
+            openURL: { url in
+                capturedURL = url
+                guard let port = URLComponents(url: url, resolvingAgainstBaseURL: false)?.port else { return }
+                let body: [String: Any] = [
+                    "address": CB.address, "nonce": CB.nonce, "ts_utc": CB.ts,
+                    "signature": CB.sig, "state": CB.state,
+                ]
+                Task {
+                    var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/cb")!)
+                    req.httpMethod = "POST"
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+                    _ = try? await URLSession(configuration: .ephemeral).data(for: req)
+                }
+            }
+        )
+        XCTAssertEqual(signed.address, CB.address)
+
+        let items = URLComponents(url: try XCTUnwrap(capturedURL), resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func q(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        XCTAssertEqual(q("domain_name"), "macprovider-payout-v2")
+        XCTAssertEqual(q("domain_version"), "2")
+        // The rotating hot wallet already flows through (not hardcoded).
+        XCTAssertEqual(q("verifying_contract"), "0x52908400098527886E0F7030069857D2E4169EE7")
+        XCTAssertEqual(q("chain_id"), "8453")
+    }
 }

@@ -673,3 +673,24 @@ func TestRegistrationRateLimiter_EvictsEmptyEntriesAfterWindow(t *testing.T) {
 		t.Fatalf("map should hold exactly provider-b, got %d entries", total)
 	}
 }
+
+// TestRegistrationRateLimiter_FailsClosedOnNilOrZeroConfig proves the
+// M3 fix: a nil or mis-configured limiter must DENY (fail closed), not
+// grant unlimited registration.
+func TestRegistrationRateLimiter_FailsClosedOnNilOrZeroConfig(t *testing.T) {
+	now := time.Now()
+	var nilLimiter *registrationRateLimiter
+	if nilLimiter.allow("p", now) {
+		t.Fatal("nil limiter must fail closed (deny), not allow unlimited registration")
+	}
+	if newRegistrationRateLimiter(0, time.Hour).allow("p", now) {
+		t.Fatal("zero-limit limiter must fail closed")
+	}
+	if newRegistrationRateLimiter(6, 0).allow("p", now) {
+		t.Fatal("zero-window limiter must fail closed")
+	}
+	// A valid limiter still admits within budget.
+	if !newRegistrationRateLimiter(registrationRateLimitDefault, registrationRateWindow).allow("p", now) {
+		t.Fatal("a valid limiter must admit the first attempt")
+	}
+}

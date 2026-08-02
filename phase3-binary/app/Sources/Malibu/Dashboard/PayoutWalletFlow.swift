@@ -335,6 +335,12 @@ enum PayoutWalletFlow {
             URLQueryItem(name: "verifying_contract", value: challenge.verifyingContract),
             URLQueryItem(name: "chain_id", value: String(challenge.chainID)),
             URLQueryItem(name: "chain", value: challenge.chain),
+            // M2: thread the coordinator-supplied EIP-712 domain name/version so
+            // the signer uses them instead of hardcoded constants — the
+            // coordinator stays the single source of truth across a domain
+            // migration (verifying_contract already flows through above).
+            URLQueryItem(name: "domain_name", value: challenge.domainName),
+            URLQueryItem(name: "domain_version", value: challenge.domainVersion),
             URLQueryItem(name: "nonce", value: nonce),
             URLQueryItem(name: "ts_utc", value: String(tsUtc)),
             URLQueryItem(name: "redirect_uri", value: "http://127.0.0.1:\(server.port)/cb"),

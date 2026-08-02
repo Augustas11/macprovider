@@ -48,13 +48,14 @@ func newRegistrationRateLimiter(limit int, window time.Duration) *registrationRa
 // reports whether it is within the window budget. It returns false
 // once the provider has reached `limit` attempts inside the trailing
 // `window` (→ HTTP 429). Callers MUST pass the service clock (s.Now)
-// so injected test clocks and skew handling stay consistent. A nil or
-// mis-configured limiter fails OPEN (returns true) so a construction
-// bug never blocks a legitimate money-path registration; production
-// always constructs a valid limiter in NewAddressesService.
+// so injected test clocks and skew handling stay consistent. M3: a nil
+// or mis-configured (zero limit/window) limiter FAILS CLOSED (returns
+// false → the registration is rejected) rather than silently disabling
+// the abuse-control gate. Production never hits this — NewAddressesService
+// constructs a valid limiter and rejects invalid config at construction.
 func (l *registrationRateLimiter) allow(providerID string, now time.Time) bool {
 	if l == nil || l.limit <= 0 || l.window <= 0 {
-		return true
+		return false
 	}
 	now = now.UTC()
 	cutoff := now.Add(-l.window)
