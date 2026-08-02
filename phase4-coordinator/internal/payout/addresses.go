@@ -726,3 +726,142 @@ func isUniqueViolation(err error) bool {
 	return strings.Contains(msg, "UNIQUE constraint failed") ||
 		strings.Contains(msg, "constraint failed: UNIQUE")
 }
+
+// challengeResponse is the JSON body for GET
+// /providers/{provider_id}/payout-address/challenge. The app uses
+// verifying_contract as the EIP-712 domain.verifyingContract so the
+// signature matches the hot wallet the POST handler stamps as
+// registered_against_hot_wallet (SPEC-016 §3.2 / §6.4 rotation).
+//
+// registered_address / pending_until_utc / payout_allowed are
+// additive read-only fields sourced from LookupPayoutAddress so the
+// dashboard can display current registration without a second
+// money-path write endpoint.
+type challengeResponse struct {
+	VerifyingContract string  `json:"verifying_contract"`
+	ChainID           uint64  `json:"chain_id"`
+	DomainName        string  `json:"domain_name"`
+	DomainVersion     string  `json:"domain_version"`
+	Chain             string  `json:"chain"`
+	ServerTsUTC       int64   `json:"server_ts_utc"`
+	RegisteredAddress *string `json:"registered_address,omitempty"`
+	PendingUntilUTC   *string `json:"pending_until_utc,omitempty"`
+	PayoutAllowed     *bool   `json:"payout_allowed,omitempty"`
+}
+
+// ServePayoutChallenge implements GET
+// /providers/{provider_id}/payout-address/challenge. Read-only:
+// provider_token auth, pre-auth pause, ownership check, §7.1 log
+// on every response. Does NOT accept operator key.
+func (s *AddressesService) ServePayoutChallenge(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	providerID := chi.URLParam(r, "provider_id")
+
+	// 1. Pre-auth pause check (§3.3) — identical body for
+	// authed and unauthed so pause cannot be timed.
+	paused, err := s.Pause.IsRegistrationPaused(ctx)
+	if err != nil {
+		s.emitChallengeFailure(r, providerID, "internal_error")
+		writeError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	if paused {
+		s.emitChallengeFailure(r, providerID, "registration_paused")
+		writeError(w, http.StatusServiceUnavailable, "rotation_in_progress")
+		return
+	}
+
+	// 2. Provider-token auth (operator key is NOT accepted).
+	rawBearer := bearerFromHeader(r.Header.Get("Authorization"))
+	if rawBearer == "" {
+		s.emitChallengeFailure(r, providerID, "missing_token")
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	subject, ok, err := s.Tokens.ValidateToken(ctx, rawBearer)
+	if err != nil || !ok {
+		s.emitChallengeFailure(r, providerID, "invalid_token")
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if subject != providerID {
+		s.emitChallengeFailure(r, providerID, "token_subject_mismatch")
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	if !providerIDPattern.MatchString(providerID) {
+		s.emitChallengeFailure(r, providerID, "bad_provider_id")
+		writeError(w, http.StatusBadRequest, "bad_provider_id")
+		return
+	}
+
+	// Hot wallet MUST be the same value the POST stamps as
+	// registered_against_hot_wallet — SecurityConfig.HotWalletAddress
+	// is already canonical EIP-55 from NewAddressesService.
+	hot := s.Security.HotWalletAddress
+	now := s.Now().UTC()
+
+	resp := challengeResponse{
+		VerifyingContract: hot,
+		ChainID:           PayoutChainID,
+		DomainName:        "macprovider-payout",
+		DomainVersion:     "1",
+		Chain:             "base-mainnet",
+		ServerTsUTC:       now.Unix(),
+	}
+
+	// Best-effort read of current registration for dashboard
+	// display. Failures here do not fail the challenge — the
+	// domain fields are still valid for a new signature.
+	if addr, allowed, err := s.LookupPayoutAddress(ctx, providerID, "base-mainnet"); err == nil && addr != "" {
+		a := addr
+		resp.RegisteredAddress = &a
+		pa := allowed
+		resp.PayoutAllowed = &pa
+		// pending_until_utc is not returned by Lookup; fetch it
+		// when a row exists so the cooling-off countdown can render.
+		if pending, ok := s.lookupPendingUntil(ctx, providerID, "base-mainnet"); ok {
+			resp.PendingUntilUTC = &pending
+		}
+	}
+
+	s.emitChallengeSuccess(providerID)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// lookupPendingUntil returns pending_until_utc for a registered
+// row, or ("", false) when absent / on error.
+func (s *AddressesService) lookupPendingUntil(ctx context.Context, providerID, chain string) (string, bool) {
+	row := s.DB.QueryRowContext(ctx, `
+SELECT pending_until_utc
+  FROM provider_payout_addresses
+ WHERE provider_id = ?
+   AND chain = ?
+   AND registered_against_hot_wallet = ?`, providerID, chain, s.Security.HotWalletAddress)
+	var pending string
+	if err := row.Scan(&pending); err != nil {
+		return "", false
+	}
+	return pending, true
+}
+
+func (s *AddressesService) emitChallengeSuccess(providerID string) {
+	s.Log.Info().
+		Str("event", "provider_payout_address_challenge").
+		Str("provider_id", providerID).
+		Str("actor", "provider_token").
+		Str("ts_utc", s.Now().UTC().Format(time.RFC3339Nano)).
+		Send()
+}
+
+func (s *AddressesService) emitChallengeFailure(r *http.Request, providerID, reason string) {
+	s.Log.Info().
+		Str("event", "provider_payout_address_challenge_rejected").
+		Str("severity", "WARN").
+		Str("provider_id", providerID).
+		Str("reason", reason).
+		Str("src_ip", clientIP(r)).
+		Str("ts_utc", s.Now().UTC().Format(time.RFC3339Nano)).
+		Send()
+}
