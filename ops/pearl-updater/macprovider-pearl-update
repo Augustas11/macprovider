@@ -2775,6 +2775,21 @@ class Updater:
             raise UpdateError("legacy rollback authorization capacity is below the protected rollout baseline")
         return fleet
 
+    def _verify_rollback_expected_fleet_covers(self, protected: list[dict[str, str]]) -> None:
+        if self.config.buyer_canary_mode != BUYER_CANARY_MODE_REQUIRED or not protected:
+            return
+        expected = {
+            row["provider_id"]: row["model_id"]
+            for row in self._canary_expected_fleet()
+        }
+        for row in protected:
+            provider_id = row["provider_id"]
+            model_id = row["model_id"]
+            if expected.get(provider_id) != model_id:
+                raise UpdateError(
+                    "canary expected fleet must cover captured protected providers for legacy rollback"
+                )
+
     def _legacy_rollback_control_directory(self) -> Path:
         directory = self.canary_rollback_authorization.parent
         if not _path_entry_exists(directory):
@@ -3547,23 +3562,28 @@ class Updater:
         rows = poolz.get("pool")
         if not isinstance(rows, list):
             raise UpdateError("operator pool snapshot omitted provider rows")
-        protected: list[str] = []
+        protected: list[dict[str, str]] = []
         for row in rows:
             if not isinstance(row, dict):
                 raise UpdateError("operator pool snapshot contains an invalid provider row")
             provider_id = row.get("provider_id")
+            model_id = row.get("model_id")
             if (
                 row.get("routing_eligible") is True
                 and row.get("state") == "ready"
             ):
                 if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 256:
                     raise UpdateError("operator pool snapshot contains an invalid provider identity")
-                protected.append(provider_id)
-        if len(protected) != len(set(protected)):
+                if not isinstance(model_id, str) or not model_id:
+                    raise UpdateError("operator pool snapshot contains an invalid protected provider model")
+                protected.append({"provider_id": provider_id, "model_id": model_id})
+        protected_ids = [row["provider_id"] for row in protected]
+        if len(protected_ids) != len(set(protected_ids)):
             raise UpdateError("operator pool snapshot contains duplicate protected provider identities")
         if len(protected) != pool_ready:
             raise UpdateError("operator pool snapshot does not match coordinator ready capacity")
-        self.previous_protected_providers = sorted(protected)
+        self._verify_rollback_expected_fleet_covers(protected)
+        self.previous_protected_providers = sorted(protected_ids)
         self.previous_services = {
             "macprovider-coordinator.service": self.service_active("macprovider-coordinator.service"),
             "macprovider-gateway.service": self.service_active("macprovider-gateway.service"),

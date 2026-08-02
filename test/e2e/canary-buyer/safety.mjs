@@ -169,7 +169,10 @@ export function gatewayInvariantReasons(initial, current, {
     }
     if (Number.isInteger(model.ready_provider_count)) {
       const minReady = model.ready_provider_count - (activeProviderLossAllowed && id === activeModelID ? 1 : 0);
-      if (observed.ready_provider_count < minReady || observed.ready_provider_count > model.ready_provider_count) {
+      if (
+        observed.ready_provider_count < minReady
+        || (enforceStableProviderCounts && observed.ready_provider_count > model.ready_provider_count)
+      ) {
         reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
       }
     }

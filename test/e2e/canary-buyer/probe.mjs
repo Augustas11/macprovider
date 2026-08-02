@@ -1051,17 +1051,33 @@ function malformedLiveReadyFleetReasons(observed) {
   return reasons;
 }
 
-function livenessModelsFromStatus(gateway, configuredModels) {
-  const live = (gateway?.models || [])
-    .filter((model) => model?.available === true
-      && model?.degraded !== true
-      && Number.isInteger(model?.ready_provider_count)
-      && model.ready_provider_count > 0
-      && typeof model?.id === 'string'
-      && model.id)
-    .map((model) => model.id);
-  const uniqueLive = [...new Set(live)].sort();
-  return uniqueLive.length ? uniqueLive : configuredModels;
+export function liveFleetModels(fleet) {
+  return [...new Set((fleet || [])
+    .map((row) => row?.model_id)
+    .filter((modelID) => typeof modelID === 'string' && modelID))]
+    .sort();
+}
+
+function liveFleetGatewayModelReasons(gateway, modelIDs, {
+  activeModelID = '',
+} = {}) {
+  const models = new Map((gateway?.models || []).map((model) => [model?.id, model]));
+  const reasons = [];
+  for (const modelID of modelIDs) {
+    const model = models.get(modelID);
+    if (!model) {
+      if (modelID === activeModelID) continue;
+      reasons.push(`${modelID}:live_model_missing_from_gateway`);
+      continue;
+    }
+    if (model.available !== true || model.degraded === true) {
+      reasons.push(`${modelID}:live_model_not_available`);
+    }
+    if (!Number.isInteger(model.ready_provider_count) || model.ready_provider_count < 1) {
+      reasons.push(`${modelID}:live_model_ready_provider_count_missing`);
+    }
+  }
+  return reasons;
 }
 
 function rollbackAuthorizationFleet(expectedFleet, legacyRollbackProviders) {
@@ -1620,6 +1636,13 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     reasons.push('legacy_rollback_authorization_provider_unknown');
   }
   if (!staticFleet) {
+    reasons.push(...liveFleetGatewayModelReasons(
+      observed.gateway,
+      liveFleetModels(safetyFleet),
+      { activeModelID: gatewayAllowanceModelID },
+    ));
+  }
+  if (!staticFleet) {
     reasons.push(...malformedLiveReadyFleetReasons(observed));
   }
   if (!observed.operator_pool) return [...new Set([...reasons, 'operator_pool_signal_missing'])];
@@ -2077,7 +2100,7 @@ async function main() {
     control.fail(isolationFailure ? 'isolation_unproven' : 'precondition_failed', preReasons, 'precondition');
   }
   const models = CONFIG.mode === 'liveness'
-    ? livenessModelsFromStatus(initial.gateway, CONFIG.models)
+    ? liveFleetModels(runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders))
     : CONFIG.models;
   const results = [];
   for (const model of models) {

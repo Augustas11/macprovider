@@ -11,6 +11,7 @@ import {
   directInvocationDecision,
   observerFailureClass,
   outcomeBucket,
+  liveFleetModels,
   pollPostRequestRecovery,
   preconditionReasons,
   recoveryCadenceReasons,
@@ -100,6 +101,10 @@ test('liveness precondition follows live fleet instead of stale expected provide
     ],
   };
   assert.deepEqual(preconditionReasons(observed, staleExpectedFleet, null), []);
+  assert.deepEqual(liveFleetModels(runtimeProtectedFleet(observed, staleExpectedFleet, null)), [
+    'model-b',
+    'new-model',
+  ]);
 });
 
 test('liveness still validates live provider telemetry without static fleet equality', () => {
@@ -162,6 +167,70 @@ test('liveness validates telemetry for providers added after the initial snapsho
 
   assert.ok(safetyObservationReasons(initial, observed, staleExpectedFleet)
     .includes('provider-b:memory_pressure_critical'));
+});
+
+test('liveness allows ready-provider growth for an initial live model', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const staleExpectedFleet = [{ provider_id: 'stale-provider', model_id: 'old-model' }];
+  const initial = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: stamp(0) },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-1_000) },
+    ] }, now),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+    ],
+  };
+  const observed = structuredClone(initial);
+  observed.gateway.pool.total_providers = 2;
+  observed.gateway.pool.ready = 2;
+  observed.gateway.models[0].provider_count = 2;
+  observed.gateway.models[0].ready_provider_count = 2;
+  observed.gateway.models[0].slots_free = 2;
+  observed.operator_pool = poolzSnapshot({ pool: [
+    { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+    { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: stamp(-500) },
+  ] }, now);
+  observed.providers = [
+    safetyProvider('provider-a', 'model-a', 'session-a'),
+    safetyProvider('provider-b', 'model-a', 'session-b'),
+  ];
+
+  assert.deepEqual(safetyObservationReasons(initial, observed, staleExpectedFleet), []);
+});
+
+test('liveness fails when a live pool model is absent from gateway status', () => {
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'model-a', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'model-a', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+      { provider_id: 'provider-b', assigned_id: 'session-b', model_id: 'model-b', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'model-a', 'session-a'),
+      safetyProvider('provider-b', 'model-b', 'session-b'),
+    ],
+  };
+
+  assert.ok(preconditionReasons(observed, [{ provider_id: 'stale-provider', model_id: 'old-model' }], null)
+    .includes('model-b:live_model_missing_from_gateway'));
 });
 
 test('liveness ignores unavailable gateway models outside the live fleet', () => {

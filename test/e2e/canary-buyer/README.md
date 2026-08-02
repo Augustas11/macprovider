@@ -3,8 +3,9 @@
 The canary has two deliberately separate modes:
 
 - `liveness` is the only scheduled mode. It sends one request with at most eight
-  completion tokens for each exact expected-fleet model, never retries, checks the pool before and after
-  every request, and requires a recovery soak before reporting healthy.
+  completion tokens for each model in the initial live Ready/routable `/poolz`
+  fleet, never retries, checks the pool before and after every request, and
+  requires a recovery soak before reporting healthy.
 - `qualification` sends load only to one private/loopback provider HTTP endpoint.
   It never sends qualification load through the production gateway. Operator
   `/poolz` must prove that exact target is non-routable while the separately
@@ -132,17 +133,19 @@ not listed; no unlisted provider other than that exact target is accepted):
 }
 ```
 
-Scheduled liveness uses the same document without an allowed extra target, so
-membership, provider IDs, model IDs, Ready/routable state, and heartbeat
-freshness must all match exactly. The document is required to contain the
-operator-reviewed live protected fleet: provider IDs are unique, duplicate
-model IDs are allowed when multiple protected providers serve the same model,
-and every model in the fleet must be probed by `CANARY_MODELS`.
-`CANARY_MODELS` must exactly equal the unique model set in the document. The
-shipped schedules pin Pearl's live models:
+Scheduled liveness uses the same document only as a non-empty operator-reviewed
+identity allowlist for rollback compatibility. It does not require the
+document's provider cardinality or model set to match the current live fleet.
+Instead it derives the protected liveness fleet from the initial Ready/routable
+`/poolz` rows, probes each unique model in that live fleet, validates any
+provider that becomes live during the run, and ignores non-live provider rows
+for ordinary liveness/recovery. `CANARY_MODELS` remains an explicit
+configuration sanity check and the qualification workload source, but scheduled
+liveness does not require it to equal the expected-fleet model set. The shipped
+schedules list Pearl's historically reviewed models:
 `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` and
 `mlx-community/Llama-3.2-3B-Instruct-4bit`, and
-`mlx-community/Qwen3-8B-4bit`, producing one 8-token request each.
+`mlx-community/Qwen3-8B-4bit`.
 Each provider heartbeat carries versioned `safety_telemetry`; the coordinator
 validates it, stamps receipt freshness, and publishes it through authenticated
 `/poolz`. Version 2 binds the observation to the coordinator session, binary,
@@ -201,9 +204,12 @@ set, binary, model hash, and current external/battery state.
 
 Before load, between requests, after load, and throughout soak the probe checks:
 
-- gateway and coordinator remain up and non-degraded;
-- total/Ready provider counts and per-model Ready counts do not change;
-- every expected rollout-safety provider stays Ready/routable with its exact model;
+- gateway and coordinator remain up;
+- qualification and rollback keep strict total/Ready provider counts, aggregate
+  health counters, and per-model Ready counts; ordinary liveness scopes those
+  checks to the initial live Ready/routable fleet and allows live provider
+  growth;
+- every protected provider stays Ready/routable with its exact model;
 - the isolated qualification target stays non-routable without reconnecting;
 - actual heartbeat timestamps (never generic activity) remain fresh and never
   regress between soak samples, and the final sample advances from the initial
@@ -238,7 +244,7 @@ summaries so heartbeat and workload evolution can be audited after the run.
 | `CANARY_RECOVERY_SOAK_SECONDS` | `45` | spans the 30-second production heartbeat cadence |
 | `CANARY_RECOVERY_POLL_MS` | `7000` | samples faster than the 30-second production heartbeat cadence |
 | `CANARY_SAFETY_POLL_MS` | `2000` | concurrent in-request safety observation cadence |
-| `CANARY_MIN_READY_PROVIDERS` | `2` | rollout-safety capacity floor (also at least expected-fleet size) |
+| `CANARY_MIN_READY_PROVIDERS` | `2` | rollout-safety capacity floor for the live observed fleet |
 | `CANARY_MAX_HEARTBEAT_AGE_MS` | `90000` | operator-observed freshness cap |
 | `CANARY_MAX_MEMORY_GROWTH_MB` | `512` | provider RSS growth cap |
 | `CANARY_MAX_MEMORY_FRACTION` | `0.9` | provider RSS / RAM cap |

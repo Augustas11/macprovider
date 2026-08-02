@@ -1585,6 +1585,15 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.systemctl.assert_not_called()
 
     def test_capture_rollout_state_records_ready_provider_baseline(self):
+        expected_fleet = self.root / "capture-expected-fleet.json"
+        expected_providers = [
+            {"provider_id": f"provider-{index}", "model_id": f"model-{index}"}
+            for index in range(3)
+        ]
+        expected_fleet.write_text(
+            json.dumps({"schema_version": 1, "providers": expected_providers}) + "\n"
+        )
+        expected_fleet.chmod(0o600)
         self.updater.capture_database_paths = mock.Mock()
         self.updater.get_json = mock.Mock(
             return_value={"pool_size": 4, "pool_ready": 3}
@@ -1592,7 +1601,12 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
         self.updater.get_authorized_json = mock.Mock(return_value={
             "pool": [
-                {"provider_id": f"provider-{index}", "state": "ready", "routing_eligible": True}
+                {
+                    "provider_id": f"provider-{index}",
+                    "model_id": f"model-{index}",
+                    "state": "ready",
+                    "routing_eligible": True,
+                }
                 for index in range(3)
             ] + [{"provider_id": "degraded", "state": "degraded", "routing_eligible": False}]
         })
@@ -1605,7 +1619,8 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.updater._journal_transition = mock.Mock()
 
-        self.updater.capture_rollout_state()
+        with mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet):
+            self.updater.capture_rollout_state()
 
         self.assertEqual(self.updater.previous_pool_ready, 3)
         self.assertEqual(
@@ -1616,6 +1631,47 @@ class PearlUpdaterTests(unittest.TestCase):
             self.updater._journal_transition.call_args.kwargs["previous_pool_ready"],
             3,
         )
+
+    def test_capture_rollout_state_requires_rollback_allowlist_coverage(self):
+        expected_fleet = self.root / "stale-capture-expected-fleet.json"
+        expected_fleet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "providers": [{"provider_id": "provider-0", "model_id": "model-0"}],
+                }
+            )
+            + "\n"
+        )
+        expected_fleet.chmod(0o600)
+        self.updater.capture_database_paths = mock.Mock()
+        self.updater.get_json = mock.Mock(
+            return_value={"pool_size": 3, "pool_ready": 3}
+        )
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(return_value={
+            "pool": [
+                {
+                    "provider_id": f"provider-{index}",
+                    "model_id": f"model-{index}",
+                    "state": "ready",
+                    "routing_eligible": True,
+                }
+                for index in range(3)
+            ]
+        })
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config, allow_provider_drain=True
+        )
+        self.updater.service_active = mock.Mock(return_value=True)
+
+        with (
+            mock.patch.object(updater_module, "CANARY_EXPECTED_FLEET", expected_fleet),
+            self.assertRaisesRegex(updater_module.UpdateError, "cover captured protected providers"),
+        ):
+            self.updater.capture_rollout_state()
+
+        self.updater.service_active.assert_not_called()
 
     def test_restart_failure_invokes_rollback(self):
         release = self.verify()
