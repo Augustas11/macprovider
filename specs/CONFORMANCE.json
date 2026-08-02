@@ -1404,10 +1404,10 @@
       "journeys": [],
       "evidence": [
         {
-          "artifact": "commit:d989621c874eb4596e1d19230b5c9c9a5c88fb68",
+          "artifact": "commit:f2fe9f2bcb5b32a263ac92f5ecabdc86724727f0",
           "source": null,
-          "captured_at": "2026-08-01",
-          "expires_at": "2027-08-01"
+          "captured_at": "2026-08-02",
+          "expires_at": "2027-08-02"
         }
       ],
       "gap": null
