@@ -1803,12 +1803,17 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.updater.previous_pool_ready = 3
         self.updater.previous_protected_providers = ["provider-0", "provider-1", "provider-2"]
+        self.updater.previous_protected_fleet = [
+            {"provider_id": f"provider-{index}", "model_id": f"model-{index}"}
+            for index in range(3)
+        ]
         self.updater.get_json = mock.Mock(
             return_value={"pool_size": 3, "pool_ready": 3}
         )
         admitted_rows = [
             {
                 "provider_id": f"provider-{index}",
+                "model_id": f"model-{index}",
                 "state": "ready",
                 "routing_eligible": True,
                 "catalog_admission_mode": "legacy_bridge",
@@ -1827,6 +1832,12 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(self.updater.audit.call_args.kwargs["pool_ready"], 3)
 
         self.updater.get_authorized_json.return_value = {"pool": admitted_rows[:-1]}
+        with self.assertRaisesRegex(updater_module.UpdateError, "protected provider lost"):
+            self.updater.verify_provider_admission_rollout_policy()
+        self.updater.get_authorized_json.return_value = {"pool": admitted_rows}
+        self.updater.get_authorized_json.return_value = {
+            "pool": [{**admitted_rows[0], "model_id": "drifted-model"}, *admitted_rows[1:]]
+        }
         with self.assertRaisesRegex(updater_module.UpdateError, "protected provider lost"):
             self.updater.verify_provider_admission_rollout_policy()
         self.updater.get_authorized_json.return_value = {"pool": admitted_rows}
@@ -2914,6 +2925,10 @@ class PearlUpdaterTests(unittest.TestCase):
         identity = updater_module.RuntimeIdentity("v1.8.36", "v1.8.36", "1.8.36")
         self.updater.previous_pool_ready = 2
         self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.previous_protected_fleet = [
+            {"provider_id": "provider-a", "model_id": "model-a"},
+            {"provider_id": "provider-b", "model_id": "model-b"},
+        ]
         self.updater.local_coordinator_identity_ready = mock.Mock(return_value=True)
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_identity_ready = mock.Mock(return_value=True)
@@ -2954,10 +2969,19 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_public_protected_fleet_sample_requires_exact_ready_baseline(self):
         self.updater.previous_pool_ready = 2
         self.updater.previous_protected_providers = ["provider-a", "provider-b"]
+        self.updater.previous_protected_fleet = [
+            {"provider_id": "provider-a", "model_id": "model-a"},
+            {"provider_id": "provider-b", "model_id": "model-b"},
+        ]
         self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
         rows = [
-            {"provider_id": provider_id, "state": "ready", "routing_eligible": True}
-            for provider_id in self.updater.previous_protected_providers
+            {
+                "provider_id": row["provider_id"],
+                "model_id": row["model_id"],
+                "state": "ready",
+                "routing_eligible": True,
+            }
+            for row in self.updater.previous_protected_fleet
         ]
         self.updater.get_authorized_json = mock.Mock(
             return_value={"summary": {"ready": 2}, "pool": rows}
@@ -2979,6 +3003,11 @@ class PearlUpdaterTests(unittest.TestCase):
             "pool": [{**rows[0], "routing_eligible": False}, rows[1]],
         }
         self.assertFalse(self.updater.protected_provider_fleet_ready())
+        self.updater.get_authorized_json.return_value = {
+            "summary": {"ready": 2},
+            "pool": [{**rows[0], "model_id": "drifted-model"}, rows[1]],
+        }
+        self.assertFalse(self.updater.protected_provider_fleet_ready())
 
     def test_public_protected_fleet_sample_relaxes_stale_baseline_for_rollback(self):
         self.updater.previous_pool_ready = 5
@@ -2989,9 +3018,21 @@ class PearlUpdaterTests(unittest.TestCase):
             "provider-d",
             "provider-e",
         ]
+        self.updater.previous_protected_fleet = [
+            {"provider_id": provider_id, "model_id": f"model-{suffix}"}
+            for provider_id, suffix in zip(
+                self.updater.previous_protected_providers,
+                ("a", "b", "c", "d", "e"),
+            )
+        ]
         self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
         rows = [
-            {"provider_id": f"provider-{suffix}", "state": "ready", "routing_eligible": True}
+            {
+                "provider_id": f"provider-{suffix}",
+                "model_id": f"model-{suffix}",
+                "state": "ready",
+                "routing_eligible": True,
+            }
             for suffix in ("a", "b", "c", "d")
         ]
         self.updater.get_authorized_json = mock.Mock(

@@ -4973,10 +4973,11 @@ class Updater:
             )
             return ready_rows >= max(required_ready, len(current))
         return all(
-            provider_id in current
-            and current[provider_id].get("state") == "ready"
-            and current[provider_id].get("routing_eligible") is True
-            for provider_id in self.previous_protected_providers
+            (row := current.get(expected["provider_id"])) is not None
+            and row.get("state") == "ready"
+            and row.get("routing_eligible") is True
+            and row.get("model_id") == expected["model_id"]
+            for expected in self._previous_protected_fleet()
         )
 
     def prove_serving_recovery(
@@ -5073,12 +5074,14 @@ class Updater:
                 for row in rows
                 if isinstance(row, dict) and isinstance(row.get("provider_id"), str)
             }
-            for provider_id in self.previous_protected_providers:
+            for expected in self._previous_protected_fleet():
+                provider_id = expected["provider_id"]
                 row = current.get(provider_id)
                 if (
                     row is None
                     or row.get("routing_eligible") is not True
                     or row.get("state") != "ready"
+                    or row.get("model_id") != expected["model_id"]
                     or row.get("catalog_admission_mode") not in ("legacy_bridge", "current", "previous")
                 ):
                     raise UpdateError(
