@@ -373,7 +373,7 @@ malibu_emission:
 # routing. Keys match model_id case-insensitively; values must be bare
 # numeric versions or the coordinator refuses to start.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.69"
+  latest_binary_version: "1.8.79"
   # required_binary_version: "1.7.0"
   # per_model_required_binary_version:
   #   "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": "1.8.60"
