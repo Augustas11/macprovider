@@ -81,6 +81,17 @@ test('hard request, token, and time budgets never admit an over-budget request',
   });
 });
 
+test('run budget capacity can only grow to a valid minimum', () => {
+  const budget = new RunBudget({ maxRequests: 2, maxCompletionTokens: 16, maxDurationMs: 1_000, startedAtMs: 100 });
+  budget.ensureMinimumCapacity({ maxRequests: 1, maxCompletionTokens: 8 });
+  assert.equal(budget.snapshot(100).limits.max_requests_per_provider, 2);
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 16);
+  budget.ensureMinimumCapacity({ maxRequests: 5, maxCompletionTokens: 40 });
+  assert.equal(budget.snapshot(100).limits.max_requests_per_provider, 5);
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 40);
+  assert.throws(() => budget.ensureMinimumCapacity({ maxRequests: 0 }), /maxRequests must be a positive safe integer/);
+});
+
 test('gateway pre/post invariants match exact active non-routable aggregation loss', () => {
   const initial = healthyGateway();
   assert.deepEqual(gatewayInvariantReasons(initial, initial, { minReadyProviders: 2 }), []);

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   degradedReasons,
   directInvocationDecision,
+  ensureLivenessBudgetCapacity,
   observerFailureClass,
   outcomeBucket,
   liveFleetModels,
@@ -28,6 +29,7 @@ import {
   poolzSnapshot,
   providerSignalSnapshot,
   responseIdentityReasons,
+  RunBudget,
 } from './safety.mjs';
 
 function safetyProvider(providerID, modelID, sessionID, overrides = {}) {
@@ -69,6 +71,23 @@ test('scheduled liveness requires only one bounded serviceability sample', () =>
     outcomes: { '2xx': 1 },
   });
   assert.deepEqual(degradedReasons({ mode: 'liveness', up: 1, models: [model] }), []);
+});
+
+test('scheduled liveness raises budget only to the live model workload', () => {
+  const budget = new RunBudget({
+    maxRequests: 4,
+    maxCompletionTokens: 32,
+    maxDurationMs: 90_000,
+    startedAtMs: 100,
+  });
+  ensureLivenessBudgetCapacity(budget, 5);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), null);
+  assert.equal(budget.reserve(8, 100), 'request_budget_exhausted:6_gt_5');
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 40);
 });
 
 test('liveness precondition follows live fleet instead of stale expected provider count', () => {
@@ -133,6 +152,32 @@ test('liveness still validates live provider telemetry without static fleet equa
   };
   assert.ok(preconditionReasons(observed, staleExpectedFleet, null)
     .includes('provider-a:memory_pressure_warning'));
+});
+
+test('liveness ready floor follows the observed live protected fleet', () => {
+  const staleExpectedFleet = [
+    { provider_id: 'missing-a', model_id: 'old-model-a' },
+    { provider_id: 'missing-b', model_id: 'old-model-b' },
+  ];
+  const observed = {
+    gateway: gatewaySnapshot({
+      status: 'up',
+      degraded: false,
+      coordinator: { status: 'up', checked_at: new Date().toISOString() },
+      pool: { total_providers: 1, ready: 1, degraded: 0, draining: 0, unavailable: 0 },
+      models: [
+        { id: 'new-model', provider_count: 1, ready_provider_count: 1, slots_free: 1, available: true, degraded: false },
+      ],
+    }),
+    operator_pool: poolzSnapshot({ pool: [
+      { provider_id: 'provider-a', assigned_id: 'session-a', model_id: 'new-model', state: 'ready', routing_eligible: true, last_heartbeat_at: new Date().toISOString() },
+    ] }),
+    providers: [
+      safetyProvider('provider-a', 'new-model', 'session-a'),
+    ],
+  };
+
+  assert.deepEqual(safetyObservationReasons(observed, observed, staleExpectedFleet), []);
 });
 
 test('liveness validates telemetry for providers added after the initial snapshot', () => {

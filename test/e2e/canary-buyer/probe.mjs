@@ -77,6 +77,7 @@ const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
 const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r6';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
 const LEGACY_ROLLBACK_MAX_PROVIDERS = 100;
+const LIVENESS_MAX_TOKENS_PER_MODEL = 8;
 
 const CONFIG = {
   mode: selectedMode,
@@ -1105,6 +1106,23 @@ function mergeFleetByProviderID(...fleets) {
   return [...byID.values()].sort((a, b) => a.provider_id.localeCompare(b.provider_id));
 }
 
+function minimumReadyProviders(staticFleet, fleetSize) {
+  return staticFleet
+    ? Math.max(CONFIG.minReadyProviders, fleetSize)
+    : Math.max(1, fleetSize);
+}
+
+export function ensureLivenessBudgetCapacity(budget, modelCount) {
+  if (CONFIG.mode !== 'liveness' || modelCount < 1) return;
+  budget.ensureMinimumCapacity({
+    maxRequests: Math.max(CONFIG.maxRequestsPerProvider, modelCount),
+    maxCompletionTokens: Math.max(
+      CONFIG.maxCompletionTokensPerProvider,
+      modelCount * LIVENESS_MAX_TOKENS_PER_MODEL,
+    ),
+  });
+}
+
 export function runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders) {
   if (legacyRollbackProviders?.size) {
     return rollbackAuthorizationFleet(legacyRollbackProviders);
@@ -1631,9 +1649,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     ? activeModelID
     : (recoveredDirectSignals ? cachedGatewayModelID : '');
   const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
-    minReadyProviders: staticFleet
-      ? Math.max(CONFIG.minReadyProviders, safetyFleet.length)
-      : CONFIG.minReadyProviders,
+    minReadyProviders: minimumReadyProviders(staticFleet, safetyFleet.length),
     maxDrainingProviders: qualification ? 1 : 0,
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
     enforceHealthyProviderAggregates: staticFleet,
@@ -2059,13 +2075,15 @@ async function main() {
       await assertResolvesLocal(providerUrl, 'CANARY_ISOLATED_PROVIDER_BASE');
     }
     expectedFleet = await loadExpectedFleet();
-    const expectedModels = [...new Set(expectedFleet.map((row) => row.model_id))].sort();
-    const configuredModels = [...new Set(CONFIG.models)].sort();
-    if (configuredModels.length !== CONFIG.models.length) {
-      throw new Error('CANARY_MODELS must not contain duplicates');
-    }
-    if (CONFIG.mode === 'qualification' && !expectedModels.includes(CONFIG.models[0])) {
-      throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
+    if (CONFIG.mode === 'qualification') {
+      const expectedModels = [...new Set(expectedFleet.map((row) => row.model_id))].sort();
+      const configuredModels = [...new Set(CONFIG.models)].sort();
+      if (configuredModels.length !== CONFIG.models.length) {
+        throw new Error('CANARY_MODELS must not contain duplicates');
+      }
+      if (!expectedModels.includes(CONFIG.models[0])) {
+        throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
+      }
     }
     if (CONFIG.mode === 'qualification') baselines = await loadBaselines();
     if (CONFIG.mode === 'liveness') {
@@ -2114,6 +2132,7 @@ async function main() {
   const models = CONFIG.mode === 'liveness'
     ? liveFleetModels(runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders))
     : CONFIG.models;
+  ensureLivenessBudgetCapacity(budget, models.length);
   const results = [];
   for (const model of models) {
     if (control.failed()) break;
@@ -2168,9 +2187,10 @@ async function main() {
       expectedFleet,
       legacyRollbackProviders,
       {
-        minReadyProviders: legacyRollbackProviders?.size || CONFIG.mode === 'qualification'
-          ? Math.max(CONFIG.minReadyProviders, recoveryFleetSize)
-          : CONFIG.minReadyProviders,
+        minReadyProviders: minimumReadyProviders(
+          Boolean(legacyRollbackProviders?.size || CONFIG.mode === 'qualification'),
+          recoveryFleetSize,
+        ),
         maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
         maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
         maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,

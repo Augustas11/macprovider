@@ -142,11 +142,10 @@ provider that becomes live during the run, and ignores non-live provider rows
 for ordinary liveness/recovery. `CANARY_MODELS` remains the qualification
 workload source, but scheduled liveness derives its workload from live `/poolz`
 and does not require a configured static model list or expected-fleet model-set
-match. The shipped
-schedules list Pearl's historically reviewed models:
-`mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` and
-`mlx-community/Llama-3.2-3B-Instruct-4bit`, and
-`mlx-community/Qwen3-8B-4bit`.
+match. Its ready-provider floor is the live protected fleet size observed at
+the safety snapshot, with a minimum of one ready/routable provider. Its
+request/token budget starts from the configured conservative floor and grows
+only to one 8-token request per live model discovered from that snapshot.
 Each provider heartbeat carries versioned `safety_telemetry`; the coordinator
 validates it, stamps receipt freshness, and publishes it through authenticated
 `/poolz`. Version 2 binds the observation to the coordinator session, binary,
@@ -239,13 +238,13 @@ summaries so heartbeat and workload evolution can be audited after the run.
 
 | Variable | Liveness default | Purpose |
 |---|---:|---|
-| `CANARY_MAX_REQUESTS_PER_PROVIDER` | `4` | worst-case routed request cap |
-| `CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER` | `32` | worst-case reserved completion-token cap |
+| `CANARY_MAX_REQUESTS_PER_PROVIDER` | `4` | conservative request cap floor; liveness raises it only to live model count |
+| `CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER` | `32` | conservative token cap floor; liveness raises it only to `8 * live model count` |
 | `CANARY_MAX_RUN_DURATION_MS` | `90000` | internal whole-run cap |
 | `CANARY_RECOVERY_SOAK_SECONDS` | `45` | spans the 30-second production heartbeat cadence |
 | `CANARY_RECOVERY_POLL_MS` | `7000` | samples faster than the 30-second production heartbeat cadence |
 | `CANARY_SAFETY_POLL_MS` | `2000` | concurrent in-request safety observation cadence |
-| `CANARY_MIN_READY_PROVIDERS` | `2` | rollout-safety capacity floor for the live observed fleet |
+| `CANARY_MIN_READY_PROVIDERS` | live fleet size | qualification/rollback static floor; ordinary liveness derives this from live Ready/routable `/poolz` rows |
 | `CANARY_MAX_HEARTBEAT_AGE_MS` | `90000` | operator-observed freshness cap |
 | `CANARY_MAX_MEMORY_GROWTH_MB` | `512` | provider RSS growth cap |
 | `CANARY_MAX_MEMORY_FRACTION` | `0.9` | provider RSS / RAM cap |

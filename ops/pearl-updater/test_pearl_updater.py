@@ -3490,17 +3490,9 @@ class PearlUpdaterTests(unittest.TestCase):
                 "mlx-community/Qwen3-8B-4bit",
             },
         )
-        service_models = "Environment=CANARY_MODELS=" + ",".join(
-            (
-                "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
-                "mlx-community/Llama-3.2-3B-Instruct-4bit",
-                "mlx-community/Qwen3-8B-4bit",
-            )
-        )
-        self.assertIn(
-            service_models,
-            (REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.service").read_text(),
-        )
+        service_text = (REPO_ROOT / "test/e2e/canary-buyer/canary-buyer.service").read_text()
+        self.assertNotIn("Environment=CANARY_MODELS=", service_text)
+        self.assertNotIn("Environment=CANARY_MIN_READY_PROVIDERS=", service_text)
         self.assertEqual(updater_module.CANARY_UNIT_BUDGET_S, 180)
 
     def test_canary_expected_fleet_accepts_full_protected_duplicate_model_inventory(self):

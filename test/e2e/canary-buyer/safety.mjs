@@ -35,6 +35,16 @@ export class RunBudget {
     return null;
   }
 
+  ensureMinimumCapacity({ maxRequests = this.limits.maxRequests, maxCompletionTokens = this.limits.maxCompletionTokens } = {}) {
+    for (const [name, value] of Object.entries({ maxRequests, maxCompletionTokens })) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new Error(`${name} must be a positive safe integer`);
+      }
+    }
+    this.limits.maxRequests = Math.max(this.limits.maxRequests, maxRequests);
+    this.limits.maxCompletionTokens = Math.max(this.limits.maxCompletionTokens, maxCompletionTokens);
+  }
+
   recordProvider(provider, maxTokens) {
     if (!provider) return;
     const current = this.providers.get(provider) || { requests: 0, completion_tokens_reserved: 0 };
