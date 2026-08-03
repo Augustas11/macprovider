@@ -541,7 +541,7 @@ struct Stage2Prober: Stage2Probing {
         var firstTokenAt: Date?
         // Reasoning models (gpt-oss-20b / Harmony) suppress their
         // analysis/reasoning channel from `delta.content`, so on the
-        // probe's nonsense padded prompt they generate tokens but emit
+        // probe prompt they generate tokens but emit
         // ZERO visible content deltas. The provider closes the stream with
         // a usage chunk (`choices: []` + `usage`) that carries the honest
         // total decode count in `macprovider_generated_completion_tokens`

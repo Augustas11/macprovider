@@ -552,12 +552,59 @@ struct Stage1Prober: Stage1Probing {
     }
 
     static func promptTokenEstimate(targetContext: Int) -> Int {
+        // Keep the persisted Stage 1/2 estimate at 80% of the requested
+        // context. The prompt below is calibrated to this same target.
         max(1, Int((Double(targetContext) * 0.8).rounded(.down)))
     }
 
+    // The probe must give Harmony/reasoning models an ordinary language task.
+    // This fixed passage is deliberately neutral and contains no tool-call,
+    // JSON, or chat-template control-token syntax. English tokenization is
+    // model-dependent, so the stable shape estimate uses 1.25 tokens per
+    // whitespace-delimited word; the repeat count is rounded to keep the
+    // prompt close to the historical 80%-of-context target (19,200 estimated
+    // prompt tokens at a 24,000-token target context). The shorter passage
+    // also fits the existing 64-token unit-test contexts with the instruction.
+    static let coherentProbeFiller =
+        "Clear questions make careful measurements easier to follow. A steady process records each step, preserves useful context, and gives the next action a precise purpose. This neutral passage supports a short, consistent continuation."
+    static let coherentProbeInstruction = "Continue the passage above."
+    static let coherentProbeEstimatedTokensPerWord = 1.25
+    static let coherentProbePromptLengthTolerance = 0.05
+    // Match the provider's documented supported max-context range. The lower
+    // bound leaves room for max_tokens=64; the upper bound covers the largest
+    // documented per-tier default while keeping prompt construction bounded.
+    static let coherentProbeMinimumContext = 64
+    static let coherentProbeMaximumContext = 200_000
+    static let coherentProbeMaxFillerRepeats = 4_096
+
+    static func estimatedPromptTokens(for prompt: String) -> Int {
+        let wordCount = prompt.split(whereSeparator: \.isWhitespace).count
+        return Int((Double(wordCount) * coherentProbeEstimatedTokensPerWord).rounded())
+    }
+
     static func paddedPrompt(targetContext: Int) -> String {
-        Array(repeating: "probe", count: promptTokenEstimate(targetContext: targetContext))
-            .joined(separator: " ")
+        let targetTokens = Double(promptTokenEstimate(targetContext: targetContext))
+        let instructionTokens = Double(
+            coherentProbeInstruction.split(whereSeparator: \.isWhitespace).count
+        ) * coherentProbeEstimatedTokensPerWord
+        let fillerTokens = Double(
+            coherentProbeFiller.split(whereSeparator: \.isWhitespace).count
+        ) * coherentProbeEstimatedTokensPerWord
+        let repetitions: Int
+        if targetTokens <= instructionTokens {
+            repetitions = 0
+        } else {
+            // Autotune validates the supported context range before probing.
+            // Keep this shared helper bounded as well so a malformed direct
+            // caller cannot turn an extreme Int into an unbounded allocation.
+            repetitions = min(
+                coherentProbeMaxFillerRepeats,
+                max(1, Int(((targetTokens - instructionTokens) / fillerTokens).rounded()))
+            )
+        }
+
+        let filler = Array(repeating: coherentProbeFiller, count: repetitions).joined(separator: " ")
+        return filler.isEmpty ? coherentProbeInstruction : filler + " " + coherentProbeInstruction
     }
 
     private func probeOnce(model: String, port: Int, targetContext: Int) async throws -> SingleProbeResult {
@@ -591,7 +638,7 @@ struct Stage1Prober: Stage1Probing {
         var deltaCount = 0
         // Reasoning models (gpt-oss-20b / Harmony) suppress their
         // analysis/reasoning channel from `delta.content`, so on the
-        // probe's nonsense padded prompt they generate tokens but emit
+        // probe prompt they generate tokens but emit
         // ZERO visible content deltas. The provider closes the stream with
         // a usage chunk (`choices: []` + `usage`) that carries the honest
         // total decode count in `macprovider_generated_completion_tokens`

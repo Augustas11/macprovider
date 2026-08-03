@@ -68,6 +68,23 @@ final class AutotuneCommandTests: XCTestCase {
         )
     }
 
+    func testTargetContextRejectsOutsideCoherentProbeRange() throws {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--target-context", "63",
+            "--dry-run",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--target-context", "200001",
+            "--dry-run",
+        ]))
+    }
+
+    func testMaxContextAxisRejectsBeyondCoherentProbeRange() throws {
+        XCTAssertThrowsError(
+            try AutotuneCommand.parseMaxContextAxis("24000,200001", targetContext: 24000)
+        )
+    }
+
     func testKvBitsAxisAcceptsUnsetFourEight() throws {
         let values = try AutotuneCommand.parseKvBitsAxis("unset,4,8")
 

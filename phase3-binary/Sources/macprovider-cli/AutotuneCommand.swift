@@ -704,8 +704,10 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     private func validateBasicInputs() throws {
-        guard targetContext > 0 else {
-            throw ValidationError("--target-context must be >= 1")
+        guard (Stage1Prober.coherentProbeMinimumContext...Stage1Prober.coherentProbeMaximumContext).contains(targetContext) else {
+            throw ValidationError(
+                "--target-context must be in \(Stage1Prober.coherentProbeMinimumContext)...\(Stage1Prober.coherentProbeMaximumContext)"
+            )
         }
         guard stage1Replicates >= 1 else {
             throw ValidationError("--stage1-replicates must be >= 1")
@@ -1344,6 +1346,11 @@ struct AutotuneCommand: AsyncParsableCommand {
             }
             guard value >= targetContext else {
                 throw ValidationError("--max-context-axis cell \(value) is below --target-context \(targetContext)")
+            }
+            guard value <= Stage1Prober.coherentProbeMaximumContext else {
+                throw ValidationError(
+                    "--max-context-axis cell \(value) exceeds maximum supported context \(Stage1Prober.coherentProbeMaximumContext)"
+                )
             }
             return value
         }.sorted()

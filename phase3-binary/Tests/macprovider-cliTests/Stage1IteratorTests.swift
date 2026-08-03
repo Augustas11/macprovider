@@ -33,6 +33,59 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertEqual(prober.probedModels, ["model-a", "model-b"])
     }
 
+    func testPaddedPromptPreservesEstimatedLengthAtRequiredContexts() throws {
+        // Exact tokenization varies by candidate model. The shared probe
+        // shape invariant uses Stage1Prober's documented 1.25-token/word
+        // estimate and allows 5% for the fixed-filler repeat rounding.
+        let expectedTokensByContext = [2_000: 1_600, 24_000: 19_200]
+        for targetContext in [2_000, 24_000] {
+            let prompt = Stage1Prober.paddedPrompt(targetContext: targetContext)
+            let expectedTokens = try XCTUnwrap(expectedTokensByContext[targetContext])
+            XCTAssertEqual(Stage1Prober.promptTokenEstimate(targetContext: targetContext), expectedTokens)
+            let estimatedTokens = Stage1Prober.estimatedPromptTokens(for: prompt)
+
+            XCTAssertEqual(
+                Double(estimatedTokens),
+                Double(expectedTokens),
+                accuracy: max(1.0, Double(expectedTokens) * Stage1Prober.coherentProbePromptLengthTolerance),
+                "prompt estimate drifted at target context \(targetContext)"
+            )
+        }
+    }
+
+    func testPaddedPromptFitsSmallContextsAndBoundsExtremeContexts() throws {
+        let smallPrompt = Stage1Prober.paddedPrompt(targetContext: 64)
+        XCTAssertLessThanOrEqual(
+            Stage1Prober.estimatedPromptTokens(for: smallPrompt),
+            Stage1Prober.promptTokenEstimate(targetContext: 64)
+        )
+
+        let extremePrompt = Stage1Prober.paddedPrompt(targetContext: Int.max)
+        let fillerWords = Stage1Prober.coherentProbeFiller.split(whereSeparator: \.isWhitespace).count
+        let instructionWords = Stage1Prober.coherentProbeInstruction.split(whereSeparator: \.isWhitespace).count
+        XCTAssertEqual(
+            extremePrompt.split(whereSeparator: \.isWhitespace).count,
+            fillerWords * Stage1Prober.coherentProbeMaxFillerRepeats + instructionWords
+        )
+    }
+
+    func testPaddedPromptIsCoherentAndToolCallSafe() {
+        let prompt = Stage1Prober.paddedPrompt(targetContext: 2_000)
+        let lowercasePrompt = prompt.lowercased()
+
+        XCTAssertTrue(prompt.contains(Stage1Prober.coherentProbeFiller))
+        XCTAssertTrue(prompt.hasSuffix(Stage1Prober.coherentProbeInstruction))
+        XCTAssertFalse(lowercasePrompt.contains("probe"))
+
+        let forbiddenMarkers = [
+            "{", "}", "[", "]", "\"", "```", "<|", "|>",
+            "tool_call", "tool-call", "function_call", "function-call", "json",
+        ]
+        for marker in forbiddenMarkers {
+            XCTAssertFalse(lowercasePrompt.contains(marker), "prompt contains forbidden marker \(marker)")
+        }
+    }
+
     func testStage1IteratorAdvancesPastTransient() async throws {
         let dbURL = try temporaryDBURL()
         let db = try AutotuneDB(path: dbURL.path)
