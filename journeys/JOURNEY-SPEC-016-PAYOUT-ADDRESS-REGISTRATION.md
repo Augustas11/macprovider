@@ -30,12 +30,22 @@ passed, that payout is deployed, or that payout activation is permitted.
   screenshots, result JSON, or uploaded artifacts.
 - Record the configured chain ID, EIP-712 domain, verifying contract, and
   coordinator endpoint from the candidate under test.
+- Execute the physical journey in the candidate-derived handler-only
+  conformance harness. The harness must mount the exact challenge and
+  registration handlers with isolated SQLite, real provider-token and pause
+  validation, and controlled test dependencies, but must not construct the
+  production payout runner, external RPC clients, or settlement signer.
+  It must keep payout.enabled false. If this harness cannot be built from the
+  named candidate, mark the run blocked and produce no passing evidence.
 
 ## Physical steps
 
 1. Capture the candidate version, effective configuration, database
-   namespace, and clean starting state. Confirm no payout runner or payout
-   settlement action is enabled.
+   namespace, harness identifier, and clean starting state. Confirm
+   payout.enabled=false, runner_started=false, no external RPC client or
+   settlement signer is constructed, and no payout settlement action is
+   enabled. Use the handler-only harness for HTTP registration and the
+   candidate's read-only selection query/fixture for cooling-off assertions.
 2. Fetch a payout challenge over the TLS coordinator endpoint using the
    provider token. Verify that the token subject and URL path bind to the
    test provider and that the response contains the actual challenge fields:
@@ -77,9 +87,18 @@ passed, that payout is deployed, or that payout activation is permitted.
    409 payout_not_allowed, unchanged address and payout_allowed values, and
    exactly one rejection event. Do not shorten or bypass the production
    cooling-off or compliance policy.
-9. Exercise registration rate limiting and provider pre-authorization pause.
-   Verify the expected error responses, no durable mutation on denied
-   requests, and cleanup of all loopback listeners and temporary state.
+9. Set runtime.registration_paused=1 and send challenge and registration
+   requests both with and without a token. Require identical 503 status/body
+   pairs and the exact rejection events
+   provider_payout_address_challenge_rejected and
+   provider_payout_address_change_rejected with reason=registration_paused.
+   Use the harness pause hook to flip the flag after the registration
+   pre-authentication check but before the BEGIN IMMEDIATE commit. Require
+   rollback, no durable row/permission mutation, and exactly one
+   provider_payout_address_change_rejected event with the same reason.
+   Exercise the provider-scoped rate limit and require 429 plus exactly one
+   provider_payout_address_change_rejected event with reason=rate_limited.
+   Verify cleanup of all loopback listeners and temporary state.
 10. Inspect logs, database rows, callback captures, screenshots, and exported
     artifacts for bearer tokens, private keys, raw secrets, or unintended
     production identifiers. Hash the redacted evidence set.
@@ -93,6 +112,9 @@ The run must produce a redacted, signed result envelope containing:
 
 - schema_version, journey_id, spec_id, requirement_ids, run_id, candidate
   commit/release, operator, environment class, and UTC timestamps;
+- execution_mode, harness identifier/version, payout.enabled,
+  runner_started, external_rpc_started, settlement_signer_started, and
+  restoration result;
 - one result entry for every physical step, with pass/fail status, assertion
   identifiers, and SHA-256 references to retained artifacts;
 - effective payout configuration before and after the run;
