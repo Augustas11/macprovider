@@ -3,11 +3,48 @@
 Author: operator (a11) + Claude session 2026-07-29
 Status: IMPLEMENTATION HANDOFF — SPEC-038 v0.2 is LOCKED on `origin/main`
 (landed with SPEC-039 at `61369ec6`). This is the **second** of two IMPL builds.
-It **depends on the SPEC-039 paged-engine IMPL landing first**
-(`audits/_prompts/BUILD_SPEC_039_PAGED_ENGINE_IMPL_PROMPT.md`) and consumes three
-of its surfaces as frozen public API. Do not start this build until the SPEC-039
-engine PR has merged and its descriptor / block-table handle / extraction
-primitive are real.
+It **depends on the SPEC-039 paged-engine IMPL**, which **MERGED 2026-08-03 at
+`69c32bbb` (PR #814)**. Of the three consumed surfaces, **two are real**
+(capability descriptor FR-PKV11, block-table handle FR-PKV2) and **one is
+deferred** (FR-PKV10 standalone contiguous-`KVCache` extraction — only a neutral
+byte-materialization stub exists; see §0). Build now against the two real
+surfaces; the FR-PKV10-dependent cache-reuse path is **scoped out of this first
+cut** per §0.
+
+## 0. HEAD-UPDATE 2026-08-03 — READ BEFORE §2 (FR-PKV10 gap + scope)
+
+The SPEC-039 engine PR (#814, `69c32bbb`) landed as a **foundation + proven
+dense-parity core**, default-off/inert. Two of the three surfaces this scheduler
+consumes are real and stable public API:
+- **FR-PKV11 capability descriptor** (`PagedKVDescriptor`) — real; drive the
+  activation predicate against it as §3.1 describes.
+- **FR-PKV2 block-table handle** (`PagedKVBlockTableHandle` + allocate/bind/
+  extend/release, backed by `PagedKVBlockAllocator`) — real.
+
+But **FR-PKV10 is NOT complete.** The merged engine ships only a *neutral
+byte-materialization* primitive (`PagedKVMaterializedByteCache`); the standalone,
+live, injectable contiguous-`KVCache` handoff that this scheduler's cross-turn
+reuse consumes is an **unimplemented protocol** (`PagedKVContiguousCacheBridge`),
+explicitly deferred to the SPEC-039 runtime bridge. Tracked in **issue #887**.
+
+**Consequence — scope this first IMPL cut down, do not fake the missing surface:**
+- **Batch fresh-conversation decode only** (the real throughput win). Implement
+  FR-CB1..CB3, CB5..CB9, CB11..CB14, CB16 (minus cross-turn reuse), CB17 as written.
+- **Serial-route any sticky-cache-eligible / cross-turn request** (the existing
+  `AsyncSemaphore` path) with a reason-coded `batching_unsupported` telemetry
+  string until #887 lands — the same fail-honest pattern §4.8 uses for unsupported
+  tuples. No batched cross-turn cache reuse until FR-PKV10 is real.
+- **Defer FR-CB4 cross-turn-reuse-under-batching and AC-19 batched sticky-hit
+  billing parity** to a SPEC-038 follow-up gated on #887. Keep AC-19's
+  *fresh-conversation / non-sticky* cases (no discount, ambiguous, retry,
+  invalid-range quarantine) — those don't need FR-PKV10.
+- Tests for the real surfaces MAY use the SPEC-039-compatible fake (§3, §4.4)
+  exactly as this prompt already allows.
+
+Everything below is unchanged EXCEPT where §3 surface #3 and §7 are annotated for
+this gap. The feature still lands **default-off and inert**; the real enable gate
+(§7) is unchanged and still requires the SPEC-039 runtime bridge + a >32 GB-Mac
+serve proof.
 
 ## 1. Mission
 
@@ -76,6 +113,11 @@ semantics, or allocator internals** (FR-CB16). You consume exactly three surface
    `KVCache`, or retain-and-reattach its own blocks across turns, preserving
    **exact SPEC-024 token-granular LCP/trim including a mid-block boundary**
    (FR-CB4). This is how you keep cross-turn cache reuse eligible under batching.
+   **⚠ NOT YET REAL (2026-08-03, §0): deferred in merged #814 — only neutral
+   byte-materialization exists; the injectable contiguous-`KVCache` bridge is
+   unimplemented (`PagedKVContiguousCacheBridge`), tracked in #887.** Do NOT
+   consume or fake this surface in the first cut — serial-route cross-turn/sticky
+   requests per §0 and defer FR-CB4/AC-19 until #887 lands.
 
 ## 4. Concrete task list
 
@@ -305,7 +347,9 @@ sustained upside, acceptable tail latency + rejection rate, OPoI false-positive
 SPEC-039 handoff): `serve` self-re-execs into the INSTALLED binary, and a worktree
 `swift build` has no `mlx.metallib` — so this real-serve proof runs only from a
 **packaged release-candidate install** on a test provider, ideally a `>32 GB` Mac
-(the P0 #584 lab-Mac dependency). **Provider safety on the dev Mac:** it runs the
+(the recurring >32 GB-Mac enable-proof dependency; also requires the SPEC-039
+runtime bridge, #887, before any batched cache-reuse path can serve).
+**Provider safety on the dev Mac:** it runs the
 LIVE production provider — never broad `pkill`; use narrow `pgrep`; bootout the
 watchdog (`live.streamvc.macprovider-watchdog`) then the provider via graceful
 `launchctl bootout`, off-peak, and restore + verify serving after. Never print the
