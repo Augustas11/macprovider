@@ -1,6 +1,6 @@
 import ArgumentParser
 import Foundation
-import MacProviderCore
+@testable import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -259,6 +259,18 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.continuousBatchQueueLimit, 4)
     }
 
+    func testContinuousBatchingPlainYAMLOnAndOffPreserveRawThreeStateMode() throws {
+        for (raw, expected) in [("on", ContinuousBatchingMode.on), ("off", .off)] {
+            let config = try ConfigLoader.load(
+                cli: CLIOverrides(),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in "continuous_batching: \(raw)\n" }
+            )
+            XCTAssertEqual(config.continuousBatching, expected)
+        }
+    }
+
     func testContinuousBatchingRejectsInvalidMode() throws {
         XCTAssertThrowsError(try ConfigLoader.load(
             cli: CLIOverrides(continuousBatching: "maybe"),
@@ -283,6 +295,15 @@ final class ServingKnobsConfigTests: XCTestCase {
             environment: [:],
             fileExists: { _ in true },
             readFile: { _ in "continuous_batching: maybe\n" }
+        ))
+    }
+
+    func testContinuousBatchingRejectsBooleanYAMLMode() throws {
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching: true\n" }
         ))
     }
 
@@ -409,11 +430,38 @@ final class ServingKnobsConfigTests: XCTestCase {
 
     func testContinuousBatchQueueLimitPreflightRejectsZero() throws {
         var config = AppConfig.defaults()
+        config.continuousBatching = .canary
         config.continuousBatchQueueLimit = 0
         XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
     }
 
-    func testContinuousBatchingStrictOnFailsUntilUpstreamBatchAPIPinned() throws {
+    func testContinuousBatchQueueLimitPreflightRejectsExcessiveQueue() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatching = .canary
+        config.maxConcurrencyOverride = 2
+        config.continuousBatchQueueLimit = 17
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
+    func testContinuousBatchQueueLimitIsInertWhenContinuousBatchingIsOff() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatching = .off
+        config.maxConcurrencyOverride = 2
+        config.continuousBatchQueueLimit = 0
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+
+        config.continuousBatchQueueLimit = 17
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
+    func testContinuousBatchingPolicyBoundsConfiguredQueueToActiveRows() {
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.queueLimit(configured: Int.max, maxActiveRows: 2),
+            16
+        )
+    }
+
+    func testContinuousBatchingStrictOnRejectsBeforeProviderReadinessWithoutRuntimeBridge() throws {
         var config = AppConfig.defaults()
         config.continuousBatching = .on
         config.maxConcurrencyOverride = 2
@@ -436,7 +484,10 @@ final class ServingKnobsConfigTests: XCTestCase {
                 maxBatch: 2,
                 queueLimit: nil,
                 kvBits: kvBits,
-                draftConfigured: draftConfigured
+                draftConfigured: draftConfigured,
+                schedulerBackendAvailable: false,
+                pagedKVDecision: .disabled,
+                requestedTuple: nil
             )
             XCTAssertThrowsError(
                 try ContinuousBatchingPolicy.validateStrictStartup(capability),
@@ -451,12 +502,12 @@ final class ServingKnobsConfigTests: XCTestCase {
             }
         }
 
-        // Unpinned upstream batch API => 503 continuous_batching_unavailable.
+        // Missing local engine capability => fail closed before inference.
         assertStrictError(
             kvBits: nil,
             draftConfigured: false,
             expectedStatus: 503,
-            expectedCode: "continuous_batching_unavailable"
+            expectedCode: "continuous_batching_local_capability_unavailable"
         )
         // kv_bits requested => 400 continuous_batching_unsupported_kv_bits.
         assertStrictError(
@@ -482,26 +533,32 @@ final class ServingKnobsConfigTests: XCTestCase {
             maxBatch: 2,
             queueLimit: nil,
             kvBits: 4,
-            draftConfigured: true
+            draftConfigured: true,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
         )
         XCTAssertNil(capability.unsupportedReason)
         XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
     }
 
-    func testContinuousBatchingCanarySerialRoutesUnsupportedPin() throws {
+    func testContinuousBatchingCanaryAllowsRuntimeReasonCodedSerialRouting() throws {
         var config = AppConfig.defaults()
         config.continuousBatching = .canary
         config.maxConcurrencyOverride = 2
         XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
     }
 
-    func testContinuousBatchingPolicyReportsKvBitsBeforeMissingPin() {
+    func testContinuousBatchingPolicyReportsKvBitsBeforeLocalCapability() {
         let capability = ContinuousBatchingPolicy.capability(
             mode: .on,
             maxBatch: 2,
             queueLimit: nil,
             kvBits: 4,
-            draftConfigured: false
+            draftConfigured: false,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
         )
         XCTAssertEqual(capability.queueLimit, 4)
         XCTAssertEqual(capability.unsupportedReason, .kvBitsUnsupported)
@@ -513,10 +570,218 @@ final class ServingKnobsConfigTests: XCTestCase {
             maxBatch: 2,
             queueLimit: 9,
             kvBits: nil,
-            draftConfigured: true
+            draftConfigured: true,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
         )
         XCTAssertEqual(capability.queueLimit, 9)
         XCTAssertEqual(capability.unsupportedReason, .draftSpecDecodeMutualExclusion)
+    }
+
+    func testDraftEnabledDepthOneStrictOnUsesExistingSerialPath() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 1,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: true,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+
+        XCTAssertEqual(capability.unsupportedReason, .draftSpecDecodeMutualExclusion)
+        XCTAssertTrue(capability.shouldUseSerialPath)
+        XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+    }
+
+    func testContinuousBatchingActivationIsDescriptorMembership() throws {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 32,
+            modelID: "catalog/model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: false,
+            hardwareClass: "m4-max-64gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "dense-greedy-parity"
+        )
+        let exact = ContinuousBatchingRequestedTuple(
+            modelID: "catalog/model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: false,
+            hardwareClass: "m4-max-64gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "dense-greedy-parity",
+            poolEpoch: 1
+        )
+        let supported = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: exact
+        )
+        XCTAssertNil(supported.unsupportedReason)
+        XCTAssertFalse(supported.shouldUseSerialPath)
+
+        let mismatch = ContinuousBatchingRequestedTuple(
+            modelID: exact.modelID,
+            modelSHA256: String(repeating: "e", count: 64),
+            tokenizerSHA256: exact.tokenizerSHA256,
+            chatTemplateSHA256: exact.chatTemplateSHA256,
+            cacheClass: exact.cacheClass,
+            kvDType: exact.kvDType,
+            requiresMoE: exact.requiresMoE,
+            hardwareClass: exact.hardwareClass,
+            metallibSHA256: exact.metallibSHA256,
+            kernelIdentifier: exact.kernelIdentifier,
+            parityLabel: exact.parityLabel,
+            poolEpoch: exact.poolEpoch
+        )
+        let rejected = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: mismatch
+        )
+        XCTAssertEqual(rejected.unsupportedReason, .tupleNotAdvertised)
+        XCTAssertTrue(rejected.shouldUseSerialPath)
+    }
+
+    func testStickyCacheEligibleRequestSerialRoutesUntilBridgeExists() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            stickyCacheEligible: true,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertEqual(capability.unsupportedReason, .stickyCacheBridgeUnavailable)
+        XCTAssertTrue(capability.shouldUseSerialPath)
+    }
+
+    func testMoETupleRemainsUnsupportedUntilCorrectnessAndMSB04EvidenceExist() {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 32,
+            modelID: "catalog/moe-model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            supportedModelFamilies: ["qwen3_moe"],
+            supportsMoEDispatch: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity"
+        )
+        let tuple = ContinuousBatchingRequestedTuple(
+            modelID: descriptor.modelID,
+            modelSHA256: descriptor.modelSHA256,
+            tokenizerSHA256: descriptor.tokenizerSHA256,
+            chatTemplateSHA256: descriptor.chatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity",
+            poolEpoch: 1
+        )
+
+        let canary = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple
+        )
+        XCTAssertEqual(canary.unsupportedReason, .moePromotionEvidenceUnavailable)
+        XCTAssertTrue(canary.shouldUseSerialPath)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(canary),
+            "event=batching_unsupported action=serial_routed reason=moe_promotion_evidence_unavailable\n"
+        )
+
+        let strict = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple
+        )
+        XCTAssertEqual(strict.unsupportedReason, .moePromotionEvidenceUnavailable)
+        XCTAssertFalse(strict.shouldUseSerialPath)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
+            guard let apiError = error as? APIError else {
+                return XCTFail("expected APIError, got \(error)")
+            }
+            XCTAssertEqual(apiError.status, 400)
+            XCTAssertEqual(apiError.code, "continuous_batching_moe_promotion_evidence_unavailable")
+        }
+    }
+
+    func testStrictOnRejectsStickyRequestWithoutCacheBridge() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            stickyCacheEligible: true,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertEqual(capability.unsupportedReason, .stickyCacheBridgeUnavailable)
+        XCTAssertFalse(capability.shouldUseSerialPath)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+        XCTAssertNil(ContinuousBatchingPolicy.serialRouteTelemetryLine(capability))
+    }
+
+    func testStrictOnNeverSilentlySerialRoutesMissingLocalCapability() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertEqual(capability.unsupportedReason, .pagedKVDisabled)
+        XCTAssertFalse(capability.shouldUseSerialPath)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability))
     }
 
     // MARK: - Runtime threading
@@ -639,7 +904,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(observed.mode, .canary)
         XCTAssertEqual(observed.maxActiveRows, 3)
          XCTAssertEqual(observed.queueLimit, 5)
-         XCTAssertEqual(observed.unsupportedReason, .upstreamBatchAPIUnpinned)
+         XCTAssertEqual(observed.unsupportedReason, .pagedKVDisabled)
      }
 
     func testRuntimeDefaultMaxBatchIsOne() async throws {

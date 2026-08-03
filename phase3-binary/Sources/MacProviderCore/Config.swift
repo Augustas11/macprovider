@@ -182,10 +182,10 @@ public struct AppConfig: Equatable, Sendable {
             managedBy: nil,
             streamInterval: 1,
             prefillStepSize: 512,
+            continuousBatching: .off,
+            continuousBatchQueueLimit: nil,
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
-            continuousBatching: .off,
-            continuousBatchQueueLimit: nil
         )
     }
 }
@@ -410,8 +410,10 @@ public enum ConfigLoader {
         }
 
         let raw: Any?
+        let rawNode: Node?
         do {
             raw = try Yams.load(yaml: text)
+            rawNode = try Yams.compose(yaml: text)
         } catch {
             throw ConfigError.invalidYAML(path: path, underlying: String(describing: error))
         }
@@ -475,7 +477,17 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
-        try assign(&config.continuousBatching, from: dict, key: "continuous_batching", expected: "off, canary, or on")
+        if dict["continuous_batching"] != nil {
+            guard let rawMode = rawNode?["continuous_batching"]?.scalar?.string,
+                  let mode = ContinuousBatchingMode(rawValue: rawMode.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "continuous_batching",
+                    value: String(describing: dict["continuous_batching"]),
+                    expected: "off, canary, or on"
+                )
+            }
+            config.continuousBatching = mode
+        }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
         return config
     }
@@ -840,18 +852,6 @@ public enum ConfigLoader {
             throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
         }
         field = format
-    }
-
-    private static func assign(_ field: inout ContinuousBatchingMode, from dict: [String: Any], key: String, expected: String) throws {
-        guard let value = dict[key], !(value is NSNull) else { return }
-        if let bool = value as? Bool {
-            field = bool ? .on : .off
-            return
-        }
-        guard let string = value as? String, let mode = ContinuousBatchingMode(rawValue: string.lowercased()) else {
-            throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
-        }
-        field = mode
     }
 
     private static func assign(_ field: inout Int, from env: [String: String], env key: String, expected: String) throws {

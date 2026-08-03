@@ -1,5 +1,12 @@
 # BUILD IMPL — SPEC-038 continuous batching first implementation slice
 
+> **Historical / superseded:** this v0.1 scaffold prompt is retained only to
+> explain the absorbed PR #804 controls. Its upstream-pin activation theory is
+> not authoritative. Use
+> `audits/_prompts/BUILD_SPEC_038_V0_2_SCHEDULER_IMPL_PROMPT.md`; local SPEC-039
+> descriptor membership plus installed runtime capability is the only future
+> activation path.
+
 You are a senior systems engineer implementing SPEC-038 for the macprovider
 provider runtime. Work in a fresh worktree from `origin/main`; do not edit the
 canonical checkout. Treat `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md`

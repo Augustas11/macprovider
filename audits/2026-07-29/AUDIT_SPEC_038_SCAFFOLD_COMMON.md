@@ -1,16 +1,16 @@
 # Shared context — SPEC-038 continuous-batching scaffold BUILD audit
 
-Worktree: `/Users/augstar/macprovider-232-continuous-batching`
+Worktree: the isolated SPEC-038 scaffold worktree.
 Branch: `feature/232-continuous-batching` (one commit `709efbb5` ahead of `origin/main`).
 
 ## How to read the change under audit
 Run exactly:
 ```
-git -C /Users/augstar/macprovider-232-continuous-batching diff origin/main...HEAD
+git diff origin/main...HEAD
 ```
 That range IS the entire change you are auditing. Read the full files it touches
 for context, and read the normative spec:
-`/Users/augstar/macprovider-232-continuous-batching/specs/SPEC-038-continuous-batching.md`
+`specs/SPEC-038-continuous-batching.md`
 (authority domain `continuous-batching-serving`, requirements `SPEC-038-R001..R016`).
 
 ## What this change IS (audit against THIS intent — do not fault it for being this)

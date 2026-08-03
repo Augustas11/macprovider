@@ -1291,6 +1291,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
                 if didTimeout {
                     await self.cancelAllInFlightForDrainTimeout()
+                    // Cancellation is only a request to stop old-generation
+                    // work, not proof that the old container is quiescent.
+                    // Keep the old snapshot installed and fail this swap.
+                    throw DrainCancelledError()
                 }
                 await self.completeSwapAtomically(
                     container: container,
@@ -1329,27 +1333,46 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch
     }
 
-    func continuousBatchingCapabilityForTest() -> ContinuousBatchingCapability {
-        continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+    func continuousBatchingCapabilityForTest(stickyCacheEligible: Bool = false) -> ContinuousBatchingCapability {
+        continuousBatchingCapability(
+            draftConfigured: currentDraftModelID != nil,
+            stickyCacheEligible: stickyCacheEligible
+        )
     }
 
-    private func continuousBatchingCapability(draftConfigured: Bool) -> ContinuousBatchingCapability {
-        ContinuousBatchingPolicy.capability(
+    private func continuousBatchingCapability(
+        draftConfigured: Bool,
+        stickyCacheEligible: Bool
+    ) -> ContinuousBatchingCapability {
+        // The independently observed runtime tuple and scheduler backend are
+        // installed by the deferred SPEC-039 engine bridge. Do not manufacture
+        // a self-fulfilling tuple from the advertised descriptor.
+        let requestedTuple: ContinuousBatchingRequestedTuple? = nil
+        return ContinuousBatchingPolicy.capability(
             mode: continuousBatchingMode,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
             kvBits: kvBitsOverride,
-            draftConfigured: draftConfigured
+            draftConfigured: draftConfigured,
+            stickyCacheEligible: stickyCacheEligible,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: pagedKVAttachDecision,
+            requestedTuple: requestedTuple
         )
     }
 
-    private func applyContinuousBatchingPolicy(snapshot: RuntimeSnapshot) throws {
+    private func applyContinuousBatchingPolicy(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot
+    ) throws {
         let capability = continuousBatchingCapability(
-            draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil
+            draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
+            // v0.2 admits keyless fresh requests only. A conversation key is
+            // conservatively treated as sticky/cross-turn until the cache
+            // bridge can prove that it has no reusable state.
+            stickyCacheEligible: request.conversationKey != nil
         )
-        if continuousBatchingMode == .canary {
-            ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
-        }
+        ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
         try ContinuousBatchingPolicy.validateStrictStartup(capability)
     }
 
@@ -1616,9 +1639,9 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
-        try applyContinuousBatchingPolicy(snapshot: handle.snapshot)
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
                 return
@@ -1640,6 +1663,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
     }
@@ -1787,9 +1811,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let completionStartedAt = Date()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
-        try applyContinuousBatchingPolicy(snapshot: snapshot)
         if let testSpeculativeCompletion,
            Self.speculativeRoute(
                for: request,
@@ -2202,8 +2226,8 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
-        try applyContinuousBatchingPolicy(snapshot: snapshot)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         if let testSpeculativeStream,
