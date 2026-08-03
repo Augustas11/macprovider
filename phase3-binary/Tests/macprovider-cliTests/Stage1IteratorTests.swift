@@ -439,6 +439,467 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertGreaterThan(medianTPS, 0)
     }
 
+    // MARK: - Reasoning-model throughput fix
+
+    /// Reasoning models (gpt-oss-20b / Harmony) suppress their analysis
+    /// channel from `delta.content`, so the probe sees ZERO content
+    /// deltas AND — crucially — the provider reports `completion_tokens`
+    /// = 0 (visible-final only) for a probe that elicits no final answer.
+    /// The honest decode count lives in the additive vendor field
+    /// `macprovider_generated_completion_tokens`. This end-to-end test
+    /// drives the prober against a server that emits only empty-content
+    /// deltas + a usage chunk with `completion_tokens: 0` and the
+    /// generated-tokens field, and asserts the candidate is feasible with
+    /// positive throughput — NOT the 0 tok/s "invalid throughput"
+    /// infeasible verdict that pre-fix code (and a completion_tokens-only
+    /// fix) produced.
+    func testStage1ProberReasoningOnlyStreamUsesGeneratedTokens() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try reasoningOnlyUsageScript(generatedTokens: 40).path,
+            logDirectory: try temporaryDirectory(name: "stage1-reasoning-only-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 10, stopGraceSeconds: 1).probe(
+            model: "gpt-oss-20b",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(let medianTPS, _) = result else {
+            return XCTFail("reasoning-only stream must be feasible, got \(result)")
+        }
+        XCTAssertGreaterThan(medianTPS, 0,
+            "macprovider_generated_completion_tokens must yield positive throughput for reasoning models even when completion_tokens is 0")
+        // 40 decoded tokens / 2000ms provider decode window = 20 tok/s. The
+        // measured median must track the PROVIDER-reported decode rate, not
+        // a client-timed artifact.
+        XCTAssertEqual(medianTPS, 20.0, accuracy: 0.5,
+            "throughput must equal the provider-reported decode rate (40 tokens / 2000ms = 20 tok/s)")
+    }
+
+    /// Unit: reasoning-only finalization. No content deltas
+    /// (`firstTokenAt == nil`) but a decode-token count → throughput
+    /// derived from it over the full request window, TTFT finite.
+    func testFinalizeProbeMetricsReasoningOnlyStream() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let ended = started.addingTimeInterval(2.0)
+        // Branch 3: a decoded-token count but no provider timing and no
+        // visible token → divide by the full request window (conservative).
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 0,
+            usageDecodedTokens: 50,
+            usageGenerationMS: nil,
+            firstTokenAt: nil,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 25.0, accuracy: 0.0001,
+            "50 tokens / 2s full window = 25 tok/s")
+        XCTAssertEqual(metrics.ttftMS, 2_000, accuracy: 0.0001,
+            "no content token observed → TTFT falls back to full elapsed")
+        XCTAssertTrue(metrics.ttftMS.isFinite)
+    }
+
+    /// Unit: provider-timed path (branch 1). When the usage chunk carries
+    /// BOTH a decoded-token count and `macprovider_generation_ms`,
+    /// throughput = tokens / (generationMS / 1000) — the authoritative,
+    /// all-channel decode rate, independent of client-observed timing.
+    func testFinalizeProbeMetricsProviderTimedIsAuthoritative() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(0.2)
+        let ended = started.addingTimeInterval(1.2)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 10,
+            usageDecodedTokens: 12,
+            usageGenerationMS: 1_000,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 12.0, accuracy: 0.0001,
+            "12 decoded tokens / 1s provider decode window = 12 tok/s")
+        XCTAssertEqual(metrics.ttftMS, 200, accuracy: 0.0001)
+    }
+
+    /// Unit: the MIXED reasoning+final case that fixes the HIGH. A stream
+    /// with 5s of silent reasoning then 1s of visible final output reports
+    /// 110 total decoded tokens over a 6000ms provider decode window. The
+    /// client-observed content window (`ended - firstTokenAt` = 1s) would
+    /// wrongly yield 110 tok/s; the provider-timed path must yield
+    /// ≈18.3 tok/s.
+    func testFinalizeProbeMetricsMixedReasoningAndFinal() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(5.0)
+        let ended = started.addingTimeInterval(6.0)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 20,
+            usageDecodedTokens: 110,
+            usageGenerationMS: 6_000,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 110.0 / 6.0, accuracy: 0.01,
+            "110 tokens / 6s provider decode window ≈ 18.3 tok/s, NOT 110")
+        XCTAssertLessThan(metrics.throughputTPS, 20,
+            "must NOT report the content-window rate (110 tok/s)")
+        XCTAssertEqual(metrics.ttftMS, 5_000, accuracy: 0.0001)
+    }
+
+    /// Unit (code round-3 MEDIUM): a `usageGenerationMS` larger than the
+    /// observed request wall-time is malformed — the decode window is a
+    /// subset of the request. An overflowed `Int64.max` must NOT be trusted
+    /// (it would yield a garbage ~0 TPS "feasible" replicate); the provider
+    /// branch (1b) is skipped and finalization falls through to the
+    /// conservative client-timed window (1c here, since a visible token was
+    /// seen).
+    func testFinalizeProbeMetricsRejectsGenerationMSExceedingRequestWindow() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(0.2)
+        let ended = started.addingTimeInterval(1.2)
+
+        // Int64.max ms → absurdly larger than the 1.2s request → ignored.
+        let overflow = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 10,
+            usageDecodedTokens: 40,
+            usageGenerationMS: Int(Int64.max),
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        // Falls to 1c: decoded count (40) over the warm-generation window (1s).
+        XCTAssertEqual(overflow.throughputTPS, 40.0, accuracy: 0.0001,
+            "generation_ms > request window must be ignored, not trusted")
+
+        // A merely-too-large value (5s reported for a 1.2s request) is also
+        // rejected.
+        let tooLarge = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 10,
+            usageDecodedTokens: 40,
+            usageGenerationMS: 5_000,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(tooLarge.throughputTPS, 40.0, accuracy: 0.0001)
+    }
+
+    /// Unit: a `usageGenerationMS` within the observed request window (plus
+    /// tolerance) IS trusted as the provider decode window.
+    func testFinalizeProbeMetricsAcceptsGenerationMSWithinRequestWindow() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let ended = started.addingTimeInterval(2.0)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 0,
+            usageDecodedTokens: 40,
+            usageGenerationMS: 1_800,
+            firstTokenAt: nil,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 40.0 / 1.8, accuracy: 0.01,
+            "1800ms decode window inside the 2s request is authoritative")
+    }
+
+    /// Unit (code round-4 MEDIUM): a legacy stream with observed content but
+    /// a fallback token count of 0 (e.g. a whitespace-only delta whose word
+    /// split is empty) must NOT be infeasible — content was observed, so at
+    /// least one token counts. Preserves the prior `max(1, wordCount)` /
+    /// `max(1, deltaCount)` behavior.
+    func testFinalizeProbeMetricsContentObservedButZeroFallbackCountsAsOne() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(0.2)
+        let ended = started.addingTimeInterval(1.2)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 0,
+            usageDecodedTokens: nil,
+            usageGenerationMS: nil,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 1.0, accuracy: 0.0001,
+            "content observed → at least 1 token / 1s window = 1 tok/s, not infeasible")
+        XCTAssertTrue(metrics.throughputTPS.isFinite)
+        XCTAssertEqual(metrics.ttftMS, 200, accuracy: 0.0001)
+    }
+
+    /// Unit: content stream without a usage chunk (older serve builds).
+    /// Falls back (branch 2) to the content-delta count over the
+    /// generation window.
+    func testFinalizeProbeMetricsContentStreamWithoutUsage() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(0.2)
+        let ended = started.addingTimeInterval(1.2)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 10,
+            usageDecodedTokens: nil,
+            usageGenerationMS: nil,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 10.0, accuracy: 0.0001,
+            "10 deltas / 1s generation window = 10 tok/s")
+        XCTAssertEqual(metrics.ttftMS, 200, accuracy: 0.0001)
+    }
+
+    /// Unit: a decoded-token count present but `usageGenerationMS` == 0
+    /// (degenerate provider timing) must NOT divide by zero — the provider
+    /// branch (1b) requires ms >= 1. Round-2 code MEDIUM-2 branch order: the
+    /// authoritative decoded count (12) is preferred over the content-delta
+    /// fallback (10), divided by the warm-generation window (1c).
+    func testFinalizeProbeMetricsZeroGenerationMSFallsThrough() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(0.2)
+        let ended = started.addingTimeInterval(1.2)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 10,
+            usageDecodedTokens: 12,
+            usageGenerationMS: 0,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 12.0, accuracy: 0.0001,
+            "generationMS<1 → skip provider path; decoded count over the 1s warm window = 12 tok/s")
+        XCTAssertTrue(metrics.throughputTPS.isFinite)
+    }
+
+    /// Unit: truly empty generation (no content deltas AND no usage) →
+    /// throughput 0 with an infinite TTFT sentinel, preserving the
+    /// pre-existing infeasible verdict.
+    func testFinalizeProbeMetricsTrulyEmptyIsZero() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let ended = started.addingTimeInterval(1.0)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 0,
+            usageDecodedTokens: nil,
+            usageGenerationMS: nil,
+            firstTokenAt: nil,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 0)
+        XCTAssertEqual(metrics.ttftMS, .infinity)
+    }
+
+    /// Unit: an explicit decoded-token count of 0 also means nothing was
+    /// generated → throughput 0.
+    func testFinalizeProbeMetricsExplicitZeroUsageIsZero() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let ended = started.addingTimeInterval(1.0)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 0,
+            usageDecodedTokens: 0,
+            usageGenerationMS: nil,
+            firstTokenAt: nil,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 0)
+        XCTAssertEqual(metrics.ttftMS, .infinity)
+    }
+
+    /// Unit: the usage-chunk parser. Prefers the additive
+    /// `macprovider_generated_completion_tokens` (total decode count
+    /// incl. suppressed reasoning) over `completion_tokens`; falls back to
+    /// `completion_tokens` when the generated field is absent (older serve
+    /// builds); returns nil for ordinary content chunks, `[DONE]`, and
+    /// malformed payloads.
+    func testUsageDecodedTokensParsing() {
+        // Generated field present + completion_tokens 0 (the reasoning-only
+        // case): the generated field wins.
+        let reasoningChunk = #"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":0,"macprovider_generated_completion_tokens":57,"total_tokens":100}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: reasoningChunk), 57,
+            "generated-tokens field must win over completion_tokens")
+
+        // Generated field present alongside a non-zero completion_tokens:
+        // still prefer the (larger) generated total (both within the
+        // max_tokens cap).
+        let bothChunk = #"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":12,"macprovider_generated_completion_tokens":60,"total_tokens":112}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: bothChunk), 60)
+
+        // Older serve build without the generated field → fall back to
+        // completion_tokens.
+        let legacyChunk = #"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":42,"total_tokens":142}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: legacyChunk), 42)
+
+        let contentChunk = #"{"choices":[{"delta":{"content":"hi"}}]}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: contentChunk))
+
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: "[DONE]"))
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: "not-valid-json"))
+
+        let usageNoTokens = #"{"choices":[],"usage":{"prompt_tokens":100}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: usageNoTokens))
+    }
+
+    /// Unit: hardened usage-chunk parser rejects malformed/hostile values.
+    /// Each must return nil so finalization falls back rather than trusting
+    /// an inflated or nonsensical count.
+    func testUsageDecodedTokensParserHardening() {
+        // Boolean masquerading as a number (JSON `true` bridges to NSNumber).
+        let boolChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":true}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: boolChunk),
+            "boolean token count must be rejected")
+
+        // Fractional (non-integral) value.
+        let fractionalChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":12.5}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: fractionalChunk),
+            "fractional token count must be rejected")
+
+        // Negative value.
+        let negativeChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":-3}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: negativeChunk),
+            "negative token count must be rejected")
+
+        // Int.max — an overflow/garbage sentinel far above the cap.
+        let intMaxChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":9223372036854775807}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: intMaxChunk),
+            "Int.max token count must be rejected")
+
+        // Greater than the probe's max_tokens cap (64): an honest provider
+        // cannot decode more completion tokens than the cap.
+        let oversizedChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":65}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: oversizedChunk),
+            "value > maxTokens must be rejected")
+        // Exactly the cap is valid.
+        let atCapChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":64}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: atCapChunk), 64)
+
+        // A content chunk that ALSO carries usage (non-empty choices) must
+        // NOT be treated as the terminal usage chunk.
+        let contentWithUsage = #"{"choices":[{"delta":{"content":"hi"}}],"usage":{"macprovider_generated_completion_tokens":50}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: contentWithUsage),
+            "non-empty choices must not be treated as terminal usage chunk")
+
+        // The valid reasoning chunk still parses.
+        let validChunk = #"{"choices":[],"usage":{"completion_tokens":0,"macprovider_generated_completion_tokens":57}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: validChunk), 57)
+    }
+
+    /// Unit: `usageGenerationMS` parser — terminal-shape checks plus a
+    /// non-boolean, finite, integral, nonnegative whole-millisecond value.
+    func testUsageGenerationMSParsing() {
+        let validChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":40,"macprovider_generation_ms":2000}}"#
+        XCTAssertEqual(Stage1Prober.usageGenerationMS(from: validChunk), 2000)
+
+        // Round-2 security HIGH: the provider emits whole-ms Int64. A
+        // fractional value is malformed and must be rejected (a lenient Double
+        // accepting `0.001` inflated throughput by ~10^6).
+        let fractionalChunk = #"{"choices":[],"usage":{"macprovider_generation_ms":1234.5}}"#
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: fractionalChunk),
+            "fractional generation_ms must be rejected")
+
+        // Sub-millisecond fraction (the exact HIGH exploit value) rejected.
+        let subMsChunk = #"{"choices":[],"usage":{"macprovider_generation_ms":0.001}}"#
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: subMsChunk),
+            "0.001ms must be rejected, not accepted as a 10^6x TPS multiplier")
+
+        // An integral value encoded as a JSON float (e.g. 2000.0) is still a
+        // whole number of ms and is accepted.
+        let integralFloatChunk = #"{"choices":[],"usage":{"macprovider_generation_ms":2000.0}}"#
+        XCTAssertEqual(Stage1Prober.usageGenerationMS(from: integralFloatChunk), 2000)
+
+        // Zero is a valid, finite, integral, nonnegative value (the caller's
+        // finalization treats ms < 1 as "no usable timing").
+        let zeroChunk = #"{"choices":[],"usage":{"macprovider_generation_ms":0}}"#
+        XCTAssertEqual(Stage1Prober.usageGenerationMS(from: zeroChunk), 0)
+
+        // Boolean rejected.
+        let boolChunk = #"{"choices":[],"usage":{"macprovider_generation_ms":true}}"#
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: boolChunk))
+
+        // Negative rejected.
+        let negativeChunk = #"{"choices":[],"usage":{"macprovider_generation_ms":-5}}"#
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: negativeChunk))
+
+        // Non-empty choices rejected.
+        let contentWithUsage = #"{"choices":[{"delta":{"content":"hi"}}],"usage":{"macprovider_generation_ms":2000}}"#
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: contentWithUsage))
+
+        // Absent field → nil.
+        let noField = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":40}}"#
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: noField))
+
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: "[DONE]"))
+        XCTAssertNil(Stage1Prober.usageGenerationMS(from: "not-valid-json"))
+    }
+
+    /// Round-2 security HIGH: a valid integer ms drives the provider-timed
+    /// branch, and the denominator is floored at 1 ms (0.001s) so throughput
+    /// stays bounded even at the minimum reportable window. The pre-fix lenient
+    /// Double path let `0.001` ms give `64 / (0.001/1000)` = 64,000,000 TPS;
+    /// the floored integer path caps ms=1 at `64 / 0.001s` = 64,000 TPS.
+    func testFinalizeProbeMetricsProviderTimedUsesOneMillisecondFloor() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let ended = started.addingTimeInterval(2.0)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 0,
+            usageDecodedTokens: 64,
+            usageGenerationMS: 1,
+            firstTokenAt: nil,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 64.0 / 0.001, accuracy: 0.0001,
+            "ms=1 floors the denominator at 0.001s → 64,000 TPS, not an unbounded value")
+        XCTAssertTrue(metrics.throughputTPS.isFinite)
+    }
+
+    /// Round-2 code MEDIUM-2 (Fix D): an authoritative decoded-count of 0 means
+    /// the provider decoded nothing — infeasible — even when a stray content
+    /// delta was observed and a first-token time exists. The count is
+    /// authoritative over the content fallback.
+    func testFinalizeProbeMetricsAuthoritativeZeroBeatsContentFallback() {
+        let started = Date(timeIntervalSince1970: 1_000)
+        let firstTokenAt = started.addingTimeInterval(0.2)
+        let ended = started.addingTimeInterval(1.2)
+        let metrics = Stage1Prober.finalizeProbeMetrics(
+            contentFallbackTokens: 1,
+            usageDecodedTokens: 0,
+            usageGenerationMS: nil,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
+        XCTAssertEqual(metrics.throughputTPS, 0,
+            "authoritative decoded-count 0 → infeasible regardless of observed content")
+        XCTAssertEqual(metrics.ttftMS, .infinity)
+    }
+
+    /// Round-2 code MEDIUM-1 (Fix C): when the namespaced generated field is
+    /// PRESENT but invalid, the parser returns nil and must NOT silently fall
+    /// back to `completion_tokens`.
+    func testUsageDecodedTokensPresentButInvalidDoesNotFallBack() {
+        // Generated > maxTokens cap (65 > 64) with a valid completion_tokens 32:
+        // present-but-invalid → nil, NOT 32.
+        let overCapChunk = #"{"choices":[],"usage":{"completion_tokens":32,"macprovider_generated_completion_tokens":65}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: overCapChunk),
+            "present-but-over-cap generated field must yield nil, not fall back to completion_tokens")
+
+        // Generated boolean with a valid completion_tokens 20 → nil.
+        let boolChunk = #"{"choices":[],"usage":{"completion_tokens":20,"macprovider_generated_completion_tokens":true}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: boolChunk),
+            "present-but-boolean generated field must yield nil, not fall back to completion_tokens")
+
+        // Generated JSON null (present as NSNull) with valid completion_tokens → nil.
+        let nullChunk = #"{"choices":[],"usage":{"completion_tokens":20,"macprovider_generated_completion_tokens":null}}"#
+        XCTAssertNil(Stage1Prober.usageDecodedTokens(from: nullChunk),
+            "present-but-null generated field must yield nil, not fall back to completion_tokens")
+
+        // Sanity: when the generated field is genuinely ABSENT, completion_tokens
+        // is still used (unchanged fallback behavior).
+        let absentChunk = #"{"choices":[],"usage":{"completion_tokens":20}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: absentChunk), 20,
+            "absent generated field → fall back to completion_tokens")
+    }
+
     /// Round-1 K.1 closure: persistence-field assertion. The iterator
     /// MUST write Stage 1 rows with `stage = 1`, `replicates_n = stage1Replicates`,
     /// `max_context_cap = targetContext`, `kv_bits = NULL`,
@@ -952,6 +1413,104 @@ final class Stage1IteratorTests: XCTestCase {
                 time.sleep(delay)
                 chunk = json.dumps({"choices":[{"delta":{"content":response_text}}]})
                 client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// Emits a reasoning-model stream faithful to the real provider:
+    /// empty-content deltas (the visible analysis channel gpt-oss
+    /// suppresses) followed by the terminal usage chunk with
+    /// `completion_tokens: 0` (visible-final only, as the real provider
+    /// reports when a probe elicits no final answer) AND the additive
+    /// `macprovider_generated_completion_tokens` carrying the honest total
+    /// decode count. The prober must derive throughput from the generated
+    /// field, not the (zero) content deltas or the (zero) completion_tokens.
+    private func reasoningOnlyUsageScript(generatedTokens: Int) throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-reasoning-only-provider")
+        let scriptURL = directory.appendingPathComponent("reasoning-only-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys, time
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 reasoning-only provider ready", flush=True)
+
+        generated_tokens = \(generatedTokens)
+        generation_ms = generated_tokens * 50
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                # Reasoning models emit empty-content deltas (the parser
+                # skips them) while generating suppressed analysis tokens.
+                for _ in range(3):
+                    chunk = json.dumps({"choices":[{"delta":{"content":""}}]})
+                    client.sendall(f"data: {chunk}\\n\\n".encode())
+                # Spend real wall-time equal to the decode window we report,
+                # so the observed request duration contains it (the probe
+                # rejects a generation_ms larger than the request window).
+                time.sleep(generation_ms / 1000.0)
+                # Terminal usage chunk: completion_tokens is the visible-
+                # final count (0 for a reasoning-only probe); the honest
+                # total decode count is the macprovider vendor field.
+                usage_chunk = json.dumps({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 51,
+                        "completion_tokens": 0,
+                        "macprovider_generated_completion_tokens": generated_tokens,
+                        # Provider-measured warm-decode wall-time. 50ms/token
+                        # → generated_tokens / (ms/1000) = 20 tok/s for the
+                        # 40-token fixture, the authoritative decode rate the
+                        # probe must report.
+                        "macprovider_generation_ms": generation_ms,
+                        "total_tokens": 51,
+                    },
+                })
+                client.sendall(f"data: {usage_chunk}\\n\\n".encode())
                 client.sendall(b"data: [DONE]\\n\\n")
                 client.close()
                 continue

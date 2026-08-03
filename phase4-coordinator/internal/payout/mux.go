@@ -42,8 +42,12 @@ type PathTableEntry struct {
 // own entries; the audit-verifier asserts that no handler
 // escapes this declaration. EXACT-MATCH chi patterns only — no
 // trailing-slash prefix routes.
+//
+// GET .../payout-address/challenge is the read-only EIP-712 domain
+// challenge used by Malibu "Add wallet" (hot wallet rotates §6.4).
 var step1PathTable = []PathTableEntry{
 	{Method: http.MethodPost, Path: "/providers/{provider_id}/payout-address", Realm: RealmProviderToken},
+	{Method: http.MethodGet, Path: "/providers/{provider_id}/payout-address/challenge", Realm: RealmProviderToken},
 }
 
 // step2PathTable extends step1PathTable with the Step 2 admin
@@ -94,8 +98,9 @@ func NewMux(addresses *AddressesService, fallback http.Handler) (http.Handler, e
 	}
 	r := chi.NewRouter()
 
-	// §3.3 handler — provider_token auth.
+	// §3.3 handlers — provider_token auth.
 	r.Post("/providers/{provider_id}/payout-address", addresses.ServePayoutAddress)
+	r.Get("/providers/{provider_id}/payout-address/challenge", addresses.ServePayoutChallenge)
 
 	// Everything else under /providers/ delegates to the
 	// fallback. The route is registered with chi so the path-
@@ -158,6 +163,7 @@ func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
 	r := chi.NewRouter()
 
 	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
+	r.Get("/providers/{provider_id}/payout-address/challenge", opts.Addresses.ServePayoutChallenge)
 	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
 
 	// Operator-key auth shim for the admin routes.
@@ -229,6 +235,7 @@ func NewMuxStep3(opts Step3MuxOptions) (http.Handler, error) {
 	r := chi.NewRouter()
 
 	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
+	r.Get("/providers/{provider_id}/payout-address/challenge", opts.Addresses.ServePayoutChallenge)
 	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
 
 	auth := operatorKeyMiddleware(opts.OperatorKey)
@@ -315,8 +322,9 @@ func NewMuxStep4(opts Step4MuxOptions) (http.Handler, error) {
 	}
 	r := chi.NewRouter()
 
-	// Step 1: §3.3 provider-token registration handler.
+	// Step 1: §3.3 provider-token registration handlers.
 	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
+	r.Get("/providers/{provider_id}/payout-address/challenge", opts.Addresses.ServePayoutChallenge)
 	// Step 4: §7.3 provider-token payouts read endpoint.
 	r.Get("/providers/{provider_id}/payouts", opts.Payouts.ServePayouts)
 	// Fallback wildcard for non-payout /providers/* paths.

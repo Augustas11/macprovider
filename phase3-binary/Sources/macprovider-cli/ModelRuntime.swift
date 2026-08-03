@@ -1991,6 +1991,15 @@ actor ModelRuntime: ModelRuntimeServing {
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // Autotune throughput probe: measure warm-decode
+                    // wall-time on the provider so the client can derive an
+                    // honest decode rate even for reasoning models whose
+                    // analysis channel is silent in the SSE stream. Fires on
+                    // the first decoded token of ANY channel (reasoning or
+                    // final) inside the generate closure below; the duration
+                    // to the generate result is reported as
+                    // `macprovider_generation_ms`.
+                    let decodeTimer = FirstTokenRecorder()
                     // SPEC-037 FR-KVP2.5: speculative-decode routing is
                     // determined BEFORE any conversation-cache begin(). A
                     // speculative-routed request acquires no lease, triggers no
@@ -2019,6 +2028,13 @@ actor ModelRuntime: ModelRuntimeServing {
                             drainCancelled: drainCancelled,
                             blockingInferenceExecutor: blockingInferenceExecutor
                         )
+                        // Warm-decode wall-time for the speculative path.
+                        // collectSpeculativeText owns its own decode loop and
+                        // does not fire `decodeTimer`, so this resolves to nil
+                        // here; the field is passed for construction-site parity
+                        // with the non-speculative path.
+                        let decodeEndedAt = Date()
+                        let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
 
@@ -2063,6 +2079,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             promptTokens: promptTokenIds.count,
                             cachedPromptTokens: 0,
                             completionTokens: generated.generationTokenCount,
+                            generationMilliseconds: generationMS,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             specDecodeDraftedTokens: generated.draftedTokens,
@@ -2133,6 +2150,16 @@ actor ModelRuntime: ModelRuntimeServing {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                             BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                 EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
+                                // Round-2 code LOW: only start the decode timer
+                                // on a callback that actually carries a token.
+                                // An empty first callback would otherwise start
+                                // the clock during prefill and inflate the
+                                // measured decode window. Mirrors the
+                                // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
+                                // guards elsewhere in this file.
+                                if !tokens.isEmpty {
+                                    decodeTimer.recordIfMissing()
+                                }
                                 if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
                                     return .stop
                                 }
@@ -2206,6 +2233,13 @@ actor ModelRuntime: ModelRuntimeServing {
                                 return .more
                             })
                         }
+                        // Warm-decode wall-time: from the first decoded token
+                        // (any channel) to the generate result. Reported to the
+                        // client as `macprovider_generation_ms` so the autotune
+                        // probe can divide total decoded tokens by this window
+                        // even when the reasoning channel is silent in SSE.
+                        let decodeEndedAt = Date()
+                        let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
                         if shouldCancel() {
@@ -2292,6 +2326,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             kvCacheBytesReused: kvCacheBytesReused,
                             completionTokens: parsed.completionTokens,
                             generatedCompletionTokens: parsed.generatedCompletionTokens,
+                            generationMilliseconds: generationMS,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                         )
@@ -3339,6 +3374,10 @@ actor ModelRuntime: ModelRuntimeServing {
             completionTokens: completion.completionTokens,
             generatedCompletionTokens: completion.generatedCompletionTokens,
             ttftMilliseconds: completion.ttftMilliseconds,
+            // Architect LOW: forward the decode-window so the structured
+            // streaming path's usage carries `macprovider_generation_ms`
+            // instead of null, matching the non-structured path.
+            generationMilliseconds: completion.generationMilliseconds,
             toolCalls: completion.toolCalls,
             modelHashObserved: completion.modelHashObserved,
             specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
@@ -3923,6 +3962,7 @@ struct CompletionResult: Sendable {
     let completionTokens: Int
     let generatedCompletionTokens: Int
     let ttftMilliseconds: Int64?
+    let generationMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?
     let specDecodeDraftedTokens: Int
@@ -3938,6 +3978,7 @@ struct CompletionResult: Sendable {
         completionTokens: Int,
         generatedCompletionTokens: Int? = nil,
         ttftMilliseconds: Int64? = nil,
+        generationMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
         modelHashObserved: String? = nil,
         specDecodeDraftedTokens: Int = 0,
@@ -3955,6 +3996,7 @@ struct CompletionResult: Sendable {
         self.completionTokens = completionTokens
         self.generatedCompletionTokens = max(0, generatedCompletionTokens ?? completionTokens)
         self.ttftMilliseconds = ttftMilliseconds
+        self.generationMilliseconds = generationMilliseconds
         self.toolCalls = toolCalls
         self.modelHashObserved = modelHashObserved
         self.specDecodeDraftedTokens = max(0, specDecodeDraftedTokens)
@@ -3973,6 +4015,7 @@ struct CompletionResult: Sendable {
             completionTokens: completionTokens,
             generatedCompletionTokens: generatedCompletionTokens,
             ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
             toolCalls: toolCalls,
             modelHashObserved: observed,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
@@ -4001,6 +4044,12 @@ private final class FirstTokenRecorder: @unchecked Sendable {
             return nil
         }
         return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
+    }
+
+    func durationMilliseconds(until end: Date) -> Int64? {
+        lock.lock(); defer { lock.unlock() }
+        guard let timestamp else { return nil }
+        return max(0, Int64(end.timeIntervalSince(timestamp) * 1000))
     }
 }
 

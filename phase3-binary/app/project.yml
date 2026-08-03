@@ -23,8 +23,8 @@ settings:
     SWIFT_VERSION: "5.9"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Manual
-    MARKETING_VERSION: "1.8.46"
-    CURRENT_PROJECT_VERSION: "46"
+    MARKETING_VERSION: "1.8.47"
+    CURRENT_PROJECT_VERSION: "47"
     OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
 
 targets:
@@ -36,8 +36,20 @@ targets:
       - path: Sources/Malibu
         excludes:
           - "**/*.md"
+          # H2: keep payout-signer out of the source scan too — otherwise
+          # signer.html / ethers.min.js are swept in as FLAT Copy-Bundle-
+          # Resources entries. They are packaged as a folder by the
+          # "Bundle payout-signer" post-build step instead.
+          - "Resources/payout-signer/**"
     resources:
-      - Sources/Malibu/Resources
+      # payout-signer is deliberately EXCLUDED here and copied as a directory
+      # by the "Bundle payout-signer" post-build step below. XcodeGen 2.45.4's
+      # `type: folder` still emits a group that FLATTENS the two files to
+      # Contents/Resources/* — which breaks the runtime lookup at
+      # Contents/Resources/payout-signer/ (H2). The copy step preserves the
+      # folder, matching the existing install.sh packaging pattern.
+      - Sources/Malibu/Resources/Assets.xcassets
+      - Sources/Malibu/Resources/Brand
     entitlements:
       path: Malibu.entitlements
     info:
@@ -66,6 +78,17 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           install -m 755 "${SRCROOT}/../dist/install.sh" "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/install.sh"
+      # H2: package the payout-signer as a FOLDER so the Add-wallet flow can
+      # resolve Contents/Resources/payout-signer/{signer.html,ethers.min.js}
+      # at runtime. Runs before code signing so the files are sealed.
+      - name: Bundle payout-signer
+        basedOnDependencyAnalysis: false
+        script: |
+          SRC="${SRCROOT}/Sources/Malibu/Resources/payout-signer"
+          DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/payout-signer"
+          /bin/mkdir -p "${DEST}"
+          install -m 644 "${SRC}/signer.html" "${DEST}/signer.html"
+          install -m 644 "${SRC}/ethers.min.js" "${DEST}/ethers.min.js"
   # AUDIT R1 ARCHITECT A8 fix: unit-test the audit-critical app-side surfaces
   # (codec parity vs CLI, URL-scheme nonce validation, snapshot presenter,
   # config CRLF handling). Runs under xcodebuild test -scheme Malibu.

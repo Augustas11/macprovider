@@ -159,6 +159,27 @@ type Runner struct {
 	//
 	// Single-threaded under mu+inFlight; cleared in RunOnce defer.
 	runningBalance *big.Int
+
+	// recoveryOnly latches the R2-HIGH "recovery-only cycle" mode:
+	// checkNonceGap returned gapRecoveryOnly (a rebroadcastable
+	// crash-recovery attempt sits at the on-chain pending nonce, one
+	// below the DB cursor). In this mode the row loop still drives
+	// recovery rebroadcast + all unrelated in-flight polls/confirms,
+	// but the single terminal fresh-allocation call site in processRow
+	// is suppressed (returns rowOutcomeSkipped) so NO fresh nonce is
+	// allocated past the unfilled hole this cycle. Set by RunOnce's
+	// gap switch and cleared in the same cycle's defer. Single-threaded
+	// under mu+inFlight.
+	recoveryOnly bool
+	// gapRecoveryObservedNonce / gapRecoveryExpectedNonce carry the
+	// on-chain observed pending nonce and the DB cursor's expected nonce
+	// captured by checkNonceGap on the gapRecoveryOnly path. They exist
+	// ONLY so RunOnce can emit the per-cycle payout_nonce_gap_recovery_only
+	// diagnostic (from_address + observed/expected + ts) — they are never
+	// used to target or drive an attempt. Meaningful only while
+	// recoveryOnly is true; single-threaded under mu+inFlight.
+	gapRecoveryObservedNonce uint64
+	gapRecoveryExpectedNonce uint64
 }
 
 // hotWalletBalance returns the cycle-scoped running USDC balance
@@ -517,6 +538,48 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 	// the cycle.
 	r.opts.ChronicOutage.Evaluate(ctx, now)
 
+	// SPEC-016 §7.1 payout_nonce_gap pre-check. Runs ONCE per cycle
+	// BEFORE the §4.3 step 1 SELECT and BEFORE any fresh nonce
+	// allocation. A confirmed gap (on-chain pending nonce fell BEHIND
+	// the DB cursor via an abandoned-unfilled hole) HALTS the whole
+	// cadence cycle for the single hot wallet: no rows are processed,
+	// nothing is allocated/built/broadcast, and NO automatic gap-fill
+	// is attempted. Per-cycle skip only — the next cadence cycle
+	// re-checks against fresh on-chain state.
+	// R2-HIGH tri-state gate (architect Option A). gapHalt returns
+	// without processing rows; gapProceed runs the normal cycle;
+	// gapRecoveryOnly latches r.recoveryOnly so the row loop drives
+	// recovery + unrelated in-flight work but processRow suppresses the
+	// single fresh-allocation call site (no fresh nonce past the hole).
+	decision, err := r.checkNonceGap(ctx, now)
+	if err != nil {
+		return runID, fmt.Errorf("checkNonceGap: %w", err)
+	}
+	switch decision {
+	case gapHalt:
+		return runID, nil
+	case gapRecoveryOnly:
+		r.recoveryOnly = true
+		defer func() { r.recoveryOnly = false }()
+		// Per-cycle §7.1 diagnostic: a rebroadcastable crash-recovery
+		// attempt sits at the on-chain pending nonce, so this cycle
+		// suppresses fresh allocation and lets the normal row loop drive
+		// the recovery rebroadcast + all unrelated in-flight work. Emitted
+		// EVERY recovery-only cycle so an unselectable-recovery fail-closed
+		// PAUSE (payout_allowed=0 / cooling-off / off-page) is visible to
+		// the operator rather than a silent payout stall.
+		r.opts.Logger.Warn().
+			Str("event", "payout_nonce_gap_recovery_only").
+			Str("run_id", runID).
+			Str("from_address", strings.ToLower(r.opts.Security.HotWalletAddress)).
+			Uint64("expected_nonce", r.gapRecoveryExpectedNonce).
+			Uint64("observed_pending_nonce", r.gapRecoveryObservedNonce).
+			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+			Send()
+	case gapProceed:
+		// normal cycle
+	}
+
 	// §4.3 step 1: SELECT ready rows.
 	hotWallet := r.opts.Security.HotWalletAddress
 	rows, err := SelectReadyPayouts(ctx, r.opts.DB, hotWallet, now.Format(time.RFC3339Nano), snap.MaxRowsPerRun)
@@ -645,6 +708,189 @@ func (r *Runner) currentHotWalletUSDCBalance(ctx context.Context) (*big.Int, err
 		return nil, fmt.Errorf("currentHotWalletUSDCBalance: parse failed")
 	}
 	return bal, nil
+}
+
+// gapDecision is the tri-state result of the §7.1 nonce-gap pre-check
+// (R2-HIGH, architect Option A). It replaces the old (bool halt, error)
+// return so a rebroadcastable-at-observed hole no longer collapses into
+// a blanket "proceed" that lets the row loop allocate past the hole.
+type gapDecision int
+
+const (
+	// gapProceed: no gap to guard (no cursor yet, or observed >=
+	// expected). Normal cycle — fresh allocation may happen.
+	gapProceed gapDecision = iota
+	// gapHalt: fail-closed. Nonce state unverifiable, a real abandon
+	// hole, or a reorg-suspect chain contradiction. RunOnce returns
+	// without processing any row this cycle.
+	gapHalt
+	// gapRecoveryOnly: a rebroadcastable crash-recovery attempt sits at
+	// the on-chain pending nonce (observed = expected-1). The cycle
+	// proceeds to drive that attempt's rebroadcast + all unrelated
+	// in-flight polls/confirms, but the single terminal fresh-allocation
+	// call site in processRow is suppressed so NO fresh nonce is
+	// allocated past the unfilled hole this cycle.
+	gapRecoveryOnly
+)
+
+// checkNonceGap performs the SPEC-016 §7.1 payout_nonce_gap (WARN)
+// pre-check ONCE per cadence cycle, BEFORE any fresh nonce is
+// allocated. It guards fresh nonce allocation: the on-chain pending
+// nonce having fallen BEHIND the DB cursor (observed_pending_nonce <
+// expected_nonce) means nonce `observed` is not yet mined, so allocating
+// N+1 into that hole would stall the money path on-chain. This is a
+// SAFETY GATE, so it fails CLOSED: every path that cannot POSITIVELY
+// prove the hole is benign crash-recovery HALTS the cycle (return
+// halt=true after emitting the right diagnostic) rather than falling
+// through to allocation. RunOnce then skips ALL rows this cycle for the
+// single hot wallet — no allocate/build/broadcast and NO automatic
+// gap-fill. The next cadence cycle re-checks against fresh on-chain
+// state. This is a per-cycle skip, NOT a runner halt (RequestHalt stays
+// reserved for §7.4 negative-drift).
+//
+// Decision table (each path maps to a concrete RPC/DB check):
+//   - no cursor yet                         → cold-start incomplete; cannot
+//     compute a gap → proceed (nothing to guard yet)
+//   - two-RPC read error / >1 disagreement  → nonce state UNVERIFIABLE →
+//     HALT fail-closed (emit payout_nonce_gap_precheck_skipped). A
+//     transient blip is re-checked next cycle; a chronic RPC outage is
+//     separately PAGEd by the chronic-outage detector. This must NOT fall
+//     through to allocation — an unverified cursor is exactly when a hole
+//     could be allocated into.
+//   - observed >= expected                  → steady state (==) or an
+//     out-of-band spend (observed>expected is a DIFFERENT pathology,
+//     NOT payout_nonce_gap) → proceed
+//   - observed < expected: a nonce MAY be missing. Resolve via the
+//     payout_attempts row at nonce == observed, in this order:
+//     1. rebroadcastable attempt AT observed → benign crash-recovery
+//     (bytes re-broadcast next cycle) → PROCEED. This is the ONLY
+//     proceed path in the observed<expected branch.
+//     2. abandoned/unconfirmed/non-cancel CAUSE AT observed → real
+//     abandon hole → emit payout_nonce_gap (WARN) → HALT.
+//     3. otherwise (a confirmed row AT observed, OR nothing at observed)
+//     → chain-contradicted / unexplained. Because observed is not yet
+//     mined, any confirmed_at_utc row at `observed` is stale-by-
+//     definition (reorged-out inside the reorg window), so it must
+//     NOT suppress the gap. Emit payout_nonce_gap_reorg_suspect (info)
+//     → HALT. The reorg poller (reorg.go) independently detects and
+//     reconciles the stale row and emits its own payout_reorg_*
+//     alerts; this halt only prevents allocating into the hole
+//     meanwhile.
+//
+// This also closes a latent stall: an operator abandon WITHOUT a cancel
+// (§4.6 permits broadcast_cancel_self_transfer:false) leaves the
+// abandoned row out of LookupExistingLatest, so cancelsBlockFresh stays
+// false and processRow would allocate N+1 into the hole and stall
+// silently on-chain. The halt here fires in exactly that state.
+//
+// R2-HIGH (architect Option A): the rebroadcastable-at-observed path no
+// longer returns a blanket "proceed" — that let the row loop fresh-
+// allocate N+1 past the unfilled hole whenever the recovery attempt was
+// not selected by SelectReadyPayouts or its rebroadcast failed, stalling
+// the whole hot wallet on-chain. It now returns gapRecoveryOnly: the
+// cycle proceeds far enough to drive recovery + unrelated in-flight
+// work, but suppresses fresh allocation. See gapDecision.
+func (r *Runner) checkNonceGap(ctx context.Context, now time.Time) (gapDecision, error) {
+	hotWallet := r.opts.Security.HotWalletAddress
+	expected, ok, err := ReadNonceCursor(ctx, r.opts.DB, hotWallet)
+	if err != nil {
+		return gapHalt, fmt.Errorf("ReadNonceCursor: %w", err)
+	}
+	if !ok {
+		return gapProceed, nil
+	}
+
+	// Per-cycle two-RPC pending-nonce read, reusing the audited
+	// ColdStartNonceSync discipline (both RPCs, "pending" tag, ±1
+	// tolerance, chosen = max). observed = chosen. A returned error is
+	// either a transient RPC failure OR a >1 cross-RPC disagreement;
+	// both mean "skip the gap check this cycle" — NOT a gap.
+	observed, _, _, _, err := r.opts.RPCs.ColdStartNonceSync(ctx, hotWallet)
+	if err != nil {
+		// Nonce state is UNVERIFIABLE this cycle (transient RPC failure OR
+		// a >1 cross-RPC disagreement). Fail CLOSED: HALT rather than
+		// allocate against an unverified cursor — an unverified read is
+		// exactly the state in which a fresh N+1 could be dropped into a
+		// hole and stall. Info diagnostic only; a chronic RPC outage is
+		// separately PAGEd by the chronic-outage detector. Redact the raw
+		// error (an RPC URL can carry a secret) — log only a classified
+		// error class, never err.Error()/the URL.
+		r.opts.Logger.Warn().
+			Str("event", "payout_nonce_gap_precheck_skipped").
+			Str("error_class", classifyRPCErr(err)).
+			Str("from_address", strings.ToLower(hotWallet)).
+			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+			Send()
+		return gapHalt, nil
+	}
+
+	if observed >= expected {
+		return gapProceed, nil
+	}
+
+	// observed < expected: a nonce MAY be missing at nonce == observed.
+	// Resolve via the payout_attempts row there. Fail closed on everything
+	// except a positively-benign crash-recovery.
+
+	// 1. Rebroadcastable attempt AT observed → benign crash-recovery; the
+	//    persisted bytes re-broadcast next cycle and fill the nonce. This
+	//    is the ONLY proceed path in this branch.
+	rebroad, err := rebroadcastableAttemptExists(ctx, r.opts.DB, hotWallet, observed)
+	if err != nil {
+		return gapHalt, fmt.Errorf("rebroadcastableAttemptExists: %w", err)
+	}
+	if rebroad {
+		// R2-HIGH (architect Option A): the persisted bytes WILL be
+		// re-broadcast to fill the hole, but only if the recovery attempt
+		// is actually driven this cycle. Do NOT blanket-proceed (that let
+		// the row loop fresh-allocate N+1 past the hole when the recovery
+		// row was unselectable or its rebroadcast failed). Enter
+		// recovery-only mode: the normal row loop rebroadcasts the
+		// selected recovery attempt (and any live cancel) while
+		// processRow suppresses fresh allocation. Capture observed +
+		// expected purely so RunOnce can emit the per-cycle
+		// payout_nonce_gap_recovery_only diagnostic.
+		r.gapRecoveryObservedNonce = observed
+		r.gapRecoveryExpectedNonce = expected
+		return gapRecoveryOnly, nil
+	}
+
+	// 2. Durable abandon CAUSE AT observed (abandoned, unconfirmed,
+	//    non-cancel) → a real abandon hole. Emit §7.1 payout_nonce_gap
+	//    (WARN) and HALT. Checked before the reorg-suspect fallback so the
+	//    dual case (a real abandon CAUSE and a stale confirmed row both at
+	//    observed) is reported as the more specific payout_nonce_gap.
+	cause, err := nonceGapCauseExists(ctx, r.opts.DB, hotWallet, observed)
+	if err != nil {
+		return gapHalt, fmt.Errorf("nonceGapCauseExists: %w", err)
+	}
+	if cause {
+		r.opts.Logger.Warn().
+			Str("event", "payout_nonce_gap").
+			Str("severity", "WARN").
+			Str("from_address", strings.ToLower(hotWallet)).
+			Uint64("expected_nonce", expected).
+			Uint64("observed_pending_nonce", observed).
+			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+			Send()
+		return gapHalt, nil
+	}
+
+	// 3. Otherwise: a confirmed row sits at observed (stale-by-definition,
+	//    since observed is not yet mined → reorged-out inside the reorg
+	//    window), OR nothing at all sits at observed (chain-contradicted /
+	//    unexplained). Both are uncertain, so HALT fail-closed. Emit an
+	//    info payout_nonce_gap_reorg_suspect (NO raw RPC error/URL); the
+	//    reorg poller reconciles the stale row and emits its own
+	//    payout_reorg_* alerts.
+	r.opts.Logger.Warn().
+		Str("event", "payout_nonce_gap_reorg_suspect").
+		Str("from_address", strings.ToLower(hotWallet)).
+		Uint64("expected_nonce", expected).
+		Uint64("observed_pending_nonce", observed).
+		Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+		Send()
+	return gapHalt, nil
 }
 
 type rowOutcome int
@@ -788,6 +1034,16 @@ func (r *Runner) processRow(ctx context.Context, runID string, row ReadyRow) (ro
 		return rowOutcomeSkipped, nil
 	}
 
+	// R2-HIGH (architect Option A): in recovery-only mode suppress ONLY
+	// this terminal fresh-allocation call site. Every earlier branch
+	// (claimAndLog, rebroadcastAndPoll, pollAndConfirm, cancel handling)
+	// has already run unchanged above, so recovery rebroadcast + all
+	// unrelated in-flight polls/confirms still progress this cycle — only
+	// a FRESH nonce allocation past the unfilled hole is prevented.
+	if r.recoveryOnly {
+		return rowOutcomeSkipped, nil
+	}
+
 	// Fresh allocation (§4.3 step 5 — INSERT inside BEGIN IMMEDIATE).
 	return r.allocateBuildSignBroadcast(ctx, runID, row, amount)
 }
@@ -798,9 +1054,14 @@ func (r *Runner) processRow(ctx context.Context, runID string, row ReadyRow) (ro
 // accept, then transition to pollAndConfirm. Closes
 // [code:1.1] MAJOR.
 func (r *Runner) rebroadcastAndPoll(ctx context.Context, conn *sql.Conn, runID string, row ReadyRow, attempt *AttemptRow) (rowOutcome, error) {
-	if !attempt.TxHash.Valid {
-		// Defensive: a row with raw_signed_tx but no tx_hash is a
-		// SPEC violation. Surface as invariant.
+	if !attempt.TxHash.Valid || attempt.TxHash.String == "" {
+		// Defensive: a row with raw_signed_tx but NULL or EMPTY tx_hash is
+		// a SPEC violation and is NOT rebroadcastable. R2-LOW-2: this Go
+		// precondition must match the round-1-tightened
+		// rebroadcastableAttemptExists SQL (tx_hash IS NOT NULL AND
+		// tx_hash <> ''); a malformed empty-hash row must fall through to
+		// fail-closed here, never attempt a malformed rebroadcast. Surface
+		// as invariant.
 		r.emitInvariantViolation(row.PayoutID, "raw_signed_tx_without_hash", fmt.Sprintf("attempt_seq=%d", attempt.AttemptSeq))
 		return rowOutcomeFailed, nil
 	}

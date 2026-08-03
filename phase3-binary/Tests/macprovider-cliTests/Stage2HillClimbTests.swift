@@ -247,6 +247,261 @@ final class Stage2HillClimbTests: XCTestCase {
         ))
     }
 
+    // MARK: - Stage 2 feasibility guard + fallback (real prober)
+
+    /// Fix 2: a stream that generates NOTHING (empty SSE) yields
+    /// `(.infinity, 0)` from finalizeProbeMetrics. With `gateTTFTMS == 0` the
+    /// TTFT ceiling is disabled, so the pre-fix code appended a `(0, ∞)`
+    /// replicate and returned `.feasible(medianTPS: 0, p95TTFTMS: ∞)`. The
+    /// guard must reject the non-positive throughput / non-finite TTFT and
+    /// mark the cell infeasible — INDEPENDENT of `gateTTFTMS`.
+    func testStage2ProberEmptyStreamWithZeroGateIsInfeasible() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try stage2EmptyStreamScript().path,
+            logDirectory: try temporaryDirectory(name: "stage2-empty-logs")
+        )
+
+        let result = try await Stage2Prober(readyTimeoutSec: 10, stopGraceSeconds: 1).probe(
+            model: "gpt-oss-20b",
+            port: port,
+            runner: runner,
+            knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: 2_000),
+            targetContext: 64,
+            gateTTFTMS: 0,
+            replicates: 1
+        )
+
+        guard case .infeasible = result else {
+            return XCTFail("empty stream with gateTTFTMS==0 must be infeasible, got \(result)")
+        }
+    }
+
+    /// Fix 5: older serve builds emit multi-word content deltas but NO usage
+    /// chunk. Stage 2 must measure throughput from the WORD count of the
+    /// visible text (its historical fallback numerator), not the delta count.
+    /// The script emits 2 deltas of 15 words each (30 words, 2 deltas) then
+    /// holds the stream ~0.3s before closing, so the generation window is
+    /// well-defined: a word-count numerator yields ~100 tok/s while a
+    /// delta-count numerator would yield only ~6 tok/s.
+    func testStage2ProberOlderServerMeasuresFromWordCount() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try stage2WordCountFallbackScript().path,
+            logDirectory: try temporaryDirectory(name: "stage2-wordcount-logs")
+        )
+
+        let result = try await Stage2Prober(readyTimeoutSec: 10, stopGraceSeconds: 1).probe(
+            model: "legacy-model",
+            port: port,
+            runner: runner,
+            knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: 2_000),
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(let medianTPS, _, _) = result else {
+            return XCTFail("older-server multi-word stream must be feasible, got \(result)")
+        }
+        // 30 words / ~0.3s ≈ 100 tok/s. A delta-count numerator (2 deltas)
+        // could reach at most ~6-7 tok/s over the same window. Assert well
+        // above that ceiling so only the word-count numerator can pass.
+        XCTAssertGreaterThan(medianTPS, 30,
+            "throughput must be derived from the word count, not the delta count; got \(medianTPS)")
+    }
+
+    /// Round-2 security MEDIUM (Fix B): the aggregate median that feeds a
+    /// `.feasible` cell must be overflow-safe. Two enormous-but-finite
+    /// per-replicate throughputs averaged as `(a + b) / 2` overflow to
+    /// `.infinity`; averaged as `a / 2 + b / 2` they stay finite. A finite
+    /// median then passes the `medianTPS.isFinite && medianTPS > 0` guard,
+    /// while an `.infinity` would have been rejected — either way the cell is
+    /// never marked `.feasible(medianTPS: .infinity)`.
+    func testStage2AggregateMedianIsOverflowSafe() {
+        let enormous = Double.greatestFiniteMagnitude
+        // Naive averaging overflows; confirm the harness's premise.
+        XCTAssertEqual((enormous + enormous) / 2, .infinity,
+            "premise: naive (a + b) / 2 overflows for two greatestFiniteMagnitude values")
+
+        let median = Stage2Prober.median([enormous, enormous])
+        XCTAssertTrue(median.isFinite,
+            "overflow-safe median must stay finite for two enormous-but-finite replicates")
+        XCTAssertEqual(median, enormous, accuracy: enormous * 1e-12)
+        XCTAssertNotEqual(median, .infinity,
+            "median must never be .infinity — that would yield .feasible(medianTPS: .infinity)")
+    }
+
+    private func stage2EmptyStreamScript() throws -> URL {
+        let directory = try temporaryDirectory(name: "stage2-empty-provider")
+        let scriptURL = directory.appendingPathComponent("empty-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import socket, sys
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage2 empty provider ready", flush=True)
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private func stage2WordCountFallbackScript() throws -> URL {
+        let directory = try temporaryDirectory(name: "stage2-wordcount-provider")
+        let scriptURL = directory.appendingPathComponent("wordcount-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys, time
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage2 wordcount provider ready", flush=True)
+
+        # 15 words per delta, 2 deltas → 30 words / 2 deltas. NO usage chunk
+        # (older serve build), so finalization must use the word count.
+        words = " ".join(f"w{i}" for i in range(15))
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                for _ in range(2):
+                    chunk = json.dumps({"choices":[{"delta":{"content":words + " "}}]})
+                    client.sendall(f"data: {chunk}\\n\\n".encode())
+                # Hold the stream open so the generation window is well-defined
+                # (~0.3s) before the terminal [DONE]. No usage chunk emitted.
+                time.sleep(0.3)
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private func temporaryDirectory(name: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(name)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return directory
+    }
+
+    private func unusedPort() throws -> Int {
+        let socketFD = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(socketFD, 0)
+        defer { close(socketFD) }
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        var bindAddr = addr
+        let bindResult = withUnsafePointer(to: &bindAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(bindResult, 0)
+
+        var boundAddr = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(socketFD, $0, &length)
+            }
+        }
+        XCTAssertEqual(nameResult, 0)
+        return Int(UInt16(bigEndian: boundAddr.sin_port))
+    }
+
     private func makeHillClimb(
         db: AutotuneDB,
         prober: StubStage2Prober,

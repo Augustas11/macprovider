@@ -980,6 +980,119 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
+    // MARK: - Payout address (Add wallet)
+
+    /// Refresh registered payout address via CLI challenge GET (read-only).
+    func refreshPayoutRegistration() async {
+        guard !snapshot.payoutRegistrationInProgress else { return }
+        // Seed from local display cache before network.
+        if snapshot.payoutRegisteredAddress == nil,
+           let stored = PayoutRegistrationStore.load() {
+            snapshot.payoutRegisteredAddress = stored.address
+            snapshot.payoutPendingUntilUTC = stored.pendingUntilUTC
+        }
+        do {
+            let challenge = try await PayoutWalletFlow.fetchChallenge()
+            snapshot.payoutRegisteredAddress = challenge.registeredAddress
+            snapshot.payoutPendingUntilUTC = challenge.pendingUntilUTC
+            snapshot.payoutLastError = nil
+            if let addr = challenge.registeredAddress {
+                PayoutRegistrationStore.save(
+                    address: addr,
+                    pendingUntilUTC: challenge.pendingUntilUTC
+                )
+            }
+        } catch {
+            // Soft-fail on dashboard load; keep any locally remembered address.
+        }
+    }
+
+    /// Full non-custodial register flow: challenge → browser sign → register.
+    /// Optional `pasted` skips the browser when the provider copy-pasted.
+    func registerPayoutWallet(pasted: PayoutSignedPayload? = nil) async {
+        guard !snapshot.payoutRegistrationInProgress else { return }
+        snapshot.payoutRegistrationInProgress = true
+        snapshot.payoutLastError = nil
+        snapshot.payoutLastStatus = nil
+        defer { snapshot.payoutRegistrationInProgress = false }
+
+        do {
+            let challenge = try await PayoutWalletFlow.fetchChallenge()
+            if let existing = challenge.registeredAddress {
+                snapshot.payoutRegisteredAddress = existing
+                snapshot.payoutPendingUntilUTC = challenge.pendingUntilUTC
+            }
+
+            let nonce = try PayoutWalletFlow.randomNonceHex()
+            let ts = PayoutWalletFlow.tsUtc(serverTsUTC: challenge.serverTsUTC)
+            let state = try PayoutWalletFlow.randomState()
+
+            let signed: PayoutSignedPayload
+            if let pasted {
+                // Paste path: provider supplies address+signature (+nonce/ts)
+                // from the signer fallback UI. Shape-check only; coordinator
+                // EIP-712 verify is the trust boundary.
+                guard PayoutWalletFlow.validateCallback(
+                    payload: pasted,
+                    expectedState: pasted.state,
+                    expectedNonce: pasted.nonce,
+                    expectedTsUtc: pasted.tsUtc
+                ) else {
+                    throw PayoutWalletFlowError.invalidCallback
+                }
+                signed = pasted
+            } else {
+                signed = try await PayoutWalletFlow.captureSignature(
+                    challenge: challenge,
+                    nonce: nonce,
+                    tsUtc: ts,
+                    state: state
+                )
+            }
+
+            let result = try await PayoutWalletFlow.register(
+                address: signed.address,
+                nonce: signed.nonce,
+                tsUtc: signed.tsUtc,
+                signature: signed.signature
+            )
+            snapshot.payoutRegisteredAddress = result.address
+            snapshot.payoutPendingUntilUTC = result.pendingUntilUTC
+            snapshot.payoutLastStatus = result.status
+            snapshot.payoutLastError = nil
+            snapshot.walletBound = true
+            PayoutRegistrationStore.save(
+                address: result.address,
+                pendingUntilUTC: result.pendingUntilUTC
+            )
+        } catch let error as PayoutWalletFlowError {
+            snapshot.payoutLastError = Self.payoutErrorMessage(error)
+        } catch {
+            snapshot.payoutLastError = "Wallet registration failed. Try again."
+        }
+    }
+
+    private static func payoutErrorMessage(_ error: PayoutWalletFlowError) -> String {
+        switch error {
+        case .cliNotFound:
+            return "Provider software is not installed."
+        case let .challengeFailed(msg), let .registerFailed(msg), let .loopbackFailed(msg):
+            return msg
+        case .timedOut:
+            return "Wallet signing timed out. Open Add wallet and try again."
+        case .cancelled:
+            return "Wallet registration was cancelled."
+        case .invalidCallback:
+            return "The signature from the browser was incomplete or mismatched."
+        case .missingResources:
+            return "The bundled wallet signer page is missing from this app build."
+        case .missingProviderID:
+            return "Provider identity is not configured on this Mac."
+        case .rngFailure:
+            return "Secure random generation failed. Please try again."
+        }
+    }
+
     private func finishReferralAction() {
         referralActionWatchdog.cancel()
         snapshot.referralActionInProgress = false

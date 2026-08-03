@@ -116,9 +116,9 @@ jobs:
 
       - name: Setup Go for Pearl binaries
         if: ${{ github.event.inputs.promote_run_id == '' }}
-        # Pinned to actions/setup-go v6.5.0. Linux binaries are cross-compiled
+        # Pinned to actions/setup-go v7.0.0. Linux binaries are cross-compiled
         # without CGO and carried as unsigned inputs into the protected signer.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: |
@@ -342,7 +342,7 @@ jobs:
             unsigned-release-inputs/gateway-linux-amd64
 
       - name: Upload unsigned build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: unsigned-release-${{ steps.release_source.outputs.commit }}
           path: unsigned-release-inputs/

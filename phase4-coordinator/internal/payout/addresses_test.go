@@ -576,3 +576,121 @@ func intString(n int64) string {
 // the import list honest.
 var _ = io.Discard
 var _ = json.Marshal
+
+// TestServePayoutAddress_RateLimit_429AfterWindowBudget proves the
+// §3.3:833 provider-scoped registration cap (default 6/hr). The
+// limiter is checked AFTER token auth + ownership and BEFORE the
+// body is decoded, so every authenticated attempt — even one that
+// would fail validation downstream — consumes the window. The first
+// registrationRateLimitDefault authenticated POSTs get past the
+// limiter (and fail later at decode/validation); the next one is
+// rejected with 429 + a rate_limited §7.1 log surface.
+func TestServePayoutAddress_RateLimit_429AfterWindowBudget(t *testing.T) {
+	db := openTestDB(t)
+	hotWallet := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	svc := newServiceForTest(t, db, hotWallet, "rl-pid", "tok", &fakePause{})
+	// Freeze the clock so all attempts fall in the same window.
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	svc.Now = func() time.Time { return fixed }
+	r := newRouter(t, svc)
+
+	post := func() int {
+		// Empty body → passes auth+ownership+limiter, then fails at
+		// JSON decode. The point is only whether the limiter admits
+		// the attempt (any non-429) or rejects it (429).
+		req := httptest.NewRequest("POST", "/providers/rl-pid/payout-address", strings.NewReader("{}"))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for i := 0; i < registrationRateLimitDefault; i++ {
+		if code := post(); code == http.StatusTooManyRequests {
+			t.Fatalf("attempt %d was rate-limited (429) before the budget of %d was reached", i+1, registrationRateLimitDefault)
+		}
+	}
+	// The (N+1)th authenticated attempt in the same window is 429.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/providers/rl-pid/payout-address", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer tok")
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt %d expected 429, got %d body=%s", registrationRateLimitDefault+1, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rate_limited") {
+		t.Errorf("429 body=%q does not contain rate_limited", rec.Body.String())
+	}
+
+	// A different provider is unaffected (per-provider keying) — but
+	// unauthenticated for this token, so it 401s rather than 429s;
+	// the key point is it is NOT rate-limited by rl-pid's window.
+	// After the window advances past registrationRateWindow the same
+	// provider is admitted again.
+	svc.Now = func() time.Time { return fixed.Add(registrationRateWindow + time.Minute) }
+	if code := post(); code == http.StatusTooManyRequests {
+		t.Fatalf("after window expiry, attempt was still rate-limited (429)")
+	}
+}
+
+// TestRegistrationRateLimiter_EvictsEmptyEntriesAfterWindow proves the
+// M2 fix: a provider that stops registering does not leak a map entry
+// forever. Once its timestamps expire, the next allow() (from any
+// provider) runs the periodic global sweep and deletes the stale key.
+func TestRegistrationRateLimiter_EvictsEmptyEntriesAfterWindow(t *testing.T) {
+	limiter := newRegistrationRateLimiter(6, time.Hour)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if !limiter.allow("provider-a", t0) {
+		t.Fatalf("provider-a first attempt should be allowed")
+	}
+	limiter.mu.Lock()
+	_, presentA := limiter.hits["provider-a"]
+	limiter.mu.Unlock()
+	if !presentA {
+		t.Fatalf("provider-a should be tracked after its attempt")
+	}
+
+	// After the full window elapses, a different provider's attempt
+	// triggers the sweep, evicting provider-a's now-expired entry.
+	later := t0.Add(time.Hour + time.Minute)
+	if !limiter.allow("provider-b", later) {
+		t.Fatalf("provider-b first attempt should be allowed")
+	}
+	limiter.mu.Lock()
+	_, stillA := limiter.hits["provider-a"]
+	_, hasB := limiter.hits["provider-b"]
+	total := len(limiter.hits)
+	limiter.mu.Unlock()
+
+	if stillA {
+		t.Fatalf("provider-a should have been evicted by the sweep")
+	}
+	if !hasB {
+		t.Fatalf("provider-b should be tracked")
+	}
+	if total != 1 {
+		t.Fatalf("map should hold exactly provider-b, got %d entries", total)
+	}
+}
+
+// TestRegistrationRateLimiter_FailsClosedOnNilOrZeroConfig proves the
+// M3 fix: a nil or mis-configured limiter must DENY (fail closed), not
+// grant unlimited registration.
+func TestRegistrationRateLimiter_FailsClosedOnNilOrZeroConfig(t *testing.T) {
+	now := time.Now()
+	var nilLimiter *registrationRateLimiter
+	if nilLimiter.allow("p", now) {
+		t.Fatal("nil limiter must fail closed (deny), not allow unlimited registration")
+	}
+	if newRegistrationRateLimiter(0, time.Hour).allow("p", now) {
+		t.Fatal("zero-limit limiter must fail closed")
+	}
+	if newRegistrationRateLimiter(6, 0).allow("p", now) {
+		t.Fatal("zero-window limiter must fail closed")
+	}
+	// A valid limiter still admits within budget.
+	if !newRegistrationRateLimiter(registrationRateLimitDefault, registrationRateWindow).allow("p", now) {
+		t.Fatal("a valid limiter must admit the first attempt")
+	}
+}

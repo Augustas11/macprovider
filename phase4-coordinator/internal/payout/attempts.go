@@ -413,6 +413,18 @@ SELECT COUNT(*) FROM payout_attempts
 // UpsertNonceCursor records the runner's chosen cold-start nonce
 // for the given from_address. RPC values are persisted for
 // post-hoc forensics.
+//
+// Cold-start-only (the sole caller is cmd/coordinator's startup
+// ColdStartNonceSync path; AllocateNextNonceTx/BumpNonceCursorTx
+// own the in-txn allocation cursor). SPEC-016:1749-1750 defines the
+// cold-start cursor as max(cursor_in_db, max(rpc_a, rpc_b)), so the
+// ON CONFLICT must take the MAX of the stored and incoming next_nonce
+// — never overwrite. A plain overwrite would let a restart whose RPC
+// pending nonce lags the DB cursor (e.g. DB=8, chain-pending=7) erase
+// a real abandoned-unfilled hole and stall the money path. Mainnet
+// nonces never decrease, so MAX is always the correct cursor. The
+// rpc_a/rpc_b/last_synced columns stay excluded.* — they are forensic
+// snapshots of THIS sync, not monotonic state.
 func UpsertNonceCursor(ctx context.Context, db *sql.DB, fromAddress string, nextNonce uint64,
 	rpcAValue, rpcBValue uint64, nowUTC string,
 ) error {
@@ -421,7 +433,7 @@ INSERT INTO wallet_nonce_cursor
   (from_address, next_nonce, last_synced_at_utc, rpc_a_last_value, rpc_b_last_value)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(from_address) DO UPDATE SET
-  next_nonce = excluded.next_nonce,
+  next_nonce = MAX(wallet_nonce_cursor.next_nonce, excluded.next_nonce),
   last_synced_at_utc = excluded.last_synced_at_utc,
   rpc_a_last_value = excluded.rpc_a_last_value,
   rpc_b_last_value = excluded.rpc_b_last_value`,
@@ -479,6 +491,67 @@ func BumpNonceCursorTx(ctx context.Context, conn *sql.Conn, fromAddress string, 
 		nowUTC, strings.ToLower(fromAddress),
 	)
 	return err
+}
+
+// ---- §7.1 payout_nonce_gap pre-check helpers ----------------------------
+
+// nonceGapCauseExists reports whether an abandoned, still-unconfirmed,
+// NON-cancel payout_attempts row occupies `nonce` for from_address —
+// the durable CAUSE that ties a payout_nonce_gap emission to an
+// operator abandon (§4.6) rather than to unrelated chain state. An
+// abandoned-unfilled non-cancel attempt is exactly the hole a gap
+// detector must confirm on-chain (observed_pending_nonce == this
+// nonce). Columns: abandoned_at_utc (set = abandoned), confirmed_at_utc
+// (NULL = not confirmed), is_cancel_self_transfer (0 = not a cancel).
+func nonceGapCauseExists(ctx context.Context, db *sql.DB, fromAddress string, nonce uint64) (bool, error) {
+	var exists int
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS(
+  SELECT 1 FROM payout_attempts
+   WHERE from_address = ?
+     AND nonce = ?
+     AND abandoned_at_utc IS NOT NULL
+     AND confirmed_at_utc IS NULL
+     AND is_cancel_self_transfer = 0)`,
+		strings.ToLower(fromAddress), int64(nonce),
+	).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
+// rebroadcastableAttemptExists reports whether a LIVE persisted-but-
+// unbroadcast (rebroadcastable) attempt occupies `nonce` — a
+// crash-recovery in progress that will re-broadcast the persisted bytes
+// next cycle. This mirrors processRow's rebroadcast precondition
+// exactly: rebroadcastAndPoll (§4.3 step 5) only re-sends when
+// raw_signed_tx holds non-empty bytes AND a tx_hash is present (a row
+// with raw bytes but no hash is treated as an invariant violation, not
+// rebroadcast), with broadcast_at_utc / confirmed_at_utc / abandoned_at_utc
+// all NULL. Matching the same predicate here is what makes this a safe
+// "will be filled next cycle" suppressor: a malformed row (raw bytes,
+// NULL/empty tx_hash) is NOT rebroadcastable, so it must not suppress a
+// real gap. Without this guard a crash between persist and broadcast
+// would false-alarm as a gap even though the nonce is about to be filled.
+func rebroadcastableAttemptExists(ctx context.Context, db *sql.DB, fromAddress string, nonce uint64) (bool, error) {
+	var exists int
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS(
+  SELECT 1 FROM payout_attempts
+   WHERE from_address = ?
+     AND nonce = ?
+     AND raw_signed_tx IS NOT NULL
+     AND length(raw_signed_tx) > 0
+     AND tx_hash IS NOT NULL
+     AND tx_hash <> ''
+     AND broadcast_at_utc IS NULL
+     AND confirmed_at_utc IS NULL
+     AND abandoned_at_utc IS NULL)`,
+		strings.ToLower(fromAddress), int64(nonce),
+	).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 // ---- helpers ------------------------------------------------------------
