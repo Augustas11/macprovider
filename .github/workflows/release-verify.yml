@@ -124,7 +124,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        # Pinned to actions/setup-go v5.5.0. Re-resolve deliberately
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
         # when upgrading the action rather than trusting a mutable tag.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:

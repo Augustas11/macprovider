@@ -116,7 +116,7 @@ jobs:
 
       - name: Setup Go for Pearl binaries
         if: ${{ github.event.inputs.promote_run_id == '' }}
-        # Pinned to actions/setup-go v6.5.0. Linux binaries are cross-compiled
+        # Pinned to actions/setup-go v7.0.0. Linux binaries are cross-compiled
         # without CGO and carried as unsigned inputs into the protected signer.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:

@@ -78,7 +78,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        # Pinned to actions/setup-go v6.5.0. Re-resolve deliberately.
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
@@ -302,7 +302,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
         # when upgrading instead of trusting the mutable tag in this required
         # pairing/security gate.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -337,7 +337,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
         # when upgrading instead of trusting the mutable tag in this required
         # pairing/security gate.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
