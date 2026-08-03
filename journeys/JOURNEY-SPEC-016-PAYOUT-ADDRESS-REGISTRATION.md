@@ -4,6 +4,8 @@ Status: contract-only; no conformance or production-readiness claim
 Owner: payout/release verification
 Spec: SPEC-016
 Requirement: R002
+Authority domain: payout-lifecycle
+Issue: https://github.com/Augustas11/macprovider/issues/614
 
 ## Purpose
 
@@ -35,9 +37,13 @@ passed, that payout is deployed, or that payout activation is permitted.
    namespace, and clean starting state. Confirm no payout runner or payout
    settlement action is enabled.
 2. Fetch a payout challenge over the TLS coordinator endpoint using the
-   provider token. Verify that the challenge is scoped to the provider and
-   includes the expected domain, chain ID, verifying contract, nonce, and
-   expiry. Record only redacted identifiers and artifact hashes.
+   provider token. Verify that the token subject and URL path bind to the
+   test provider and that the response contains the actual challenge fields:
+   domain name/version, chain ID, chain, verifying contract, and
+   server_ts_utc. Compare the verifying contract with the candidate hot
+   wallet and record only redacted identifiers and artifact hashes. The
+   endpoint does not issue a nonce or expiry; request freshness is proven by
+   the signed POST timestamp/skew rejection and anti-replay nonce checks below.
 3. Start the Malibu Add Wallet flow. Verify that the callback listener binds
    only to loopback, uses a fresh state and nonce, accepts one valid callback,
    and tears down on cancellation, timeout, malformed input, oversized input,
@@ -48,20 +54,29 @@ passed, that payout is deployed, or that payout activation is permitted.
    address material. Record the signed digest and address fingerprint, never
    the signature payload if it contains secrets.
 5. Submit the registration over TLS. Verify the expected success response,
-   provider scoping, persisted address, audit record, and initial
-   payout_allowed/cooling-off state. Confirm no payout settlement is
-   attempted.
+   provider scoping, persisted address, success audit record, and initial
+   payout_allowed=1 plus a future pending_until_utc cooling-off deadline.
+   Confirm the runner selects no address for payout before that deadline and
+   no payout settlement is attempted.
 6. Re-submit the same signed request and a request with a consumed or
-   mismatched nonce. Verify rejection and prove that no second registration,
-   audit mutation, or payout permission is created.
-7. Exercise invalid signature, expired challenge, wrong domain, wrong chain,
-   wrong provider, and timestamp-skew cases. Verify fail-closed rejection
-   before any durable registration or payout-permission mutation.
-8. After the controlled cooling-off interval or an approved test-clock
-   advance, rotate to a second disposable address. Verify the documented
-   old/new-address semantics, replay protection, audit trail, and
-   payout_allowed transition. Do not shorten or bypass the production
-   policy in the candidate configuration.
+   mismatched nonce. Verify rejection and prove that no second registration
+   row, success/change audit event, or payout-permission mutation is created.
+   Require exactly one structured rejection event for each rejected attempt,
+   including the replay reason.
+7. Exercise invalid signature, wrong domain, wrong chain, wrong provider,
+   typed-data field mismatch, and stale timestamp cases. Verify fail-closed
+   rejection before any durable registration or payout-permission mutation;
+   stale-request rejection is the expiry/freshness proof because the
+   challenge response has no expiry field.
+8. With an existing allowed row whose prior cooling-off has elapsed, rotate
+   to a second disposable address. Verify a 200 response, rotated_from,
+   a new future pending_until_utc deadline, and payout_allowed remains 1.
+   During that new cooling-off, verify runner selection uses the previous
+   address; after the deadline, verify it uses the new address. Separately
+   seed an existing payout_allowed=0 row and submit a valid rotation. Require
+   409 payout_not_allowed, unchanged address and payout_allowed values, and
+   exactly one rejection event. Do not shorten or bypass the production
+   cooling-off or compliance policy.
 9. Exercise registration rate limiting and provider pre-authorization pause.
    Verify the expected error responses, no durable mutation on denied
    requests, and cleanup of all loopback listeners and temporary state.
@@ -83,6 +98,12 @@ The run must produce a redacted, signed result envelope containing:
 - effective payout configuration before and after the run;
 - redacted challenge/domain/nonce/address fingerprints sufficient to prove
   binding and replay behavior without exposing secrets;
+- exact canonical EIP-712 typed-data inputs and signature in an
+  access-controlled artifact, with the public result retaining only its
+  artifact hash, signer/address fingerprint, digest, verifier version, and
+  independent verification output;
+- exact candidate coordinator, CLI, Malibu executable/resource hashes,
+  canonical envelope encoding, and applicable signer key/trust-root metadata;
 - explicit values for payout_enabled, runner_started, settlement_attempted,
   and production_side_effects;
 - signer identity and signature metadata, plus the verification result;

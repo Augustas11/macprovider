@@ -3104,6 +3104,7 @@
       "tests": [
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_HappyPath_FirstRegistration",
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_AntiReplay_SecondNonceRejected",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_Zero",
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_One",
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RateLimit_429AfterWindowBudget",
         "phase3-binary/Tests/macprovider-cliTests/PayoutAddressClientTests.swift:PayoutAddressClientTests",
