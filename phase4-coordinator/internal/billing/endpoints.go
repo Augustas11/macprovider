@@ -50,19 +50,30 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 // below) so it shares atomicity with the ledger_config_snapshots
 // row §13.2 already requires.
 func (s *Store) HandlersWithQuarantineGate(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, nil)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, nil, 0)
 }
 
 func (s *Store) HandlersWithQuarantineGateAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, idlePrewarm)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, idlePrewarm, 0)
 }
 
 func (s *Store) HandlersWithQuarantineGates(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, nil)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, nil, 0)
 }
 
 func (s *Store) HandlersWithQuarantineGatesAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm, 0)
+}
+
+// HandlersWithQuarantineGatesIdlePrewarmAndPayoutCap is the SPEC-005
+// vX.Y+1 constructor (SPEC-016 §9.5b HARD prereq) that additionally
+// threads the immutable §5.2 per-payout cap
+// (payout.security.per_payout_cap_usdc_base_units) into the
+// `/admin/ledger/payout-ready` reorg-compensation handler. The cap is
+// a startup-immutable scalar (payout.security.* is not live-reloaded),
+// so it is passed by value rather than read through a reload primitive.
+func (s *Store) HandlersWithQuarantineGatesIdlePrewarmAndPayoutCap(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader, perPayoutCapBaseUnits int64) http.Handler {
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm, perPayoutCapBaseUnits)
 }
 
 // HandlersWithBridge mounts the admin/provider handlers. The
@@ -75,10 +86,10 @@ func (s *Store) HandlersWithQuarantineGatesAndIdlePrewarm(operatorKey string, to
 // accepted. Handlers (the legacy single-arg signature) is kept as a
 // thin shim so test fixtures and direct callers don't churn.
 func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
-	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, false, nil)
+	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, false, nil, 0)
 }
 
-func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
+func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader, perPayoutCapBaseUnits int64) http.Handler {
 	// SPEC-005 v0.4 (issue #169) — handler CONSTRUCTION must not be
 	// able to silently flip the live route-layer flag. R8 fix
 	// (ARCH-M1) replaces the unconditional SetForceVoidEnabled call
@@ -107,6 +118,7 @@ func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOn
 		tokenStore:              tokenStore,
 		requireProviderTokens:   requireProviderTokens,
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
+		perPayoutCapBaseUnits:   perPayoutCapBaseUnits,
 		lastEarnings:            map[string][]time.Time{},
 		adminBucket:             newAdminRateLimiter(),
 		idlePrewarm:             idlePrewarm,
@@ -121,6 +133,7 @@ type handler struct {
 	tokenStore              tokenValidator
 	requireProviderTokens   bool
 	earningsRateLimitPerMin int
+	perPayoutCapBaseUnits   int64
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
 	adminBucket             *adminRateLimiter
@@ -245,6 +258,12 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			h.forceCreditHandler(w, r, m.id)
 			return
 		}
+	}
+	// SPEC-005 vX.Y+1 §9.5b reorg-compensation admin endpoint
+	// (SPEC-016 §9.5b HARD prereq for USDC payouts).
+	if r.URL.Path == payoutReadyPath {
+		h.payoutReadyHandler(w, r)
+		return
 	}
 	switch {
 	case r.URL.Path == "/admin/ledger/summary":
@@ -573,7 +592,7 @@ SELECT lrc.provider_id,
 			providerIDs = append(providerIDs, providerID)
 		}
 	}
-	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), time.Time{}, time.Time{}, false)
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.nowUTC(), time.Time{}, time.Time{}, false)
 	summaries, err := h.settlementReceiptSummariesForProviders(ctx, providerIDs, diagnosticsFrom, diagnosticsTo, true, 3)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -897,20 +916,54 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rangeSQL, rangeArgs := earningsRangeFilter(rangeFrom, rangeTo, hasRange)
-	current := sqliteTimeText(currentMondayUTC(time.Now().UTC()))
+	nowUTC := time.Now().UTC()
+	current := sqliteTimeText(currentMondayUTC(nowUTC))
+	todayUTC := sqliteTimeText(time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC))
 	models := h.modelsServed(r.Context(), providerID, rangeSQL, rangeArgs...)
 	totalArgs := append([]any{providerID}, rangeArgs...)
 	currentArgs := append([]any{providerID, current}, rangeArgs...)
+	todayArgs := append([]any{providerID, todayUTC}, rangeArgs...)
 	faultArgs := append([]any{providerID}, rangeArgs...)
+
+	// Payable provider_credits for the range-scoped total plus the two rolling
+	// windows the Malibu card shows. current_window == "this week" (since Monday
+	// UTC); today == since midnight UTC. These honour any from/to range.
+	totalCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...)
+	weekCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...)
+	todayCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, todayArgs...)
+	// "Pending" = all USDC currently owed to the provider (earned, payout-
+	// eligible, not yet paid). It is a lifetime, range-INDEPENDENT figure — a
+	// from/to filter narrows the today/week/lifetime views but must never make
+	// owed money appear smaller — so it deliberately ignores rangeSQL. The
+	// SPEC-016 payout pipeline is default-off / not deployed, so no payable
+	// credit has been paid yet and every payable credit is still owed. When
+	// payouts go live, this must subtract only CONFIRMED, non-reorged/non-
+	// orphaned payouts (payout reorg/orphan compensation is tracked outside
+	// ledger_payout_ready — see internal/payout/reorg.go, orphans.go); a naive
+	// `status NOT IN ('ready','voided')` subtraction would UNDERSTATE owed money
+	// after an unresolved orphan, so it is intentionally not done here.
+	pendingCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID)
+
 	resp := map[string]any{
 		"provider_id":            providerID,
-		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...),
-		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...),
+		"total_credits":          totalCredits,
+		"current_window_credits": weekCredits,
 		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
 		"provider_share_bps":     h.latestShareBps(r.Context()),
 		"models_served":          models,
 		"rate_card_excerpt":      h.rateCardExcerpt(r.Context(), models),
 		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
+		// usdc_* are the USD figures the Malibu client (ProviderEarningsClient)
+		// decodes for the "today / wk / pending / life" card. Before this the
+		// endpoint emitted only *_credits, so every card read $0.00 regardless
+		// of real accrued earnings. Converted via the SPEC-016 §4.3 payout
+		// invariant (provider_credits == USDC base units, 6 decimals), so the
+		// displayed amount equals what the payout runner actually pays — not a
+		// tunable stats display rate that could diverge from real payouts.
+		"usdc_today":    providerCreditsToUSDC(todayCredits),
+		"usdc_week":     providerCreditsToUSDC(weekCredits),
+		"usdc_pending":  providerCreditsToUSDC(pendingCredits),
+		"usdc_lifetime": providerCreditsToUSDC(totalCredits),
 	}
 	idlePrewarm := statsprewarm.Summary{
 		EventsLast1h:        map[string]int64{},
@@ -929,7 +982,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp["idle_prewarm"] = idlePrewarm
-	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), rangeFrom, rangeTo, hasRange)
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.nowUTC(), rangeFrom, rangeTo, hasRange)
 	summaries, err := h.settlementReceiptSummariesForProviders(r.Context(), []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())

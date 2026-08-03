@@ -13,7 +13,7 @@
 | Changes | Does NOT change |
 |---------|-----------------|
 | Applies Postgres migrations `012_malibu_emission_ledger` + `014_malibu_trust_unlock` | `malibu_emission.enabled` (stays `false`) |
-| Installs coordinator binary with `writer_dsn` wired | Withdrawable MALIBU flow |
+| Validates/restarts signed coordinator runtime with `writer_dsn` wired | Withdrawable MALIBU flow |
 | Merges MALIBU overlay into Pearl `coordinator.pearl-overlays.yaml` | Base `/opt/macprovider/coordinator.yaml` |
 | Mounts `GET /v1/provider/malibu-accrual` read API | Base nginx vhost (add `location = /v1/provider/malibu-accrual` per §4.4) |
 
@@ -52,6 +52,7 @@ After first deploy with `MALIBU_EMISSION_WRITER_PASSWORD` set, rotate the passwo
 ## 2. Quick deploy (scripted)
 
 ```bash
+git checkout vX.Y.Z
 cd phase4-coordinator
 bash scripts/build-linux.sh
 bash dist/deploy-malibu-emission-pearl.sh
@@ -79,9 +80,12 @@ SKIP_MIGRATE=1 bash dist/deploy-malibu-emission-pearl.sh
 
 ## 3. Manual steps (if not using script)
 
-### 3.1 Build + upload binary
+### 3.1 Production binary authority
 
-Same as [`opoi-pearl-deploy.md`](./opoi-pearl-deploy.md) §3.1–3.2.
+Do not build, upload, or install coordinator binaries manually for production
+MALIBU work. Production runtime bytes must come from the signed Pearl runtime
+release/updater and then pass the guarded `deploy-pearl-vps.sh` provenance
+checks. Manual steps below are overlay/migration reference only.
 
 ### 3.2 Apply migrations
 
@@ -190,13 +194,11 @@ ssh pearl 'sudo rm /etc/systemd/system/macprovider-coordinator.service.d/malibu-
 
 Set `malibu_emission.enabled: false` in pearl overlay and restart.
 
-### 6.3 Binary rollback
+### 6.3 Runtime rollback
 
-```bash
-ssh pearl 'sudo install -o root -g macprovider -m 0750 \
-  /opt/macprovider/coordinator.prev /opt/macprovider/coordinator \
-  && sudo systemctl restart macprovider-coordinator'
-```
+Do not restore `/opt/macprovider/coordinator` by copying local or `.prev`
+bytes. Use the signed Pearl runtime updater/rollback path for binary rollback,
+then rerun the guarded deploy validation if a MALIBU overlay remains enabled.
 
 ---
 

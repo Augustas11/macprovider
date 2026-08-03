@@ -30,11 +30,11 @@ let package = Package(
         // issue #718) binds to the same reviewed version.
         .package(
             url: "https://github.com/huggingface/swift-jinja.git",
-            exact: "2.3.6"
+            exact: "2.4.2"
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.101.2"
+            exact: "2.101.3"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",

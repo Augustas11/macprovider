@@ -81,6 +81,17 @@ test('hard request, token, and time budgets never admit an over-budget request',
   });
 });
 
+test('run budget capacity can only grow to a valid minimum', () => {
+  const budget = new RunBudget({ maxRequests: 2, maxCompletionTokens: 16, maxDurationMs: 1_000, startedAtMs: 100 });
+  budget.ensureMinimumCapacity({ maxRequests: 1, maxCompletionTokens: 8 });
+  assert.equal(budget.snapshot(100).limits.max_requests_per_provider, 2);
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 16);
+  budget.ensureMinimumCapacity({ maxRequests: 5, maxCompletionTokens: 40 });
+  assert.equal(budget.snapshot(100).limits.max_requests_per_provider, 5);
+  assert.equal(budget.snapshot(100).limits.max_completion_tokens_per_provider, 40);
+  assert.throws(() => budget.ensureMinimumCapacity({ maxRequests: 0 }), /maxRequests must be a positive safe integer/);
+});
+
 test('gateway pre/post invariants match exact active non-routable aggregation loss', () => {
   const initial = healthyGateway();
   assert.deepEqual(gatewayInvariantReasons(initial, initial, { minReadyProviders: 2 }), []);
@@ -91,6 +102,9 @@ test('gateway pre/post invariants match exact active non-routable aggregation lo
   active.pool.ready = 1;
   active.models = active.models.filter((model) => model.id !== 'model-a');
   assert.deepEqual(gatewayInvariantReasons(initial, active, {
+    minReadyProviders: 2, activeModelID: 'model-a',
+  }), []);
+  assert.deepEqual(gatewayInvariantReasons(initial, initial, {
     minReadyProviders: 2, activeModelID: 'model-a',
   }), []);
   const inventedDegradedRow = structuredClone(initial);
@@ -112,6 +126,12 @@ test('gateway pre/post invariants match exact active non-routable aggregation lo
     'ready_changed_2_to_1',
     'model-a:model_not_stably_available',
   ]);
+  assert.deepEqual(gatewayInvariantReasons(initial, changed, {
+    minReadyProviders: 1,
+    maxDrainingProviders: 1,
+    enforceStableProviderCounts: false,
+    enforceStableModelSet: false,
+  }), []);
 });
 
 test('operator pool invariants abort on state, connection, and heartbeat regressions', () => {
@@ -263,11 +283,24 @@ test('expected fleet and qualification isolation require exact provider/model/ro
     targetProviderID: 'provider-b', targetModel: 'model-b', maxHeartbeatAgeMs: 90_000,
     localProviderSignal: provider({ provider_id: 'provider-b', model_id: 'model-b', coordinator_session_id: 'session-b' }),
   }).includes('isolation_target_still_routable'));
+  assert.deepEqual(validateExpectedFleetDocument({ schema_version: 1, providers: [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-a' },
+    { provider_id: 'provider-c', model_id: 'model-c' },
+  ] }, { requireUniqueModels: false }), [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-a' },
+    { provider_id: 'provider-c', model_id: 'model-c' },
+  ]);
+  assert.deepEqual(validateExpectedFleetDocument({ schema_version: 1, providers: [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+  ] }, { requireUniqueModels: false }), [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+  ]);
   assert.throws(() => validateExpectedFleetDocument({ schema_version: 1, providers: [
     { provider_id: 'provider-a', model_id: 'model-a' },
     { provider_id: 'provider-b', model_id: 'model-b' },
-    { provider_id: 'provider-c', model_id: 'model-c' },
-  ] }), /exactly 2/);
+  ] }, { expectedProviderCount: 3 }), /exactly 3/);
   assert.throws(() => validateExpectedFleetDocument({ schema_version: 1, providers: [
     { provider_id: 'provider-a', model_id: 'model-a' },
     { provider_id: 'provider-b', model_id: 'model-a' },
@@ -283,6 +316,22 @@ test('response attribution requires exact provider and model in both canary mode
   assert.deepEqual(responseIdentityReasons({ provider: '', responseModel: 'model-b' }, 'model-a', fleet), [
     'model-a:response_model_model-b_ne_model-a',
     'model-a:response_provider_missing_ne_provider-a',
+  ]);
+  const duplicateModelFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-a' },
+  ];
+  assert.deepEqual(responseIdentityReasons({ provider: 'provider-b', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), []);
+  assert.deepEqual(responseIdentityReasons({ provider: 'provider-c', responseModel: 'model-a' }, 'model-a', duplicateModelFleet), [
+    'model-a:response_provider_provider-c_ne_provider-a|provider-b',
+  ]);
+  assert.deepEqual(responseIdentityReasons(
+    { provider: 'provider-b', responseModel: 'model-a' },
+    'model-a',
+    duplicateModelFleet,
+    { expectedProviderID: 'provider-a' },
+  ), [
+    'model-a:response_provider_provider-b_ne_provider-a',
   ]);
 });
 

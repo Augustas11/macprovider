@@ -150,7 +150,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.12",
+      "version": "0.9.13",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -426,7 +426,7 @@
     {
       "spec_id": "SPEC-016",
       "title": "Provider payout pipeline (USDC on Base)",
-      "version": "0.1.20",
+      "version": "0.1.25",
       "path": "specs/SPEC-016-payout-pipeline.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -439,16 +439,30 @@
         "SPEC-006",
         "SPEC-014"
       ],
-      "implementation_status": "pending-reconciliation",
-      "production_status": "pending-verification",
-      "last_reconciled_commit": null,
-      "last_reconciled_at": null,
-      "evidence": [],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": "bc551b952420101fb8e8f42bd4c051bd7800288d",
+      "last_reconciled_at": "2026-08-03",
+      "evidence": [
+        {
+          "artifact": "commit:ed26cc8f3178b5da44fae93483df1d931410e35f",
+          "source": null,
+          "captured_at": "2026-07-31",
+          "expires_at": "2027-07-31"
+        },
+        {
+          "artifact": "commit:64d4ba620bf7d52704ad3b7c0071fbe94c0d7d82",
+          "source": null,
+          "captured_at": "2026-08-03",
+          "expires_at": "2027-08-03"
+        }
+      ],
       "requirement_id_migration": "pending",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "PR #164 merged the SPEC-016 USDC-on-Base payout implementation, PR #827 repaired the spec-index drift, and PR #882 added the provider-facing Add Wallet registration flow. R002 now has canonical implementation/test anchors and a contract-only physical journey; the runner remains default-off and no production activation claim is made. Exhaustive clause-level requirement ID migration, signed journey evidence, §9 operator prerequisites, production deployment, and the remaining per-requirement reconciliations remain pending under the payout-lifecycle domain."
       }
     },
     {
@@ -484,7 +498,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.6",
+      "version": "0.2.7",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -603,7 +617,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.5",
+      "version": "v0.1.6",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -627,17 +641,18 @@
       "last_reconciled_commit": null,
       "last_reconciled_at": null,
       "evidence": [],
-      "requirement_id_migration": "pending",
+      "requirement_id_migration": "complete",
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Requirement IDs SPEC-022-R001..R011 registered (one per normative requirement group R-1..R-11) in v0.1.6; conformance reconciliation of the settlement pipeline tracked under the verified-model-settlement domain."
       }
     },
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.8.6",
+      "version": "v0.9.3",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -885,7 +900,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2.2",
+      "version": "v0.2.5",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1129,6 +1144,29 @@
   ],
   "requirements": [
     {
+      "requirement_id": "SPEC-001-R001",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func setSleepAssertionDesired",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runReconnectLoop",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func drainFromCoordinator"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionSurvivesDisconnectAndReleasesOnStop",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionFollowsServingIntent",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testSleepAssertionRefusesReArmAfterStop"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/854",
+        "rationale": "Provider serving continuity across coordinator disconnect, reconnect backoff, and coordinator drain (§6.5 / FR-13 / FR-15 / AC-16): PR #853 binds the macOS sleep assertion to serving intent under regression tests, but production physical uptime evidence remains pending."
+      }
+    },
+    {
       "requirement_id": "SPEC-002-R001",
       "spec_id": "SPEC-002",
       "state": "pending",
@@ -1356,6 +1394,29 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-018 v0.2.5 defines the #743 Harmony token-ID response parsing contract; conformance remains pending until the implementation and regression evidence are reconciled against AC-57 through AC-61."
       }
+    },
+    {
+      "requirement_id": "SPEC-018-R002",
+      "spec_id": "SPEC-018",
+      "state": "conformant",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:enum ToolCallParser",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:struct NativeToolCallStreamEmitter"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ToolCallParserTests.swift:final class ToolCallParserTests",
+        "phase3-binary/Tests/macprovider-cliTests/NativeToolCallStreamEmitterTests.swift:final class NativeToolCallStreamEmitterTests"
+      ],
+      "journeys": [],
+      "evidence": [
+        {
+          "artifact": "commit:f2fe9f2bcb5b32a263ac92f5ecabdc86724727f0",
+          "source": null,
+          "captured_at": "2026-08-02",
+          "expires_at": "2027-08-02"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-020-R001",
@@ -2009,7 +2070,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the \u00a75a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP3 (snapshot-at-commit, write ordering, durability events) plus the §5a Format v1 normative encoding it publishes; normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -2024,7 +2085,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per \u00a75a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-KVP4 (four-category envelope validation, full-envelope AAD projection per §5a): normative in SPEC-037 v0.1.0; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
@@ -2847,6 +2908,371 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-PKV14 (operator configuration surface mirroring SPEC-037 FR-KVP11: triple-source precedence, default-off, block size, pool capacity, fallback policy): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R001",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-1 policy authority and mode (single authoritative verified_model_settlement surface; default observe MUST NOT change money; enforce activation preconditions; effective policy recorded and read from request-start row): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R002",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-2 entrypoint and routing preconditions (covered paid entrypoints; active signed catalog at route time; route only to hash_verified provider/model pairs; fail-closed warm-swap): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R003",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-3 route-time verification snapshot (immutable per-attempt snapshot; model-hash triple-equality; usage/prompt_hash/output_hash cross-check against coordinator-observed canonical state; quarantine on unavailable/mismatch): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R004",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-4 receipt requirement (settlement-capable provider-signed receipt for any debitable/creditable outcome; null model_hash and legacy receipts non-settling; signature necessary not sufficient; receipt-key identity binding; terminal receipt selection is idempotent): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R005",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-5 streaming receipts (first-class paid traffic; terminal-state binding; partial-prefix binding for partial-output settlement with coordinator-observed cross-check; async verification decoupled; per-attempt failover settles delivered verified prefixes without double-charge): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R006",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-6 buyer receipt retrieval (owner/operator auth; no raw prompts or outputs; proof/metadata only; defined retention, rate limits, idempotency, 404/403, pending/quarantined visibility): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R007",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-7 settlement, quarantine, and payout exclusion (receipt-verification gate before any credit/earnings/sweep/payout; non-verified excluded; quarantine mandatory for trust failures and terminal; no fallback to provider-reported usage under enforce; operator money-positive bypasses forbidden): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R008",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-8 buyer debit semantics (reservation-first; final debit only on verified; quarantine/deadline releases reservation and keeps provider credit zero; zero_settled terminal; buyer surfaces distinguish pending/verified/quarantined/zero_settled): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R009",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-9 rollout, migration, and rollback (effective policy by request-start timestamp and attempt identity; no retroactive reclassification; enforced rows retain original policy/deadline/payout-exclusion across rollback; pre-existing payout-ready rows excluded from the snapshot): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R010",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-10 buyer disclosure (distinguish catalog-verified identity from unattested hardware/runtime; mixed-pool claims constrained; observe mode MUST NOT claim enforcement; excluded entrypoints named; partial-charge and failover disclosure): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-022-R011",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "R-11 audit and observability (structured per-attempt settlement audit event; no raw prompts/outputs/receipt material; aggregate verified/pending/quarantined/zero_settled counters; recovery/backfill audit completeness): normative in SPEC-022 v0.1.6; settlement pipeline runs in observe mode and reconciliation to conformant is tracked under the verified-model-settlement domain."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R001",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Default-off rail scope, USDC-on-Base operator prerequisites, and activation boundary (§1, §2, §9): preliminary anchor for the existing obligation area; implementation merged default-off by PR #164, but production enablement and §9 operator prerequisite evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R002",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/payout/addresses.go:AddressesService",
+        "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
+        "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress",
+        "phase3-binary/Sources/macprovider-cli/PayoutAddressClient.swift:PayoutAddressClient",
+        "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift:PayoutWalletFlow"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_HappyPath_FirstRegistration",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_AntiReplay_SecondNonceRejected",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_Zero",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_One",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RateLimit_429AfterWindowBudget",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_PreAuthPauseReturns503Before401",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_TOCTOUPauseFlipDuringTxn_NoRowWritten",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_NonceMismatchInBody_RejectsAsSignatureMismatch",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_DenyList",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_SignatureSkew",
+        "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_NonceCanonicalisation_0XReplayDefeated",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_HappyPath",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_IncludesRegisteredAddress",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_UnauthorizedNoToken",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_ForbiddenWrongProvider",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_PreAuthPauseIdenticalBody",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestServePayoutChallenge_StructuredLogOnReject",
+        "phase4-coordinator/internal/payout/challenge_test.go:TestMux_ChallengeEscapedURLsAreNotCollapsed",
+        "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_HappyPath",
+        "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_WrongVerifyingContractRejected",
+        "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_WrongNonceRejected",
+        "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_MatchesCommitted",
+        "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_RoundTripJSSignature",
+        "phase4-coordinator/internal/payout/attempts_test.go:TestSelectReadyPayouts_FiltersByHotWalletAndCoolingOff",
+        "phase3-binary/Tests/macprovider-cliTests/PayoutAddressClientTests.swift:PayoutAddressClientTests",
+        "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:PayoutWalletFlowTests"
+      ],
+      "journeys": [
+        "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider payout-address registration, EIP-712 proof-of-possession, replay protection, cooling-off, and rotation semantics (§3): current origin/main maps the coordinator, CLI, and Malibu surfaces plus targeted regression suites from PR #882, and defines the required physical journey. The requirement remains pending because the journey is contract-only, no signed journey-result artifact exists, and payout.enabled remains false/not deployed; physical replay, cooling-off, rotation, and release evidence are still required."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R003",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout package boundary, read surfaces, handler inventory, and import-graph ownership (§3.4, §4.1, §7.3): preliminary anchor for the existing obligation area; implementation exists in the coordinator payout package and wiring, but mappings/tests are not yet reconciled to conformant."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R004",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runner selection, signing, broadcast, two-RPC confirmation, and ClaimPayoutReady finalization (§4.3): preliminary anchor for the existing obligation area; runner implementation merged default-off, but production activation, mapped tests, and journey evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R005",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout attempt schema, idempotent retry, nonce-gap fill, cancel self-transfer, and abandon-attempt recovery (§4.5, §4.6): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R006",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Reorg polling, orphan recording, compensation, and funding-recording admin flows (§4.7, §4.9): preliminary anchor for the existing obligation area; implementation merged default-off, but operator runbook evidence and signed journey-result support remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R007",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Runtime flags, pause/resume, runner lease, self-fencing, and crash-safe audit outboxes (§4.8, §4.8a, §4.8b, §4.8c, §6.4.1): preliminary anchor for the existing obligation area; implementation merged default-off, but conformance mappings and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R008",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Payout caps, hot-wallet balances, gas accounting, and conservation reconciliation (§5, §6.2, §7.4): preliminary anchor for the existing obligation area; implementation merged default-off, but funded-wallet operation and reconciliation evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R009",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Signer custody, Linux-only process hardening, two-RPC discipline, SPKI pinning, and reload boundaries (§6.3, §6.4, §6.5): preliminary anchor for the existing obligation area; implementation merged default-off, but production host evidence and signed journey-result support remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R010",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Structured audit events, retention, operator queries, BetterStack alert filters, and runbook obligations (§7, §9): preliminary anchor for the existing obligation area; implementation and runbook artifacts merged, but alert verification and production evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-016-R011",
+      "spec_id": "SPEC-016",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Provider-token custody and compliance payout eligibility (§8, v0.1.20 Wave-2 custody gate): preliminary anchor for the existing obligation area; normative custody gate retained through v0.1.23, but provider eligibility policy and production evidence remain pending."
       }
     }
   ]

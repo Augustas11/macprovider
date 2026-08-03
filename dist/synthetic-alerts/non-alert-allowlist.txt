@@ -1,0 +1,65 @@
+# Non-alert payout_/provider_payout_ string literals.
+#
+# The synthetic-alerts completeness test (synthetic_alerts_catalog_test.go)
+# scans every non-test .go file under phase4-coordinator/internal/payout/ and
+# phase4-coordinator/cmd/coordinator/ for identifier-shaped string literals
+# matching ^(payout_|provider_payout_)[a-z0-9_]+$. EVERY such literal must be
+# classified as exactly one of:
+#   (a) a catalogued ALERT event  -> dist/synthetic-alerts/catalog.tsv, or
+#   (b) a reviewed NON-ALERT string -> this file.
+# Any literal that is neither FAILS the test (fail-closed): a new alert event
+# cannot ship without a catalog entry (and thus a BetterStack matcher + a
+# synthetic-alert verification), and a new non-alert string must be reviewed
+# and listed here.
+#
+# Format: <literal><TAB><one-word reason>. Reasons:
+#   db-table     - SQLite table name
+#   db-column    - SQLite column name
+#   reason-value - a `reason`/error-class/HTTP body string, not an event name
+#   info-event   - a structured-log event emitted WITHOUT a PAGE/WARN severity
+#                  field (INFO/debug/operational); not part of the §9 item 6
+#                  alert filter. If one of these is ever promoted to a PAGE/WARN
+#                  alert (a `severity` field added), MOVE it to catalog.tsv.
+#
+# literal	reason
+payout_attempts	db-table
+payout_balance_probe_rpc_error	info-event
+payout_chain_balance_db_error	info-event
+payout_chain_balance_decode_error	info-event
+payout_chain_balance_ok	info-event
+payout_flag_audit_reaper_claim_failed	info-event
+payout_flag_audit_reaper_failed	info-event
+payout_flag_audit_reaper_pass	info-event
+payout_funding_receipt_mismatch	info-event
+payout_funding_recorded	info-event
+payout_funding_rpc_error	info-event
+payout_funding_rpc_unavailable	info-event
+payout_hot_wallet_funding	db-table
+payout_id	db-column
+payout_nonce_cold_start_within_tolerance	info-event
+payout_nonce_gap_precheck_skipped	info-event
+payout_nonce_gap_recovery_only	info-event
+payout_nonce_gap_reorg_suspect	info-event
+payout_not_allowed	reason-value
+payout_paid	info-event
+payout_reorg_orphan_resolved	info-event
+payout_reorg_orphans	db-table
+payout_run_finished	info-event
+payout_run_now_invoked	info-event
+payout_run_started	info-event
+payout_runner_halted_skipping_rows	info-event
+payout_runner_lease	db-table
+payout_runner_lease_left_to_stale_out	info-event
+payout_runner_state	db-table
+payout_runtime_flag_write_failed	info-event
+payout_stale_outbox_claim_failed	info-event
+payout_stale_outbox_produced	info-event
+payout_stale_outbox_producer_conn_failed	info-event
+payout_stale_outbox_producer_failed	info-event
+payout_stale_outbox_reaper_failed	info-event
+payout_tuning_sighup_received	info-event
+provider_payout_address_changed	info-event
+provider_payout_address_challenge	info-event
+provider_payout_address_challenge_rejected	info-event
+provider_payout_address_nonces	db-table
+provider_payout_addresses	db-table

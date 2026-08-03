@@ -115,8 +115,8 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
-CANARY_AUTHORITY_VERSION = "issue-585-integration-r7"
-CANARY_AUTHORITY_COMMIT = "43138cee6dd26f18a11934390fc6b3b0623f1e00"
+CANARY_AUTHORITY_VERSION = "issue-825-canary-fleet-r6"
+CANARY_AUTHORITY_COMMIT = "fb3f4f1680b9cf2404c0f40317bef3696d659f58"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -134,11 +134,11 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "73d47710a0a1a33c1f2b474f11a273f555b89d99118b5347be29492baba42a5d",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "65c07f1c8e111bc402e5e22f6a1871d66186bb6f618175a8f2aafebfa7ab743c",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "a4e7351671f703edf149dc04a3f9db3480b0921252eac29da5e6ad7b3488fa4f",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "d1556e42e845a2895d0d777c6f7724d886bd46864143ed836c2179bbca2d3c35",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
-    Path("/etc/systemd/system/canary-buyer.service"): "fcc5413a717373af4112d2cc62a2eabc9eeb7e48e3a5233b3cc81f4ca3bbfabb",
+    Path("/etc/systemd/system/canary-buyer.service"): "df5ef235382a90eebff046e43aeb45b88623f4f4a82637584f9000de40bf9c2b",
     Path("/etc/systemd/system/canary-buyer.timer"): "deb5e3acf67b8d713f61b3167224e908c6754e65e143d84840dba8fea3eb7a18",
 }
 CANARY_AUTHORITY_FILE_MODES = {
@@ -157,8 +157,10 @@ CANARY_EXPECTED_MODELS = frozenset(
     {
         "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
         "mlx-community/Llama-3.2-3B-Instruct-4bit",
+        "mlx-community/Qwen3-8B-4bit",
     }
 )
+CANARY_MAX_EXPECTED_PROVIDERS = 100
 CANARY_AUTHORITY_PRIVATE_FILES = {
     CANARY_BUYER_TOKEN: "canary buyer token",
     CANARY_HEARTBEAT_URL: "canary heartbeat URL",
@@ -867,6 +869,7 @@ class Updater:
         self.previous_versions: dict[str, str] = {}
         self.previous_pool_ready: int | None = None
         self.previous_protected_providers: list[str] = []
+        self.previous_protected_fleet: list[dict[str, str]] = []
         self.deadman_previous_paused: bool | None = None
         self.deadman_restore_required = False
         self.journal: dict[str, Any] | None = None
@@ -1076,6 +1079,7 @@ class Updater:
             "previous_versions": {},
             "previous_pool_ready": None,
             "previous_protected_providers": [],
+            "previous_protected_fleet": [],
             "database_paths": [],
             "database_config_hashes": {},
             "canary_timer_was_active": None,
@@ -2713,17 +2717,97 @@ class Updater:
             not isinstance(document, dict)
             or document.get("schema_version") != 1
             or not isinstance(providers, list)
-            or len(providers) != 2
+            or len(providers) < 1
+            or len(providers) > CANARY_MAX_EXPECTED_PROVIDERS
             or any(not isinstance(row, dict) for row in providers)
             or any(not isinstance(value, str) or not value for value in provider_ids + model_ids)
-            or len(set(provider_ids)) != 2
-            or len(set(model_ids)) != 2
-            or set(model_ids) != CANARY_EXPECTED_MODELS
+            or len(set(provider_ids)) != len(provider_ids)
         ):
             raise UpdateError(
-                "canary expected fleet must bind exactly two unique providers to the pinned service models"
+                "canary expected fleet must bind unique protected providers to non-empty models"
             )
         return normalized
+
+    @staticmethod
+    def _normalize_protected_fleet_rows(rows: object, description: str) -> list[dict[str, str]]:
+        if not isinstance(rows, list):
+            raise UpdateError(f"{description} is invalid")
+        normalized: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise UpdateError(f"{description} is invalid")
+            provider_id = row.get("provider_id")
+            model_id = row.get("model_id")
+            if (
+                not isinstance(provider_id, str)
+                or not provider_id
+                or len(provider_id) > 256
+                or not isinstance(model_id, str)
+                or not model_id
+            ):
+                raise UpdateError(f"{description} is invalid")
+            normalized.append({"provider_id": provider_id, "model_id": model_id})
+        provider_ids = [row["provider_id"] for row in normalized]
+        if len(provider_ids) != len(set(provider_ids)):
+            raise UpdateError(f"{description} contains duplicate provider identities")
+        return sorted(normalized, key=lambda row: row["provider_id"])
+
+    def _previous_protected_fleet(self) -> list[dict[str, str]]:
+        if self.previous_protected_fleet:
+            return [dict(row) for row in self.previous_protected_fleet]
+        if not self.previous_protected_providers:
+            return []
+        raise UpdateError("phase journal protected provider model baseline is unavailable")
+
+    def _rollback_authorization_fleet(self, previous_version: str) -> list[dict[str, str]]:
+        protected_fleet = self._previous_protected_fleet()
+        if not protected_fleet:
+            return self._canary_expected_fleet()
+        poolz = self.get_authorized_json(
+            "http://127.0.0.1:8444/poolz",
+            self.coordinator_operator_token(),
+        )
+        rows = poolz.get("pool")
+        if not isinstance(rows, list):
+            raise UpdateError("legacy rollback authorization pool snapshot omitted provider rows")
+        expected_ids = {row["provider_id"] for row in protected_fleet}
+        current: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise UpdateError("legacy rollback authorization pool snapshot contains an invalid row")
+            provider_id = row.get("provider_id")
+            if not isinstance(provider_id, str) or not provider_id:
+                raise UpdateError("legacy rollback authorization pool snapshot contains an invalid provider identity")
+            if provider_id in current:
+                raise UpdateError("legacy rollback authorization pool snapshot contains duplicate provider identities")
+            current[provider_id] = row
+        fleet: list[dict[str, str]] = []
+        for expected in protected_fleet:
+            provider_id = expected["provider_id"]
+            row = current.get(provider_id)
+            model_id = row.get("model_id") if isinstance(row, dict) else None
+            binary_version = row.get("binary_version") if isinstance(row, dict) else None
+            if (
+                row is None
+                or row.get("state") != "ready"
+                or row.get("routing_eligible") is not True
+                or model_id != expected["model_id"]
+                or str(SemVer.parse(str(binary_version or ""))) != previous_version
+            ):
+                raise UpdateError(
+                    "legacy rollback authorization requires the captured protected providers to be ready on the restored version"
+                )
+            fleet.append(dict(expected))
+        ready_rows = sum(
+            1
+            for provider_id, row in current.items()
+            if provider_id in expected_ids
+            and row.get("state") == "ready"
+            and row.get("routing_eligible") is True
+        )
+        if self.previous_pool_ready is not None and ready_rows < self.previous_pool_ready:
+            raise UpdateError("legacy rollback authorization capacity is below the protected rollout baseline")
+        return fleet
 
     def _legacy_rollback_control_directory(self) -> Path:
         directory = self.canary_rollback_authorization.parent
@@ -2785,12 +2869,10 @@ class Updater:
             raise UpdateError("legacy rollback authorization version is invalid") from exc
         if normalized_version != journal_version:
             raise UpdateError("legacy rollback authorization version mismatches the phase journal")
-        fleet = self._canary_expected_fleet()
-        fleet_ids = sorted(row["provider_id"] for row in fleet)
-        if fleet_ids != self.previous_protected_providers:
+        fleet = self._rollback_authorization_fleet(normalized_version)
+        baseline_fleet = self._previous_protected_fleet()
+        if baseline_fleet and fleet != baseline_fleet:
             raise UpdateError("legacy rollback authorization fleet mismatches the protected rollout baseline")
-        if self.previous_pool_ready != len(fleet):
-            raise UpdateError("legacy rollback authorization capacity mismatches the protected rollout baseline")
         directory = self._legacy_rollback_control_directory()
         self._remove_legacy_rollback_authorization()
         validity_s = min(max(self.config.canary_timeout_s + 60, 180), 14 * 60)
@@ -3499,23 +3581,33 @@ class Updater:
         rows = poolz.get("pool")
         if not isinstance(rows, list):
             raise UpdateError("operator pool snapshot omitted provider rows")
-        protected: list[str] = []
+        protected: list[dict[str, str]] = []
         for row in rows:
             if not isinstance(row, dict):
                 raise UpdateError("operator pool snapshot contains an invalid provider row")
             provider_id = row.get("provider_id")
+            model_id = row.get("model_id")
             if (
                 row.get("routing_eligible") is True
                 and row.get("state") == "ready"
             ):
                 if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 256:
                     raise UpdateError("operator pool snapshot contains an invalid provider identity")
-                protected.append(provider_id)
-        if len(protected) != len(set(protected)):
+                if not isinstance(model_id, str) or not model_id:
+                    raise UpdateError("operator pool snapshot contains an invalid protected provider model")
+                protected.append({"provider_id": provider_id, "model_id": model_id})
+        protected_ids = [row["provider_id"] for row in protected]
+        if len(protected_ids) != len(set(protected_ids)):
             raise UpdateError("operator pool snapshot contains duplicate protected provider identities")
         if len(protected) != pool_ready:
             raise UpdateError("operator pool snapshot does not match coordinator ready capacity")
-        self.previous_protected_providers = sorted(protected)
+        self.previous_protected_fleet = self._normalize_protected_fleet_rows(
+            protected,
+            "operator protected provider model baseline",
+        )
+        self.previous_protected_providers = [
+            row["provider_id"] for row in self.previous_protected_fleet
+        ]
         self.previous_services = {
             "macprovider-coordinator.service": self.service_active("macprovider-coordinator.service"),
             "macprovider-gateway.service": self.service_active("macprovider-gateway.service"),
@@ -3537,6 +3629,7 @@ class Updater:
             previous_versions=dict(self.previous_versions),
             previous_pool_ready=self.previous_pool_ready,
             previous_protected_providers=list(self.previous_protected_providers),
+            previous_protected_fleet=list(self.previous_protected_fleet),
         )
 
     def coordinator_operator_token(self) -> str:
@@ -4841,7 +4934,7 @@ class Updater:
         )
         return current, decision
 
-    def protected_provider_fleet_ready(self) -> bool:
+    def protected_provider_fleet_ready(self, *, require_previous_baseline: bool = True) -> bool:
         if not self.previous_protected_providers:
             return True
         poolz = self.get_authorized_json(
@@ -4853,11 +4946,13 @@ class Updater:
         if not isinstance(summary, dict) or not isinstance(rows, list):
             raise UpdateError("public protected-fleet sample omitted pool or summary")
         ready = summary.get("ready")
-        required_ready = max(
-            self.config.minimum_pool_ready_after_rollout,
-            self.previous_pool_ready or 0,
-            len(self.previous_protected_providers),
-        )
+        required_ready = self.config.minimum_pool_ready_after_rollout
+        if require_previous_baseline:
+            required_ready = max(
+                required_ready,
+                self.previous_pool_ready or 0,
+                len(self.previous_protected_providers),
+            )
         if type(ready) is not int or ready < required_ready:
             return False
         current: dict[str, dict[str, Any]] = {}
@@ -4870,11 +4965,19 @@ class Updater:
             if provider_id in current:
                 raise UpdateError("public protected-fleet sample contains duplicate provider identities")
             current[provider_id] = row
+        if not require_previous_baseline:
+            ready_rows = sum(
+                1
+                for row in current.values()
+                if row.get("state") == "ready" and row.get("routing_eligible") is True
+            )
+            return ready_rows >= max(required_ready, len(current))
         return all(
-            provider_id in current
-            and current[provider_id].get("state") == "ready"
-            and current[provider_id].get("routing_eligible") is True
-            for provider_id in self.previous_protected_providers
+            (row := current.get(expected["provider_id"])) is not None
+            and row.get("state") == "ready"
+            and row.get("routing_eligible") is True
+            and row.get("model_id") == expected["model_id"]
+            for expected in self._previous_protected_fleet()
         )
 
     def prove_serving_recovery(
@@ -4896,11 +4999,17 @@ class Updater:
         )
         if self.previous_protected_providers:
             stable_samples = 0
+            relax_previous_baseline = (
+                legacy_rollback_version is not None
+                and self.config.buyer_canary_mode == BUYER_CANARY_MODE_REQUIRED
+            )
 
             def protected_fleet_stable() -> bool:
                 nonlocal stable_samples
                 try:
-                    ready = self.protected_provider_fleet_ready()
+                    ready = self.protected_provider_fleet_ready(
+                        require_previous_baseline=not relax_previous_baseline
+                    )
                 except Exception:
                     stable_samples = 0
                     raise
@@ -4965,12 +5074,14 @@ class Updater:
                 for row in rows
                 if isinstance(row, dict) and isinstance(row.get("provider_id"), str)
             }
-            for provider_id in self.previous_protected_providers:
+            for expected in self._previous_protected_fleet():
+                provider_id = expected["provider_id"]
                 row = current.get(provider_id)
                 if (
                     row is None
                     or row.get("routing_eligible") is not True
                     or row.get("state") != "ready"
+                    or row.get("model_id") != expected["model_id"]
                     or row.get("catalog_admission_mode") not in ("legacy_bridge", "current", "previous")
                 ):
                     raise UpdateError(
@@ -5844,6 +5955,15 @@ class Updater:
             ):
                 raise UpdateError("phase journal protected provider identities are invalid")
             self.previous_protected_providers = list(protected)
+            protected_fleet_raw = payload.get("previous_protected_fleet", [])
+            protected_fleet = self._normalize_protected_fleet_rows(
+                protected_fleet_raw,
+                "phase journal protected provider model baseline",
+            )
+            protected_fleet_ids = [row["provider_id"] for row in protected_fleet]
+            if protected_fleet_ids and protected_fleet_ids != self.previous_protected_providers:
+                raise UpdateError("phase journal protected provider model baseline mismatches protected identities")
+            self.previous_protected_fleet = protected_fleet
             database_paths = payload.get("database_paths", [])
             if not isinstance(database_paths, list) or any(
                 not isinstance(value, str) or not Path(value).is_absolute() for value in database_paths

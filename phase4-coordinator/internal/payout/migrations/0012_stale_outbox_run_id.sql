@@ -1,0 +1,12 @@
+-- SPEC-016 §4.8c — codex Step 3 r2 [arch:r2-3.3] + [code:r2-2.1]
+-- MEDIUM closure. The payout_cancel_self_transfer_reconfirm_stale
+-- PAGE event's §7.1 field set requires run_id, but the
+-- cancel_reconfirm_stale_outbox row didn't persist it, so the
+-- reaper could not reconstruct run_id when emitting on its
+-- recovery path. Add a nullable run_id column so the
+-- runner-owned producer persists it inline.
+--
+-- Nullable: rows produced before this migration land with NULL;
+-- the §7.1 emitter writes "" when NULL so downstream consumers
+-- still get a stable field name.
+ALTER TABLE cancel_reconfirm_stale_outbox ADD COLUMN run_id TEXT NULL;

@@ -2507,26 +2507,111 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testProbeSafetyAssessmentFailsClosedOnUnavailableTelemetry() {
-        let unavailable = ProbeSafetyAssessment.assess(
-            before: ProbeSafetySample(pageouts: nil, thermalState: nil),
-            after: ProbeSafetySample(pageouts: nil, thermalState: nil)
-        )
+        // Whole-series unknown pressure => fail closed (matches the prior
+        // nil-fail-closed contract). All-unknown thermal also throttles.
+        let unavailable = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: nil),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: nil),
+        ])
         XCTAssertTrue(unavailable.swapDetected)
         XCTAssertTrue(unavailable.thermalThrottleDetected)
+        XCTAssertFalse(unavailable.swapObservedUnderLoad)
 
-        let safe = ProbeSafetyAssessment.assess(
-            before: ProbeSafetySample(pageouts: 10, thermalState: .nominal),
-            after: ProbeSafetySample(pageouts: 10, thermalState: .fair)
-        )
+        // Healthy series: sustained normal pressure, benign thermal.
+        let safe = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
         XCTAssertFalse(safe.swapDetected)
         XCTAssertFalse(safe.thermalThrottleDetected)
+        XCTAssertFalse(safe.swapObservedUnderLoad)
+    }
 
-        let unsafe = ProbeSafetyAssessment.assess(
-            before: ProbeSafetySample(pageouts: 10, thermalState: .nominal),
-            after: ProbeSafetySample(pageouts: 11, thermalState: .serious)
-        )
-        XCTAssertTrue(unsafe.swapDetected)
-        XCTAssertTrue(unsafe.thermalThrottleDetected)
+    func testProbeSafetyAssessmentDetectsSustainedCriticalThrash() {
+        // #742's real incident: a genuinely thrashing node holds CRITICAL
+        // memory pressure across the probe => hard swap veto.
+        let thrash = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+        ])
+        XCTAssertTrue(thrash.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentDoesNotBlockIncidentalPressureOn8GB() {
+        // 8 GB Mac running the smallest model: mostly normal pressure with a
+        // single transient WARNING blip. This must NOT be read as thrash, so
+        // llama-3.2-3b stays paid-eligible (the growth-blocker fix).
+        let incidental = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .fair),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(incidental.swapDetected)
+        XCTAssertFalse(incidental.swapObservedUnderLoad)
+    }
+
+    func testProbeSafetyAssessmentFlagsAdvisoryOnWarningMajority() {
+        // Sustained WARNING majority (no critical majority): do not block, but
+        // flag the advisory observation for operators / telemetry.
+        let warned = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .warning, thermalState: .nominal),
+        ])
+        XCTAssertFalse(warned.swapDetected)
+        XCTAssertTrue(warned.swapObservedUnderLoad)
+    }
+
+    func testProbeSafetyAssessmentSingleTransientUnknownDoesNotBlock() {
+        // A lone unknown reading amid healthy samples must not fail closed.
+        let transient = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(transient.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentShortProbeSustainedCriticalStillBlocks() {
+        // Round-1 audit fix (MEDIUM): a short probe that yields only the two
+        // synchronous samples must still veto when both read CRITICAL — the old
+        // >= 3 total-sample floor let this fail open.
+        let shortThrash = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+        ])
+        XCTAssertTrue(shortThrash.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentLoneCriticalSpikeDoesNotBlock() {
+        // A single incidental CRITICAL reading among healthy samples is not
+        // sustained thrash (requires >= 2 critical), so it must not block.
+        let spike = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal),
+        ])
+        XCTAssertFalse(spike.swapDetected)
+    }
+
+    func testProbeSafetyAssessmentUnknownDoesNotDiluteCriticalMajority() {
+        // Round-1 audit fix (MEDIUM): .unknown readings must not dilute the
+        // denominator. Two CRITICAL among many UNKNOWN is a critical majority of
+        // the READABLE samples and must veto (the old raw-count denominator let
+        // this fail open).
+        let diluted = ProbeSafetyAssessment.assess(samples: [
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .critical, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+            ProbeSafetySample(pressureLevel: .unknown, thermalState: .serious),
+        ])
+        XCTAssertTrue(diluted.swapDetected)
     }
 
     func testBothMarketFallbacksProduceLowConfidence() throws {
@@ -3118,6 +3203,123 @@ final class AutotuneRecommendTests: XCTestCase {
             outcomes.diagnostics[modelKey],
             "probe request failed: The request timed out. (n_err=3)"
         )
+    }
+
+    func testBenchmarksDiagnosesInvalidFeasibleMeasurementsWithoutTrapping() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .feasible(medianTPS: 0, p95TTFTMS: .infinity),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("invalid feasible throughput"), diagnostic)
+    }
+
+    func testBenchmarksDiagnosesInvalidFeasibleTTFTWithoutTrapping() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .feasible(medianTPS: 42, p95TTFTMS: .infinity),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("invalid feasible TTFT infinityms"), diagnostic)
+    }
+
+    func testReceiptBoundBenchmarkFailsClosedOnInvalidFeasibleMeasurement() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 64
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = artifactSHA
+        request.benchmarks = [:]
+        let prefetched = PrefetchedModelArtifact(
+            modelKey: modelKey,
+            modelID: row.modelID,
+            modelRevision: revision,
+            candidateRowIdentity: try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey)),
+            path: snapshot.path,
+            sha256: artifactSHA
+        )
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: RecordingStage1Prober(results: [
+                snapshot.path: .feasible(medianTPS: .nan, p95TTFTMS: 900),
+            ]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        do {
+            _ = try await benchmarker.benchmarks(
+                request: request,
+                targetContext: 4_000,
+                gateTTFTMS: 3_000,
+                replicates: 1,
+                port: 18_080,
+                candidateModelIDs: [row.modelID],
+                prefetchedArtifacts: [modelKey: prefetched]
+            )
+            XCTFail("receipt-bound invalid feasible output must fail before state replacement")
+        } catch AutotuneRecommendError.candidateProbeFailed(let failedModelKey, let reason) {
+            XCTAssertEqual(failedModelKey, modelKey)
+            XCTAssertTrue(reason.contains("invalid feasible throughput nan"), reason)
+        }
     }
 
     func testReceiptBoundBenchmarkFailsClosedWhenCandidateIsNotReady() async throws {
@@ -3797,6 +3999,6 @@ private final class RecordingStage1Prober: Stage1Probing {
 
 private struct StaticProbeSafetySampler: ProbeSafetySampling {
     func sample() -> ProbeSafetySample {
-        ProbeSafetySample(pageouts: 10, thermalState: .nominal)
+        ProbeSafetySample(pressureLevel: .normal, thermalState: .nominal)
     }
 }

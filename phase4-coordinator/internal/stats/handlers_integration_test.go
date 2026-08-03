@@ -801,6 +801,12 @@ func driveOneRollupTick(t *testing.T, fx *pgFixture) {
 		t.Fatalf("open stats_rollup: %v", err)
 	}
 	defer rdb.Close()
+	adminDB, err := sql.Open("postgres", fx.adminDSN())
+	if err != nil {
+		t.Fatalf("open admin db: %v", err)
+	}
+	defer adminDB.Close()
+	baseline := componentGeneratedAt(t, adminDB, "leaderboard_24h")
 	logger := zerolog.Nop()
 	cfg := freshRollupConfig()
 	runner, err := statsrollup.New(rdb, cfg, statsrollup.ZeroSnapshotProvider{}, logger)
@@ -809,9 +815,37 @@ func driveOneRollupTick(t *testing.T, fx *pgFixture) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	runner.Start(ctx)
-	time.Sleep(500 * time.Millisecond)
+	waitForComponentAdvance(t, adminDB, "leaderboard_24h", baseline)
 	cancel()
 	runner.Wait()
+}
+
+func componentGeneratedAt(t *testing.T, db *sql.DB, component string) time.Time {
+	t.Helper()
+	var generatedAt time.Time
+	if err := db.QueryRowContext(
+		context.Background(),
+		`SELECT generated_at FROM stats_components_health WHERE component = $1`,
+		component,
+	).Scan(&generatedAt); err != nil {
+		t.Fatalf("read %s generated_at: %v", component, err)
+	}
+	return generatedAt
+}
+
+func waitForComponentAdvance(t *testing.T, db *sql.DB, component string, baseline time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		generatedAt := componentGeneratedAt(t, db, component)
+		if generatedAt.After(baseline) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not advance from %s before deadline; last generated_at=%s", component, baseline.Format(time.RFC3339Nano), generatedAt.Format(time.RFC3339Nano))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // ===========================================================================
@@ -1413,8 +1447,9 @@ func TestTrustedUntrustedXFF(t *testing.T) {
 	reader := readerPool(t, fx)
 
 	// Untrusted-proxy case: limiter keys on r.RemoteAddr,
-	// ignoring rotated XFF. After 300 invalid-bearer requests
-	// from the same r.RemoteAddr, request 301 returns 429.
+	// ignoring rotated XFF. Send enough invalid-bearer requests
+	// that one fixed-window minute rollover cannot split the
+	// sample below the 300 rpm auth-failure cap in both windows.
 	muxUntrusted := stats.NewMux(
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
@@ -1426,7 +1461,7 @@ func TestTrustedUntrustedXFF(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer mpk_invalid_xff")
 	var rate429 int
-	for i := 0; i < 350; i++ {
+	for i := 0; i < 650; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/v1/stats/leaderboard", nil)
 		req.Header.Set("Authorization", "Bearer mpk_invalid_xff")
 		// Rotate XFF; the untrusted limiter ignores it.

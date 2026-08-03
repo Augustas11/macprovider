@@ -159,6 +159,115 @@ final class ProviderDrainerTests: XCTestCase {
         XCTAssertEqual(calls[0].1, ["bootstrap", "gui/502", plistURL.path])
     }
 
+    func testLaunchdCrashRestoreGuardStartsOnlyForLaunchdManagedConflict() throws {
+        let plistURL = URL(fileURLWithPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist")
+        var starts: [(String, String)] = []
+        var dismissCount = 0
+        let drainer = ProviderDrainer(
+            uid: 502,
+            plistURL: plistURL,
+            launchdRestoreGuardStarter: { domain, plistPath in
+                starts.append((domain, plistPath))
+                return ProviderLaunchdRestoreGuard {
+                    dismissCount += 1
+                }
+            }
+        )
+
+        let guardHandle = try XCTUnwrap(
+            try drainer.startLaunchdCrashRestoreGuard(for: .launchdManaged(pid: nil))
+        )
+        XCTAssertEqual(starts.count, 1)
+        XCTAssertEqual(starts[0].0, "gui/502")
+        XCTAssertEqual(starts[0].1, plistURL.path)
+
+        XCTAssertNil(try drainer.startLaunchdCrashRestoreGuard(for: .none))
+        XCTAssertNil(
+            try drainer.startLaunchdCrashRestoreGuard(
+                for: .foreground(pid: 515, argv: ["/usr/local/bin/macprovider-cli", "serve"])
+            )
+        )
+        XCTAssertEqual(starts.count, 1)
+
+        guardHandle.dismiss()
+        guardHandle.dismiss()
+        XCTAssertEqual(dismissCount, 1)
+    }
+
+    func testLaunchdRestoreGuardScriptBootstrapsOnceOnEOFWithoutDismissToken() throws {
+        let fixture = try makeLaunchdGuardFixture()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            ProviderLaunchdRestoreGuard.restoreScript,
+            "macprovider-launchd-restore-guard-test",
+            fixture.launchctl.path,
+            "gui/502",
+            "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist",
+            ProviderLaunchdRestoreGuard.dismissToken,
+        ]
+        process.standardInput = Pipe().fileHandleForReading
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        let log = try String(contentsOf: fixture.log, encoding: .utf8)
+        XCTAssertEqual(
+            log,
+            "bootstrap gui/502 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist\n"
+        )
+    }
+
+    func testLaunchdRestoreGuardIgnoresHangupBeforeEOF() throws {
+        let fixture = try makeLaunchdGuardFixture()
+        let stdin = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            ProviderLaunchdRestoreGuard.restoreScript,
+            "macprovider-launchd-restore-guard-test",
+            fixture.launchctl.path,
+            "gui/502",
+            "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist",
+            ProviderLaunchdRestoreGuard.dismissToken,
+        ]
+        process.standardInput = stdin.fileHandleForReading
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        try process.run()
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(Darwin.kill(process.processIdentifier, SIGHUP), 0)
+        try stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        let log = try String(contentsOf: fixture.log, encoding: .utf8)
+        XCTAssertEqual(
+            log,
+            "bootstrap gui/502 /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist\n"
+        )
+    }
+
+    func testLaunchdRestoreGuardDismissTokenExitsWithoutBootstrap() throws {
+        let fixture = try makeLaunchdGuardFixture()
+        let guardHandle = try ProviderLaunchdRestoreGuard.start(
+            launchdDomain: "gui/502",
+            plistPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist",
+            launchctlPath: fixture.launchctl.path
+        )
+
+        guardHandle.dismiss()
+
+        let log = try String(contentsOf: fixture.log, encoding: .utf8)
+        XCTAssertEqual(log, "")
+    }
+
     // MARK: - Round-1 audit fix tests (drainer scope)
 
     /// Round-1 G.3 closure: the foreground drain MUST emit the SIGKILL-
@@ -208,5 +317,25 @@ final class ProviderDrainerTests: XCTestCase {
 
         XCTAssertEqual(try drainer.restore(conflict, restartForeground: true), .restored)
         XCTAssertEqual(restarts, [["/usr/local/bin/macprovider-cli", "serve", "--model", "X"]])
+    }
+
+    private func makeLaunchdGuardFixture() throws -> (launchctl: URL, log: URL) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("launchd-restore-guard-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let log = directory.appendingPathComponent("launchctl.log")
+        try Data().write(to: log)
+        let launchctl = directory.appendingPathComponent("launchctl")
+        let script = """
+        #!/bin/sh
+        printf "%s %s %s\\n" "$1" "$2" "$3" >> "\(log.path)"
+        exit 0
+        """
+        try script.write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        return (launchctl, log)
     }
 }

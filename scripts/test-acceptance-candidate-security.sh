@@ -85,7 +85,7 @@ if re.search(r'^\s*cp Package\.resolved ', build, re.MULTILINE) and 'if [ -f Pac
     raise SystemExit("candidate Malibu build requires a removed optional lockfile")
 if re.search(r'^\s*archive\s*\\$', build, re.MULTILINE):
     raise SystemExit("candidate Malibu build can expand an empty array under macOS Bash 3.2")
-if "retention-days: 1" not in protected or "actions/upload-artifact@ea165f8d" not in protected:
+if "retention-days: 1" not in protected or "actions/upload-artifact@043fb46d" not in protected:
     raise SystemExit("private acceptance artifact is not short-lived and action-pinned")
 for secret in (
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM",

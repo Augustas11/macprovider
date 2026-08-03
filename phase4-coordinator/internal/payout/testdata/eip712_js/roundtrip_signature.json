@@ -1,0 +1,10 @@
+{
+  "providerId": "test-provider-id",
+  "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "chain": "base-mainnet",
+  "nonce": "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "tsUtc": 1719234896,
+  "verifyingContract": "0x52908400098527886E0F7030069857D2E4169EE7",
+  "signature": "0x0e7a74c9ffb11e2c88b1c74d522b31d29e2f4715a3b48b78fc2acbc21741b6f755e742d6f73baf1d7327c2bc8d8c8476dbbb1445257e170f17ef541b2cfe2cab1c",
+  "note": "Throwaway Hardhat account #1 only — never a production key."
+}

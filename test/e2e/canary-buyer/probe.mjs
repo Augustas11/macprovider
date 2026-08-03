@@ -28,7 +28,7 @@
  * Config (env; safety inputs are required and fail closed):
  *   MACPROVIDER_BUYER_TOKEN | MALIBU_API_KEY   buyer bearer token (liveness)
  *   CANARY_BASE            gateway base URL (default https://api.streamvc.live)
- *   CANARY_MODELS         exact expected model ids (qualification: exactly one)
+ *   CANARY_MODELS         qualification model id (liveness derives live models)
  *   CANARY_POOLZ_URL      authenticated coordinator /poolz URL
  *   CANARY_OPERATOR_TOKEN operator bearer token
  *   CANARY_EXPECTED_FLEET_FILE exact provider/model inventory JSON
@@ -74,8 +74,10 @@ const configuredTTFTSamples = intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20);
 const configuredTPSSamples = intEnv('CANARY_TPS_SAMPLES', 3, 1, 10);
 const GATEWAY_STATUS_CACHE_TTL_MS = 10_000;
 const PRODUCTION_HEARTBEAT_CADENCE_MS = 30_000;
-const LEGACY_ROLLBACK_AUTHORITY = 'issue-585-integration-r7';
+const LEGACY_ROLLBACK_AUTHORITY = 'issue-825-canary-fleet-r6';
 const LEGACY_ROLLBACK_MAX_VALIDITY_MS = 15 * 60 * 1000;
+const LEGACY_ROLLBACK_MAX_PROVIDERS = 100;
+const LIVENESS_MAX_TOKENS_PER_MODEL = 8;
 
 const CONFIG = {
   mode: selectedMode,
@@ -101,7 +103,7 @@ const CONFIG = {
   minDecodeTpsP50: numberEnv('CANARY_MIN_DECODE_TPS_P50', 15),
   minCachedPromptRatio: numberEnv('CANARY_MIN_CACHED_PROMPT_RATIO', 0.1),
   minReadyProviders: intEnv('CANARY_MIN_READY_PROVIDERS', 2, 1, 100),
-  expectedProviderCount: 2,
+  expectedProviderCount: intEnv('CANARY_EXPECTED_PROVIDER_COUNT', 0, 0, 100),
   maxRequestsPerProvider: intEnv('CANARY_MAX_REQUESTS_PER_PROVIDER', isQualification ? 17 : 4, 1, 100),
   maxCompletionTokensPerProvider: intEnv('CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER', isQualification ? 512 : 32, 1, 4096),
   maxRunDurationMs: intEnv('CANARY_MAX_RUN_DURATION_MS', isQualification ? 300000 : 90000, 10000, 900000),
@@ -1006,9 +1008,132 @@ async function loadExpectedFleet() {
     throw new Error(`cannot read CANARY_EXPECTED_FLEET_FILE: ${error.message || error}`);
   }
   return validateExpectedFleetDocument(parsed, {
-    expectedProviderCount: CONFIG.expectedProviderCount,
-    requireUniqueModels: true,
+    expectedProviderCount: CONFIG.mode === 'qualification'
+      ? CONFIG.expectedProviderCount || null
+      : null,
+    minProviderCount: CONFIG.mode === 'qualification'
+      ? CONFIG.minReadyProviders
+      : 1,
+    requireUniqueModels: CONFIG.mode === 'qualification',
   });
+}
+
+function liveReadyFleet(observed) {
+  const seen = new Set();
+  const rows = [];
+  for (const row of observed?.operator_pool || []) {
+    if (row?.state !== 'ready' || row?.routing_eligible !== true) continue;
+    if (typeof row.provider_id !== 'string' || !row.provider_id) continue;
+    if (typeof row.model_id !== 'string' || !row.model_id) continue;
+    if (seen.has(row.provider_id)) continue;
+    seen.add(row.provider_id);
+    rows.push({ provider_id: row.provider_id, model_id: row.model_id });
+  }
+  return rows.sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+}
+
+function malformedLiveReadyFleetReasons(observed) {
+  const reasons = [];
+  const seen = new Set();
+  for (const [index, row] of (observed?.operator_pool || []).entries()) {
+    if (row?.state !== 'ready' || row?.routing_eligible !== true) continue;
+    const providerID = row.provider_id;
+    if (typeof providerID !== 'string' || !providerID) {
+      reasons.push(`live_ready_provider_${index}:provider_id_missing`);
+      continue;
+    }
+    if (seen.has(providerID)) {
+      reasons.push(`${providerID}:live_ready_provider_duplicate`);
+    }
+    seen.add(providerID);
+    if (typeof row.model_id !== 'string' || !row.model_id) {
+      reasons.push(`${providerID}:live_ready_model_id_missing`);
+    }
+  }
+  return reasons;
+}
+
+export function liveFleetModels(fleet) {
+  return [...new Set((fleet || [])
+    .map((row) => row?.model_id)
+    .filter((modelID) => typeof modelID === 'string' && modelID))]
+    .sort();
+}
+
+function liveFleetGatewayModelReasons(gateway, modelIDs, {
+  activeModelID = '',
+} = {}) {
+  const models = new Map((gateway?.models || []).map((model) => [model?.id, model]));
+  const reasons = [];
+  for (const modelID of modelIDs) {
+    const model = models.get(modelID);
+    if (!model) {
+      if (modelID === activeModelID) continue;
+      reasons.push(`${modelID}:live_model_missing_from_gateway`);
+      continue;
+    }
+    if (model.available !== true || model.degraded === true) {
+      reasons.push(`${modelID}:live_model_not_available`);
+    }
+    if (!Number.isInteger(model.ready_provider_count) || model.ready_provider_count < 1) {
+      reasons.push(`${modelID}:live_model_ready_provider_count_missing`);
+    }
+  }
+  return reasons;
+}
+
+function rollbackAuthorizationFleet(legacyRollbackProviders) {
+  if (!legacyRollbackProviders?.size) return [];
+  return [...legacyRollbackProviders.entries()]
+    .map(([providerID, row]) => ({
+      provider_id: row.provider_id || providerID,
+      model_id: row.model_id,
+    }))
+    .sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+}
+
+function mergeFleetByProviderID(...fleets) {
+  const byID = new Map();
+  for (const fleet of fleets) {
+    for (const row of fleet || []) {
+      if (!row?.provider_id || byID.has(row.provider_id)) continue;
+      byID.set(row.provider_id, {
+        provider_id: row.provider_id,
+        model_id: row.model_id,
+      });
+    }
+  }
+  return [...byID.values()].sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+}
+
+function minimumReadyProviders(staticFleet, fleetSize) {
+  return staticFleet
+    ? Math.max(CONFIG.minReadyProviders, fleetSize)
+    : Math.max(1, fleetSize);
+}
+
+export function ensureLivenessBudgetCapacity(budget, modelCount) {
+  if (CONFIG.mode !== 'liveness' || modelCount < 1) return;
+  budget.ensureMinimumCapacity({
+    maxRequests: Math.max(CONFIG.maxRequestsPerProvider, modelCount),
+    maxCompletionTokens: Math.max(
+      CONFIG.maxCompletionTokensPerProvider,
+      modelCount * LIVENESS_MAX_TOKENS_PER_MODEL,
+    ),
+  });
+}
+
+export function runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders) {
+  if (legacyRollbackProviders?.size) {
+    return rollbackAuthorizationFleet(legacyRollbackProviders);
+  }
+  return CONFIG.mode === 'qualification' ? expectedFleet : liveReadyFleet(initial);
+}
+
+export function responseAttributionFleet(initial, observations, expectedFleet, legacyRollbackProviders) {
+  const protectedFleet = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders);
+  if (CONFIG.mode === 'qualification' || legacyRollbackProviders?.size) return protectedFleet;
+  return mergeFleetByProviderID(protectedFleet, liveReadyFleet(observations?.at(-1) || initial));
 }
 
 function classifySignalReasons(reasons) {
@@ -1062,6 +1187,26 @@ function expectedPoolRows(poolRows, expectedFleet) {
   return poolRows.filter((row) => ids.has(row.provider_id));
 }
 
+function activeExpectedProviderID(observed, expectedFleet, activeModelID, {
+  qualification = false,
+  activeProviderIDHint = '',
+} = {}) {
+  if (!activeModelID) return '';
+  if (qualification) return CONFIG.isolatedProviderID;
+  const candidateIDs = new Set(
+    expectedFleet
+      .filter((row) => row.model_id === activeModelID)
+      .map((row) => row.provider_id),
+  );
+  if (!candidateIDs.size) return '';
+  if (activeProviderIDHint && candidateIDs.has(activeProviderIDHint)) return activeProviderIDHint;
+  const busy = (observed.operator_pool || []).filter((row) => candidateIDs.has(row.provider_id)
+    && row.state === 'busy'
+    && row.routing_eligible === false);
+  if (busy.length === 1) return busy[0].provider_id;
+  return candidateIDs.size === 1 ? [...candidateIDs][0] : '';
+}
+
 function isLegacyBridgeProviderSignalSubstitute(row, expected) {
   return row?.provider_id === expected.provider_id
     && row?.model_id === expected.model_id
@@ -1094,10 +1239,181 @@ function isLegacyRollbackProviderSignalSubstitute(
     && row?.binary_version === authorization.binary_version;
 }
 
+function legacyRollbackRowAuthorized(row, expected, authorizedProviders, nowMs) {
+  const authorization = authorizedProviders?.get(expected?.provider_id || '');
+  return authorization?.model_id === expected?.model_id
+    && Number.isFinite(authorization?.expires_at_ms)
+    && nowMs < authorization.expires_at_ms
+    && row?.provider_id === expected.provider_id
+    && typeof row?.assigned_id === 'string'
+    && row.assigned_id.length > 0
+    && row?.model_id === expected.model_id
+    && Number.isFinite(row?.connected_at_ms)
+    && row?.catalog_admission_mode == null
+    && row?.binary_version === authorization.binary_version;
+}
+
+function hasDuplicateProviderIDs(rows) {
+  const seen = new Set();
+  for (const row of rows) {
+    const providerID = row?.provider_id;
+    if (typeof providerID !== 'string' || providerID.length === 0) continue;
+    if (seen.has(providerID)) return true;
+    seen.add(providerID);
+  }
+  return false;
+}
+
+function legacyIdleDuplicateDropAllowance(
+  observations,
+  expectedFleet,
+  legacyRollbackProviders,
+  heartbeatAdvanceProviderIDs,
+  nowMs,
+) {
+  const empty = { providerIDs: new Set(), byModel: new Map(), count: 0 };
+  if (!legacyRollbackProviders?.size || !heartbeatAdvanceProviderIDs) return empty;
+  const observedList = Array.isArray(observations) ? observations.filter(Boolean) : [observations].filter(Boolean);
+  if (!observedList.length) return empty;
+  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
+  const providerIDs = new Set();
+  for (const observed of observedList) {
+    const rows = Array.isArray(observed?.operator_pool) ? observed.operator_pool : [];
+    if (hasDuplicateProviderIDs(rows)) return empty;
+    if (hasDuplicateProviderIDs(Array.isArray(observed?.providers) ? observed.providers : [])) return empty;
+    const currentByID = new Map(rows.map((row) => [row.provider_id, row]));
+    for (const expected of expectedFleet) {
+      const id = expected.provider_id;
+      if (heartbeatAdvanceProviderIDs.has(id) || !legacyRollbackProviders.has(id)) continue;
+      const authorization = legacyRollbackProviders.get(id);
+      const idAuthorized = authorization?.model_id === expected.model_id
+        && Number.isFinite(authorization?.expires_at_ms)
+        && nowMs < authorization.expires_at_ms;
+      if (!idAuthorized) continue;
+      const row = currentByID.get(id);
+      const rowAuthorized = row && legacyRollbackRowAuthorized(row, expected, legacyRollbackProviders, nowMs);
+      if (row && !rowAuthorized) continue;
+      const rowReady = row
+        && rowAuthorized
+        && row.state === 'ready'
+        && row.routing_eligible === true
+        && Number.isFinite(row.heartbeat_age_ms)
+        && row.heartbeat_age_ms <= CONFIG.maxHeartbeatAgeMs;
+      if (rowReady) continue;
+      const substituteReady = rows.some((candidate) => {
+        if (!candidate?.provider_id || candidate.provider_id === id) return false;
+        const candidateExpected = expectedByID.get(candidate.provider_id);
+        if (!candidateExpected || candidateExpected.model_id !== expected.model_id) return false;
+        return legacyRollbackRowAuthorized(candidate, candidateExpected, legacyRollbackProviders, nowMs)
+          && candidate.state === 'ready'
+          && candidate.routing_eligible === true
+          && Number.isFinite(candidate.heartbeat_age_ms)
+          && candidate.heartbeat_age_ms <= CONFIG.maxHeartbeatAgeMs;
+      });
+      if (substituteReady) providerIDs.add(id);
+    }
+	  }
+	  if (providerIDs.size !== 1) return empty;
+	  const byModel = new Map();
+  for (const id of providerIDs) {
+    const model = expectedByID.get(id)?.model_id || '';
+    if (model) byModel.set(model, (byModel.get(model) || 0) + 1);
+  }
+  return { providerIDs, byModel, count: providerIDs.size };
+}
+
+function filterLegacyIdleDuplicateRecoveryReasons(reasons, {
+  observations,
+  expectedFleet,
+  legacyRollbackProviders,
+  heartbeatAdvanceProviderIDs,
+  nowMs,
+}) {
+  const allowance = legacyIdleDuplicateDropAllowance(
+    observations,
+    expectedFleet,
+    legacyRollbackProviders,
+    heartbeatAdvanceProviderIDs,
+    nowMs,
+  );
+  if (!allowance.count) return reasons;
+  return reasons.filter((reason) => !legacyIdleDuplicateReasonAllowed(reason, allowance));
+}
+
+function legacyIdleDuplicateReasonAllowed(reason, allowance) {
+  const unscopedReason = reason.replace(/^(?:sample_\d+|final|recovery_final|recovery_soak):/, '');
+  for (const id of allowance.providerIDs) {
+    if (!unscopedReason.startsWith(`${id}:`)) continue;
+    const suffix = unscopedReason.slice(id.length + 1);
+    if (
+      suffix === 'expected_provider_not_ready'
+      || suffix === 'expected_provider_missing'
+      || suffix === 'heartbeat_signal_missing'
+      || suffix === 'provider_signal_missing'
+      || suffix === 'provider_disappeared'
+      || /^state_[^:]+_not_ready$/.test(suffix)
+      || /^heartbeat_stale_\d+(?:\.\d+)?ms_gt_\d+ms$/.test(suffix)
+      || /^telemetry_observation_stale_\d+ms_gt_\d+ms$/.test(suffix)
+      || /^provider_state_[^:]+_not_allowed$/.test(suffix)
+      || suffix === 'coordinator_disconnected'
+    ) {
+      return true;
+    }
+  }
+	  let match = unscopedReason.match(/^ready_(\d+)_lt_(\d+)$/);
+	  if (match && Number(match[2]) - Number(match[1]) >= 1
+	      && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^pool_unavailable_(\d+)_ne_0$/);
+	  if (match && Number(match[1]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^ready_changed_(\d+)_to_(\d+)$/);
+	  if (match && Number(match[1]) - Number(match[2]) >= 1
+	      && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^total_providers_changed_(\d+)_to_(\d+)$/);
+	  if (match && Number(match[1]) - Number(match[2]) >= 1
+	      && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^provider_count_changed_(\d+)_to_(\d+)$/);
+	  if (match && Number(match[1]) - Number(match[2]) >= 1
+	      && Number(match[1]) - Number(match[2]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^provider_signal_count_(\d+)_ne_(\d+)$/);
+	  if (match && Number(match[2]) - Number(match[1]) >= 1
+	      && Number(match[2]) - Number(match[1]) <= allowance.count) return true;
+	  match = unscopedReason.match(/^(.*):ready_provider_count_changed_(\d+)_to_(\d+)$/);
+	  if (match) {
+	    const allowedLoss = allowance.byModel.get(match[1]) || 0;
+	    if (Number(match[2]) - Number(match[3]) >= 1
+	        && Number(match[2]) - Number(match[3]) <= allowedLoss) return true;
+	  }
+  return false;
+}
+
 function hasDirectProviderSignal(signal) {
   return Object.entries(signal || {}).some(
     ([field, value]) => field !== 'source' && value != null,
   );
+}
+
+function directProviderSignalIdentityReasons(providers, expectedFleet, {
+  allowUnexpectedProviders = false,
+} = {}) {
+  const expectedIDs = new Set(expectedFleet.map((row) => row.provider_id));
+  const seen = new Set();
+  const reasons = [];
+  for (const [index, signal] of providers.entries()) {
+    if (!hasDirectProviderSignal(signal)) continue;
+    const providerID = signal?.provider_id;
+    if (typeof providerID !== 'string' || providerID.length === 0) {
+      reasons.push(`provider_signal_identity_missing_${index}`);
+      continue;
+    }
+    if (!allowUnexpectedProviders && !expectedIDs.has(providerID)) {
+      reasons.push(`provider_signal_unexpected_${providerID}`);
+    }
+    if (seen.has(providerID)) {
+      reasons.push(`provider_signal_duplicate_${providerID}`);
+    }
+    seen.add(providerID);
+  }
+  return reasons;
 }
 
 function recoveryProviderSignals(
@@ -1106,12 +1422,15 @@ function recoveryProviderSignals(
   authorizedProviders,
   nowMs,
   allowLegacyBridgeProviderSignals = false,
+  restrictDirectSignalsToExpectedFleet = false,
 ) {
   const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
   const operatorPool = Array.isArray(observation?.operator_pool) ? observation.operator_pool : [];
   const providers = Array.isArray(observation?.providers) ? observation.providers : [];
   return providers.filter((signal, index) => {
-    if (hasDirectProviderSignal(signal)) return true;
+    if (hasDirectProviderSignal(signal)) {
+      return !restrictDirectSignalsToExpectedFleet || expectedByID.has(signal?.provider_id);
+    }
     const poolRow = operatorPool[index];
     const expected = expectedByID.get(poolRow?.provider_id);
     const exactReadyLegacyBridge = expected
@@ -1144,16 +1463,52 @@ export function recoverySoakObservationReasons(
     allowLegacyBridgeProviderSignals = false,
     ...soakOptions
   } = options;
-  return recoverySoakReasons({
+  const staticFleet = CONFIG.mode === 'qualification' || Boolean(legacyRollbackProviders?.size);
+  const safetyFleet = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders);
+  if (!staticFleet) {
+    return recoverySoakReasons({
+      gatewayInitial: initial.gateway,
+      gatewaySamples: samples.map((sample) => sample.gateway),
+      poolzInitial: expectedPoolRows(initial.operator_pool || [], safetyFleet),
+      poolzSamples: samples.map(
+        (sample) => expectedPoolRows(sample.operator_pool || [], safetyFleet),
+      ),
+      providerInitial: recoveryProviderSignals(
+        initial,
+        safetyFleet,
+        null,
+        nowMs,
+        allowLegacyBridgeProviderSignals,
+        true,
+      ),
+      providerSamples: samples.map(
+        (sample) => recoveryProviderSignals(
+          sample,
+          safetyFleet,
+          null,
+          nowMs,
+          allowLegacyBridgeProviderSignals,
+          true,
+        ),
+      ),
+    }, {
+      ...soakOptions,
+      enforceHealthyProviderAggregates: false,
+      enforceStableProviderCounts: false,
+      enforceStableModelSet: true,
+      allowedStableModelIDs: new Set(safetyFleet.map((row) => row.model_id)),
+    });
+  }
+  const reasons = recoverySoakReasons({
     gatewayInitial: initial.gateway,
     gatewaySamples: samples.map((sample) => sample.gateway),
-    poolzInitial: expectedPoolRows(initial.operator_pool, expectedFleet),
+    poolzInitial: expectedPoolRows(initial.operator_pool, safetyFleet),
     poolzSamples: samples.map(
-      (sample) => expectedPoolRows(sample.operator_pool || [], expectedFleet),
+      (sample) => expectedPoolRows(sample.operator_pool || [], safetyFleet),
     ),
     providerInitial: recoveryProviderSignals(
       initial,
-      expectedFleet,
+      safetyFleet,
       legacyRollbackProviders,
       nowMs,
       allowLegacyBridgeProviderSignals,
@@ -1161,16 +1516,32 @@ export function recoverySoakObservationReasons(
     providerSamples: samples.map(
       (sample) => recoveryProviderSignals(
         sample,
-        expectedFleet,
+        safetyFleet,
         legacyRollbackProviders,
         nowMs,
         allowLegacyBridgeProviderSignals,
       ),
     ),
   }, soakOptions);
+  for (const [index, sample] of samples.entries()) {
+    reasons.push(...directProviderSignalIdentityReasons(
+      Array.isArray(sample?.providers) ? sample.providers : [],
+      safetyFleet,
+    ).map((reason) => `sample_${index + 1}:${reason}`));
+  }
+  return filterLegacyIdleDuplicateRecoveryReasons(reasons, {
+    observations: samples,
+    expectedFleet: safetyFleet,
+    legacyRollbackProviders,
+    heartbeatAdvanceProviderIDs: soakOptions.heartbeatAdvanceProviderIDs || null,
+    nowMs,
+  });
 }
 
-export function validateLegacyRollbackAuthorization(document, expectedFleet, nowMs = Date.now()) {
+export function validateLegacyRollbackAuthorization(document, expectedFleetOrNowMs = Date.now(), maybeNowMs = null) {
+  const nowMs = Number.isFinite(expectedFleetOrNowMs)
+    ? expectedFleetOrNowMs
+    : (Number.isFinite(maybeNowMs) ? maybeNowMs : Date.now());
   const exactKeys = (value, expected) => value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join('\u0000') === [...expected].sort().join('\u0000');
   if (!exactKeys(document, ['schema_version', 'kind', 'authority', 'transaction_id', 'expires_at', 'providers'])
@@ -1188,25 +1559,24 @@ export function validateLegacyRollbackAuthorization(document, expectedFleet, now
       || expiresAtMs > nowMs + LEGACY_ROLLBACK_MAX_VALIDITY_MS) {
     throw new Error('legacy rollback authorization expiry is invalid');
   }
-  if (document.providers.length !== expectedFleet.length) {
+  if (document.providers.length < 1 || document.providers.length > LEGACY_ROLLBACK_MAX_PROVIDERS) {
     throw new Error('legacy rollback authorization fleet size is invalid');
   }
-  const expectedByID = new Map(expectedFleet.map((row) => [row.provider_id, row]));
   const authorized = new Map();
   for (const row of document.providers) {
     if (!exactKeys(row, ['provider_id', 'model_id', 'binary_version'])
         || typeof row.provider_id !== 'string'
         || typeof row.model_id !== 'string'
         || typeof row.binary_version !== 'string'
+        || !row.provider_id
+        || row.provider_id.length > 256
+        || !row.model_id
         || !/^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(row.binary_version)
         || authorized.has(row.provider_id)) {
       throw new Error('legacy rollback authorization provider row is invalid');
     }
-    const expected = expectedByID.get(row.provider_id);
-    if (!expected || expected.model_id !== row.model_id) {
-      throw new Error('legacy rollback authorization provider identity is invalid');
-    }
     authorized.set(row.provider_id, {
+      provider_id: row.provider_id,
       model_id: row.model_id,
       binary_version: row.binary_version,
       expires_at_ms: expiresAtMs,
@@ -1215,7 +1585,7 @@ export function validateLegacyRollbackAuthorization(document, expectedFleet, now
   return authorized;
 }
 
-async function loadLegacyRollbackAuthorization(expectedFleet) {
+async function loadLegacyRollbackAuthorization() {
   const path = CONFIG.legacyRollbackAuthorizationFile;
   if (!path) return null;
   const fs = await import('node:fs/promises');
@@ -1233,23 +1603,33 @@ async function loadLegacyRollbackAuthorization(expectedFleet) {
       || (parentInfo.mode & 0o777) !== 0o755) {
     throw new Error('legacy rollback authorization file is not a trusted root control');
   }
-  return validateLegacyRollbackAuthorization(JSON.parse(await fs.readFile(path, 'utf8')), expectedFleet);
+  return validateLegacyRollbackAuthorization(JSON.parse(await fs.readFile(path, 'utf8')));
 }
 
 export function safetyObservationReasons(initial, observed, expectedFleet, {
   requireHeartbeatAdvance = false,
+  heartbeatAdvanceProviderIDs = null,
   activeModelID = '',
+  activeProviderIDHint = '',
   cachedGatewayModelID = '',
   allowLegacyBridgeProviderSignals = false,
   legacyRollbackProviders = null,
   nowMs = Date.now(),
 } = {}) {
   const qualification = CONFIG.mode === 'qualification';
-  const activeProviderID = activeModelID
-    ? (qualification
-      ? CONFIG.isolatedProviderID
-      : expectedFleet.find((row) => row.model_id === activeModelID)?.provider_id || '')
-    : '';
+  const staticFleet = qualification || Boolean(legacyRollbackProviders?.size);
+  const safetyFleet = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders);
+  const telemetryFleet = staticFleet
+    ? safetyFleet
+    : mergeFleetByProviderID(safetyFleet, liveReadyFleet(observed));
+  const safetyModelIDs = new Set(safetyFleet.map((row) => row.model_id));
+  const legacyRollbackAuthorizationUnknown = Boolean(
+    legacyRollbackProviders?.size && safetyFleet.length !== legacyRollbackProviders.size,
+  );
+  const activeProviderID = activeExpectedProviderID(observed, safetyFleet, activeModelID, {
+    qualification,
+    activeProviderIDHint,
+  });
   const activePoolRow = activeProviderID
     ? (observed.operator_pool || []).find((row) => row.provider_id === activeProviderID)
     : null;
@@ -1269,24 +1649,45 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     ? activeModelID
     : (recoveredDirectSignals ? cachedGatewayModelID : '');
   const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
-    minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+    minReadyProviders: minimumReadyProviders(staticFleet, safetyFleet.length),
     maxDrainingProviders: qualification ? 1 : 0,
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
+    enforceHealthyProviderAggregates: staticFleet,
+    enforceStableProviderCounts: staticFleet,
+    enforceStableModelSet: staticFleet || !qualification,
+    allowedStableModelIDs: staticFleet ? null : safetyModelIDs,
   });
+  if (legacyRollbackAuthorizationUnknown) {
+    reasons.push('legacy_rollback_authorization_provider_unknown');
+  }
+  if (!staticFleet) {
+    reasons.push(...liveFleetGatewayModelReasons(
+      observed.gateway,
+      liveFleetModels(telemetryFleet),
+      { activeModelID: gatewayAllowanceModelID },
+    ));
+  }
+  if (!staticFleet) {
+    reasons.push(...malformedLiveReadyFleetReasons(observed));
+  }
   if (!observed.operator_pool) return [...new Set([...reasons, 'operator_pool_signal_missing'])];
 
-  reasons.push(...expectedFleetReasons(observed.operator_pool, expectedFleet, {
+  reasons.push(...expectedFleetReasons(observed.operator_pool, safetyFleet, {
     allowedExtraProviderIDs: qualification ? [CONFIG.isolatedProviderID] : [],
     maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
     activeProviderID: qualification ? '' : activeProviderID,
+    allowUnexpectedProviders: !staticFleet,
   }));
-  const initialExpected = expectedPoolRows(initial.operator_pool || [], expectedFleet);
-  const currentExpected = expectedPoolRows(observed.operator_pool, expectedFleet);
-  reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
-    maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
-    requireHeartbeatAdvance,
-    activeProviderID: qualification ? '' : activeProviderID,
-  }));
+  if (staticFleet) {
+    const initialExpected = expectedPoolRows(initial.operator_pool || [], safetyFleet);
+    const currentExpected = expectedPoolRows(observed.operator_pool, safetyFleet);
+    reasons.push(...poolzInvariantReasons(initialExpected, currentExpected, {
+      maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+      requireHeartbeatAdvance,
+      heartbeatAdvanceProviderIDs,
+      activeProviderID: qualification ? '' : activeProviderID,
+    }));
+  }
 
   if (qualification) {
     reasons.push(...qualificationIsolationReasons(observed.operator_pool, {
@@ -1318,19 +1719,24 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       }
     }
   } else {
-    if (observed.providers.length !== expectedFleet.length) {
-      reasons.push(`provider_signal_count_${observed.providers.length}_ne_${expectedFleet.length}`);
+    if (staticFleet && observed.providers.length !== safetyFleet.length) {
+      reasons.push(`provider_signal_count_${observed.providers.length}_ne_${safetyFleet.length}`);
     }
+    reasons.push(...directProviderSignalIdentityReasons(observed.providers, safetyFleet, {
+      allowUnexpectedProviders: !staticFleet,
+    }));
     const initialByID = new Map((initial.providers || []).map((provider) => [provider.provider_id, provider]));
     const currentByID = new Map(observed.providers.map((provider) => [provider.provider_id, provider]));
     const currentPoolByID = new Map(observed.operator_pool.map((provider) => [provider.provider_id, provider]));
-    for (const expected of expectedFleet) {
+    for (const expected of telemetryFleet) {
       const current = currentByID.get(expected.provider_id);
+      const rollbackAuthorization = legacyRollbackProviders?.get(expected.provider_id);
       if (!current) {
         const poolRow = currentPoolByID.get(expected.provider_id);
         const poolIndex = observed.operator_pool.indexOf(poolRow);
-        const directSignalMissing = poolIndex >= 0
-          && !hasDirectProviderSignal(observed.providers[poolIndex]);
+        const poolSlotSignal = poolIndex >= 0 ? observed.providers[poolIndex] : null;
+        const directSignalPresent = poolIndex >= 0 && hasDirectProviderSignal(poolSlotSignal);
+        const directSignalMissing = poolIndex >= 0 && !directSignalPresent;
         if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
           continue;
         }
@@ -1343,23 +1749,44 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         )) {
           continue;
         }
+        if (directSignalPresent && poolSlotSignal?.provider_id !== expected.provider_id) {
+          reasons.push(`${expected.provider_id}:provider_signal_identity_mismatch_${poolSlotSignal?.provider_id || 'missing'}`);
+          continue;
+        }
         reasons.push(`${expected.provider_id}:provider_signal_missing`);
         continue;
       }
       const before = initialByID.get(expected.provider_id) || current;
+      const requireProviderHeartbeatAdvance = requireHeartbeatAdvance
+        && (!heartbeatAdvanceProviderIDs || heartbeatAdvanceProviderIDs.has(expected.provider_id));
       reasons.push(...providerSignalReasons(before, current, {
         maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
         maxMemoryFraction: CONFIG.maxMemoryFraction,
         maxRequestsInFlight: activeProviderID === current.provider_id ? 1 : 0,
         allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
-        requireObservationAdvance: requireHeartbeatAdvance,
+        requireObservationAdvance: requireProviderHeartbeatAdvance,
       }));
       if (current.model_id !== expected.model_id) {
         reasons.push(`${expected.provider_id}:telemetry_model_${current.model_id || 'missing'}_ne_${expected.model_id}`);
       }
+      if (rollbackAuthorization) {
+        const poolRow = currentPoolByID.get(expected.provider_id);
+        if (current.binary_version !== rollbackAuthorization.binary_version) {
+          reasons.push(`${expected.provider_id}:telemetry_binary_${current.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
+        }
+        if (poolRow?.binary_version !== rollbackAuthorization.binary_version) {
+          reasons.push(`${expected.provider_id}:pool_binary_${poolRow?.binary_version || 'missing'}_ne_${rollbackAuthorization.binary_version}`);
+        }
+      }
     }
   }
-  return [...new Set(reasons)];
+  return [...new Set(filterLegacyIdleDuplicateRecoveryReasons(reasons, {
+    observations: observed,
+    expectedFleet,
+    legacyRollbackProviders,
+    heartbeatAdvanceProviderIDs,
+    nowMs,
+  }))];
 }
 
 function createControl(initial, baselines, expectedFleet, budget, legacyRollbackProviders) {
@@ -1386,12 +1813,13 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
   const observeAndCheck = async (phase, {
     timeoutMs = CONFIG.reqTimeoutMs,
     activeModelID = '',
+    activeProviderIDHint = '',
   } = {}) => {
     if (failure) return null;
     try {
       const observed = await observeSafety(budget, timeoutMs);
       observations.push(observed);
-      const reasons = observationReasons(observed, { activeModelID });
+      const reasons = observationReasons(observed, { activeModelID, activeProviderIDHint });
       if (reasons.length) fail(classifySignalReasons(reasons), reasons, phase);
       return observed;
     } catch (error) {
@@ -1402,7 +1830,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
     }
   };
 
-  const observeAfterRequest = async (model) => {
+  const observeAfterRequest = async (model, activeProviderIDHint = '') => {
     const phase = `after_request_${budget.requests}`;
     try {
       const result = await pollPostRequestRecovery({
@@ -1414,6 +1842,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
         strictReasons: (observed) => observationReasons(observed, {}),
         transientReasons: (observed) => observationReasons(observed, {
           activeModelID: model,
+          activeProviderIDHint,
           cachedGatewayModelID: model,
         }),
         maxWaitMs: Math.min(CONFIG.postRequestRecoveryMs, budget.remainingDurationMs()),
@@ -1459,7 +1888,12 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
           [`${model}:${bucket}`], `request_${budget.requests}`);
         return;
       }
-      const identityReasons = responseIdentityReasons(result, model, expectedFleet, {
+      const identityReasons = responseIdentityReasons(result, model, responseAttributionFleet(
+        initial,
+        observations,
+        expectedFleet,
+        legacyRollbackProviders,
+      ), {
         expectedProviderID: CONFIG.mode === 'qualification' ? CONFIG.isolatedProviderID : '',
       });
       if (identityReasons.length) {
@@ -1490,7 +1924,7 @@ function createControl(initial, baselines, expectedFleet, budget, legacyRollback
       // that exact correlated shape while polling through the cache TTL plus
       // one poll/observer margin, then require a fully strict snapshot before
       // another request can start.
-      await observeAfterRequest(model);
+      await observeAfterRequest(model, result.provider || '');
     },
     async monitorDuringRequest(requestAbort, stopSignal, activeModelID) {
       let sample = 0;
@@ -1599,7 +2033,6 @@ async function main() {
   if (!CONFIG.poolzURL) required.push('CANARY_POOLZ_URL');
   if (!CONFIG.operatorToken) required.push('CANARY_OPERATOR_TOKEN');
   if (!CONFIG.expectedFleetFile) required.push('CANARY_EXPECTED_FLEET_FILE');
-  if (CONFIG.models.length < 1) required.push('explicit CANARY_MODELS values');
   if (CONFIG.mode === 'liveness' && !CONFIG.token) {
     required.push('MACPROVIDER_BUYER_TOKEN or MALIBU_API_KEY');
   }
@@ -1642,22 +2075,19 @@ async function main() {
       await assertResolvesLocal(providerUrl, 'CANARY_ISOLATED_PROVIDER_BASE');
     }
     expectedFleet = await loadExpectedFleet();
-    const expectedModels = [...new Set(expectedFleet.map((row) => row.model_id))].sort();
-    const configuredModels = [...new Set(CONFIG.models)].sort();
-    if (configuredModels.length !== CONFIG.models.length) {
-      throw new Error('CANARY_MODELS must not contain duplicates');
-    }
-    if (CONFIG.mode === 'liveness'
-        && (configuredModels.length !== expectedModels.length
-          || configuredModels.some((model, index) => model !== expectedModels[index]))) {
-      throw new Error('CANARY_MODELS must exactly match the model set in CANARY_EXPECTED_FLEET_FILE');
-    }
-    if (CONFIG.mode === 'qualification' && !expectedModels.includes(CONFIG.models[0])) {
-      throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
+    if (CONFIG.mode === 'qualification') {
+      const expectedModels = [...new Set(expectedFleet.map((row) => row.model_id))].sort();
+      const configuredModels = [...new Set(CONFIG.models)].sort();
+      if (configuredModels.length !== CONFIG.models.length) {
+        throw new Error('CANARY_MODELS must not contain duplicates');
+      }
+      if (!expectedModels.includes(CONFIG.models[0])) {
+        throw new Error(`CANARY_MODELS value ${CONFIG.models[0]} is absent from CANARY_EXPECTED_FLEET_FILE`);
+      }
     }
     if (CONFIG.mode === 'qualification') baselines = await loadBaselines();
     if (CONFIG.mode === 'liveness') {
-      legacyRollbackProviders = await loadLegacyRollbackAuthorization(expectedFleet);
+      legacyRollbackProviders = await loadLegacyRollbackAuthorization();
     }
   } catch (e) {
     console.error(`FAIL: ${redact(e.message)}`);
@@ -1699,7 +2129,10 @@ async function main() {
       && preReasons.some((reason) => /isolation_|isolated_provider_/.test(reason));
     control.fail(isolationFailure ? 'isolation_unproven' : 'precondition_failed', preReasons, 'precondition');
   }
-  const models = CONFIG.models;
+  const models = CONFIG.mode === 'liveness'
+    ? liveFleetModels(runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders))
+    : CONFIG.models;
+  ensureLivenessBudgetCapacity(budget, models.length);
   const results = [];
   for (const model of models) {
     if (control.failed()) break;
@@ -1717,11 +2150,15 @@ async function main() {
       )
     );
   }
+  const heartbeatAdvanceProviderIDs = legacyRollbackProviders?.size && budget.providers.size
+    ? new Set([...budget.providers.keys()].filter(Boolean))
+    : null;
   let post = null;
   const recoverySamples = [];
   const recoveryRecords = [];
   let recoveryFailure = null;
   if (shouldRunRecovery(budget.requests)) {
+    const recoveryFleetSize = runtimeProtectedFleet(initial, expectedFleet, legacyRollbackProviders).length;
     const soakDeadline = Date.now() + (CONFIG.recoverySoakSeconds * 1000);
     while (soakDeadline - Date.now() >= CONFIG.recoveryPollMs) {
       const timeReason = budget.timeReason();
@@ -1733,7 +2170,7 @@ async function main() {
         recoveryRecords.push({ observed: null, reasons: [], error: budget.timeReason() || 'hard_deadline_exhausted', phase: 'recovery_soak' });
         break;
       }
-      const record = await control.observeRaw('recovery_soak');
+      const record = await control.observeRaw('recovery_soak', { heartbeatAdvanceProviderIDs });
       recoveryRecords.push(record);
       if (record.observed) {
         post = record.observed;
@@ -1750,19 +2187,26 @@ async function main() {
       expectedFleet,
       legacyRollbackProviders,
       {
-        minReadyProviders: Math.max(CONFIG.minReadyProviders, expectedFleet.length),
+        minReadyProviders: minimumReadyProviders(
+          Boolean(legacyRollbackProviders?.size || CONFIG.mode === 'qualification'),
+          recoveryFleetSize,
+        ),
         maxDrainingProviders: CONFIG.mode === 'qualification' ? 1 : 0,
         maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
         maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
         maxMemoryFraction: CONFIG.maxMemoryFraction,
         requireNominalThermal: CONFIG.mode === 'qualification',
         allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
+        heartbeatAdvanceProviderIDs,
+        enforceStableProviderCounts: Boolean(legacyRollbackProviders?.size || CONFIG.mode === 'qualification'),
+        enforceStableModelSet: Boolean(legacyRollbackProviders?.size || CONFIG.mode === 'qualification'),
       },
     ));
     const finalRecovery = recoverySamples.at(-1);
     if (finalRecovery) {
       recoveryReasons.push(...safetyObservationReasons(initial, finalRecovery, expectedFleet, {
         requireHeartbeatAdvance: true,
+        heartbeatAdvanceProviderIDs,
         allowLegacyBridgeProviderSignals: CONFIG.allowLegacyBridgeProviderSignals,
         legacyRollbackProviders,
       }).map((reason) => `recovery_final:${reason}`));

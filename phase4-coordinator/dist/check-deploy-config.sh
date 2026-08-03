@@ -790,6 +790,205 @@ if gw:
 else:
     print("  note: gateway.yaml not provided -> skipped C2 timer cross-check")
 
+# --- payout block (SPEC-016 v0.1.21 §6.5 — Step 4 deploy gate) ---
+# The payout.* block has a hard schema split: payout.security.* is
+# runtime-immutable; payout.tuning.* is SIGHUP-reloadable with bound
+# re-enforcement. The gate validates every required key is either
+# present-with-value or env:NAME-indirected, and rejects placeholder
+# strings (per c2-gate-resolves-env-indirected-secrets). Skipped when
+# payout.enabled != true so existing pre-Step-4 deploys still pass.
+#
+# coord is the raw YAML text (not a dict) — see section_body /
+# g_section above. We compose a 2-level helper for payout.security.*
+# and payout.tuning.* without pulling in a full YAML parser.
+def g_payout(sub, key):
+    """Read payout.<sub>.<key> from the raw YAML text. Returns None when absent."""
+    payout_body = section_body(coord, "payout")
+    if payout_body is None:
+        return None
+    sub_body_lines = []
+    sub_indent = None
+    in_sub = False
+    for line in payout_body:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # detect "<sub>:" at indent 2 (the payout block's child).
+        if in_sub:
+            # leave on dedent
+            cur_indent = len(line) - len(line.lstrip())
+            if sub_indent is None:
+                sub_indent = cur_indent
+            if cur_indent < sub_indent:
+                in_sub = False
+                continue
+            sub_body_lines.append(line)
+            continue
+        m = KEY_RE.match(stripped)
+        if m and m.group(1) == sub:
+            in_sub = True
+            continue
+    if not sub_body_lines:
+        return None
+    for line in sub_body_lines:
+        m = KEY_RE.match(line.strip())
+        if not m:
+            continue
+        if m.group(1) == key:
+            # split off the value
+            rest = line.split(":", 1)[1] if ":" in line else ""
+            return parse_scalar(rest)
+    return None
+
+payout_enabled_raw = g_section(coord, "payout", "enabled")
+payout_enabled = (payout_enabled_raw or "").strip().lower() == "true"
+if not payout_enabled:
+    print("  note: payout.enabled is false -> SPEC-016 payout gate SKIPPED")
+else:
+    def get_sec(k): return g_payout("security", k)
+    def get_tun(k): return g_payout("tuning", k)
+
+    def check_payout_field(label, raw, *, hex_64=False, allow_empty=False, is_rpc_url=False):
+        """Validate a payout config field: present-with-value or env:NAME.
+
+        - missing                              -> HARD fail
+        - "env:NAME", NAME unset               -> ok (deferred to runtime)
+        - "env:NAME", NAME set to placeholder  -> HARD fail
+        - "env:" / "env:1bad"                  -> HARD fail (malformed)
+        - inline literal placeholder           -> HARD fail
+        - inline literal value                 -> ok (hex-validated if hex_64;
+                                                  https / non-internal target
+                                                  if is_rpc_url -- FULL-r1
+                                                  [full-sec:r1-1] closure)
+        """
+        if raw is None or raw == "":
+            if allow_empty:
+                ok(f"{label} empty -> default applies")
+                return
+            hard(f"{label} is MISSING — payout.enabled=true requires every payout.* key")
+            return
+        raw_s = str(raw)
+        src = ""
+        if raw_s.startswith("env:"):
+            m = ENV_REF.match(raw_s)
+            if not m:
+                hard(f"{label} malformed env indirection {raw_s!r}")
+                return
+            name = m.group(1)
+            resolved = os.environ.get(name)
+            if not resolved:
+                ok(f"{label} deferred to runtime via env:{name}")
+                return
+            raw_s = resolved
+            src = f" (resolved from env:{name})"
+        if PLACEHOLDER.search(raw_s) or raw_s.startswith("<"):
+            hard(f"{label} is a PLACEHOLDER{src} -> payout pipeline would fail at startup")
+            return
+        if hex_64 and not re.fullmatch(r"[0-9a-fA-F]{64}", raw_s):
+            hard(f"{label} is not 64-hex (len {len(raw_s)}){src}; expected SHA-256 SPKI pin")
+            return
+        if is_rpc_url:
+            err = validate_payout_rpc_url(raw_s)
+            if err is not None:
+                hard(f"{label} invalid{src}: {err}")
+                return
+        ok(f"{label} present{src}")
+
+    # FULL-r1 [full-sec:r1-1] HIGH closure: payout RPC URLs are the
+    # trust root for the §4.4 two-RPC discipline. Mirror the runtime
+    # validation in internal/config/config.go::validatePayoutRPCURL —
+    # reject non-https, userinfo, loopback / private / link-local /
+    # unspecified IPs. Hostnames pass through (DNS not resolved in
+    # the deploy gate); the SPKI pin is the runtime trust root.
+    def validate_payout_rpc_url(raw):
+        from urllib.parse import urlparse
+        import ipaddress
+        try:
+            u = urlparse(raw.strip())
+        except Exception as exc:
+            return f"unparseable URL ({exc})"
+        if not u.hostname:
+            return "missing hostname"
+        if u.scheme != "https":
+            return f"scheme {u.scheme!r} must be https (SPKI pin only fires on https)"
+        if u.username or u.password:
+            return "must not contain userinfo (credentials in URL leak into logs)"
+        host = u.hostname
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return None  # hostname literal: defer trust to SPKI pin
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
+            return f"IP literal {host} is loopback / private / link-local / unspecified (SSRF defense)"
+        return None
+
+    # security namespace (required when enabled=true)
+    check_payout_field("payout.security.hot_wallet_address", get_sec("hot_wallet_address"))
+    check_payout_field("payout.security.rpc_url_primary",   get_sec("rpc_url_primary"),   is_rpc_url=True)
+    check_payout_field("payout.security.rpc_url_secondary", get_sec("rpc_url_secondary"), is_rpc_url=True)
+    # FULL-r1 [full-sec:r1-1] HIGH closure: distinct-host check (only
+    # when both RPC URLs are inline literals; env:NAME values that
+    # didn't resolve are deferred to runtime and already gated by
+    # internal/config/config.go::Validate).
+    pri_raw = get_sec("rpc_url_primary")
+    sec_raw = get_sec("rpc_url_secondary")
+    if pri_raw and sec_raw and not pri_raw.startswith("env:") and not sec_raw.startswith("env:"):
+        from urllib.parse import urlparse as _up
+        try:
+            pri_host = (_up(pri_raw).hostname or "").lower()
+            sec_host = (_up(sec_raw).hostname or "").lower()
+            if pri_host and sec_host and pri_host == sec_host:
+                hard("payout.security.rpc_url_primary and rpc_url_secondary use the same hostname (SPEC-016 §4.4 trust separation)")
+            elif pri_host and sec_host:
+                ok("payout.security.rpc_url_{primary,secondary} use distinct hostnames")
+        except Exception:
+            pass
+    check_payout_field("payout.security.encrypted_wallet_path", get_sec("encrypted_wallet_path"))
+    # caps + cancel + abandon (no env: indirection expected; integers)
+    for key in (
+        "per_payout_cap_usdc_base_units",
+        "per_day_cap_usdc_base_units",
+        "cancel_max_tip_multiplier",
+        "cancel_max_gas_native_wei",
+        "cancel_max_gas_native_wei_per_24h",
+        "abandon_rate_per_hour",
+        "chain_recon_interval",
+        "chain_recon_tolerance_usdc_base_units",
+        "pause_resume_min_interval",
+    ):
+        val = get_sec(key)
+        if val is None or val == "":
+            hard(f"payout.security.{key} is MISSING — required when payout.enabled=true")
+        else:
+            ok(f"payout.security.{key} present")
+
+    # tuning namespace
+    # Step 4 r1 [sec:r1-3]/[arch:4.6] MEDIUM closure: low_balance_threshold
+    # and low_native_threshold must be present (0 is valid; disables the probe).
+    for key in (
+        "address_cooling_off_period",
+        "run_interval",
+        "run_now_min_interval",
+        "confirmation_blocks",
+        "max_rows_per_run",
+        "reorg_poll_window",
+        "low_balance_threshold",
+        "low_native_threshold",
+    ):
+        val = get_tun(key)
+        if val is None or val == "":
+            hard(f"payout.tuning.{key} is MISSING — required when payout.enabled=true")
+        else:
+            ok(f"payout.tuning.{key} present")
+
+    # SPKI pins are optional (empty allowed); when set, must be 64-hex.
+    check_payout_field("payout.tuning.rpc_url_primary_pin_spki",
+                       get_tun("rpc_url_primary_pin_spki"),
+                       hex_64=True, allow_empty=True)
+    check_payout_field("payout.tuning.rpc_url_secondary_pin_spki",
+                       get_tun("rpc_url_secondary_pin_spki"),
+                       hex_64=True, allow_empty=True)
+
 # Surface WARN count so a final "passed" line cannot hide an UNVERIFIED
 # cross-file C2c (audit-r5 MINOR): operators scanning wrapper output
 # would otherwise miss the manual-verification prompt.

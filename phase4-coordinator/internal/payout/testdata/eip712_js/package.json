@@ -1,0 +1,12 @@
+{
+  "name": "eip712-crosslang-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test_digest.mjs",
+    "sign": "node roundtrip_sign.mjs"
+  },
+  "dependencies": {
+    "ethers": "6.13.4"
+  }
+}

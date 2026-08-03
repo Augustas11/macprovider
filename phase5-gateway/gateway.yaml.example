@@ -166,6 +166,18 @@ routing:
   sticky_enabled: false
   sticky_ttl_s: 1800
 
+features:
+  # Experimental Anthropic Messages compatibility facade. When enabled,
+  # POST /v1/messages translates supported full-context text/tool requests into
+  # the existing billed chat-completions pipeline. Multimodal inputs, hosted
+  # Anthropic tools, beta features, and count_tokens remain unsupported.
+  anthropic_messages_enabled: false
+  # Stateless OpenAI Responses API compatibility facade. When enabled,
+  # POST /v1/responses translates full-context Responses requests into the
+  # existing billed chat-completions pipeline. Server-side response state,
+  # hosted tools, and multimodal input remain unsupported.
+  responses_api_enabled: false
+
 cors:
   allowed_origins:
     - https://console.streamvc.live

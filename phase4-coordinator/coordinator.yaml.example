@@ -186,7 +186,7 @@ autotune:
 # legacy cohort (DECISION_CRITERIA Entry 161). `required_binary_version` is a
 # hard admission floor, not an autoupdate target, and is unaffected by the gate.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.67"
+  latest_binary_version: "1.8.81"
   required_binary_version: ""
 
 auth:

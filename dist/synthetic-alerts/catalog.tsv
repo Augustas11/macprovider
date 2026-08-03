@@ -1,0 +1,88 @@
+# SPEC-016 payout PAGE/WARN synthetic-alert catalog
+#
+# Single source of truth shared by:
+#   - dist/synthetic-alerts/emit.sh            (the synthetic-alert emitter)
+#   - phase4-coordinator/internal/payout/synthetic_alerts_catalog_test.go
+#     (the completeness test that keeps this file in lock-step with the code)
+#
+# This catalog exists to satisfy SPEC-016 §9 cutover prerequisite item 6:
+# before flipping `payout.enabled: true`, the operator MUST verify with ONE
+# synthetic alert per ENUMERATED PAGE/WARN event NAME (NOT one per severity
+# tier) that each event fires its BetterStack matcher. Per-event verification
+# catches typos and missing matchers a per-tier check would silently miss
+# (e.g. `payout_runner_lease_lost` typo'd as `payout_runner_lease_lst`).
+#
+# BetterStack matchers MUST key on the `event` field + the `severity` field,
+# NOT the zerolog `level`: some real events emit a PAGE `severity` at a non-error
+# level (e.g. payout_reorg_orphan_recorded logs at warn level with severity=PAGE).
+#
+# Columns (TAB-separated):
+#   1. event_name    - the structured-log `event` field value the coordinator emits
+#   2. severity      - PAGE | WARN | INFO. For a page_capable event this is the
+#                      FLOOR severity (the value the event emits by default).
+#   3. status        - provenance / reconciliation state (see below)
+#   4. page_capable  - "page_capable" if the event emits a DYNAMIC severity that
+#                      can escalate to PAGE at runtime (e.g. WARN -> PAGE); "-"
+#                      otherwise. emit.sh emits BOTH a WARN and a PAGE synthetic
+#                      line for these so the operator verifies both matchers.
+#
+# status values:
+#   code                   Emitted by the coordinator with an explicit
+#                          `severity` field (PAGE or WARN). Operator MUST have a
+#                          BetterStack matcher and MUST verify it with a
+#                          synthetic alert. This is the normal case. The harness
+#                          ENFORCES that every emission site carries a matching
+#                          severity field (there is deliberately no "untagged"
+#                          status that could exempt an emitted PAGE/WARN alert).
+#   info                   Emitted by the coordinator at INFO. §9 item 6 lists it
+#                          as OPTIONAL for the alert filter. Not emitted as a
+#                          synthetic alert by default (see emit.sh --include-info).
+#   spec-only-not-emitted  Enumerated by SPEC-016 §9 item 6 as PAGE/WARN but NOT
+#                          emitted anywhere in the coordinator source.
+#                          DISCREPANCY: either the spec over-enumerates or the
+#                          emission is missing. Carried so the operator still
+#                          provisions the matcher; the completeness test asserts
+#                          the name stays ABSENT from code until reconciled.
+#
+# See README.md for the operator procedure and the full discrepancy write-up.
+#
+# event_name	severity	status	page_capable
+payout_admin_invoked_while_halted	WARN	code	-
+payout_attempt_abandoned	PAGE	code	-
+payout_cancel_self_transfer_reconfirm_stale	PAGE	code	-
+payout_chain_balance_drift_negative	PAGE	code	-
+payout_chain_balance_drift_positive	WARN	code	-
+payout_chain_balance_rpc_disagreement	PAGE	code	-
+payout_chain_balance_rpc_error	WARN	code	-
+payout_chain_value_mismatch	PAGE	code	-
+payout_config_reload_rejected	PAGE	code	-
+payout_config_reloaded	PAGE	code	-
+payout_daily_cap_tripped	WARN	code	-
+payout_flag_audit_reaped	WARN	code	-
+payout_insufficient_funds	PAGE	code	-
+payout_invariant_violation	PAGE	code	-
+payout_low_balance	WARN	code	-
+payout_low_native_balance	WARN	code	-
+payout_registration_paused	PAGE	code	-
+payout_registration_resumed	PAGE	code	-
+payout_reorg_orphan_recorded	PAGE	code	-
+payout_reorg_poll_rpc_error	WARN	code	-
+payout_reorg_revert	PAGE	code	-
+payout_rpc_chronic_outage	PAGE	code	-
+payout_rpc_disagreement	PAGE	code	-
+payout_runner_halted	PAGE	code	-
+payout_runner_halted_skipping_cycle	PAGE	code	-
+payout_runner_lease_lost	PAGE	code	-
+payout_runner_lease_taken_over	PAGE	code	-
+payout_runtime_flag_sync_emit_failed	PAGE	code	-
+payout_spki_drain_skipped_unsupported_client	WARN	code	-
+payout_stale_outbox_backlog	WARN	code	page_capable
+payout_stale_outbox_reaped	WARN	code	-
+payout_failed	PAGE	code	-
+payout_signer_unavailable	PAGE	code	-
+provider_payout_address_change_rejected	WARN	code	-
+provider_payout_address_rejected_unknown_provider	WARN	code	-
+payout_capped	INFO	info	-
+payout_cancel_self_transfer_confirmed	INFO	info	-
+payout_nonce_gap	WARN	code	-
+payout_runner_lease_conflict	PAGE	code	-

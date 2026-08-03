@@ -111,7 +111,7 @@ def unique_step(job, name):
     return job.split(marker, 1)[1].split("\n      - name:", 1)[0]
 
 
-PEARL_SETUP_GO_SHA = "924ae3a1cded613372ab5595356fb5720e22ba16"
+PEARL_SETUP_GO_SHA = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 PEARL_GO_SEAL_STEP = (
     "        if: ${{ github.event.inputs.promote_run_id == '' }}\n"
     "        shell: bash\n"
@@ -160,7 +160,7 @@ PEARL_VERIFY_UPLOAD_SEQUENCE = (
     "\n      - name: Upload unsigned build artifact\n"
 )
 UNSIGNED_UPLOAD_STEP = (
-    "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
+    "        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n"
     "        with:\n"
     '          name: unsigned-release-${{ steps.release_source.outputs.commit }}\n'
     "          path: unsigned-release-inputs/\n"
@@ -286,7 +286,7 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Prepare release assets", 4, 1),
     ("Require an advancing immutable discovery head", 2, 2),
     ("Create verified draft GitHub release", 1, 1),
-    ("Publish only the revalidated numeric draft", 1, 1),
+    ("Publish only the revalidated numeric draft", 2, 2),
     ("Publish one append-only immutable discovery transport", 1, 1),
     ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
 )

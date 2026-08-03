@@ -52,7 +52,8 @@ jobs:
           echo "prerelease=$RELEASE_PRERELEASE_INPUT" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go for Pearl binaries
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        # Pinned to actions/setup-go v7.0.0.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: |
@@ -60,11 +61,14 @@ jobs:
             phase5-gateway/go.sum
 
       - name: Select and verify reviewed release toolchain
+        id: release_toolchain
         shell: bash
         run: |
           set -euo pipefail
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
-          bash scripts/verify-release-toolchain.sh release-toolchain.json
+          toolchain_json="$RUNNER_TEMP/release-toolchain.json"
+          bash scripts/verify-release-toolchain.sh "$toolchain_json"
+          printf 'json=%s\n' "$toolchain_json" >> "$GITHUB_OUTPUT"
 
       - name: Seal OpenSSL 3 for protected runtime signing
         id: protected_openssl
@@ -91,34 +95,52 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.release_source.outputs.tag }}"
+          artifact_dir="$RUNNER_TEMP/pearl-runtime-build"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+          git_status="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$git_status" ]; then
+            echo "::error::runtime checkout is dirty before Pearl Go build" >&2
+            printf '%s\n' "$git_status" >&2
+            exit 1
+          fi
           (
             cd phase4-coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w -X main.version=$tag" \
-              -o "$GITHUB_WORKSPACE/coordinator-linux-amd64" ./cmd/coordinator
+              -o "$artifact_dir/coordinator-linux-amd64" ./cmd/coordinator
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w" \
-              -o "$GITHUB_WORKSPACE/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+              -o "$artifact_dir/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
           )
           (
             cd phase5-gateway
             GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w -X main.version=$tag" \
-              -o "$GITHUB_WORKSPACE/gateway-linux-amd64" ./cmd/gateway
+              -o "$artifact_dir/gateway-linux-amd64" ./cmd/gateway
           )
-          file coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 | tee pearl-file.txt
-          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
-          strings coordinator-linux-amd64 > coordinator-linux-amd64.strings
-          strings gateway-linux-amd64 > gateway-linux-amd64.strings
-          grep -Fq "$tag" coordinator-linux-amd64.strings
-          grep -Fq "$tag" gateway-linux-amd64.strings
-          python3 scripts/verify-pearl-go-binaries.py \
-            coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64
+          file \
+            "$artifact_dir/coordinator-linux-amd64" \
+            "$artifact_dir/coordinator-cli-linux-amd64" \
+            "$artifact_dir/gateway-linux-amd64" | tee "$artifact_dir/pearl-file.txt"
+          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          strings "$artifact_dir/coordinator-linux-amd64" > "$artifact_dir/coordinator-linux-amd64.strings"
+          strings "$artifact_dir/gateway-linux-amd64" > "$artifact_dir/gateway-linux-amd64.strings"
+          grep -Fq "$tag" "$artifact_dir/coordinator-linux-amd64.strings"
+          grep -Fq "$tag" "$artifact_dir/gateway-linux-amd64.strings"
+          EXPECTED_REVISION="${{ steps.release_source.outputs.commit }}" \
+            python3 scripts/verify-pearl-go-binaries.py \
+            "$artifact_dir/coordinator-linux-amd64" \
+            "$artifact_dir/coordinator-cli-linux-amd64" \
+            "$artifact_dir/gateway-linux-amd64"
+          install -m 0755 "$artifact_dir/coordinator-linux-amd64" coordinator-linux-amd64
+          install -m 0755 "$artifact_dir/coordinator-cli-linux-amd64" coordinator-cli-linux-amd64
+          install -m 0755 "$artifact_dir/gateway-linux-amd64" gateway-linux-amd64
 
       - name: Sign Pearl runtime metadata and checksums
         id: assets
@@ -141,6 +163,7 @@ jobs:
           trap cleanup_release_signing_key EXIT
           printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
           chmod 600 "$release_signing_key"
+          install -m 0644 "${{ steps.release_toolchain.outputs.json }}" release-toolchain.json
           coordinator_sha="$(shasum -a 256 coordinator-linux-amd64 | awk '{print $1}')"
           coordinator_cli_sha="$(shasum -a 256 coordinator-cli-linux-amd64 | awk '{print $1}')"
           gateway_sha="$(shasum -a 256 gateway-linux-amd64 | awk '{print $1}')"

@@ -91,6 +91,147 @@ type Config struct {
 	ProofOfWeights               ProofOfWeightsConfig         `yaml:"proof_of_weights"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+	// Payout is the SPEC-016 payout-pipeline configuration.
+	// Default Enabled=false ships the schema migrations + handlers
+	// idle; flipping to true activates the §3.3 endpoint (Step 1)
+	// and the runner cycle (Step 2+, not present yet). See SPEC-016
+	// §6.5 for the dual-loader namespace split (Step 4).
+	Payout PayoutConfig `yaml:"payout"`
+}
+
+// PayoutConfig is the operator-facing root of the SPEC-016
+// `payout.*` namespace. At Step 1 only the security.hot_wallet_address
+// and a single tuning knob (address_cooling_off_period) are read;
+// the §6.5 dual-loader split lands in Step 4 with the full key set.
+type PayoutConfig struct {
+	Enabled  bool                 `yaml:"enabled"`
+	Security PayoutSecurityConfig `yaml:"security"`
+	Tuning   PayoutTuningConfig   `yaml:"tuning"`
+}
+
+// PayoutSecurityConfig holds SPEC-016 §6.5 `payout.security.*` keys
+// — the IMMUTABLE-at-startup subset. Step 2 grows this struct with
+// caps + RPC URLs + abandon caps; Step 4 will land the full §6.5
+// dual-loader split (SIGHUP-only tuning, fsnotify-forbidden, etc.).
+// At Step 2 the values are read once at process start and not
+// re-loaded; no SIGHUP handler touches these.
+type PayoutSecurityConfig struct {
+	// HotWalletAddress is the operator hot wallet on Base mainnet.
+	// SPEC §3.2 step 5 uses it as the EIP-712 verifyingContract;
+	// §3.4 stamps it into provider_payout_addresses.registered_against_hot_wallet
+	// on every successful INSERT/UPDATE.
+	HotWalletAddress string `yaml:"hot_wallet_address"`
+
+	// RPCURLPrimary / RPCURLSecondary are the two Base mainnet
+	// JSON-RPC endpoints. SPEC §4.4 REQUIRES two; single-RPC is
+	// REJECTED at v0.1.x. The two MUST be loaded from SEPARATE
+	// secrets paths (§4.4 trust-separation requirement); this is
+	// enforced operationally via config-file layout, not by IMPL.
+	RPCURLPrimary   string `yaml:"rpc_url_primary"`
+	RPCURLSecondary string `yaml:"rpc_url_secondary"`
+
+	// PerPayoutCapUSDCBaseUnits is the §5.2 per-payout ceiling.
+	// Default $500 = 500_000_000 base units.
+	PerPayoutCapUSDCBaseUnits int64 `yaml:"per_payout_cap_usdc_base_units"`
+
+	// PerDayCapUSDCBaseUnits is the §5.3 rolling 24h ceiling.
+	// Default $5,000 = 5_000_000_000 base units.
+	PerDayCapUSDCBaseUnits int64 `yaml:"per_day_cap_usdc_base_units"`
+
+	// CancelMaxTipMultiplier is the §4.6 cap on the tip multiplier
+	// supplied by the operator on /admin/payout/abandon-attempt.
+	// Default 5×. Requests above are silently floored with a
+	// cap_applied log entry.
+	CancelMaxTipMultiplier float64 `yaml:"cancel_max_tip_multiplier"`
+
+	// CancelMaxGasNativeWei is the §4.6 per-cancel gas ceiling.
+	// Default 0.01 ETH = 1e16 wei. Requests above 422 reject.
+	CancelMaxGasNativeWei int64 `yaml:"cancel_max_gas_native_wei"`
+
+	// CancelMaxGasNativeWeiPer24h is the §4.6 24h aggregate gas
+	// ceiling. Default 0.05 ETH = 5e16 wei. SUM over confirmed
+	// cancels in the window + the current-request estimate.
+	CancelMaxGasNativeWeiPer24h int64 `yaml:"cancel_max_gas_native_wei_per_24h"`
+
+	// AbandonRatePerHour is the §4.6 per-operator-token rate
+	// limit on the abandon endpoint. Default 3.
+	AbandonRatePerHour int `yaml:"abandon_rate_per_hour"`
+
+	// ChainReconInterval is the §4.4 / §7.4 chain-balance recon
+	// cadence (Step 4 wiring, Step 2 reads the value). Default 1h.
+	ChainReconInterval time.Duration `yaml:"chain_recon_interval"`
+
+	// ChainReconToleranceUSDCBaseUnits is the §4.4 drift
+	// threshold. Default $0.10 = 100_000 base units.
+	ChainReconToleranceUSDCBaseUnits int64 `yaml:"chain_recon_tolerance_usdc_base_units"`
+
+	// PauseResumeMinInterval is the §6.4.1 endpoint rate-limit
+	// floor. Default 60s. Step 3 wiring.
+	PauseResumeMinInterval time.Duration `yaml:"pause_resume_min_interval"`
+
+	// EncryptedWalletPath is the on-disk AES-256-GCM-encrypted
+	// secp256k1 wallet file. SPEC §6.3 production path; the
+	// runner decrypts at startup using the KEK supplied via
+	// systemd LoadCredential= (preferred) or
+	// MACPROVIDER_PAYOUT_WALLET_KEK env var. Required when
+	// payout.enabled=true unless DevMode is also true.
+	EncryptedWalletPath string `yaml:"encrypted_wallet_path"`
+
+	// EncryptedWalletOnDiskHex indicates the wallet file is
+	// stored as hex-encoded bytes (vs raw bytes). Default false
+	// (raw bytes).
+	EncryptedWalletOnDiskHex bool `yaml:"encrypted_wallet_on_disk_hex"`
+
+	// DevMode permits loading the wallet from the dev-only env
+	// var (MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY) instead
+	// of the encrypted file + KEK production path. NEVER enable
+	// in production. Step 2 [sec:2.3] HIGH closure: dev path
+	// MUST be explicitly opted-in.
+	DevMode bool `yaml:"dev_mode"`
+}
+
+// PayoutTuningConfig holds SPEC-016 §6.5 `payout.tuning.*` keys —
+// the SIGHUP-reloadable subset (full hot-reload semantics land in
+// Step 4; Step 2 just reads the values at startup). Hard bounds
+// per §6.5 are enforced at parse time.
+type PayoutTuningConfig struct {
+	// AddressCoolingOffPeriod is the §3.3 cooling-off window for
+	// freshly-registered or rotated addresses. Default 24h.
+	// SPEC §3.1 floor: 1h.
+	AddressCoolingOffPeriod time.Duration `yaml:"address_cooling_off_period"`
+
+	// RunInterval is the §4.2 runner cadence. Default 6h.
+	// SPEC §6.5 bounds: [5m, 24h].
+	RunInterval time.Duration `yaml:"run_interval"`
+
+	// RunNowMinInterval rate-limits the §4.2 admin run-now endpoint.
+	// Default 60s. SPEC §6.5 bounds: [10s, 1h].
+	RunNowMinInterval time.Duration `yaml:"run_now_min_interval"`
+
+	// ConfirmationBlocks is the §4.3 step 7 receipt-depth threshold
+	// for the two-RPC confirm. Default 5. SPEC §6.5 bounds
+	// [5, 200] (v0.1.20 round-20 M2 closure widened from [2, 50]).
+	ConfirmationBlocks int `yaml:"confirmation_blocks"`
+
+	// MaxRowsPerRun caps the §4.3 step 1 SELECT. Default 50.
+	// SPEC §6.5 bounds: [1, 500].
+	MaxRowsPerRun int `yaml:"max_rows_per_run"`
+
+	// ReorgPollWindow is the §4.7 re-poll window for already-
+	// confirmed rows. Default 24h. SPEC §6.5 bounds [1h, 168h]
+	// (v0.1.20 round-20 M1 closure).
+	ReorgPollWindow time.Duration `yaml:"reorg_poll_window"`
+
+	// LowBalanceThreshold / LowNativeThreshold drive §6.2 alerts
+	// (Step 4 wiring; Step 2 reads). Defaults: 0 (disabled).
+	LowBalanceThreshold int64 `yaml:"low_balance_threshold"`
+	LowNativeThreshold  int64 `yaml:"low_native_threshold"`
+
+	// RPCURLPrimaryPinSPKI / RPCURLSecondaryPinSPKI are optional
+	// SHA-256 SPKI cert pins for the two RPCs (§4.4). 64-hex chars
+	// or empty.
+	RPCURLPrimaryPinSPKI   string `yaml:"rpc_url_primary_pin_spki"`
+	RPCURLSecondaryPinSPKI string `yaml:"rpc_url_secondary_pin_spki"`
 }
 
 // ProofOfWeightsConfig gates Session B integrity controls. Defaults keep
@@ -1260,6 +1401,28 @@ func Default() Config {
 			// risk if anything else is added. Issue #125.
 			TrustedProxies: []string{"127.0.0.0/8", "::1/128"},
 		},
+		Payout: PayoutConfig{
+			Enabled: false,
+			Security: PayoutSecurityConfig{
+				PerPayoutCapUSDCBaseUnits:        500_000_000,   // $500
+				PerDayCapUSDCBaseUnits:           5_000_000_000, // $5,000
+				CancelMaxTipMultiplier:           5.0,
+				CancelMaxGasNativeWei:            10_000_000_000_000_000, // 0.01 ETH (1e16)
+				CancelMaxGasNativeWeiPer24h:      50_000_000_000_000_000, // 0.05 ETH (5e16)
+				AbandonRatePerHour:               3,
+				ChainReconInterval:               time.Hour,
+				ChainReconToleranceUSDCBaseUnits: 100_000, // $0.10
+				PauseResumeMinInterval:           60 * time.Second,
+			},
+			Tuning: PayoutTuningConfig{
+				AddressCoolingOffPeriod: 24 * time.Hour,
+				RunInterval:             6 * time.Hour,
+				RunNowMinInterval:       60 * time.Second,
+				ConfirmationBlocks:      5,
+				MaxRowsPerRun:           50,
+				ReorgPollWindow:         24 * time.Hour,
+			},
+		},
 	}
 }
 
@@ -1280,6 +1443,166 @@ func LoadWithOverlay(basePath, overlayPath string) (Config, error) {
 			return Config{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
 		}
 	}
+	if err := finalizeLoadedConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// payoutTuningOnlyWrapper is a minimal YAML envelope that surfaces
+// only the payout.tuning.* namespace. Used by LoadPayoutTuningOnly
+// so SIGHUP parsing cannot accidentally read or validate payout.security.*.
+type payoutTuningOnlyWrapper struct {
+	Payout struct {
+		Tuning PayoutTuningConfig `yaml:"tuning"`
+	} `yaml:"payout"`
+}
+
+// LoadPayoutTuningOnly parses ONLY the `payout.tuning.*` keys from
+// the YAML at basePath — merged with overlayPath when non-empty, with
+// the same overlay-keys-override semantics as LoadWithOverlay — and
+// returns the validated snapshot. It intentionally does NOT read
+// `payout.security.*`, does NOT call resolveEnv on any other field,
+// and does NOT run full Config.Validate.
+//
+// Merge-audit 2026-07-30 (convergent code+security HIGH): the SIGHUP
+// path MUST read the same effective base+overlay source as startup's
+// LoadWithOverlay. The shipped systemd unit passes --config-overlay;
+// reading only the base file here would let a SIGHUP silently revert
+// overlay-sourced tuning — including clearing non-empty SPKI pins,
+// which validate as empty and would drop RPC certificate pinning on
+// the payout money path.
+//
+// Step 4 r1 [code:r1-3] MEDIUM closure: the SIGHUP loader MUST NOT
+// couple tuning-reload success to immutable security fields. Callers
+// that need the full config should use Load instead.
+//
+// Bound enforcement mirrors the §6.5 sub-set that applies to the
+// tuning namespace only. The per_day_cap cross-check on
+// low_balance_threshold is skipped because the security config is
+// deliberately not loaded here; the bound is enforced by Validate at
+// startup. On SIGHUP, TuningProvider.Reload applies its own in-memory
+// cap check using the startup PerDayCapUSDCBaseUnits.
+func LoadPayoutTuningOnly(basePath, overlayPath string) (PayoutTuningConfig, error) {
+	b, err := os.ReadFile(basePath)
+	if err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	// Start from defaults so missing keys inherit the startup values.
+	defaults := Default()
+	wrapper := payoutTuningOnlyWrapper{}
+	wrapper.Payout.Tuning = defaults.Payout.Tuning
+	if err := yaml.Unmarshal(b, &wrapper); err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	if strings.TrimSpace(overlayPath) != "" {
+		ob, err := os.ReadFile(overlayPath)
+		if err != nil {
+			return PayoutTuningConfig{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		}
+		// Unmarshal into the SAME wrapper: keys present in the overlay
+		// override; keys absent inherit base (mirrors LoadWithOverlay).
+		if err := yaml.Unmarshal(ob, &wrapper); err != nil {
+			return PayoutTuningConfig{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		}
+	}
+	t := wrapper.Payout.Tuning
+	// §6.5 tuning-namespace bound matrix — same as Validate's payout.tuning.* block.
+	if t.AddressCoolingOffPeriod < time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h (SPEC-016 §3.1)")
+	}
+	if t.RunInterval < 5*time.Minute || t.RunInterval > 24*time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.run_interval must be in [5m, 24h] (SPEC-016 §6.5)")
+	}
+	if t.RunNowMinInterval < 10*time.Second || t.RunNowMinInterval > time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.run_now_min_interval must be in [10s, 1h] (SPEC-016 §6.5)")
+	}
+	if t.ConfirmationBlocks < 5 || t.ConfirmationBlocks > 200 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.confirmation_blocks must be in [5, 200] (SPEC-016 §6.5)")
+	}
+	if t.MaxRowsPerRun < 1 || t.MaxRowsPerRun > 500 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.max_rows_per_run must be in [1, 500] (SPEC-016 §6.5)")
+	}
+	if t.ReorgPollWindow < time.Hour || t.ReorgPollWindow > 168*time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.reorg_poll_window must be in [1h, 168h] (SPEC-016 §6.5)")
+	}
+	if t.LowBalanceThreshold < 0 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.low_balance_threshold must be >= 0")
+	}
+	if t.LowNativeThreshold < 0 || t.LowNativeThreshold > 1_000_000_000_000_000_000 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.low_native_threshold must be in [0, 1e18] (SPEC-016 §6.5)")
+	}
+	if err := validateSPKIPin(t.RPCURLPrimaryPinSPKI, "payout.tuning.rpc_url_primary_pin_spki"); err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	if err := validateSPKIPin(t.RPCURLSecondaryPinSPKI, "payout.tuning.rpc_url_secondary_pin_spki"); err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	return t, nil
+}
+
+// LoadForSIGHUPReload reads the config for the GENERAL coordinator
+// SIGHUP reload path (tier2 / billing / proof-of-weights consumers in
+// reloadCoordinatorConfig). Identical to Load EXCEPT the payout.*
+// namespace is reset to defaults (enabled=false) after unmarshal and
+// before env resolution + validation, so on SIGHUP:
+//   - payout.security.* env: sentinels are never resolved (SPEC-016
+//     v0.1.23 §6.5: the security namespace is startup-immutable and
+//     MUST NOT be parsed on any SIGHUP path; the dedicated payout
+//     listener uses LoadPayoutTuningOnly), and
+//   - a payout.* key edited invalidly on disk cannot reject an
+//     otherwise-valid tier2/billing reload (no cross-namespace
+//     reload-success coupling — merge-audit 2026-07-30 architect HIGH).
+//
+// Safe because the general reload path never applies payout fields:
+// the payout runtime consumes config only via its startup snapshot
+// plus the §6.5 tuning-only SIGHUP listener.
+func LoadForSIGHUPReload(path string) (Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+	}
+	// Merge-audit r2 (convergent code+architect HIGH): strip the payout
+	// subtree BEFORE typed decode. Resetting cfg.Payout after a typed
+	// unmarshal is not enough — a type-malformed payout.* scalar (e.g. a
+	// non-numeric cancel_max_tip_multiplier) would fail the Config decode
+	// itself and reject the whole reload before any reset runs.
+	//
+	// Merge-audit r3 (code HIGH): the strip must happen at the yaml.Node
+	// level, NOT via a map[string]interface{} decode + re-marshal — that
+	// round-trip resolves unquoted timestamp-like scalars (2026-07-19)
+	// into time.Time and re-emits them RFC3339-normalized, so the reload
+	// would ACCEPT deadline strings (tier2.model_hash_legacy_until,
+	// referrals.grandfather_before) that startup Load rejects. Removing
+	// the payout mapping entry from the parsed node tree leaves every
+	// other scalar byte-identical to what Load would see.
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", path, err)
+	}
+	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
+		m := doc.Content[0]
+		// Merge-audit r4 (code HIGH): strip EVERY top-level payout entry —
+		// YAML permits duplicate keys at this layer, and a second payout
+		// block would otherwise reach typed decode.
+		kept := make([]*yaml.Node, 0, len(m.Content))
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if m.Content[i].Value == "payout" {
+				continue
+			}
+			kept = append(kept, m.Content[i], m.Content[i+1])
+		}
+		m.Content = kept
+	}
+	cfg := Default()
+	if len(doc.Content) > 0 {
+		if err := doc.Decode(&cfg); err != nil {
+			return Config{}, fmt.Errorf("base config %s: %w", path, err)
+		}
+	}
+	// Belt-and-braces: the payout namespace stays at defaults regardless
+	// of what the document contained.
+	cfg.Payout = Default().Payout
 	if err := finalizeLoadedConfig(&cfg); err != nil {
 		return Config{}, err
 	}
@@ -1424,6 +1747,32 @@ func (c *Config) resolveEnv() error {
 		}
 		if v := strings.TrimSpace(os.Getenv("MP_SESSION_COOKIE_DOMAIN")); v != "" {
 			c.Auth.GitHubOAuth.SessionCookieDomain = v
+		}
+	}
+	// Step 4 r1 [sec:r1-4] MEDIUM closure: payout.security.* string
+	// fields must honor the env:NAME indirection rule. The deploy gate
+	// already validates env: presence; without this resolver the
+	// coordinator boots with literal "env:..." RPC/wallet strings.
+	if c.Payout.Enabled {
+		if v, err := resolveEnvValue("payout.security.rpc_url_primary", c.Payout.Security.RPCURLPrimary); err != nil {
+			return err
+		} else {
+			c.Payout.Security.RPCURLPrimary = v
+		}
+		if v, err := resolveEnvValue("payout.security.rpc_url_secondary", c.Payout.Security.RPCURLSecondary); err != nil {
+			return err
+		} else {
+			c.Payout.Security.RPCURLSecondary = v
+		}
+		if v, err := resolveEnvValue("payout.security.hot_wallet_address", c.Payout.Security.HotWalletAddress); err != nil {
+			return err
+		} else {
+			c.Payout.Security.HotWalletAddress = v
+		}
+		if v, err := resolveEnvValue("payout.security.encrypted_wallet_path", c.Payout.Security.EncryptedWalletPath); err != nil {
+			return err
+		} else {
+			c.Payout.Security.EncryptedWalletPath = v
 		}
 	}
 	return nil
@@ -1951,6 +2300,101 @@ func (c Config) Validate() error {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
+		}
+	}
+	if c.Payout.Enabled {
+		if c.Payout.Security.HotWalletAddress == "" {
+			return fmt.Errorf("payout.security.hot_wallet_address must be set when payout.enabled is true")
+		}
+		if c.Payout.Security.RPCURLPrimary == "" || c.Payout.Security.RPCURLSecondary == "" {
+			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must both be set (SPEC-016 §4.4 two-RPC discipline)")
+		}
+		// FULL-r1 [full-sec:r1-1] HIGH closure: payout RPC URLs are
+		// the trust root for the §4.4 two-RPC discipline. An
+		// attacker-controlled origin can return agreeing chain IDs,
+		// receipts, and balanceOf results — defeating
+		// ReceiptsAgree / chain-balance drift detection. Enforce
+		// https-only (TLS+SPKI pin runs only on https handshakes),
+		// no userinfo (avoids credential leak in URL logs), no
+		// loopback/private/link-local/unspecified targets (SSRF +
+		// internal-pivot defense), and distinct hostnames between
+		// primary and secondary (independent providers).
+		priURL, err := validatePayoutRPCURL("payout.security.rpc_url_primary", c.Payout.Security.RPCURLPrimary)
+		if err != nil {
+			return err
+		}
+		secURL, err := validatePayoutRPCURL("payout.security.rpc_url_secondary", c.Payout.Security.RPCURLSecondary)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(priURL.Hostname(), secURL.Hostname()) {
+			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must use distinct hostnames (SPEC-016 §4.4 independent-providers trust separation)")
+		}
+		if c.Payout.Security.PerPayoutCapUSDCBaseUnits <= 0 {
+			return fmt.Errorf("payout.security.per_payout_cap_usdc_base_units must be > 0")
+		}
+		if c.Payout.Security.PerDayCapUSDCBaseUnits <= 0 {
+			return fmt.Errorf("payout.security.per_day_cap_usdc_base_units must be > 0")
+		}
+		if c.Payout.Security.PerDayCapUSDCBaseUnits < c.Payout.Security.PerPayoutCapUSDCBaseUnits {
+			return fmt.Errorf("payout.security.per_day_cap_usdc_base_units must be >= per_payout_cap_usdc_base_units")
+		}
+		if c.Payout.Security.CancelMaxTipMultiplier < 1.0 {
+			return fmt.Errorf("payout.security.cancel_max_tip_multiplier must be >= 1.0")
+		}
+		if c.Payout.Security.CancelMaxGasNativeWei <= 0 {
+			return fmt.Errorf("payout.security.cancel_max_gas_native_wei must be > 0")
+		}
+		if c.Payout.Security.CancelMaxGasNativeWeiPer24h < c.Payout.Security.CancelMaxGasNativeWei {
+			return fmt.Errorf("payout.security.cancel_max_gas_native_wei_per_24h must be >= cancel_max_gas_native_wei")
+		}
+		if c.Payout.Security.AbandonRatePerHour <= 0 {
+			return fmt.Errorf("payout.security.abandon_rate_per_hour must be > 0")
+		}
+		if c.Payout.Security.ChainReconInterval < time.Minute {
+			return fmt.Errorf("payout.security.chain_recon_interval must be >= 1m")
+		}
+		if c.Payout.Security.ChainReconToleranceUSDCBaseUnits <= 0 {
+			return fmt.Errorf("payout.security.chain_recon_tolerance_usdc_base_units must be > 0")
+		}
+		if c.Payout.Security.PauseResumeMinInterval < time.Second {
+			return fmt.Errorf("payout.security.pause_resume_min_interval must be >= 1s")
+		}
+		if !c.Payout.Security.DevMode && c.Payout.Security.EncryptedWalletPath == "" {
+			return fmt.Errorf("payout.security.encrypted_wallet_path must be set when payout.enabled=true (SPEC §6.3); set payout.security.dev_mode=true ONLY for non-production hosts")
+		}
+		if c.Payout.Tuning.AddressCoolingOffPeriod < time.Hour {
+			return fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h (SPEC-016 §3.1)")
+		}
+		if c.Payout.Tuning.RunInterval < 5*time.Minute || c.Payout.Tuning.RunInterval > 24*time.Hour {
+			return fmt.Errorf("payout.tuning.run_interval must be in [5m, 24h] (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.RunNowMinInterval < 10*time.Second || c.Payout.Tuning.RunNowMinInterval > time.Hour {
+			return fmt.Errorf("payout.tuning.run_now_min_interval must be in [10s, 1h] (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.ConfirmationBlocks < 5 || c.Payout.Tuning.ConfirmationBlocks > 200 {
+			return fmt.Errorf("payout.tuning.confirmation_blocks must be in [5, 200] (SPEC-016 §6.5 v0.1.20 round-20 M2 closure widened from [2, 50])")
+		}
+		if c.Payout.Tuning.MaxRowsPerRun < 1 || c.Payout.Tuning.MaxRowsPerRun > 500 {
+			return fmt.Errorf("payout.tuning.max_rows_per_run must be in [1, 500] (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.ReorgPollWindow < time.Hour || c.Payout.Tuning.ReorgPollWindow > 168*time.Hour {
+			return fmt.Errorf("payout.tuning.reorg_poll_window must be in [1h, 168h] (SPEC-016 §6.5 v0.1.20 round-20 M1 closure)")
+		}
+		if c.Payout.Tuning.LowBalanceThreshold < 0 {
+			return fmt.Errorf("payout.tuning.low_balance_threshold must be >= 0")
+		}
+		if c.Payout.Tuning.LowBalanceThreshold > 0 && c.Payout.Tuning.LowBalanceThreshold > 2*c.Payout.Security.PerDayCapUSDCBaseUnits {
+			return fmt.Errorf("payout.tuning.low_balance_threshold must be <= 2 * per_day_cap_usdc_base_units (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.LowNativeThreshold < 0 || c.Payout.Tuning.LowNativeThreshold > 1_000_000_000_000_000_000 {
+			return fmt.Errorf("payout.tuning.low_native_threshold must be in [0, 1e18] (SPEC-016 §6.5)")
+		}
+		if err := validateSPKIPin(c.Payout.Tuning.RPCURLPrimaryPinSPKI, "payout.tuning.rpc_url_primary_pin_spki"); err != nil {
+			return err
+		}
+		if err := validateSPKIPin(c.Payout.Tuning.RPCURLSecondaryPinSPKI, "payout.tuning.rpc_url_secondary_pin_spki"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -2557,6 +3001,58 @@ func validateExplorerWindow(prefix string, maxDays, defaultHours, minDays, maxDa
 		return fmt.Errorf("%s_default_window_hours must be between 1 and %d", prefix, maxDays*24)
 	}
 	return nil
+}
+
+// validateSPKIPin checks SPEC-016 §6.5 syntactic bounds on a
+// pinned SHA-256 SPKI fingerprint. Empty disables pinning;
+// otherwise the value MUST be exactly 64 hex chars (lowercase
+// or uppercase). Content-correctness (the value actually matching
+// the RPC's served cert) is operational, not parse-time.
+func validateSPKIPin(value, name string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) != 64 {
+		return fmt.Errorf("%s must be empty or 64 hex chars (got %d chars)", name, len(value))
+	}
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return fmt.Errorf("%s must be empty or a valid 64-hex-char SHA-256", name)
+	}
+	return nil
+}
+
+// validatePayoutRPCURL enforces the SPEC-016 §4.4 trust-root
+// constraints on payout RPC URLs. Closes FULL-r1 [full-sec:r1-1]
+// HIGH: an unconstrained RPC URL defeats two-RPC discipline.
+//
+// MUST:
+//   - parse as a URL with a non-empty hostname,
+//   - use https (TLS+SPKI pin verification only fires on https),
+//   - have NO userinfo (credential URLs leak into logs),
+//   - resolve to a non-loopback / non-private / non-link-local /
+//     non-unspecified IP if the host is a literal IP (SSRF +
+//     internal-pivot defense; hostnames are validated at TLS time
+//     via the SPKI pin, which is the runtime trust root).
+func validatePayoutRPCURL(name, raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("%s must be a valid URL with a hostname", name)
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("%s must use https (SPEC-016 §4.4 + SPKI pin)", name)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("%s must not contain userinfo (credential leak in logs)", name)
+	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return nil, fmt.Errorf("%s must not target loopback / private / link-local / unspecified IPs (SSRF defense)", name)
+		}
+	}
+	return u, nil
 }
 
 func ValidateEndpointURL(endpoint string) error {

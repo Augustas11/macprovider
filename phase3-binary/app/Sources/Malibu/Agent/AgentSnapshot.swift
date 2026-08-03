@@ -149,6 +149,14 @@ struct AgentSnapshot: Equatable {
     var referralLastError: String? = nil
     var referralActionInProgress: Bool = false
 
+    // SPEC-016 §3 payout-address registration (Add wallet). Display-only;
+    // private keys never enter Malibu. Address is public EIP-55 material.
+    var payoutRegisteredAddress: String? = nil
+    var payoutPendingUntilUTC: String? = nil
+    var payoutRegistrationInProgress: Bool = false
+    var payoutLastError: String? = nil
+    var payoutLastStatus: String? = nil
+
     // Whether the CLI has explicitly acknowledged a pause; distinct from
     // "we optimistically flipped the UI" — pauseAck accepted:false must NOT
     // leave the UI showing Paused.
@@ -258,6 +266,11 @@ struct AgentSnapshot: Equatable {
         referralStatus = nil
         referralLastError = nil
         referralActionInProgress = false
+        payoutRegisteredAddress = nil
+        payoutPendingUntilUTC = nil
+        payoutRegistrationInProgress = false
+        payoutLastError = nil
+        payoutLastStatus = nil
     }
 
     static let empty = AgentSnapshot(

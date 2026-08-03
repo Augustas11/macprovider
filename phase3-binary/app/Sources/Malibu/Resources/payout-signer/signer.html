@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Malibu — Register payout wallet</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --card: #1a1d24;
+      --text: #f2f4f8;
+      --muted: #9aa3b2;
+      --coral: #ff6b4a;
+      --ok: #3ecf8e;
+      --err: #ff5c7a;
+      --border: rgba(255, 107, 74, 0.28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, rgba(255,107,74,0.18), transparent),
+                  var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: min(480px, 100%);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 28px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 8px; }
+    p { color: var(--muted); line-height: 1.45; margin: 0 0 16px; font-size: 0.95rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; word-break: break-all; }
+    .row { margin: 12px 0; }
+    label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+      width: 100%;
+      margin-top: 8px;
+      background: var(--coral);
+      color: #111;
+    }
+    button.secondary { background: #2a303c; color: var(--text); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-top: 16px; padding: 12px; border-radius: 10px; background: #12151b; font-size: 0.9rem; }
+    .status.ok { border: 1px solid rgba(62,207,142,0.4); color: var(--ok); }
+    .status.err { border: 1px solid rgba(255,92,122,0.4); color: var(--err); }
+    .status.info { border: 1px solid rgba(154,163,178,0.3); color: var(--muted); }
+    .fallback { margin-top: 16px; display: none; }
+    .fallback.show { display: block; }
+    textarea {
+      width: 100%;
+      min-height: 96px;
+      background: #0c0e12;
+      color: var(--text);
+      border: 1px solid #2a303c;
+      border-radius: 8px;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+    }
+    .note { font-size: 0.8rem; color: var(--muted); margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Register payout wallet</h1>
+    <p>
+      Non-custodial: Malibu never sees your private key. Sign with your browser wallet
+      (MetaMask, Rabby, or any WalletConnect-compatible wallet). The connected
+      account is the address that will be registered.
+    </p>
+
+    <div class="row">
+      <label>Provider</label>
+      <div class="mono" id="providerId">—</div>
+    </div>
+    <div class="row">
+      <label>Chain</label>
+      <div class="mono" id="chainLabel">—</div>
+    </div>
+    <div class="row">
+      <label>Connected account</label>
+      <div class="mono" id="account">not connected</div>
+    </div>
+
+    <button id="btnInjected" type="button">Connect browser wallet</button>
+    <button id="btnWC" type="button" class="secondary">WalletConnect / other wallet</button>
+    <button id="btnSign" type="button" disabled>Sign registration</button>
+
+    <div id="status" class="status info">Load parameters from Malibu, then connect a wallet.</div>
+
+    <div id="fallback" class="fallback">
+      <label>Loopback unreachable — copy these into Malibu</label>
+      <div class="row">
+        <label>Address</label>
+        <div class="mono" id="fbAddress"></div>
+      </div>
+      <div class="row">
+        <label>Signature</label>
+        <textarea id="fbSig" readonly></textarea>
+      </div>
+      <p class="note">Also paste the nonce and ts_utc shown below if Malibu asks.</p>
+      <div class="mono" id="fbMeta"></div>
+    </div>
+
+    <p class="note">
+      No analytics. Offline page (ethers.js vendored). The only network calls are your wallet
+      and a localhost POST back to Malibu.
+    </p>
+  </div>
+
+  <script src="./ethers.min.js"></script>
+  <script>
+(function () {
+  "use strict";
+
+  const params = new URLSearchParams(window.location.search);
+  const providerId = params.get("provider_id") || "";
+  const verifyingContract = params.get("verifying_contract") || "";
+  const chainId = Number(params.get("chain_id") || "8453");
+  const chain = params.get("chain") || "base-mainnet";
+  // M2: EIP-712 domain name/version come from the coordinator challenge
+  // (single source of truth across a domain migration). Fall back to the
+  // current constants only if the params are absent.
+  const domainName = params.get("domain_name") || "macprovider-payout";
+  const domainVersion = params.get("domain_version") || "1";
+  const nonce = params.get("nonce") || "";
+  const tsUtc = Number(params.get("ts_utc") || "0");
+  const redirectUri = params.get("redirect_uri") || "";
+  const state = params.get("state") || "";
+
+  const el = (id) => document.getElementById(id);
+  el("providerId").textContent = providerId || "(missing)";
+  el("chainLabel").textContent = chain + " / chainId " + chainId;
+
+  let ethereum = null;
+  let selectedAccount = null;
+
+  function setStatus(kind, msg) {
+    const s = el("status");
+    s.className = "status " + kind;
+    s.textContent = msg;
+  }
+
+  function pickProvider(preferWC) {
+    const eth = window.ethereum;
+    if (!eth) return null;
+    if (Array.isArray(eth.providers) && eth.providers.length) {
+      if (preferWC) {
+        const wc = eth.providers.find((p) => {
+          const n = (p.isWalletConnect && "wc") ||
+            (p.providerInfo && p.providerInfo.name) ||
+            (p.constructor && p.constructor.name) || "";
+          return /walletconnect/i.test(String(n)) || p.isWalletConnect;
+        });
+        if (wc) return wc;
+        // Fall through: any non-MetaMask injected (Rabby, Frame, WC bridges).
+        const nonMM = eth.providers.find((p) => !p.isMetaMask || p.isRabby);
+        if (nonMM) return nonMM;
+      }
+      const mm = eth.providers.find((p) => p.isMetaMask && !p.isRabby) || eth.providers[0];
+      return mm;
+    }
+    if (preferWC && eth.isWalletConnect) return eth;
+    return eth;
+  }
+
+  async function connect(preferWC) {
+    const provider = pickProvider(preferWC);
+    if (!provider) {
+      setStatus("err", preferWC
+        ? "No WalletConnect-compatible wallet found. Install MetaMask, Rabby, or a WalletConnect-capable browser wallet."
+        : "No browser wallet detected. Install MetaMask or Rabby, then reload.");
+      return;
+    }
+    ethereum = provider;
+    try {
+      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
+      if (!accounts || !accounts.length) {
+        setStatus("err", "No account returned by wallet.");
+        return;
+      }
+      selectedAccount = accounts[0];
+      el("account").textContent = selectedAccount;
+      el("btnSign").disabled = false;
+      setStatus("info", "Connected. Review the typed data, then sign.");
+    } catch (e) {
+      setStatus("err", "Connect failed: " + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  function buildTypedData(payoutAddress) {
+    const domain = {
+      name: domainName,
+      version: domainVersion,
+      chainId: chainId,
+      verifyingContract: verifyingContract,
+    };
+    // Do NOT include EIP712Domain — ethers adds it.
+    const types = {
+      PayoutAddressRegistration: [
+        { name: "providerId", type: "string" },
+        { name: "address", type: "address" },
+        { name: "chain", type: "string" },
+        { name: "nonce", type: "bytes32" },
+        { name: "tsUtc", type: "uint64" },
+      ],
+    };
+    const value = {
+      providerId: providerId,
+      address: payoutAddress,
+      chain: chain,
+      nonce: nonce,
+      tsUtc: tsUtc,
+    };
+    return { domain, types, value };
+  }
+
+  function showFallback(address, signature) {
+    el("fallback").classList.add("show");
+    el("fbAddress").textContent = address;
+    el("fbSig").value = signature;
+    el("fbMeta").textContent = "nonce=" + nonce + "\nts_utc=" + tsUtc + "\nstate=" + state;
+  }
+
+  // FIX-11: defense-in-depth. Only ever POST the signature to a
+  // loopback redirect target (http://127.0.0.1:<port> or
+  // http://localhost:<port>). A non-loopback redirect_uri (an attacker
+  // trying to redirect the signed callback off-box) is refused before
+  // any signature leaves this page.
+  function isLoopbackRedirect(uri) {
+    let u;
+    try {
+      u = new URL(uri);
+    } catch (e) {
+      return false;
+    }
+    if (u.protocol !== "http:") return false;
+    const host = u.hostname;
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") {
+      return false;
+    }
+    // A port is expected (ephemeral loopback listener).
+    if (!u.port) return false;
+    return true;
+  }
+
+  async function postToLoopback(payload) {
+    if (!redirectUri) throw new Error("missing redirect_uri");
+    if (!isLoopbackRedirect(redirectUri)) {
+      throw new Error("refusing non-loopback redirect_uri: " + redirectUri);
+    }
+    const res = await fetch(redirectUri, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      mode: "cors",
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error("loopback HTTP " + res.status + ": " + t);
+    }
+  }
+
+  async function sign() {
+    if (!ethereum || !selectedAccount) {
+      setStatus("err", "Connect a wallet first.");
+      return;
+    }
+    if (!providerId || !verifyingContract || !nonce || !tsUtc || !state) {
+      setStatus("err", "Missing registration parameters. Re-open from Malibu.");
+      return;
+    }
+    if (typeof ethers === "undefined") {
+      setStatus("err", "ethers.js failed to load (offline bundle missing).");
+      return;
+    }
+
+    el("btnSign").disabled = true;
+    setStatus("info", "Requesting EIP-712 signature…");
+
+    try {
+      const browser = new ethers.BrowserProvider(ethereum);
+      const signer = await browser.getSigner();
+      const payoutAddress = await signer.getAddress();
+      if (payoutAddress.toLowerCase() !== selectedAccount.toLowerCase()) {
+        setStatus("err", "Connected account mismatch.");
+        el("btnSign").disabled = false;
+        return;
+      }
+
+      const { domain, types, value } = buildTypedData(payoutAddress);
+      const signature = await signer.signTypedData(domain, types, value);
+
+      // Client-side sanity: recovered signer must equal the connected account.
+      const recovered = ethers.verifyTypedData(domain, types, value, signature);
+      if (recovered.toLowerCase() !== payoutAddress.toLowerCase()) {
+        setStatus("err", "Local verify failed: recovered " + recovered + " ≠ " + payoutAddress);
+        el("btnSign").disabled = false;
+        return;
+      }
+
+      const payload = {
+        address: payoutAddress,
+        nonce: nonce,
+        ts_utc: tsUtc,
+        signature: signature,
+        state: state,
+      };
+
+      try {
+        await postToLoopback(payload);
+        setStatus("ok", "Signature sent to Malibu. You can close this tab.");
+      } catch (loopErr) {
+        showFallback(payoutAddress, signature);
+        setStatus("err", "Could not reach Malibu loopback (" +
+          (loopErr && loopErr.message ? loopErr.message : String(loopErr)) +
+          "). Copy the signature below into Malibu.");
+      }
+    } catch (e) {
+      setStatus("err", "Sign failed: " + (e && e.message ? e.message : String(e)));
+      el("btnSign").disabled = false;
+    }
+  }
+
+  el("btnInjected").addEventListener("click", function () { connect(false); });
+  el("btnWC").addEventListener("click", function () { connect(true); });
+  el("btnSign").addEventListener("click", sign);
+
+  if (!providerId || !verifyingContract || !nonce || !tsUtc) {
+    setStatus("err", "This page must be opened from Malibu with registration parameters.");
+  } else {
+    setStatus("info", "Ready. Connect the wallet you want as your payout address.");
+  }
+})();
+  </script>
+</body>
+</html>

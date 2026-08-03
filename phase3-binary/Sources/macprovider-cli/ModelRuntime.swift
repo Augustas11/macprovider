@@ -311,6 +311,165 @@ struct InternalWarmupResult: Sendable {
     let totalElapsedMS: Double
 }
 
+private struct BlockingGenerateResult: Sendable {
+    let tokenIds: [Int]
+    let output: String
+
+    var generationTokenCount: Int {
+        tokenIds.count
+    }
+
+    init(_ result: GenerateResult) {
+        self.tokenIds = result.tokenIds
+        self.output = result.output
+    }
+}
+
+private final class BlockingInferenceWork<T>: @unchecked Sendable {
+    // Callers keep ModelContainer.perform open while this body runs and must
+    // return Sendable summaries so non-Sendable MLX state does not escape.
+    let body: () throws -> T
+
+    init(_ body: @escaping () throws -> T) {
+        self.body = body
+    }
+}
+
+private final class BlockingInferenceCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+}
+
+private final class BlockingInferenceExecutor: @unchecked Sendable {
+    private let label: String
+
+    init(label: String) {
+        self.label = label
+    }
+
+    func run<T: Sendable>(_ body: @escaping (BlockingInferenceCancellation) throws -> T) async throws -> T {
+        let cancellation = BlockingInferenceCancellation()
+        let work = BlockingInferenceWork {
+            try body(cancellation)
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let label = label
+                Thread.detachNewThread {
+                    Thread.current.name = label
+                    do {
+                        if cancellation.isCancelled {
+                            throw CancellationError()
+                        }
+                        continuation.resume(returning: try work.body())
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+}
+
+struct GenerationConfigStopStringFilter: Sendable {
+    let stopStrings: [String]
+    var buffer = ""
+    var stopped = false
+
+    init(stopStrings: Set<String>) {
+        self.stopStrings = stopStrings.filter { !$0.isEmpty }.sorted {
+            if $0.count == $1.count {
+                return $0 < $1
+            }
+            return $0.count > $1.count
+        }
+    }
+
+    var isEnabled: Bool {
+        !stopStrings.isEmpty
+    }
+
+    mutating func process(_ chunk: String) -> (text: String?, stopped: Bool) {
+        guard !stopped else {
+            return (nil, true)
+        }
+        guard isEnabled else {
+            return (chunk.isEmpty ? nil : chunk, false)
+        }
+
+        buffer += chunk
+        if let stopRange = earliestStopRange(in: buffer) {
+            let text = String(buffer[..<stopRange.lowerBound])
+            buffer = ""
+            stopped = true
+            return (text.isEmpty ? nil : text, true)
+        }
+
+        let suffixLength = longestStopPrefixSuffixLength(in: buffer)
+        let emitEnd = buffer.index(buffer.endIndex, offsetBy: -suffixLength)
+        let text = String(buffer[..<emitEnd])
+        buffer = String(buffer[emitEnd...])
+        return (text.isEmpty ? nil : text, false)
+    }
+
+    mutating func finish() -> String? {
+        guard isEnabled, !stopped, !buffer.isEmpty else {
+            return nil
+        }
+        let text = buffer
+        buffer = ""
+        return text
+    }
+
+    private func earliestStopRange(in text: String) -> Range<String.Index>? {
+        var earliest: Range<String.Index>?
+        for stopString in stopStrings {
+            guard let range = text.range(of: stopString) else {
+                continue
+            }
+            if let current = earliest {
+                if range.lowerBound < current.lowerBound {
+                    earliest = range
+                }
+            } else {
+                earliest = range
+            }
+        }
+        return earliest
+    }
+
+    private func longestStopPrefixSuffixLength(in text: String) -> Int {
+        var longest = 0
+        for stopString in stopStrings {
+            let maxLength = Swift.min(text.count, stopString.count - 1)
+            guard maxLength > longest else {
+                continue
+            }
+            for length in stride(from: maxLength, through: longest + 1, by: -1) {
+                if text.suffix(length) == stopString.prefix(length) {
+                    longest = length
+                    break
+                }
+            }
+        }
+        return longest
+    }
+}
+
 actor ModelRuntime: ModelRuntimeServing {
     // AC-V2-9b (LOCKED): SPEC-019 v0.2.4 §6 normative 2 MiB streaming
     // content cap. Byte domain is post-stop-token-filter buyer-visible
@@ -438,6 +597,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
     private let inferenceGate: AsyncSemaphore
+    private let blockingInferenceExecutor: BlockingInferenceExecutor
     private let maxBatch: Int
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
@@ -773,8 +933,10 @@ actor ModelRuntime: ModelRuntimeServing {
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
         self.conversationCache = ConversationCache()
-        self.maxBatch = max(1, maxBatch)
-        self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
+        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
+        self.maxBatch = boundedMaxBatch
+        self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
+        self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
@@ -855,7 +1017,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 numDraftTokens: 1,
                 maxContextTokens: self.maxContextTokens,
                 kvBitsOverride: self.kvBitsOverride,
-                prefillStepSize: self.prefillStepSize
+                prefillStepSize: self.prefillStepSize,
+                blockingInferenceExecutor: self.blockingInferenceExecutor
             )
             try await Self.runSpeculativeEquivalenceCanary(
                 target: container,
@@ -864,7 +1027,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 numDraftTokens: numDraftTokens,
                 maxContextTokens: self.maxContextTokens,
                 kvBitsOverride: self.kvBitsOverride,
-                prefillStepSize: self.prefillStepSize
+                prefillStepSize: self.prefillStepSize,
+                blockingInferenceExecutor: self.blockingInferenceExecutor
             )
             self.currentDraftModelID = draftModelID
             self.currentDraftTargetModelID = modelID
@@ -927,8 +1091,10 @@ actor ModelRuntime: ModelRuntimeServing {
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
         self.conversationCache = ConversationCache()
-        self.maxBatch = max(1, maxBatch)
-        self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
+        let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
+        self.maxBatch = boundedMaxBatch
+        self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
+        self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
@@ -1084,7 +1250,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                 numDraftTokens: 1,
                                 maxContextTokens: maxContextTokens,
                                 kvBitsOverride: kvBitsOverride,
-                                prefillStepSize: prefillStepSize
+                                prefillStepSize: prefillStepSize,
+                                blockingInferenceExecutor: blockingInferenceExecutor
                             )
                             try await Self.runSpeculativeEquivalenceCanary(
                                 target: loaded.0,
@@ -1093,7 +1260,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                 numDraftTokens: numDraftTokens,
                                 maxContextTokens: maxContextTokens,
                                 kvBitsOverride: kvBitsOverride,
-                                prefillStepSize: prefillStepSize
+                                prefillStepSize: prefillStepSize,
+                                blockingInferenceExecutor: blockingInferenceExecutor
                             )
                             draftModelID = configuredDraftModelID
                             draftContainer = draftLoaded.0
@@ -1154,6 +1322,20 @@ actor ModelRuntime: ModelRuntimeServing {
     func maxContextTokensForTest() -> Int {
         maxContextTokens
     }
+
+    #if DEBUG
+    func runBlockingInferenceProbeForTest(milliseconds: Int) async throws {
+        let deadline = Date().addingTimeInterval(Double(milliseconds) / 1000.0)
+        try await blockingInferenceExecutor.run { inferenceCancellation in
+            while Date() < deadline {
+                if inferenceCancellation.isCancelled {
+                    throw CancellationError()
+                }
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
+    }
+    #endif
 
     func draftModelIDForTest() -> String? {
         currentDraftModelID
@@ -1498,9 +1680,10 @@ actor ModelRuntime: ModelRuntimeServing {
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
         let inferenceGate = inferenceGate
+        let blockingInferenceExecutor = blockingInferenceExecutor
         let firstToken = FirstTokenRecorder()
         let cancellation = WarmupCancellationRecorder()
-        let result: GenerateResult = try await inferenceGate.withPermit {
+        let result: BlockingGenerateResult = try await inferenceGate.withPermit {
             if Task.isCancelled || shouldCancel() {
                 throw CancellationError()
             }
@@ -1521,15 +1704,17 @@ actor ModelRuntime: ModelRuntimeServing {
                 )
                 let kvCache = context.model.newCache(parameters: parameters)
                 let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
-                return try generate(input: lmInput, context: context, iterator: iterator) { tokens in
-                    if !tokens.isEmpty {
-                        firstToken.recordIfMissing()
-                    }
-                    if Task.isCancelled || shouldCancel() {
-                        cancellation.record()
-                        return .stop
-                    }
-                    return .more
+                return try await blockingInferenceExecutor.run { inferenceCancellation in
+                    BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { tokens in
+                        if !tokens.isEmpty {
+                            firstToken.recordIfMissing()
+                        }
+                        if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
+                            cancellation.record()
+                            return .stop
+                        }
+                        return .more
+                    })
                 }
             }
         }
@@ -1606,6 +1791,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // nonisolated inference closure (nil unless the disk tier is attached).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
+        let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
         let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
@@ -1648,7 +1834,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                 modelHash: snapshot.modelHash,
                                 specDecodeGeneration: snapshot.specDecodeGeneration,
                                 shouldCancel: shouldCancel,
-                                drainCancelled: drainCancelled
+                                drainCancelled: drainCancelled,
+                                blockingInferenceExecutor: blockingInferenceExecutor
                             )
                         } catch let error as DrainCancelledError {
                             throw error
@@ -1689,18 +1876,20 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
 
                             let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
-                            let result: GenerateResult = generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                                if !tokens.isEmpty {
-                                    firstToken.recordIfMissing()
-                                }
-                                if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
-                                    return GenerateDisposition.stop
-                                }
-                                if HarmonyResponseParser.isHarmonyModelID(request.model),
-                                   tokens.last.map(Self.isHarmonyTerminalToken) == true {
-                                    return GenerateDisposition.stop
-                                }
-                                return GenerateDisposition.more
+                            let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
+                                BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                    if !tokens.isEmpty {
+                                        firstToken.recordIfMissing()
+                                    }
+                                    if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired {
+                                        return GenerateDisposition.stop
+                                    }
+                                    if HarmonyResponseParser.isHarmonyModelID(request.model),
+                                       tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                        return GenerateDisposition.stop
+                                    }
+                                    return GenerateDisposition.more
+                                })
                             }
                             try drainCancelled.check()
                             try Task.checkCancellation()
@@ -1801,7 +1990,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelHash: String?,
         specDecodeGeneration: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
-        drainCancelled: DrainCancelToken
+        drainCancelled: DrainCancelToken,
+        blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> CompletionResult {
         let generated = try await collectSpeculativeText(
             input: input,
@@ -1811,7 +2001,8 @@ actor ModelRuntime: ModelRuntimeServing {
             draft: draft,
             numDraftTokens: numDraftTokens,
             shouldCancel: shouldCancel,
-            drainCancelled: drainCancelled
+            drainCancelled: drainCancelled,
+            blockingInferenceExecutor: blockingInferenceExecutor
         )
         try drainCancelled.check()
         try Task.checkCancellation()
@@ -1881,53 +2072,66 @@ actor ModelRuntime: ModelRuntimeServing {
         draft: ModelContainer,
         numDraftTokens: Int,
         shouldCancel: @escaping @Sendable () -> Bool,
-        drainCancelled: DrainCancelToken
+        drainCancelled: DrainCancelToken,
+        blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> SpeculativeTextResult {
         do {
             return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
                 let (input, targetContext, cache) = values
-                let draftCache = draftContext.model.newCache(parameters: parameters)
-                let stream = try generate(
-                    input: input,
-                    cache: cache,
-                    parameters: parameters,
-                    context: targetContext,
-                    draftModel: draftContext.model,
-                    draftCache: draftCache,
-                    numDraftTokens: numDraftTokens
-                )
-                var output = ""
-                var completionInfo: GenerateCompletionInfo?
-                let firstToken = FirstTokenRecorder()
-                for await generation in stream {
-                    try drainCancelled.check()
-                    try Task.checkCancellation()
-                    if shouldCancel() {
-                        throw CancellationError()
-                    }
-                    switch generation {
-                    case .chunk(let chunk):
-                        if !chunk.isEmpty {
-                            firstToken.recordIfMissing()
-                            output += chunk
+                return try await blockingInferenceExecutor.run { inferenceCancellation in
+                    let draftCache = draftContext.model.newCache(parameters: parameters)
+                    var iterator = try SpeculativeTokenIterator(
+                        input: input,
+                        mainModel: targetContext.model,
+                        draftModel: draftContext.model,
+                        mainCache: cache,
+                        draftCache: draftCache,
+                        parameters: parameters,
+                        numDraftTokens: numDraftTokens
+                    )
+                    let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
+                    var tokenIDs: [Int] = []
+                    var output = ""
+                    var detokenizer = MLXLMCommon.NaiveStreamingDetokenizer(tokenizer: targetContext.tokenizer)
+                    var stopStringFilter = GenerationConfigStopStringFilter(
+                        stopStrings: targetContext.configuration.effectiveStopStrings
+                    )
+                    let firstToken = FirstTokenRecorder()
+                    while let token = iterator.next() {
+                        try drainCancelled.check()
+                        if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() {
+                            throw CancellationError()
                         }
-                    case .info(let info):
-                        completionInfo = info
-                    case .toolCall:
-                        break
+                        if token == targetContext.tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+                            iterator.discardGeneratedToken()
+                            break
+                        }
+                        firstToken.recordIfMissing()
+                        tokenIDs.append(token)
+                        detokenizer.append(token: token)
+                        if let chunk = detokenizer.next() {
+                            let result = stopStringFilter.process(chunk)
+                            if let text = result.text {
+                                output += text
+                            }
+                            if result.stopped {
+                                break
+                            }
+                        }
                     }
+                    if let text = stopStringFilter.finish() {
+                        output += text
+                    }
+                    Stream().synchronize()
+                    let telemetry = iterator.speculativeDecodingTelemetry
+                    return SpeculativeTextResult(
+                        output: output,
+                        generationTokenCount: tokenIDs.count,
+                        draftedTokens: telemetry?.draftTokenCount ?? 0,
+                        acceptedTokens: telemetry?.acceptedDraftTokenCount ?? 0,
+                        firstToken: firstToken
+                    )
                 }
-                guard let completionInfo else {
-                    throw SpeculativeGenerationFailure(reason: "missing_completion_info")
-                }
-                let telemetry = completionInfo.speculativeDecodingTelemetry
-                return SpeculativeTextResult(
-                    output: output,
-                    generationTokenCount: completionInfo.generationTokenCount,
-                    draftedTokens: telemetry?.draftTokenCount ?? 0,
-                    acceptedTokens: telemetry?.acceptedDraftTokenCount ?? 0,
-                    firstToken: firstToken
-                )
             }
         } catch let error as DrainCancelledError {
             throw error
@@ -1938,6 +2142,20 @@ actor ModelRuntime: ModelRuntimeServing {
         } catch {
             throw SpeculativeGenerationFailure(reason: "generation_threw")
         }
+    }
+
+    private static func generationStopTokenIDs(for context: ModelContext) -> Set<Int> {
+        var stopTokenIDs = context.configuration.eosTokenIds
+        let tokenizer = context.tokenizer
+        if let eosTokenID = tokenizer.eosTokenId {
+            stopTokenIDs.insert(eosTokenID)
+        }
+        for token in context.configuration.extraEOSTokens {
+            if let tokenID = tokenizer.convertTokenToId(token) {
+                stopTokenIDs.insert(tokenID)
+            }
+        }
+        return stopTokenIDs
     }
 
     func stream(
@@ -2013,6 +2231,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
         let coldContext = coldContext(for: request, snapshot: snapshot)
         let inferenceGate = inferenceGate
+        let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
             try await Self.withStructuredStreamingIdleTimeout(
@@ -2045,6 +2264,15 @@ actor ModelRuntime: ModelRuntimeServing {
                     let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
 
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    // Autotune throughput probe: measure warm-decode
+                    // wall-time on the provider so the client can derive an
+                    // honest decode rate even for reasoning models whose
+                    // analysis channel is silent in the SSE stream. Fires on
+                    // the first decoded token of ANY channel (reasoning or
+                    // final) inside the generate closure below; the duration
+                    // to the generate result is reported as
+                    // `macprovider_generation_ms`.
+                    let decodeTimer = FirstTokenRecorder()
                     // SPEC-037 FR-KVP2.5: speculative-decode routing is
                     // determined BEFORE any conversation-cache begin(). A
                     // speculative-routed request acquires no lease, triggers no
@@ -2070,8 +2298,16 @@ actor ModelRuntime: ModelRuntimeServing {
                             draft: draftContainer,
                             numDraftTokens: numDraftTokens,
                             shouldCancel: shouldCancel,
-                            drainCancelled: drainCancelled
+                            drainCancelled: drainCancelled,
+                            blockingInferenceExecutor: blockingInferenceExecutor
                         )
+                        // Warm-decode wall-time for the speculative path.
+                        // collectSpeculativeText owns its own decode loop and
+                        // does not fire `decodeTimer`, so this resolves to nil
+                        // here; the field is passed for construction-site parity
+                        // with the non-speculative path.
+                        let decodeEndedAt = Date()
+                        let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
 
@@ -2116,6 +2352,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             promptTokens: promptTokenIds.count,
                             cachedPromptTokens: 0,
                             completionTokens: generated.generationTokenCount,
+                            generationMilliseconds: generationMS,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             specDecodeDraftedTokens: generated.draftedTokens,
@@ -2153,7 +2390,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
                     var emittedText = ""
                     var stoppedByRequestStop = false
-                    var toolStreamer = NativeToolCallStreamEmitter(modelID: request.model)
+                    var toolStreamer = NativeToolCallStreamEmitter(
+                        modelID: request.model,
+                        allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
+                    )
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
@@ -2180,80 +2420,99 @@ actor ModelRuntime: ModelRuntimeServing {
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools) && !isHarmonyResponse
                     let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
                     do {
-                        let result: GenerateResult = generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
-                            EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
-                            if Task.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
-                                return .stop
-                            }
-                            if isHarmonyResponse {
-                                do {
-                                    guard tokens.count >= harmonyObservedTokenCount else {
+                        let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
+                            BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
+                                EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
+                                // Round-2 code LOW: only start the decode timer
+                                // on a callback that actually carries a token.
+                                // An empty first callback would otherwise start
+                                // the clock during prefill and inflate the
+                                // measured decode window. Mirrors the
+                                // `if !tokens.isEmpty { firstToken.recordIfMissing() }`
+                                // guards elsewhere in this file.
+                                if !tokens.isEmpty {
+                                    decodeTimer.recordIfMissing()
+                                }
+                                if Task.isCancelled || inferenceCancellation.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
+                                    return .stop
+                                }
+                                if isHarmonyResponse {
+                                    do {
+                                        guard tokens.count >= harmonyObservedTokenCount else {
+                                            streamingParseError = Self.malformedHarmonyResponseError()
+                                            return .stop
+                                        }
+                                        let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
+                                        harmonyObservedTokenCount = tokens.count
+                                        let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
+                                        if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
+                                            harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
+                                            idleState.noteContent()
+                                        }
+                                        let output = try Self.harmonyParsedOutput(
+                                            from: parsed,
+                                            decode: { context.tokenizer.decode(tokenIds: $0) },
+                                            stopTokenFilter: stopTokenFilter,
+                                            requestStops: request.stop,
+                                            countCompletionTokens: false
+                                        )
+                                        if output.hitStop {
+                                            stoppedByRequestStop = true
+                                            return .stop
+                                        }
+                                        if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                            return .stop
+                                        }
+                                        return .more
+                                    } catch let error as APIError {
+                                        streamingParseError = error
+                                        return .stop
+                                    } catch {
                                         streamingParseError = Self.malformedHarmonyResponseError()
                                         return .stop
                                     }
-                                    let newTokenIDs = Array(tokens.dropFirst(harmonyObservedTokenCount))
-                                    harmonyObservedTokenCount = tokens.count
-                                    let parsed = harmonyStreamingParser.parse(newTokenIDs: newTokenIDs)
-                                    if parsed.finalContentTokenCount > harmonyObservedFinalTokenCount {
-                                        harmonyObservedFinalTokenCount = parsed.finalContentTokenCount
-                                        idleState.noteContent()
+                                }
+                                let decoded = context.tokenizer.decode(tokenIds: tokens)
+                                let candidate = Self.streamingSafePrefix(
+                                    decoded,
+                                    stopTokenFilter: stopTokenFilter,
+                                    requestStops: request.stop
+                                )
+                                if streamToolsIncrementally {
+                                    for event in toolStreamer.observe(candidate.text) {
+                                        onChunk(event)
                                     }
-                                    let output = try Self.harmonyParsedOutput(
-                                        from: parsed,
-                                        decode: { context.tokenizer.decode(tokenIds: $0) },
-                                        stopTokenFilter: stopTokenFilter,
-                                        requestStops: request.stop,
-                                        countCompletionTokens: false
-                                    )
-                                    if output.hitStop {
+                                    if candidate.hitStop {
                                         stoppedByRequestStop = true
                                         return .stop
                                     }
-                                    if tokens.last.map(Self.isHarmonyTerminalToken) == true {
+                                    return .more
+                                }
+
+                                let delta = Self.delta(from: emittedText, to: candidate.text)
+                                if !delta.isEmpty {
+                                    if structuredAccumulator.append(delta) != nil {
                                         return .stop
                                     }
-                                    return .more
-                                } catch let error as APIError {
-                                    streamingParseError = error
-                                    return .stop
-                                } catch {
-                                    streamingParseError = Self.malformedHarmonyResponseError()
-                                    return .stop
+                                    idleState.noteContent()
+                                    emittedText = candidate.text
+                                    onChunk(.content(delta))
                                 }
-                            }
-                            let decoded = context.tokenizer.decode(tokenIds: tokens)
-                            let candidate = Self.streamingSafePrefix(
-                                decoded,
-                                stopTokenFilter: stopTokenFilter,
-                                requestStops: request.stop
-                            )
-                            if streamToolsIncrementally {
-                                for event in toolStreamer.observe(candidate.text) {
-                                    onChunk(event)
-                                }
+
                                 if candidate.hitStop {
                                     stoppedByRequestStop = true
                                     return .stop
                                 }
                                 return .more
-                            }
-
-                            let delta = Self.delta(from: emittedText, to: candidate.text)
-                            if !delta.isEmpty {
-                                if structuredAccumulator.append(delta) != nil {
-                                    return .stop
-                                }
-                                idleState.noteContent()
-                                emittedText = candidate.text
-                                onChunk(.content(delta))
-                            }
-
-                            if candidate.hitStop {
-                                stoppedByRequestStop = true
-                                return .stop
-                            }
-                            return .more
+                            })
                         }
+                        // Warm-decode wall-time: from the first decoded token
+                        // (any channel) to the generate result. Reported to the
+                        // client as `macprovider_generation_ms` so the autotune
+                        // probe can divide total decoded tokens by this window
+                        // even when the reasoning channel is silent in SSE.
+                        let decodeEndedAt = Date()
+                        let generationMS = decodeTimer.durationMilliseconds(until: decodeEndedAt)
                         try drainCancelled.check()
                         try Task.checkCancellation()
                         if shouldCancel() {
@@ -2340,6 +2599,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             kvCacheBytesReused: kvCacheBytesReused,
                             completionTokens: parsed.completionTokens,
                             generatedCompletionTokens: parsed.generatedCompletionTokens,
+                            generationMilliseconds: generationMS,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                         )
@@ -2411,6 +2671,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
+        let blockingInferenceExecutor = blockingInferenceExecutor
         let template: [KVLayerGeometry]? = try? await inferenceGate.withPermit {
             try await container.perform { context -> [KVLayerGeometry]? in
                 let input = UserInput(chat: [.user("warmup")])
@@ -2430,8 +2691,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
                 // A single-token warmup populates the per-layer cache tensors; that is
                 // all the seed needs (only the geometry is read, never the values).
-                _ = try generate(input: lmInput, context: context, iterator: iterator) { (_: [Int]) in
-                    GenerateDisposition.stop
+                _ = try await blockingInferenceExecutor.run { _ in
+                    BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { (_: [Int]) in
+                        GenerateDisposition.stop
+                    })
                 }
                 // Only the v1-allowlisted unquantized class is serializable/persisted;
                 // any other runtime skips the seed exactly as it skips persistence.
@@ -2553,7 +2816,8 @@ actor ModelRuntime: ModelRuntimeServing {
             let maxContextTokens = maxContextTokens
             let kvBitsOverride = kvBitsOverride
             let prefillStepSize = prefillStepSize
-            let result: GenerateResult = try await inferenceGate.withPermit {
+            let blockingInferenceExecutor = blockingInferenceExecutor
+            let result: BlockingGenerateResult = try await inferenceGate.withPermit {
                 try await container.perform { context in
                     let input = UserInput(chat: [.user("Reply with a short greeting.")])
                     let lmInput = try await context.processor.prepare(input: input)
@@ -2565,8 +2829,10 @@ actor ModelRuntime: ModelRuntimeServing {
                         temperature: 0.0,
                         topP: 1.0
                     )
-                    return try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                        GenerateDisposition.more
+                    return try await blockingInferenceExecutor.run { _ in
+                        BlockingGenerateResult(try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                            GenerateDisposition.more
+                        })
                     }
                 }
             }
@@ -2628,7 +2894,8 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
-        prefillStepSize: Int
+        prefillStepSize: Int,
+        blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws {
         do {
             _ = try await target.perform { targetContext in
@@ -2648,7 +2915,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     parameters: parameters,
                     targetContext: targetContext,
                     draft: draft,
-                    numDraftTokens: numDraftTokens
+                    numDraftTokens: numDraftTokens,
+                    blockingInferenceExecutor: blockingInferenceExecutor
                 )
             }
         } catch let error as SpecDecodeStartupError {
@@ -2665,7 +2933,8 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
-        prefillStepSize: Int
+        prefillStepSize: Int,
+        blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws {
         let request = try spec028EquivalenceRequest(targetModelID: targetModelID)
         let tokenPair = try await target.perform { targetContext in
@@ -2680,13 +2949,19 @@ actor ModelRuntime: ModelRuntimeServing {
                 topP: 1.0,
                 prefillStepSize: prefillStepSize
             )
-            let plain = try plainTokenIDs(input: lmInput, parameters: parameters, context: targetContext)
+            let plain = try await plainTokenIDs(
+                input: lmInput,
+                parameters: parameters,
+                context: targetContext,
+                blockingInferenceExecutor: blockingInferenceExecutor
+            )
             let speculative = try await speculativeTokenIDs(
                 input: lmInput,
                 parameters: parameters,
                 targetContext: targetContext,
                 draft: draft,
-                numDraftTokens: numDraftTokens
+                numDraftTokens: numDraftTokens,
+                blockingInferenceExecutor: blockingInferenceExecutor
             )
             return (plain, speculative)
         }
@@ -2702,13 +2977,20 @@ actor ModelRuntime: ModelRuntimeServing {
     private static func plainTokenIDs(
         input: LMInput,
         parameters: GenerateParameters,
-        context: ModelContext
-    ) throws -> [Int] {
+        context: ModelContext,
+        blockingInferenceExecutor: BlockingInferenceExecutor
+    ) async throws -> [Int] {
         let cache = context.model.newCache(parameters: parameters)
         let iterator = try TokenIterator(input: input, model: context.model, cache: cache, parameters: parameters)
-        return generate(input: input, context: context, iterator: iterator) { _ in
-            .more
-        }.tokenIds
+        let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
+            BlockingGenerateResult(generate(input: input, context: context, iterator: iterator) { _ in
+                if inferenceCancellation.isCancelled {
+                    return GenerateDisposition.stop
+                }
+                return GenerateDisposition.more
+            })
+        }
+        return result.tokenIds
     }
 
     private static func speculativeTokenIDs(
@@ -2716,25 +2998,36 @@ actor ModelRuntime: ModelRuntimeServing {
         parameters: GenerateParameters,
         targetContext: ModelContext,
         draft: ModelContainer,
-        numDraftTokens: Int
+        numDraftTokens: Int,
+        blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> [Int] {
         try await draft.perform(nonSendable: (input, targetContext)) { draftContext, values in
             let (input, targetContext) = values
-            let draftCache = draftContext.model.newCache(parameters: parameters)
-            var tokenIDs: [Int] = []
-            for await generation in try generateTokens(
-                input: input,
-                parameters: parameters,
-                context: targetContext,
-                draftModel: draftContext.model,
-                draftCache: draftCache,
-                numDraftTokens: numDraftTokens
-            ) {
-                if let token = generation.token {
+            return try await blockingInferenceExecutor.run { inferenceCancellation in
+                let draftCache = draftContext.model.newCache(parameters: parameters)
+                var iterator = try SpeculativeTokenIterator(
+                    input: input,
+                    mainModel: targetContext.model,
+                    draftModel: draftContext.model,
+                    draftCache: draftCache,
+                    parameters: parameters,
+                    numDraftTokens: numDraftTokens
+                )
+                let stopTokenIDs = Self.generationStopTokenIDs(for: targetContext)
+                var tokenIDs: [Int] = []
+                while let token = iterator.next() {
+                    if inferenceCancellation.isCancelled {
+                        throw CancellationError()
+                    }
+                    if token == targetContext.tokenizer.unknownTokenId || stopTokenIDs.contains(token) {
+                        iterator.discardGeneratedToken()
+                        break
+                    }
                     tokenIDs.append(token)
                 }
+                Stream().synchronize()
+                return tokenIDs
             }
-            return tokenIDs
         }
     }
 
@@ -3354,6 +3647,10 @@ actor ModelRuntime: ModelRuntimeServing {
             completionTokens: completion.completionTokens,
             generatedCompletionTokens: completion.generatedCompletionTokens,
             ttftMilliseconds: completion.ttftMilliseconds,
+            // Architect LOW: forward the decode-window so the structured
+            // streaming path's usage carries `macprovider_generation_ms`
+            // instead of null, matching the non-structured path.
+            generationMilliseconds: completion.generationMilliseconds,
             toolCalls: completion.toolCalls,
             modelHashObserved: completion.modelHashObserved,
             specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
@@ -3673,16 +3970,31 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 }
 
-private struct NativeToolCallStreamEmitter {
+// `internal` (not `private`) so the allowlist fail-closed behavior is unit-testable via
+// `@testable import macprovider_cli` (see NativeToolCallStreamEmitterTests).
+struct NativeToolCallStreamEmitter {
     private let startDelimiter: String
     private let endDelimiter: String
     private let argumentKey: String
+    /// Declared tools for this request. A streamed tool-call delta MUST NOT be emitted for
+    /// any function name not in this set — otherwise a widened name grammar could surface an
+    /// undeclared tool_call to the buyer before the final parser's fail-closed check
+    /// (SPEC-018 §3.5). `nil`/empty means no tools were declared, so nothing may be emitted.
+    private let allowedFunctionNames: Set<String>?
+    /// Function-XML (`<function=…>`) is a Qwen-row-only grammar (SPEC-018 §3.1 v0.2.7). The
+    /// streaming emitter mirrors the non-streaming parser's family gate: only Qwen models may
+    /// stream `<function=…>` tool-call deltas; other families fall through to JSON parsing (which
+    /// yields nothing for XML), so no non-Qwen family can stream a function-XML delta.
+    private let allowsFunctionXML: Bool
     private var opened = false
     private var closed = false
     private var emittedArguments = ""
     private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-    init(modelID: String) {
+    init(modelID: String, allowedFunctionNames: Set<String>?) {
+        self.allowedFunctionNames = allowedFunctionNames
+        self.allowsFunctionXML = modelID.localizedCaseInsensitiveContains("qwen2.5")
+            || modelID.localizedCaseInsensitiveContains("qwen3")
         if modelID.localizedCaseInsensitiveContains("llama-3.3") {
             startDelimiter = "<|python_tag|>"
             endDelimiter = "<|eom_id|>"
@@ -3703,12 +4015,12 @@ private struct NativeToolCallStreamEmitter {
             let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
             let body = String(text[afterStart..<bodyEnd])
             let isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
-            if body.contains("<function=") {
+            if allowsFunctionXML, body.contains("<function=") {
                 return observeNemotronXML(body: body, isClosed: isClosed)
             }
             return observeJSONToolCall(body: body, isClosed: isClosed)
         }
-        if text.contains("<function=") {
+        if allowsFunctionXML, text.contains("<function=") {
             return observeNemotronXML(body: text, isClosed: false)
         }
         return []
@@ -3718,6 +4030,16 @@ private struct NativeToolCallStreamEmitter {
         guard let name = stringField("name", in: body),
               let arguments = argumentPrefix(in: body)
         else {
+            return []
+        }
+        // Fail closed: never stream a tool-call delta for an undeclared function name.
+        guard let allowed = allowedFunctionNames, allowed.contains(name) else {
+            return []
+        }
+        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
+        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
+        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            closed = true
             return []
         }
 
@@ -3741,6 +4063,16 @@ private struct NativeToolCallStreamEmitter {
         guard let name = ToolCallParser.nemotronFunctionName(in: body),
               let arguments = ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: isClosed)
         else {
+            return []
+        }
+        // Fail closed: never stream a tool-call delta for an undeclared function name.
+        guard let allowed = allowedFunctionNames, allowed.contains(name) else {
+            return []
+        }
+        // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
+        // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
+        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+            closed = true
             return []
         }
 
@@ -3903,6 +4235,7 @@ struct CompletionResult: Sendable {
     let completionTokens: Int
     let generatedCompletionTokens: Int
     let ttftMilliseconds: Int64?
+    let generationMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?
     let specDecodeDraftedTokens: Int
@@ -3918,6 +4251,7 @@ struct CompletionResult: Sendable {
         completionTokens: Int,
         generatedCompletionTokens: Int? = nil,
         ttftMilliseconds: Int64? = nil,
+        generationMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
         modelHashObserved: String? = nil,
         specDecodeDraftedTokens: Int = 0,
@@ -3935,6 +4269,7 @@ struct CompletionResult: Sendable {
         self.completionTokens = completionTokens
         self.generatedCompletionTokens = max(0, generatedCompletionTokens ?? completionTokens)
         self.ttftMilliseconds = ttftMilliseconds
+        self.generationMilliseconds = generationMilliseconds
         self.toolCalls = toolCalls
         self.modelHashObserved = modelHashObserved
         self.specDecodeDraftedTokens = max(0, specDecodeDraftedTokens)
@@ -3953,6 +4288,7 @@ struct CompletionResult: Sendable {
             completionTokens: completionTokens,
             generatedCompletionTokens: generatedCompletionTokens,
             ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
             toolCalls: toolCalls,
             modelHashObserved: observed,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
@@ -3981,6 +4317,12 @@ private final class FirstTokenRecorder: @unchecked Sendable {
             return nil
         }
         return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
+    }
+
+    func durationMilliseconds(until end: Date) -> Int64? {
+        lock.lock(); defer { lock.unlock() }
+        guard let timestamp else { return nil }
+        return max(0, Int64(end.timeIntervalSince(timestamp) * 1000))
     }
 }
 

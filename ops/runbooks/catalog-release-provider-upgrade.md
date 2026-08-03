@@ -128,7 +128,11 @@ The same signed network-release manifest also binds:
 - the exact catalog release directory selected as the next `current`; the
   activation transaction derives `previous` from the verified live pointer and
   snapshots it before mutation;
-- coordinator configuration that advertises the same provider version.
+- coordinator configuration that advertises the same provider version. The
+  stable public release gate must prove live
+  `/healthz.recommended_binary_version` equals the provider CLI release before
+  undrafting and moving `latest`; prerelease canaries do not require fleet-wide
+  advertisement.
 
 No generated output is edited independently. CI, packaging, coordinator
 startup, and deploy all verify the same release before accepting it.
@@ -596,11 +600,23 @@ The direct-deploy recovery procedure is:
 10. Confirm coordinator and gateway health report the installed signed pair and
    coordinator catalog status reports the intended release/signer.
 11. Set `CATALOG_CANARY_PROVIDER_ID` to a real enrolled canary provider and
-   provide `CATALOG_CANARY_AUTH_TOKEN` from the coordinator operator key, not
-   the gateway/coordinator service token. The deployment compatibility view is
-   `/v1/pool/check?details=deployment`, which is operator-only; the deploy
-   script proves this token against the Pearl coordinator operator-key digest
-   before any upload or restart.
+   provide the coordinator operator key, not the gateway/coordinator service
+   token. Prefer a stable local secret source on the operator Mac rather than a
+   raw shell variable: either `CATALOG_CANARY_AUTH_TOKEN_FILE` pointing at a
+   `0600` one-line bearer-token file, or a macOS Keychain generic-password item
+   selected by `CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE`
+   (default `macprovider.catalog-canary.operator-token`) and
+   `CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_ACCOUNT` (default current `USER`).
+   `CATALOG_CANARY_AUTH_TOKEN` remains accepted only as an explicit override.
+   For file-based operation, keep the token file outside the repo and verify
+   `/usr/bin/stat -f %Lp "$CATALOG_CANARY_AUTH_TOKEN_FILE"` reports `600`.
+   For Keychain operation, provision the item once from the trusted
+   operator-held token by running `/usr/bin/security add-generic-password -U -s macprovider.catalog-canary.operator-token -a "$USER" -w`,
+   then entering the token at the prompt; do not pass the token in argv.
+   Do not copy the operator key out of Pearl during deploy. The deployment
+   compatibility view is `/v1/pool/check?details=deployment`, which is
+   operator-only; the deploy script proves this token against the Pearl
+   coordinator operator-key digest before any upload or restart.
    The deploy must poll `/v1/pool/check` until that exact provider reports
    `buyer_serving: true`, `catalog_admission_mode: current`, the exact active
    release/policy/digest/signer envelope, a valid selected row identity, and

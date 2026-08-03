@@ -78,8 +78,8 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        # Pinned to actions/setup-go v6.5.0. Re-resolve deliberately.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately.
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
@@ -118,7 +118,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: phase5-gateway/go.mod
           cache-dependency-path: phase5-gateway/go.sum
@@ -157,7 +157,7 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -188,7 +188,7 @@ jobs:
           fi
 
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: phase7-verify/go.mod
           cache-dependency-path: phase7-verify/go.sum
@@ -215,7 +215,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
@@ -250,7 +250,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v6.5.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
@@ -302,10 +302,10 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
         # when upgrading instead of trusting the mutable tag in this required
         # pairing/security gate.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
@@ -337,10 +337,10 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # Pinned to actions/setup-go v7.0.0. Re-resolve deliberately
         # when upgrading instead of trusting the mutable tag in this required
         # pairing/security gate.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
@@ -377,7 +377,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go for the Tier-2 signature verifier
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
           cache: false
@@ -472,7 +472,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum

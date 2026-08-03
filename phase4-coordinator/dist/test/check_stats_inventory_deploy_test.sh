@@ -26,9 +26,9 @@ done
 
 grep -qF 'STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"' "$DEPLOY_SH" ||
   fail "deploy script missing sidecar binary variable"
-grep -qF 'STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"' "$DEPLOY_SH" ||
+grep -qF 'STATS_INVENTORY_SERVICE="$PINNED_DIST_DIR/stats-inventory-sync.service"' "$DEPLOY_SH" ||
   fail "deploy script missing sidecar service variable"
-grep -qF 'STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"' "$DEPLOY_SH" ||
+grep -qF 'STATS_INVENTORY_TIMER="$PINNED_DIST_DIR/stats-inventory-sync.timer"' "$DEPLOY_SH" ||
   fail "deploy script missing sidecar timer variable"
 grep -qF 'getent group macprovider-stats' "$DEPLOY_SH" ||
   fail "deploy script must create isolated stats group"

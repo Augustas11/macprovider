@@ -35,6 +35,16 @@ export class RunBudget {
     return null;
   }
 
+  ensureMinimumCapacity({ maxRequests = this.limits.maxRequests, maxCompletionTokens = this.limits.maxCompletionTokens } = {}) {
+    for (const [name, value] of Object.entries({ maxRequests, maxCompletionTokens })) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new Error(`${name} must be a positive safe integer`);
+      }
+    }
+    this.limits.maxRequests = Math.max(this.limits.maxRequests, maxRequests);
+    this.limits.maxCompletionTokens = Math.max(this.limits.maxCompletionTokens, maxCompletionTokens);
+  }
+
   recordProvider(provider, maxTokens) {
     if (!provider) return;
     const current = this.providers.get(provider) || { requests: 0, completion_tokens_reserved: 0 };
@@ -103,63 +113,78 @@ export function gatewayInvariantReasons(initial, current, {
   minReadyProviders = 1,
   maxDrainingProviders = 0,
   activeModelID = '',
+  enforceHealthyProviderAggregates = true,
+  enforceStableProviderCounts = true,
+  enforceStableModelSet = true,
+  allowedStableModelIDs = null,
 } = {}) {
   const before = initial?.pool ? initial : gatewaySnapshot(initial);
   const after = current?.pool ? current : gatewaySnapshot(current);
   const reasons = [];
   const beforeModels = new Map((before?.models || []).map((model) => [model.id, model]));
   const afterModels = new Map((after.models || []).map((model) => [model.id, model]));
-  // The gateway excludes a coordinator row as soon as it becomes
-  // non-routable. With one provider per model, an active request therefore
-  // removes exactly one provider and its model from the buyer-facing
-  // aggregate; it does not surface as pool.degraded=1.
+  // The gateway may exclude a coordinator row as soon as it becomes
+  // non-routable, but some runtimes keep the active row buyer-visible while the
+  // request is in flight. Accept either stable counts or one active-provider
+  // loss. The model may disappear only when that was its sole ready provider;
+  // duplicate-provider models must remain available.
   const activeModelBefore = activeModelID ? beforeModels.get(activeModelID) : null;
   const activeModelDropped = Boolean(activeModelBefore && !afterModels.has(activeModelID));
-  const activeLossAllowed = activeModelDropped && activeModelBefore.provider_count === 1;
-  if (!['up', ...(activeLossAllowed ? ['degraded'] : [])].includes(after.status)
+  const activeProviderLossAllowed = Boolean(activeModelBefore);
+  const activeModelLossAllowed = activeModelDropped && activeModelBefore.provider_count === 1;
+  if (!['up', ...(activeModelLossAllowed ? ['degraded'] : [])].includes(after.status)
       || after.coordinator_status !== 'up') reasons.push('gateway_or_coordinator_not_up');
-  if (after.degraded !== (after.status === 'degraded') || (after.degraded && !activeLossAllowed)) {
+  if (after.degraded !== (after.status === 'degraded') || (after.degraded && !activeModelLossAllowed)) {
     reasons.push('gateway_degraded');
   }
   if (!Number.isInteger(after.pool.total_providers) || !Number.isInteger(after.pool.ready)) {
     reasons.push('pool_signal_missing');
     return reasons;
   }
-  const minimumReady = Math.max(0, minReadyProviders - (activeLossAllowed ? 1 : 0));
+  const minimumReady = Math.max(0, minReadyProviders - (activeProviderLossAllowed ? 1 : 0));
   if (after.pool.ready < minimumReady) reasons.push(`ready_${after.pool.ready}_lt_${minimumReady}`);
-  for (const state of ['degraded', 'unavailable']) {
-    if (!Number.isInteger(after.pool[state])) reasons.push(`pool_${state}_signal_missing`);
-    else if (after.pool[state] !== 0) reasons.push(`pool_${state}_${after.pool[state]}_ne_0`);
+  if (enforceHealthyProviderAggregates) {
+    for (const state of ['degraded', 'unavailable']) {
+      if (!Number.isInteger(after.pool[state])) reasons.push(`pool_${state}_signal_missing`);
+      else if (after.pool[state] !== 0) reasons.push(`pool_${state}_${after.pool[state]}_ne_0`);
+    }
+    if (!Number.isInteger(after.pool.draining)) reasons.push('pool_draining_signal_missing');
+    else if (after.pool.draining > maxDrainingProviders) {
+      reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
+    }
   }
-  if (!Number.isInteger(after.pool.draining)) reasons.push('pool_draining_signal_missing');
-  else if (after.pool.draining > maxDrainingProviders) {
-    reasons.push(`pool_draining_${after.pool.draining}_gt_${maxDrainingProviders}`);
-  }
-  if (Number.isInteger(before?.pool?.total_providers)) {
-    const expectedTotal = before.pool.total_providers - (activeLossAllowed ? 1 : 0);
-    if (after.pool.total_providers !== expectedTotal) {
+  if (enforceStableProviderCounts && Number.isInteger(before?.pool?.total_providers)) {
+    const minTotal = before.pool.total_providers - (activeProviderLossAllowed ? 1 : 0);
+    if (after.pool.total_providers < minTotal || after.pool.total_providers > before.pool.total_providers) {
       reasons.push(`total_providers_changed_${before.pool.total_providers}_to_${after.pool.total_providers}`);
     }
   }
-  if (Number.isInteger(before?.pool?.ready)) {
-    const expectedReady = before.pool.ready - (activeLossAllowed ? 1 : 0);
-    if (after.pool.ready !== expectedReady) {
+  if (enforceStableProviderCounts && Number.isInteger(before?.pool?.ready)) {
+    const minReady = before.pool.ready - (activeProviderLossAllowed ? 1 : 0);
+    if (after.pool.ready < minReady || after.pool.ready > before.pool.ready) {
       reasons.push(`ready_changed_${before.pool.ready}_to_${after.pool.ready}`);
     }
   }
+  if (!enforceStableModelSet) return reasons;
   for (const [id, model] of beforeModels) {
     if (!id) continue;
+    if (allowedStableModelIDs && !allowedStableModelIDs.has(id)) continue;
     const observed = afterModels.get(id);
     if (!observed) {
-      if (!(activeLossAllowed && id === activeModelID)) reasons.push(`${id}:model_disappeared`);
+      if (!(activeModelLossAllowed && id === activeModelID)) reasons.push(`${id}:model_disappeared`);
       continue;
     }
     if (observed.degraded || !observed.available) {
       reasons.push(`${id}:model_not_stably_available`);
     }
-    if (Number.isInteger(model.ready_provider_count)
-        && observed.ready_provider_count !== model.ready_provider_count) {
-      reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
+    if (Number.isInteger(model.ready_provider_count)) {
+      const minReady = model.ready_provider_count - (activeProviderLossAllowed && id === activeModelID ? 1 : 0);
+      if (
+        observed.ready_provider_count < minReady
+        || (enforceStableProviderCounts && observed.ready_provider_count > model.ready_provider_count)
+      ) {
+        reasons.push(`${id}:ready_provider_count_changed_${model.ready_provider_count}_to_${observed.ready_provider_count}`);
+      }
     }
   }
   return reasons;
@@ -195,6 +220,8 @@ export function poolzInvariantReasons(initial, current, {
   maxHeartbeatAgeMs = 90_000,
   requireHeartbeatAdvance = false,
   activeProviderID = '',
+  heartbeatAdvanceProviderIDs = null,
+  enforceStableProviderSet = true,
 } = {}) {
   const before = Array.isArray(initial) ? initial : poolzSnapshot(initial);
   const after = Array.isArray(current) ? current : poolzSnapshot(current);
@@ -202,7 +229,9 @@ export function poolzInvariantReasons(initial, current, {
   const beforeByID = new Map(before.map((row) => [row.id, row]));
   const afterByID = new Map(after.map((row) => [row.id, row]));
   if (!before.length || !after.length) reasons.push('provider_pool_signal_missing');
-  if (after.length !== before.length) reasons.push(`provider_count_changed_${before.length}_to_${after.length}`);
+  if (enforceStableProviderSet && after.length !== before.length) {
+    reasons.push(`provider_count_changed_${before.length}_to_${after.length}`);
+  }
   for (const [id, expected] of beforeByID) {
     if (!id) {
       reasons.push('provider_identity_missing');
@@ -210,7 +239,7 @@ export function poolzInvariantReasons(initial, current, {
     }
     const observed = afterByID.get(id);
     if (!observed) {
-      reasons.push(`${id}:provider_disappeared`);
+      if (enforceStableProviderSet) reasons.push(`${id}:provider_disappeared`);
       continue;
     }
     const stateAllowed = READY_STATES.has(observed.state)
@@ -232,7 +261,9 @@ export function poolzInvariantReasons(initial, current, {
         && observed.last_heartbeat_at_ms < expected.last_heartbeat_at_ms) {
       reasons.push(`${id}:heartbeat_regressed`);
     }
-    if (requireHeartbeatAdvance) {
+    const requireProviderHeartbeatAdvance = requireHeartbeatAdvance
+      && (!heartbeatAdvanceProviderIDs || heartbeatAdvanceProviderIDs.has(id));
+    if (requireProviderHeartbeatAdvance) {
       const heartbeatAdvanced = expected.last_heartbeat_at_ms != null
         && observed.last_heartbeat_at_ms != null
         && observed.last_heartbeat_at_ms > expected.last_heartbeat_at_ms;
@@ -462,9 +493,10 @@ export function responseIdentityReasons(result, requestedModel, expectedFleet, {
     reasons.push(`${requestedModel}:response_model_${result?.responseModel || 'missing'}_ne_${requestedModel}`);
   }
   const matching = expectedFleet.filter((row) => row.model_id === requestedModel);
-  const expectedProvider = expectedProviderID || (matching.length === 1 ? matching[0].provider_id : '');
-  if (!expectedProvider) reasons.push(`${requestedModel}:expected_provider_mapping_missing_or_ambiguous`);
-  if (result?.provider !== expectedProvider) {
+  const expectedProviders = expectedProviderID ? [expectedProviderID] : matching.map((row) => row.provider_id);
+  if (!expectedProviders.length) reasons.push(`${requestedModel}:expected_provider_mapping_missing`);
+  if (!expectedProviders.includes(result?.provider || '')) {
+    const expectedProvider = expectedProviderID || (expectedProviders.length ? expectedProviders.join('|') : 'unresolved');
     reasons.push(`${requestedModel}:response_provider_${result?.provider || 'missing'}_ne_${expectedProvider || 'unresolved'}`);
   }
   return reasons;
@@ -486,10 +518,29 @@ export function performanceRegressionReasons(result, baseline, sampleClass) {
   return reasons;
 }
 
-export function validateExpectedFleetDocument(document, { expectedProviderCount = 2, requireUniqueModels = true } = {}) {
-  if (document?.schema_version !== 1 || !Array.isArray(document?.providers)
-      || document.providers.length !== expectedProviderCount) {
-    throw new Error(`expected fleet file must contain schema_version=1 and exactly ${expectedProviderCount} providers`);
+export function validateExpectedFleetDocument(document, {
+  expectedProviderCount = null,
+  minProviderCount = 1,
+  maxProviderCount = 100,
+  requireUniqueModels = true,
+} = {}) {
+  if (expectedProviderCount != null
+      && (!Number.isSafeInteger(expectedProviderCount) || expectedProviderCount < 1)) {
+    throw new Error('expectedProviderCount must be a positive integer when set');
+  }
+  if (!Number.isSafeInteger(minProviderCount) || minProviderCount < 1
+      || !Number.isSafeInteger(maxProviderCount) || maxProviderCount < minProviderCount) {
+    throw new Error('expected fleet provider bounds are invalid');
+  }
+  if (document?.schema_version !== 1 || !Array.isArray(document?.providers)) {
+    throw new Error('expected fleet file must contain schema_version=1 and a providers list');
+  }
+  const actualCount = document.providers.length;
+  if (expectedProviderCount != null && actualCount !== expectedProviderCount) {
+    throw new Error(`expected fleet file must contain exactly ${expectedProviderCount} providers`);
+  }
+  if (actualCount < minProviderCount || actualCount > maxProviderCount) {
+    throw new Error(`expected fleet file must contain between ${minProviderCount} and ${maxProviderCount} providers`);
   }
   const seen = new Set();
   const models = new Set();
@@ -513,6 +564,7 @@ export function expectedFleetReasons(poolRows, expectedFleet, {
   allowedExtraProviderIDs = [],
   maxHeartbeatAgeMs = 90_000,
   activeProviderID = '',
+  allowUnexpectedProviders = false,
 } = {}) {
   const reasons = [];
   const allowed = new Set(allowedExtraProviderIDs);
@@ -534,7 +586,9 @@ export function expectedFleetReasons(poolRows, expectedFleet, {
     }
   }
   for (const id of current.keys()) {
-    if (!expected.has(id) && !allowed.has(id)) reasons.push(`${id || '<missing>'}:unexpected_provider`);
+    if (!allowUnexpectedProviders && !expected.has(id) && !allowed.has(id)) {
+      reasons.push(`${id || '<missing>'}:unexpected_provider`);
+    }
   }
   return reasons;
 }
@@ -599,12 +653,15 @@ export function recoverySoakReasons({
       const previous = index === 0 ? poolzInitial : poolzSamples[index - 1];
       reasons.push(...poolzInvariantReasons(previous, sample, {
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
+        enforceStableProviderSet: options.enforceStableProviderCounts !== false,
       }).map((reason) => `sample_${index}:${reason}`));
     });
     if (poolzSamples.length) {
       reasons.push(...poolzInvariantReasons(poolzSamples[0], poolzSamples[poolzSamples.length - 1], {
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
         requireHeartbeatAdvance: true,
+        heartbeatAdvanceProviderIDs: options.heartbeatAdvanceProviderIDs || null,
+        enforceStableProviderSet: options.enforceStableProviderCounts !== false,
       }).map((reason) => `final:${reason}`));
     }
   }
@@ -620,7 +677,8 @@ export function recoverySoakReasons({
           const previous = previousSet.find((sample) => sample.provider_id === initial.provider_id) || initial;
           reasons.push(...providerSignalReasons(previous, current, {
           ...options,
-          requireObservationAdvance: true,
+          requireObservationAdvance: !options.heartbeatAdvanceProviderIDs
+            || options.heartbeatAdvanceProviderIDs.has(initial.provider_id),
         }).map((reason) => `sample_${index}:${reason}`));
         }
       }

@@ -48,9 +48,11 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     /// to this row for served inference, so credits still flow — the
     /// warning surfaces the discovery-tier pricing to the operator.
     case rateCardDefaultTierUsed = "rate_card_default_tier_used"
-    /// Observed swap pageouts during the Stage 1 probe. Paid recommendations
-    /// treat this as a hard eligibility veto (#742 / SPEC-023 v0.7); the warning
-    /// still surfaces so donor-mode transcripts can name the reason.
+    /// Sustained CRITICAL memory pressure across the Stage 1 probe. Paid
+    /// recommendations treat this as a hard eligibility veto (#742 /
+    /// SPEC-023 v0.9); the warning still surfaces so donor-mode transcripts can
+    /// name the reason. Advisory WARNING-majority pressure (not a critical
+    /// veto) is logged to local probe-safety telemetry, not this wire warning.
     case swapObservedUnderLoad = "swap_observed_under_load"
     /// Advisory QoS warning when measured TPS misses the signed catalog target.
     case tpsBelowGate = "tps_below_gate"
@@ -2491,32 +2493,97 @@ struct VerifiedModelArtifact {
     var sha256: String
 }
 
+/// macOS kernel memory-pressure verdict, read in-process from
+/// `kern.memorystatus_vm_pressure_level`. This is the OS's own thrash signal
+/// (the `vm_pressure_level` constants), unlike the machine-wide cumulative
+/// `Pageouts` counter it replaces (#742 fix): on Apple Silicon `Pageouts`
+/// counts healthy memory compression and is not process-scoped, so any
+/// incidental system paging during a probe flipped the old swap flag and
+/// false-rejected legitimate 8 GB providers.
+enum MemoryPressureLevel: Equatable {
+    case normal
+    case warning
+    case critical
+    case unknown
+
+    /// Reads the current pressure level via `sysctlbyname`. The kernel returns
+    /// the `vm_pressure_level` bitmask: 1 = Normal, 2 = Warning, 4 = Critical.
+    /// Any read failure or unrecognized value maps to `.unknown`.
+    static func current() -> MemoryPressureLevel {
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0) == 0 else {
+            return .unknown
+        }
+        switch level {
+        case 1: return .normal
+        case 2: return .warning
+        case 4: return .critical
+        default: return .unknown
+        }
+    }
+}
+
 struct ProbeSafetySample: Equatable {
-    var pageouts: UInt64?
+    var pressureLevel: MemoryPressureLevel
     var thermalState: ProcessInfo.ThermalState?
 }
 
-protocol ProbeSafetySampling {
+protocol ProbeSafetySampling: Sendable {
     func sample() -> ProbeSafetySample
 }
 
 struct ProbeSafetyAssessment: Equatable {
     var swapDetected: Bool
     var thermalThrottleDetected: Bool
+    /// Advisory, non-blocking: sustained WARNING-level memory pressure was seen
+    /// across the probe but not enough CRITICAL samples to veto the paid path.
+    /// Surfaced only to local telemetry/diagnostics — never a wire/schema field.
+    var swapObservedUnderLoad: Bool = false
 
-    static func assess(before: ProbeSafetySample, after: ProbeSafetySample) -> ProbeSafetyAssessment {
+    /// #742 fix: `swapDetected` now means "sustained memory-pressure thrash",
+    /// not "any pageout". Computed over the interval series sampled across the
+    /// probe:
+    /// - TRUE only when at least 2 samples are `.critical` AND `.critical`
+    ///   readings are >= 50% of the READABLE (non-`.unknown`) samples.
+    /// - Advisory WARNING-majority (>= 2 `.warning`, >= 50% of readable, not a
+    ///   critical majority) sets `swapDetected = false` but flags
+    ///   `swapObservedUnderLoad` so operators can see it without being blocked.
+    /// - Fail-closed to TRUE only when the pressure level could not be read for
+    ///   the ENTIRE series (every sample `.unknown`, or an empty series),
+    ///   matching the prior nil-fail-closed behavior. A single transient
+    ///   unknown/warning must never veto the paid path.
+    static func assess(samples: [ProbeSafetySample]) -> ProbeSafetyAssessment {
+        let pressureLevels = samples.map(\.pressureLevel)
+        let readable = pressureLevels.filter { $0 != .unknown }
+        let criticalCount = pressureLevels.filter { $0 == .critical }.count
+        let warningCount = pressureLevels.filter { $0 == .warning }.count
         let swapDetected: Bool
-        if let beforePageouts = before.pageouts, let afterPageouts = after.pageouts {
-            swapDetected = afterPageouts > beforePageouts
-        } else {
+        if readable.isEmpty {
+            // No usable pressure reading for the whole series: fail closed.
             swapDetected = true
+        } else {
+            // Sustained CRITICAL memory pressure: at least two CRITICAL
+            // observations AND a majority of the READABLE samples critical.
+            // Requiring >= 2 rejects a lone incidental spike; using the readable
+            // count (not the raw sample count) as the denominator stops
+            // transient .unknown readings from diluting a real majority and
+            // removes the round-1 fail-open where a short probe with < 3 total
+            // samples could never trip the veto.
+            swapDetected = criticalCount >= 2 && criticalCount * 2 >= readable.count
         }
-        let states = [before.thermalState, after.thermalState]
-        let thermalKnown = states.allSatisfy { $0 != nil }
-        let thermalThrottleDetected = !thermalKnown || states.compactMap { $0 }.contains { ThermalGate.shouldThrottle($0) }
+        let swapObservedUnderLoad = !swapDetected
+            && warningCount >= 2
+            && warningCount * 2 >= readable.count
+
+        let thermalStates = samples.map(\.thermalState)
+        let thermalKnown = !thermalStates.isEmpty && thermalStates.allSatisfy { $0 != nil }
+        let thermalThrottleDetected = !thermalKnown
+            || thermalStates.compactMap { $0 }.contains { ThermalGate.shouldThrottle($0) }
         return ProbeSafetyAssessment(
             swapDetected: swapDetected,
-            thermalThrottleDetected: thermalThrottleDetected
+            thermalThrottleDetected: thermalThrottleDetected,
+            swapObservedUnderLoad: swapObservedUnderLoad
         )
     }
 }
@@ -2524,32 +2591,28 @@ struct ProbeSafetyAssessment: Equatable {
 struct SystemProbeSafetySampler: ProbeSafetySampling {
     func sample() -> ProbeSafetySample {
         ProbeSafetySample(
-            pageouts: Self.vmStatCounter(named: "Pageouts"),
+            pressureLevel: MemoryPressureLevel.current(),
             thermalState: ProcessInfo.processInfo.thermalState
         )
     }
+}
 
-    private static func vmStatCounter(named key: String) -> UInt64? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/vm_stat")
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard process.terminationStatus == 0 else { return nil }
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        for line in output.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("\(key):") else { continue }
-            let digits = trimmed.dropFirst(key.count + 1).filter(\.isNumber)
-            return UInt64(digits)
-        }
-        return nil
+/// Thread-safe collector for the interval-sampled probe-safety series. Mirrors
+/// the `ProcessOutputTail` locking style used elsewhere in the CLI.
+final class ProbeSafetySampleBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [ProbeSafetySample] = []
+
+    func append(_ sample: ProbeSafetySample) {
+        lock.lock()
+        samples.append(sample)
+        lock.unlock()
+    }
+
+    func snapshot() -> [ProbeSafetySample] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
     }
 }
 
@@ -3182,7 +3245,23 @@ struct AutotuneRecommendationBenchmarker {
                     artifact = try await artifactResolver.verifiedArtifact(for: row)
                 }
                 let runner = try runnerFactory()
-                let before = safetySampler.sample()
+                // #742 fix: sample the kernel memory-pressure verdict as a
+                // SERIES across the probe (~500 ms interval) instead of a single
+                // before/after pair, so a sustained-thrash veto can't be tripped
+                // (or missed) by one incidental reading. Always take one
+                // synchronous sample first so the series is never empty.
+                let safetyBuffer = ProbeSafetySampleBuffer()
+                safetyBuffer.append(safetySampler.sample())
+                let sampler = safetySampler
+                let samplingTask = Task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        if Task.isCancelled { break }
+                        safetyBuffer.append(sampler.sample())
+                    }
+                }
+                // Cancel the sampler even if the probe throws.
+                defer { samplingTask.cancel() }
                 let probe = try await prober.probe(
                     model: artifact.modelArgument,
                     port: port,
@@ -3191,10 +3270,32 @@ struct AutotuneRecommendationBenchmarker {
                     gateTTFTMS: gateTTFTMS,
                     replicates: replicates
                 )
-                let after = safetySampler.sample()
-                let safety = ProbeSafetyAssessment.assess(before: before, after: after)
+                // Round-1 audit fix (MEDIUM): stop the sampler and WAIT for its
+                // loop to finish so no in-flight boundary sample races the
+                // snapshot, then take one final synchronous sample. This
+                // guarantees at least two samples (probe start + end) for even a
+                // sub-interval probe, closing the fail-open where a short but
+                // genuinely pressured probe could never reach the veto.
+                samplingTask.cancel()
+                _ = await samplingTask.value
+                safetyBuffer.append(sampler.sample())
+                let safetySamples = safetyBuffer.snapshot()
+                let safety = ProbeSafetyAssessment.assess(samples: safetySamples)
                 switch probe {
                 case .feasible(let medianTPS, let p95TTFTMS):
+                    if let invalidDiagnostic = Self.invalidFeasibleDiagnostic(
+                        medianTPS: medianTPS,
+                        p95TTFTMS: p95TTFTMS
+                    ) {
+                        if prefetchedArtifacts != nil {
+                            throw AutotuneRecommendError.candidateProbeFailed(
+                                modelKey: modelKey,
+                                reason: invalidDiagnostic
+                            )
+                        }
+                        diagnostics[modelKey] = invalidDiagnostic
+                        continue
+                    }
                     let generatedAt = clock()
                     results[modelKey] = CandidateBenchmark(
                         modelKey: modelKey,
@@ -3212,10 +3313,18 @@ struct AutotuneRecommendationBenchmarker {
                         hardwareIdentityHash: request.hardware.hardwareIdentityHash,
                         candidateRowIdentity: request.candidateCatalog.rowIdentity(for: modelKey) ?? ""
                     )
-                    if safety.swapDetected || safety.thermalThrottleDetected {
+                    Self.appendProbeSafetyTelemetry(
+                        modelKey: modelKey,
+                        samples: safetySamples,
+                        assessment: safety,
+                        tps: medianTPS,
+                        ttftMS: p95TTFTMS
+                    )
+                    if safety.swapDetected || safety.thermalThrottleDetected || safety.swapObservedUnderLoad {
                         var flags: [String] = []
                         if safety.swapDetected { flags.append("swap detected") }
                         if safety.thermalThrottleDetected { flags.append("thermal throttle detected") }
+                        if safety.swapObservedUnderLoad { flags.append("swap observed under load (advisory)") }
                         diagnostics[modelKey] = "feasible but " + flags.joined(separator: ", ")
                     }
                 case .infeasible(let reason, let nErr):
@@ -3256,6 +3365,77 @@ struct AutotuneRecommendationBenchmarker {
             return "bandwidth tier \(hardware.bandwidthTier.rawValue) below minimum \(row.minBandwidthTier.rawValue)"
         }
         return nil
+    }
+
+    private static func invalidFeasibleDiagnostic(
+        medianTPS: Double,
+        p95TTFTMS: Double
+    ) -> String? {
+        guard medianTPS.isFinite, medianTPS > 0 else {
+            return "Stage 1 probe produced invalid feasible throughput \(diagnosticNumber(medianTPS))"
+        }
+        guard p95TTFTMS.isFinite, p95TTFTMS >= 0, p95TTFTMS <= Double(Int32.max) else {
+            return "Stage 1 probe produced invalid feasible TTFT \(diagnosticNumber(p95TTFTMS))ms"
+        }
+        return nil
+    }
+
+    /// #742 fix: local-only telemetry for later memory-pressure threshold
+    /// calibration. One line per probed candidate into the existing autotune log
+    /// directory. Best-effort — never affects recommendation output — and adds
+    /// NO wire/coordinator/evidence field.
+    static func appendProbeSafetyTelemetry(
+        modelKey: String,
+        samples: [ProbeSafetySample],
+        assessment: ProbeSafetyAssessment,
+        tps: Double,
+        ttftMS: Double
+    ) {
+        let levels = samples.map(\.pressureLevel)
+        let normal = levels.filter { $0 == .normal }.count
+        let warning = levels.filter { $0 == .warning }.count
+        let critical = levels.filter { $0 == .critical }.count
+        let unknown = levels.filter { $0 == .unknown }.count
+        let line = "probe-safety model=\(modelKey) samples=\(levels.count)"
+            + " normal=\(normal) warning=\(warning) critical=\(critical) unknown=\(unknown)"
+            + " swap_detected=\(assessment.swapDetected)"
+            + " swap_observed_under_load=\(assessment.swapObservedUnderLoad)"
+            + " tps=\(diagnosticNumber(tps)) ttft_ms=\(diagnosticNumber(ttftMS))"
+        let dir = CandidateProviderRunner.defaultLogDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("probe-safety.log")
+        // Round-1 audit fix (LOW): cap the local log so repeated recommendation
+        // runs can't exhaust the cache/home volume. Rotate to a single .1 backup
+        // once the active log passes ~5 MiB.
+        let sizeCapBytes = 5 * 1024 * 1024
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? Int, size > sizeCapBytes {
+            let rotated = dir.appendingPathComponent("probe-safety.log.1")
+            try? FileManager.default.removeItem(at: rotated)
+            try? FileManager.default.moveItem(at: url, to: rotated)
+        }
+        let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
+        guard let data = stamped.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    private static func diagnosticNumber(_ value: Double) -> String {
+        if value.isNaN {
+            return "nan"
+        }
+        if value == .infinity {
+            return "infinity"
+        }
+        if value == -.infinity {
+            return "-infinity"
+        }
+        return value.jsonNumber
     }
 }
 

@@ -36,8 +36,6 @@ LoadCredential=operator_token:/etc/macprovider/canary-buyer.operator-token
 LoadCredential=expected_fleet:/etc/macprovider/canary-buyer.expected-fleet.json
 Environment=CANARY_BASE=https://api.streamvc.live
 Environment=CANARY_POOLZ_URL=https://coordinator.streamvc.live/poolz
-Environment=CANARY_MODELS=mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit,mlx-community/Llama-3.2-3B-Instruct-4bit
-Environment=CANARY_MIN_READY_PROVIDERS=2
 Environment=CANARY_NODE_BIN=/usr/bin/node
 Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
 Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts
@@ -57,8 +55,9 @@ Environment=CANARY_ALLOW_LEGACY_BRIDGE_PROVIDER_SIGNALS=1
 Environment=CANARY_LEGACY_ROLLBACK_AUTHORIZATION_FILE=/run/macprovider-canary-buyer/legacy-rollback.json
 # Production must never silently degrade back to journal-only monitoring.
 Environment=CANARY_REQUIRE_HEARTBEAT=1
-# Scheduled liveness is one 8-token request/model with a worst-case global cap;
-# all traffic could route to one provider, so these are true per-provider caps.
+# Scheduled liveness is one 8-token request per live model discovered from
+# /poolz. These caps are conservative floors and grow only to that live
+# workload after the initial safety snapshot.
 Environment=CANARY_MAX_REQUESTS_PER_PROVIDER=4
 Environment=CANARY_MAX_COMPLETION_TOKENS_PER_PROVIDER=32
 Environment=CANARY_MAX_RUN_DURATION_MS=90000

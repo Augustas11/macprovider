@@ -1,7 +1,7 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.2.2-draft
-**Date:** 2026-07-29
+**Status:** v0.2.5-draft
+**Date:** 2026-08-02
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
 
@@ -106,7 +106,7 @@ production-posture section).
 | **OPoI** | "Overt Proof of Inference" — a model-class canary observation. Per this spec, **liveness-derived and non-binding**; not a weight proof. |
 | **Telemetry-drift** | `pow.Evaluator` heuristics — heartbeat-time (TPS below the *verified* benchmark baseline; model-hash status; artifact drift) **and** the canary-completion OPoI pass-rate (`RecordModelClassCanary`, no evidence lookup) — all alert-only (FR-TD1). |
 | **Evidence-absent sandbox** | A strict hello-gate admission with no verified evidence in-window (never submitted or expired). The provider may connect only as `admission_sandboxed`: operator-visible / internal-probe eligible, but never routing-eligible or buyer-serving, and without receiving newly minted durable provider credentials. It still consumes normal provisional admission/session limits. |
-| **No-passing-benchmark close** | `autotune_evidence_invalid` — evidence present but no benchmark passes the *current* gate. Cause is one of: a genuine affirmative shortfall (thermal/TPS/TTFT), policy staleness (catalog/model/artifact-SHA mismatch after a catalog rotation), **or** provider semantic misbinding (a submitted binding — `model_key`, model-id, artifact-SHA, or catalog-SHA — that the verifier accepts syntactically but the gate value-checks against the current signed catalog and rejects); see FR-HG4. |
+| **No-passing-benchmark close** | `autotune_evidence_invalid` — evidence present but no benchmark passes the *current* gate. Cause is one of: a genuine affirmative shortfall (**thermal throttle only** — the advisory `bench_gate` TPS/TTFT never reject, #687), policy staleness (catalog/model/artifact-SHA mismatch after a catalog rotation), **or** provider semantic misbinding (a submitted binding — `model_key`, model-id, artifact-SHA, or catalog-SHA — that the verifier accepts syntactically but the gate value-checks against the current signed catalog and rejects); see FR-HG4. |
 | **Affirmative-shortfall close** | A rejection where the evidence *proves* the provider cannot serve the tier: `cap_exceeded` and the hardware sub-cases of `evidence_invalid`. |
 | **Policy-unverifiable / coordinator-side close** | The coordinator cannot evaluate the claim (`uncatalogued`), or is itself not wired/erroring (`gate_unavailable`, a coordinator fault). |
 
@@ -162,10 +162,53 @@ buyer-routable session.
 **FR-HG3 — Capacity-ceiling comparison.** Given verified evidence, the gate MUST
 resolve the **capacity ceiling** as the highest-RAM catalog row whose benchmark
 passes every gate predicate (no thermal throttle, catalog-SHA match, model-id match,
-**artifact-SHA256 match** to the catalog row, sustained-TPS ≥ the row's gate, TTFT ≤
-the row's gate). It MUST then evaluate the provider's claimed model against that
-ceiling and admit only if the claimed model is catalogued and its `MinRAMGB` does not
-exceed the ceiling.
+**artifact-SHA256 match** to the catalog row). It MUST then evaluate the provider's
+claimed model against that ceiling and admit only if the claimed model is catalogued
+and its `MinRAMGB` does not exceed the ceiling.
+
+**[amended #687 — advisory bench_gate is never an admission veto].** The hello-gate
+MUST NOT include the advisory `bench_gate.min_sustained_tps` or
+`bench_gate.max_4k_ttft_ms` fields (SPEC-023 §5 / §12 defines these as advisory drift
+targets, never a veto) as ceiling-resolution or admission predicates. A catalog row's
+`bench_gate` MAY be `omlx_seeded` — seeded from unattested oMLX community data — and
+per the #687 trust invariant unattested oMLX data MUST NEVER hard-block a provider or
+set/hold a recommendable or admission gate. The ceiling therefore resolves from
+hardware/identity predicates (no thermal throttle, catalog-SHA / model-id /
+artifact-SHA256 match) and `MinRAMGB` only; a provider MUST NOT be excluded from the
+ceiling because its submitted sustained-TPS is below, or its TTFT above, the advisory
+`bench_gate`. If a future hard **performance** admission gate is wanted, it MUST be a
+**separate catalog field** backed by trusted-provider (verified-provider-matrix)
+evidence, distinct from the advisory `bench_gate`; that separate-field mechanism is
+deferred to a later stage.
+
+**[normative — admission identity MUST exclude advisory `bench_gate` (#687
+Stage-2 prerequisite)].** The hello-gate's **admission identity** — the key set the
+gate uses to match a provider against verified hardware evidence and resolve its
+ceiling — MUST NOT include the advisory `bench_gate.min_sustained_tps` /
+`max_4k_ttft_ms`, `bench_gate.provenance`, or `bench_gate.gate_seed`. Those fields are
+advisory (SPEC-023 §5) and may be `omlx_seeded` from unattested community data;
+including any of them in the admission identity or evidence-match would let unattested
+oMLX data influence a hard admission decision, violating the #687 trust invariant.
+When the SPEC-023 oMLX schema activates (SPEC-023 §12.2 activation gate, condition
+(b)(i)), the Stage-2 implementation MUST provide this **separate admission identity**
+that reads only the hardware/identity predicates (thermal, catalog-policy digest /
+model-id / artifact-SHA256) and `MinRAMGB`. This is a normative requirement on the
+Stage-2 implementation; it is not implemented by this docs-only amendment and touches
+no code.
+
+**[normative — admission matches the catalog admission-policy digest, NOT the full
+catalog SHA (#687 r5)].** Wherever this spec refers to a "catalog-SHA" match as an
+admission or ceiling-resolution predicate (FR-HG3 above, FR-HG4 policy-staleness),
+the match MUST be against SPEC-023 §3.6's **`admission_policy_sha256`** — the digest
+computed over the catalog with the advisory `bench_gate.min_sustained_tps`,
+`max_4k_ttft_ms`, `provenance`, and `gate_seed` fields EXCLUDED — and MUST NOT be the
+full `candidate_catalog_sha256` (which SPEC-023 hashes over the entire catalog
+including those advisory/oMLX fields, and which SPEC-023 reserves for cache/update
+integrity only). Matching admission on the full catalog SHA would (a) drag unattested
+oMLX advisory values into the hard admission decision, contradicting the exclusion
+above, and (b) spuriously invalidate a provider's verified admission whenever any
+advisory-only catalog field changes. This is the spec-level resolution of that
+self-contradiction; the digest computation is SPEC-023 §12.2(b)(i) Stage-2 work.
 
 **FR-HG4 — Gate outcome taxonomy (normative), classified by evidence stance.**
 Every gate non-admission or sandboxing outcome MUST use exactly one of the following
@@ -179,9 +222,22 @@ apply **only** to the evidence-absent-from-expiry case:
 |--------|-------|---------|--------|
 | `autotune_gate_unavailable` | **coordinator-fault** | catalog/evidence store not wired, **or any evidence lookup/decode/binding error** (DB/query failure, malformed envelope, immutable-binding mismatch) | rejects (operator must fix) |
 | `autotune_evidence_required` | **evidence-absent** | no verified evidence in-window (never submitted, or **expired**) | sandbox-connects, never buyer-routable |
-| `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall, catalog staleness, **or** provider semantic misbinding) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (thermal throttle, TPS below gate, TTFT above gate); a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation); **or** a provider-submitted **semantic misbinding** — the verifier accepts evidence on *syntactic*/trust bindings (e.g. `model_key` non-empty/unique, `candidate_catalog_sha256` well-formed) but does **not** value-check those bindings against the signed catalog, so the *gate* is where a mismatched **`model_key`, model-id, artifact-SHA, or a provider-misbound catalog-SHA** (distinct from a genuine catalog rotation) is caught | rejects |
+| `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall, catalog staleness, **or** provider semantic misbinding) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (**thermal throttle only**; the advisory `bench_gate.min_sustained_tps`/`max_4k_ttft_ms` are NEVER a rejection cause, #687); a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation); **or** a provider-submitted **semantic misbinding** — the verifier accepts evidence on *syntactic*/trust bindings (e.g. `model_key` non-empty/unique, `candidate_catalog_sha256` well-formed) but does **not** value-check those bindings against the signed catalog, so the *gate* is where a mismatched **`model_key`, model-id, artifact-SHA, or a provider-misbound catalog-SHA** (distinct from a genuine catalog rotation) is caught | rejects |
 | `autotune_model_uncatalogued` | **policy-unverifiable** | claimed model not in the catalog — the coordinator cannot *evaluate* the claim (not proof of shortfall) | rejects |
 | `autotune_model_cap_exceeded` | **affirmative shortfall** | claimed model's `MinRAMGB` > verified capacity ceiling | rejects |
+
+**[amended #687 — `evidence_invalid` MUST NOT be raised on advisory bench_gate
+TPS/TTFT].** The "genuine hardware shortfall" sub-case of `autotune_evidence_invalid`
+is limited to a **thermal-throttle** shortfall and the catalog-SHA / model-id /
+artifact-SHA policy-staleness and semantic-misbinding sub-cases. The gate MUST NOT
+close `autotune_evidence_invalid` (nor otherwise reject or non-admit a provider)
+because the provider's submitted sustained-TPS is below, or its TTFT above, the
+advisory `bench_gate.min_sustained_tps` / `bench_gate.max_4k_ttft_ms`. Those fields
+are advisory drift targets (SPEC-023 §5 / §12), the source row may be `omlx_seeded`
+from unattested oMLX data, and the #687 trust invariant forbids unattested oMLX data
+from hard-blocking a provider. A hard **performance** admission gate, if ever wanted,
+MUST be a separate catalog field backed by trusted-provider (verified-provider-matrix)
+evidence, not the advisory `bench_gate`; that mechanism is deferred to a later stage.
 
 The load-bearing distinction is between **evidence-absent** (we have *no information*
 about the provider's capability — recoverable by submitting evidence), a **genuine
@@ -510,10 +566,13 @@ Testable against the current build:
   `MinRAMGB`, the provider is closed `autotune_model_cap_exceeded`.
 - **AC-3.** A claimed model absent from the catalog closes `autotune_model_uncatalogued`.
 - **AC-3b.** Evidence that is present but for which **no benchmark passes** the current
-  gate — every benchmark below the TPS gate / above the TTFT gate / thermally throttled,
-  **or** a catalog/model/artifact-SHA mismatch under the current catalog — closes
-  `autotune_evidence_invalid` (hardware-shortfall, catalog-staleness, and semantic-
-  misbinding sub-cases all map to this reason). A single *passing* benchmark prevents
+  gate — every benchmark thermally throttled, **or** a catalog/model/artifact-SHA
+  mismatch under the current catalog — closes `autotune_evidence_invalid`
+  (hardware-shortfall, catalog-staleness, and semantic-misbinding sub-cases all map to
+  this reason). Per AC-10 (#687), a benchmark below the advisory
+  `bench_gate.min_sustained_tps` or above `bench_gate.max_4k_ttft_ms` does **not** by
+  itself make the gate fail — the advisory `bench_gate` is not an admission veto. A
+  single *passing* benchmark prevents
   `evidence_invalid` — it establishes a ceiling — but admission may **still** be refused
   as `autotune_model_cap_exceeded` or `autotune_model_uncatalogued` if the *claimed*
   model exceeds that ceiling or is uncatalogued.
@@ -534,6 +593,16 @@ Testable against the current build:
 - **AC-9 (SPEC-008 preserved).** A provider whose signed-catalog `HashStatus` is
   `hash_mismatch`/`hash_invalid` is excluded from routing (SPEC-008 §5.5–5.6), even
   with `require_hash_verified: false` — SPEC-032 does not weaken this.
+- **AC-10 (#687 — advisory bench_gate is not an admission veto).** With
+  `require_autotune_hello_gate: true`, a provider whose submitted benchmark is below
+  the catalog row's advisory `bench_gate.min_sustained_tps` or above its
+  `bench_gate.max_4k_ttft_ms` (including when that row is `omlx_seeded`) is **not**
+  closed `autotune_evidence_invalid` on that basis and is **not** excluded from the
+  capacity ceiling on that basis; the ceiling and admission decision use only
+  hardware/identity predicates (thermal, catalog-SHA / model-id / artifact-SHA match)
+  and `MinRAMGB`. Only a thermal-throttle, policy-staleness (SHA/model/artifact
+  mismatch), semantic-misbinding, `cap_exceeded`, or `uncatalogued` condition drives a
+  non-admission — never an advisory TPS/TTFT shortfall.
 
 Implemented hardening criteria:
 
@@ -626,6 +695,39 @@ smaller box), which is why v0.2.2 ships no automatic buyer-routable probation.
   design is the other candidate substrate for FR-PW3.
 
 ## Changelog
+
+- **v0.2.5-draft (2026-08-02, #687 r5)** — Admission matches the catalog
+  admission-policy digest, not the full catalog SHA. Added a normative FR-HG3
+  requirement that every "catalog-SHA" admission / ceiling-resolution / FR-HG4
+  policy-staleness match uses SPEC-023 §3.6 `admission_policy_sha256` (which
+  excludes advisory `bench_gate.min_sustained_tps`/`max_4k_ttft_ms`/`provenance`/
+  `gate_seed`), NOT the full `candidate_catalog_sha256`. Resolves the
+  self-contradiction between the r4 "admission identity excludes advisory bench_gate"
+  rule and admission matching on the full catalog hash; also stops non-oMLX advisory
+  edits from invalidating verified admission. Docs-only; digest computation is
+  SPEC-023 §12.2(b)(i) Stage-2 work.
+
+- **v0.2.4-draft (2026-08-02, #687 r4)** — Separate admission identity (Stage-2
+  prerequisite). Added a normative requirement to FR-HG3 that the hello-gate's
+  admission identity / verified-evidence match MUST NOT include the advisory
+  `bench_gate.min_sustained_tps` / `max_4k_ttft_ms`, `bench_gate.provenance`, or
+  `bench_gate.gate_seed`; when the SPEC-023 oMLX schema activates (SPEC-023 §12.2
+  activation gate, condition (b)(i)) the Stage-2 implementation MUST provide a separate
+  admission identity reading only hardware/identity predicates and `MinRAMGB`.
+  Docs-only; no code touched.
+
+- **v0.2.3-draft (2026-08-02, #687)** — Advisory bench_gate is never an admission
+  veto. Amended FR-HG3 and FR-HG4 so the hello-gate MUST NOT resolve the capacity
+  ceiling on, reject on, or close `autotune_evidence_invalid` on the advisory
+  `bench_gate.min_sustained_tps` / `bench_gate.max_4k_ttft_ms`. SPEC-023 §5/§12 defines
+  those fields as advisory drift targets (never a veto); a catalog row's `bench_gate`
+  may be `omlx_seeded` from unattested oMLX community data, and the #687 trust invariant
+  forbids unattested oMLX data from hard-blocking a provider or setting/holding an
+  admission gate. The ceiling now resolves from hardware/identity predicates (no
+  thermal throttle, catalog-SHA / model-id / artifact-SHA match) and `MinRAMGB` only.
+  Any hard **performance** admission gate MUST be a separate catalog field backed by
+  trusted-provider (verified-provider-matrix) evidence, distinct from the advisory
+  `bench_gate`; that separate-field mechanism is deferred to a later stage. Added AC-10.
 
 - **v0.2.2-draft (2026-07-29, B5)** — Hello-gate sandbox and reload implementation
   reconciliation. When `require_autotune_hello_gate:true`, missing verified

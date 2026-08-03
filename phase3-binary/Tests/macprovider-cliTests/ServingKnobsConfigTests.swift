@@ -331,6 +331,12 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
     }
 
+    func testMaxBatchPreflightRejectsAboveThreadLimit() throws {
+        var config = AppConfig.defaults()
+        config.maxConcurrencyOverride = ProviderCapacity.maxConcurrencyOverrideLimit + 1
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
     // MARK: - Runtime threading
 
     func testRuntimeReceivesKvBitsOverride() async throws {
@@ -425,6 +431,17 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
         let observed = await runtime.maxBatchForTest()
         XCTAssertEqual(observed, 3)
+    }
+
+    func testRuntimeCapsMaxBatchAtThreadLimit() async throws {
+        let runtime = ModelRuntime(
+            modelID: "test-model",
+            maxBatch: ProviderCapacity.maxConcurrencyOverrideLimit + 100,
+            warmSwapEnabled: false,
+            loader: { _ in throw TestRuntimeError.notExpected }
+        )
+        let observed = await runtime.maxBatchForTest()
+        XCTAssertEqual(observed, ProviderCapacity.maxConcurrencyOverrideLimit)
     }
 
     func testRuntimeDefaultMaxBatchIsOne() async throws {

@@ -1,11 +1,21 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.1.5
+Version: v0.1.6
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016
 
 ## Change log
+
+### v0.1.6
+
+Editorial, non-normative: registers the conformance-unit requirement IDs
+`SPEC-022-R001`..`SPEC-022-R011` (one per normative requirement group R-1..R-11)
+in `specs/CONFORMANCE.json` and anchors each ID in the corresponding `### R-N`
+requirement-group header under `## Normative requirements`. No requirement text, obligation, or
+observable contract changes; this only migrates SPEC-022 out of the
+`requirement_id_migration: pending` state so governance declarations can cite
+verified-model-settlement requirements.
 
 ### v0.1.5
 
@@ -349,7 +359,12 @@ state and terminal-state timestamp.
 
 ## Normative requirements
 
-### R-1. Policy authority and mode
+Requirement IDs `SPEC-022-R001`..`SPEC-022-R011` are the conformance units and
+map one-to-one to the top-level requirement groups R-1..R-11 below; the `R-N.M`
+sub-clauses are the normative obligations within each group. The IDs are
+registered in `specs/CONFORMANCE.json`.
+
+### R-1. Policy authority and mode (SPEC-022-R001)
 
 R-1.1. Implementations MUST expose exactly one authoritative
 `verified_model_settlement` policy surface from the coordinator.
@@ -380,7 +395,7 @@ policy version and mode, not the current effective policy. If a service cannot
 obtain the effective policy, it MUST fail closed for paid traffic covered by the
 claim.
 
-### R-2. Entrypoint and routing preconditions
+### R-2. Entrypoint and routing preconditions (SPEC-022-R002)
 
 R-2.1. Every paid entrypoint is either covered by SPEC-022 enforce mode,
 disabled for paid traffic, or explicitly excluded from the product claim and
@@ -406,7 +421,7 @@ predicate." Ordinary routing filters still apply, including provider readiness,
 auth state, slots, model support, context limits, breaker state, quota policy,
 and sticky-affinity rules.
 
-### R-3. Route-time verification snapshot
+### R-3. Route-time verification snapshot (SPEC-022-R003)
 
 R-3.1. For every covered request attempt, the coordinator MUST create and
 persist a route-time verification snapshot before forwarding work to the
@@ -441,7 +456,7 @@ unexpired at route time. A request routed under an expired, unverifiable, or
 missing catalog MUST be quarantined and MUST NOT final-debit the buyer or pay
 the provider.
 
-### R-4. Receipt requirement
+### R-4. Receipt requirement (SPEC-022-R004)
 
 R-4.1. Every covered paid request that completes with any buyer-debitable or
 provider-creditable outcome MUST produce a settlement-capable provider-signed
@@ -474,7 +489,7 @@ or `zero_settled`) closes the row for SPEC-022 money movement. Subsequent
 receipts for the same attempt MUST be idempotent no-ops or rejected and MUST NOT
 change buyer debit, provider credit, payout readiness, or settlement outcome.
 
-### R-5. Streaming receipts
+### R-5. Streaming receipts (SPEC-022-R005)
 
 R-5.1. Streaming requests are first-class paid traffic. They MUST satisfy the
 same settlement-capable receipt requirement as non-streaming requests before
@@ -530,7 +545,7 @@ the sum of verified billable per-attempt prefixes. Unverified prefixes MUST NOT
 be final-debited to the buyer or positively settled to any provider. Overlapping
 or duplicate output across attempts MUST NOT be charged or credited twice.
 
-### R-6. Buyer receipt retrieval
+### R-6. Buyer receipt retrieval (SPEC-022-R006)
 
 R-6.1. If a buyer receipt retrieval endpoint is exposed, the requester MUST
 authenticate as the account that owns the exact `(account_id, request_id,
@@ -546,7 +561,7 @@ R-6.4. The retrieval spec MUST define retention, rate limits, idempotency,
 404/403 behavior, and whether pending/quarantined receipts are visible to
 buyers.
 
-### R-7. Settlement, quarantine, and payout exclusion
+### R-7. Settlement, quarantine, and payout exclusion (SPEC-022-R007)
 
 R-7.1. SPEC-005 settlement MUST add a receipt-verification gate before any row
 can create final buyer debit, provider credit, earnings visibility, settlement
@@ -591,7 +606,7 @@ may define an exception only with a receipt-failure-specific hold, evidence
 bundle, dual-control audit trail, and explicit exclusion from automatic payout
 until hold expiry.
 
-### R-8. Buyer debit semantics
+### R-8. Buyer debit semantics (SPEC-022-R008)
 
 R-8.1. Covered traffic uses reservation-first buyer accounting. Buyer quota or
 balance may be reserved while the request runs, but final debit MUST wait for
@@ -623,7 +638,7 @@ many agentic requests are in flight, and release behavior after terminal
 outcomes. A terminal SPEC-022 row MUST NOT permanently reduce buyer available
 quota through a stale reservation.
 
-### R-9. Rollout, migration, and rollback
+### R-9. Rollout, migration, and rollback (SPEC-022-R009)
 
 R-9.1. The effective policy applies by request-start timestamp and request
 attempt identity.
@@ -643,7 +658,7 @@ R-9.5. Pre-existing payout-ready rows created before SPEC-022 enforce mode MUST
 be explicitly classified as outside the policy snapshot. They MUST NOT be used
 as evidence that SPEC-022 enforcement is active.
 
-### R-10. Buyer disclosure
+### R-10. Buyer disclosure (SPEC-022-R010)
 
 R-10.1. `/v1/models` and product docs MUST distinguish:
 
@@ -681,7 +696,7 @@ request can briefly keep quota reserved while receipt verification is pending,
 and that the reservation releases or refunds on a non-`verified` terminal
 outcome.
 
-### R-11. Audit and observability
+### R-11. Audit and observability (SPEC-022-R011)
 
 R-11.1. Every covered request attempt MUST produce a structured settlement
 verdict audit event containing at least:

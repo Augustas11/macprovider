@@ -524,6 +524,19 @@ struct Stage1Prober: Stage1Probing {
         }
 
         let p95 = percentile95(ttfts)
+        let medianTPS = median(throughputs)
+        guard medianTPS.isFinite, medianTPS > 0 else {
+            return .infeasible(
+                reason: "Stage 1 probe produced invalid throughput \(stage1DiagnosticNumber(medianTPS))",
+                nErr: max(1, replicates)
+            )
+        }
+        guard p95.isFinite, p95 >= 0, p95 <= Double(Int32.max) else {
+            return .infeasible(
+                reason: "Stage 1 probe produced invalid TTFT \(stage1DiagnosticNumber(p95))ms",
+                nErr: max(1, replicates)
+            )
+        }
         // gateTTFTMS == 0 means the ceiling is disabled (#742: no 60s default).
         if gateTTFTMS > 0, p95 > Double(gateTTFTMS) {
             return .infeasible(
@@ -533,7 +546,7 @@ struct Stage1Prober: Stage1Probing {
         }
 
         return .feasible(
-            medianTPS: median(throughputs),
+            medianTPS: medianTPS,
             p95TTFTMS: p95
         )
     }
@@ -576,6 +589,26 @@ struct Stage1Prober: Stage1Probing {
         // whitespace-separated English words (English averages ~0.75
         // words/token, under-counting by ~1.3x).
         var deltaCount = 0
+        // Reasoning models (gpt-oss-20b / Harmony) suppress their
+        // analysis/reasoning channel from `delta.content`, so on the
+        // probe's nonsense padded prompt they generate tokens but emit
+        // ZERO visible content deltas. The provider closes the stream with
+        // a usage chunk (`choices: []` + `usage`) that carries the honest
+        // total decode count in `macprovider_generated_completion_tokens`
+        // (all channels incl. suppressed reasoning; HTTPServer.swift
+        // `usage()`). Track the latest reported value so finalization can
+        // derive throughput from it, not from counting visible content
+        // deltas — otherwise reasoning models measure 0 tok/s and are
+        // wrongly marked infeasible.
+        var usageDecodedTokens: Int?
+        // Provider-reported warm-decode wall-time (ms) from the terminal
+        // usage chunk (`macprovider_generation_ms`). This is the ONLY honest
+        // decode-window signal for reasoning models, whose analysis channel
+        // is silent in the SSE stream so the client cannot time it. When
+        // present, finalization divides total decoded tokens by this window
+        // instead of any client-observed timing. Whole milliseconds (the
+        // provider emits an Int64); see `usageGenerationMS(from:)`.
+        var usageGenerationMS: Int?
 
         for try await rawLine in bytes.lines {
             guard rawLine.hasPrefix("data:") else {
@@ -584,6 +617,12 @@ struct Stage1Prober: Stage1Probing {
             let payload = rawLine.dropFirst(5).trimmingCharacters(in: .whitespacesAndNewlines)
             if payload == "[DONE]" {
                 break
+            }
+            if let usage = Self.usageDecodedTokens(from: payload) {
+                usageDecodedTokens = usage
+            }
+            if let generationMS = Self.usageGenerationMS(from: payload) {
+                usageGenerationMS = generationMS
             }
             guard let content = Self.contentDelta(from: payload), !content.isEmpty else {
                 continue
@@ -595,36 +634,227 @@ struct Stage1Prober: Stage1Probing {
             deltaCount += 1
         }
 
-        guard let firstTokenAt else {
-            return SingleProbeResult(
-                statusCode: statusCode,
-                ttftMS: .infinity,
-                generatedText: generatedText,
-                throughputTPS: 0
-            )
-        }
-
-        // v1.7.8 Track A4: measure generation-only throughput.
-        // Pre-v1.7.8 the denominator was `ended - started`, which
-        // included TTFT (the full prefill wall-clock, 5-30s on M-Base
-        // even after v1.7.7's prewarm on a 3200-token prompt).
-        // That inflated the denominator by ~4-10x and drove reported
-        // TPS to 3-4 tok/s for candidates that actually stream 25-40
-        // tok/s in warm generation. Catalog `min_sustained_tps`
-        // (20-30 range) expresses warm-generation throughput, so this
-        // is the semantics the gate expects.
         let ended = clock()
-        let generationElapsed = max(0.001, ended.timeIntervalSince(firstTokenAt))
-        let outputTokens = max(1, deltaCount)
+        let metrics = Self.finalizeProbeMetrics(
+            contentFallbackTokens: deltaCount,
+            usageDecodedTokens: usageDecodedTokens,
+            usageGenerationMS: usageGenerationMS,
+            firstTokenAt: firstTokenAt,
+            started: started,
+            ended: ended
+        )
         return SingleProbeResult(
             statusCode: statusCode,
-            ttftMS: max(0, firstTokenAt.timeIntervalSince(started) * 1_000),
+            ttftMS: metrics.ttftMS,
             generatedText: generatedText,
-            throughputTPS: Double(outputTokens) / generationElapsed
+            throughputTPS: metrics.throughputTPS
         )
     }
 
-    private static func contentDelta(from payload: String) -> String? {
+    /// Derives TTFT and decode throughput from a completed probe stream.
+    /// Extracted as a pure static function so the finalization logic is
+    /// unit-testable without spawning a provider process.
+    ///
+    /// Throughput branch order (highest fidelity first). The decoded-token
+    /// count is authoritative: `nil` means absent/invalid, an explicit `0`
+    /// means the provider decoded nothing (infeasible), and any positive value
+    /// is the all-channel decode count.
+    ///
+    ///  1. **Decoded count present (authoritative).**
+    ///     a. `== 0` → `(.infinity, 0)` — the provider reports it decoded
+    ///        nothing; infeasible regardless of any observed content (round-2
+    ///        code MEDIUM-2).
+    ///     b. `> 0` AND `usageGenerationMS != nil && ms >= 1` → provider-timed:
+    ///        `usageDecodedTokens / max(0.001, ms/1000)`. This is the only
+    ///        correct path for reasoning models: their analysis channel is
+    ///        silent in SSE, so client-observed timing cannot see the decode
+    ///        window at all. The 1 ms floor bounds throughput (round-2 security
+    ///        HIGH: a fractional/sub-ms window otherwise inflates TPS).
+    ///     c. `> 0` with no usable ms → warm-generation window when a visible
+    ///        token was seen (`ended - firstTokenAt`), else the full request
+    ///        window (`ended - started`); both floored at 0.001s. Conservative
+    ///        but positive.
+    ///  2. **Decoded count absent (`nil`).**
+    ///     a. Legacy content window for older serve builds (non-reasoning
+    ///        models) that stream visible content but no vendor usage fields:
+    ///        `contentFallbackTokens / max(0.001, ended - firstTokenAt)`.
+    ///     b. else → `(.infinity, 0)`, the genuinely-infeasible case.
+    ///
+    /// TTFT is the first-content-token elapsed when a visible token was seen;
+    /// otherwise the full request elapsed (best available signal for a
+    /// reasoning-only stream). It is NEVER `.infinity` when tokens were
+    /// decoded.
+    static func finalizeProbeMetrics(
+        contentFallbackTokens: Int,
+        usageDecodedTokens: Int?,
+        usageGenerationMS: Int?,
+        firstTokenAt: Date?,
+        started: Date,
+        ended: Date
+    ) -> (ttftMS: Double, throughputTPS: Double) {
+        // TTFT: time to first content token when observed; otherwise the
+        // full request elapsed (best available signal for a reasoning-only
+        // stream). Computed up front so every non-infeasible branch shares it.
+        let ttftMS = firstTokenAt.map { max(0, $0.timeIntervalSince(started) * 1_000) }
+            ?? max(0, ended.timeIntervalSince(started) * 1_000)
+
+        // Branch 1: authoritative decoded-token count present (may be 0).
+        if let usageDecodedTokens {
+            // 1a: an authoritative 0 means the provider decoded nothing —
+            // infeasible regardless of any observed content.
+            if usageDecodedTokens == 0 {
+                return (ttftMS: .infinity, throughputTPS: 0)
+            }
+            // 1b: provider-timed. Only when the vendor decode window is present,
+            // at least 1 whole millisecond, AND not larger than the observed
+            // request wall-time (plus a small tolerance for clock skew /
+            // measurement boundaries). The decode window is a subset of the
+            // request, so a value exceeding the observed request duration —
+            // e.g. an overflowed `Int64.max` that would otherwise yield a
+            // garbage ~0 TPS "feasible" replicate — is malformed and ignored,
+            // falling through to the conservative client-timed window. Floor
+            // the denominator at 1 ms.
+            let requestElapsedMS = max(0, ended.timeIntervalSince(started) * 1_000)
+            let generationWindowToleranceMS = 250.0
+            if let usageGenerationMS, usageGenerationMS >= 1,
+               Double(usageGenerationMS) <= requestElapsedMS + generationWindowToleranceMS {
+                let generationElapsedSec = max(0.001, Double(usageGenerationMS) / 1000)
+                return (ttftMS: ttftMS, throughputTPS: Double(usageDecodedTokens) / generationElapsedSec)
+            }
+            // 1c: decoded count but no usable timing — divide by the
+            // warm-generation window when a visible token was seen, else the
+            // full request window. Both floored at 0.001s.
+            if let firstTokenAt {
+                let generationElapsed = max(0.001, ended.timeIntervalSince(firstTokenAt))
+                return (ttftMS: ttftMS, throughputTPS: Double(usageDecodedTokens) / generationElapsed)
+            }
+            let requestElapsed = max(0.001, ended.timeIntervalSince(started))
+            return (ttftMS: ttftMS, throughputTPS: Double(usageDecodedTokens) / requestElapsed)
+        }
+
+        // Branch 2a: legacy warm-generation window for older serve builds
+        // (non-reasoning models) that stream visible content but no vendor
+        // usage fields. `firstTokenAt` is only set on a NON-empty content
+        // delta, so content was observed — at least one token was generated
+        // even when the delta/word count rounds to 0 (e.g. a whitespace-only
+        // delta like " "). `max(1, ...)` preserves the pre-existing Stage 1
+        // `max(1, deltaCount)` / Stage 2 `max(1, wordCount)` fallback and
+        // avoids a false-infeasible verdict on such legacy output.
+        if let firstTokenAt {
+            let fallbackTokens = max(1, contentFallbackTokens)
+            let generationElapsed = max(0.001, ended.timeIntervalSince(firstTokenAt))
+            return (ttftMS: ttftMS, throughputTPS: Double(fallbackTokens) / generationElapsed)
+        }
+
+        // Branch 2b: genuinely nothing generated.
+        return (ttftMS: .infinity, throughputTPS: 0)
+    }
+
+    /// Extracts the `usage` object from a payload IFF the payload is a
+    /// genuine terminal usage chunk: a valid JSON object with a top-level
+    /// `choices` key that is an EMPTY array and a `usage` object. A content
+    /// chunk that also carries `usage` has a non-empty `choices` array and is
+    /// rejected here so it is never mistaken for the terminal usage chunk.
+    private static func terminalUsageObject(from payload: String) -> [String: Any]? {
+        guard let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [Any], choices.isEmpty,
+              let usage = json["usage"] as? [String: Any]
+        else {
+            return nil
+        }
+        return usage
+    }
+
+    /// True when `num` is a JSON boolean masquerading as an `NSNumber`
+    /// (`true`/`false` bridge to `NSNumber` and would otherwise pass numeric
+    /// checks as 1/0).
+    private static func isBoolean(_ num: NSNumber) -> Bool {
+        CFGetTypeID(num) == CFBooleanGetTypeID()
+    }
+
+    /// Parses the streamed terminal usage chunk (`choices: []` + top-level
+    /// `usage`) and returns the honest decode-token count for throughput
+    /// measurement.
+    ///
+    /// Prefers `usage.macprovider_generated_completion_tokens` — the total
+    /// tokens the model decoded across ALL channels (reasoning/analysis +
+    /// final). This is the correct throughput numerator: for Harmony
+    /// reasoning models (gpt-oss-20b) the analysis channel is suppressed
+    /// from `completion_tokens`, so on the probe's gibberish prompt
+    /// `completion_tokens` can be ~0 while real decode work happened.
+    /// Falls back to `usage.completion_tokens` for older serve builds that
+    /// predate the namespaced field (non-reasoning models, where the two
+    /// are equal).
+    ///
+    /// Hardened against malformed/hostile values: rejects booleans,
+    /// non-integral (fractional) numbers, negatives, and values greater than
+    /// `maxTokens` (the probe caps `max_tokens` at `maxTokens`; an honest
+    /// provider cannot decode more completion tokens than the cap, so a
+    /// larger value — including an overflowed `Int.max` — is malformed).
+    /// Returns nil for ordinary content chunks, `[DONE]`, malformed payloads,
+    /// and any value failing validation, which makes finalization fall back
+    /// rather than trust an inflated count.
+    static func usageDecodedTokens(from payload: String) -> Int? {
+        guard let usage = terminalUsageObject(from: payload) else {
+            return nil
+        }
+        // Round-2 code MEDIUM-1: when the namespaced field is PRESENT it is
+        // authoritative — its validation result (which is nil for a bool,
+        // fractional, negative, or over-cap value) is returned as-is. We must
+        // NOT fall back to `completion_tokens` in that case, or a hostile
+        // provider could suppress the honest all-channel count with a
+        // malformed value and have the probe trust the (possibly ~0)
+        // final-channel `completion_tokens` instead.
+        if let generatedRaw = usage["macprovider_generated_completion_tokens"] {
+            guard let generated = generatedRaw as? NSNumber else { return nil }
+            return validatedTokenCount(generated)
+        }
+        if let completionTokens = usage["completion_tokens"] as? NSNumber {
+            return validatedTokenCount(completionTokens)
+        }
+        return nil
+    }
+
+    /// Validates an `NSNumber` token count: not a boolean, integral,
+    /// nonnegative, and not greater than `maxTokens`. Returns the `Int` value
+    /// or nil.
+    private static func validatedTokenCount(_ num: NSNumber) -> Int? {
+        guard !isBoolean(num) else { return nil }
+        let value = num.doubleValue
+        guard value.isFinite else { return nil }
+        // Integral check: reject fractional values.
+        guard Double(num.int64Value) == value else { return nil }
+        let tokens = num.int64Value
+        guard tokens >= 0, tokens <= Int64(maxTokens) else { return nil }
+        return Int(tokens)
+    }
+
+    /// Parses the provider-reported warm-decode wall-time
+    /// (`macprovider_generation_ms`) from the terminal usage chunk. The
+    /// provider emits this as an `Int64` (whole milliseconds), so the value
+    /// must be a non-boolean, finite, integral, nonnegative `NSNumber`.
+    /// Round-2 security HIGH: a lenient `Double` accepted sub-millisecond
+    /// values (e.g. `0.001`) that inflated throughput by ~10^6; rejecting
+    /// fractional/negative/non-finite values (→ nil) forces finalization onto
+    /// a floored, honest window. Returns whole `Int` milliseconds, else nil.
+    static func usageGenerationMS(from payload: String) -> Int? {
+        guard let usage = terminalUsageObject(from: payload),
+              let generationMS = usage["macprovider_generation_ms"] as? NSNumber,
+              !isBoolean(generationMS)
+        else {
+            return nil
+        }
+        let value = generationMS.doubleValue
+        guard value.isFinite else { return nil }
+        // Integral check: reject fractional values.
+        guard Double(generationMS.int64Value) == value else { return nil }
+        let ms = generationMS.int64Value
+        guard ms >= 0 else { return nil }
+        return Int(ms)
+    }
+
+    static func contentDelta(from payload: String) -> String? {
         guard let data = payload.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
@@ -656,9 +886,25 @@ struct Stage1Prober: Stage1Probing {
         let sorted = values.sorted()
         let mid = sorted.count / 2
         if sorted.count.isMultiple(of: 2) {
-            return (sorted[mid - 1] + sorted[mid]) / 2
+            // Overflow-safe average (round-2 security MEDIUM): `a/2 + b/2`
+            // avoids the intermediate `a + b` overflowing to `.infinity`.
+            return sorted[mid - 1] / 2 + sorted[mid] / 2
         }
         return sorted[mid]
+    }
+
+    private func stage1DiagnosticNumber(_ value: Double) -> String {
+        if value.isNaN {
+            return "nan"
+        }
+        if value == .infinity {
+            return "infinity"
+        }
+        if value == -.infinity {
+            return "-infinity"
+        }
+        return String(format: "%.6f", value)
+            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
     }
 }
 

@@ -76,6 +76,8 @@ const (
 	legacySettlementPolicyVersion     = "spec022-prereq-v0"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
+	decodeIdleSlowModelProgressTokens = 5
+	decodeIdleSlowModelMax            = 60 * time.Second
 )
 
 var errStreamingIdleTimeout = errors.New("streaming upstream idle timeout")
@@ -136,13 +138,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// carry per-tenant headers (X-RateLimit-Remaining-Requests).
 	// Forbid intermediary caching unconditionally so a misconfigured
 	// CDN/proxy cannot serve another buyer's rate-limit state via
-	// a shared cache. Vary covers both auth modes (bearer + demo
-	// token) so any proxy that does cache will at least key
-	// correctly per-tenant.
+	// a shared cache. Vary covers public auth headers (bearer,
+	// Anthropic X-Api-Key shim, and demo token) so any proxy that
+	// does cache will at least key correctly per-tenant.
 	setNoStoreHeaders(w.Header())
 	// Use Add (not Set) so an existing CORS-supplied Vary: Origin
 	// is preserved alongside the auth-mode signals we add here.
 	w.Header().Add("Vary", "Authorization")
+	w.Header().Add("Vary", "X-Api-Key")
 	w.Header().Add("Vary", "X-Demo-Token")
 	var accountID, model string
 	var streamMode bool
@@ -219,6 +222,26 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	dedupeEntrypoint := idlessDedupeEntrypointChat
+	dedupeBody := body
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+		translatedBody, translateErr := adapter.translateRequest(body)
+		if translateErr != nil {
+			writeResponsesTranslationError(w, http.StatusBadRequest, translateErr)
+			return
+		}
+		dedupeEntrypoint = idlessDedupeEntrypointResponses
+		body = translatedBody
+	}
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil {
+		translatedBody, translateErr := adapter.translateRequest(r.Header, body)
+		if translateErr != nil {
+			writeAnthropicMessagesError(w, http.StatusBadRequest, translateErr.typ, translateErr.code, translateErr.message)
+			return
+		}
+		dedupeEntrypoint = idlessDedupeEntrypointMessages
+		body = translatedBody
+	}
 	chat, err := parseChatRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
@@ -234,7 +257,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if chat.MaxTokens != nil {
 		maxTokens = *chat.MaxTokens
 	}
-	if maxTokens <= 0 || maxTokens > maxAllowed {
+	if maxTokens < 0 || maxTokens > maxAllowed {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens_exceeded", "max_tokens exceeds configured limit")
 		return
 	}
@@ -273,11 +296,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		requestIDClass(r) == retry503RequestIDClassGatewayGenerated &&
 		strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
 		dedupeFingerprint = idlessRequestFingerprint(
+			dedupeEntrypoint,
 			subject.AccountID,
 			subject.DemoTokenHash,
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
-			body,
+			dedupeBody,
 		)
 		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
 		switch {
@@ -297,11 +321,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// fall-through 409 would name an id the buyer cannot correlate.
 			r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, entry.requestID))
 			w.Header().Set("X-Request-ID", entry.requestID)
+			var replayAdapter *responsesAdapter
+			if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+				replayAdapter = adapter
+				replayAdapter.beginReplayPassthrough()
+			}
+			if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil {
+				adapter.replayBody = true
+			}
 			if s.replayIdlessDuplicate(w, r, subject, dailyQuota, entry, dedupeWindow, deadlines) {
 				return
 			}
+			if replayAdapter != nil {
+				replayAdapter.endReplayPassthrough()
+			}
+			if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil {
+				adapter.replayBody = false
+			}
 		default:
 			sw.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			if adapter := responsesAdapterFromContext(r.Context()); adapter != nil {
+				adapter.armDedupeCapture(idlessDedupeMaxEntryBytes)
+			}
 			defer func() {
 				if dedupeFingerprint == "" {
 					return
@@ -316,12 +357,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
 					panic(recovered)
 				}
+				adapter := responsesAdapterFromContext(r.Context())
+				if adapter != nil {
+					adapter.finish()
+				}
 				// Publish is gated on a buyer-visible 2xx, not on settlement
 				// finality: a SPEC-022 hold is still a delivered answer, and
 				// a retry of it must not re-run inference. A buyer who
 				// disconnected never saw the whole response, so nothing is
 				// cached for them (their partial is settled as usual).
-				if sw.dedupePublishable() && r.Context().Err() == nil {
+				if adapter != nil && sw.dedupeDelivered2xx() && r.Context().Err() == nil {
+					capture := adapter.dedupeCapture()
+					if capture != nil {
+						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							capture, s.now())
+						return
+					}
+					if adapter.dedupeDeliveredButUncacheable() {
+						s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
+							w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
+							nil, s.now())
+						return
+					}
+					s.idlessDedupe.drop(dedupeFingerprint, requestID(r))
+					return
+				}
+				if adapter == nil && sw.dedupePublishable() && r.Context().Err() == nil {
 					s.idlessDedupe.publish(dedupeFingerprint, requestID(r), sw.statusCode,
 						w.Header().Get("Content-Type"), w.Header().Get("X-Provider-Id"),
 						sw.dedupeCapture(), s.now())
@@ -346,6 +408,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	promptEstimate := estimatePromptTokens(body)
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil {
+		adapter.setPromptEstimate(promptEstimate)
+	}
 	promptReservation := promptCapTokens(body)
 	reservationTokens := promptReservation + maxTokens
 	if reservationTokens < maxTokens {
@@ -563,7 +628,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, model, retryExhausted, priorProviderDispatch, deadlines, structuredStreaming, window, timing)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, priorProviderDispatch, window)
@@ -815,23 +880,61 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
+	anthropicDuplicateProviderResponse := false
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
+		anthropicDuplicateProviderResponse = true
+	}
 	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
 	tokenSource := "gateway_estimated"
 	if !ok {
 		usage = tokenUsage{PromptTokens: promptEstimate, CachedPromptTokens: 0, CompletionTokens: 0, TotalTokens: promptEstimate}
-	} else if usageErr != nil {
+	} else if usageErr == nil {
+		tokenSource = "provider_reported"
+	}
+	if anthropicDuplicateProviderResponse {
+		settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
+		if ok && usageErr == nil {
+			settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
+		}
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+			return
+		}
+		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+		return
+	}
+	if usageErr != nil {
 		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_usage", "Upstream provider returned invalid usage")
 		return
-	} else {
-		tokenSource = "provider_reported"
+	}
+	body = usageBodyWithTokenUsage(body, usage)
+	if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
+		if err := adapter.prepareNonStreamingResponse(body); err != nil {
+			settlePrompt, settleCompletion, settleSource := promptEstimate, int64(0), "gateway_estimated"
+			if ok {
+				settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
+			}
+			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+				return
+			}
+			writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+			return
+		}
+	}
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
+		if err := adapter.prepareNonStreamingResponse(body); err != nil {
+			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "invalid_provider_response", resp.Header) {
+				return
+			}
+			writeAnthropicMessagesError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
+			return
+		}
 	}
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
-	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -865,7 +968,7 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, model string, retryExhausted, priorProviderDispatch bool, deadlines *requestDeadlines, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	upstreamCtx := deadlines.Context()
 	cancelUpstream := deadlines.Cancel
 	if resp.StatusCode == http.StatusServiceUnavailable {
@@ -958,7 +1061,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	// keeps the socket warm with role-only or usage-only frames no longer
 	// holds the stream open forever. A zero deadline preserves the legacy
 	// "no idle timeout" sentinel (streaming_idle_ms <= 0).
-	idleTimeout := s.cfg.StreamingIdleTimeout()
+	idleTimeout := adaptiveDecodeIdleTimeout(model, s.cfg)
 	progressDeadline := streamingProgressDeadline(idleTimeout)
 	var emitted int64
 	var serializedEmitted int64
@@ -1006,7 +1109,31 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	gatewaySerializedEstimatedCompletion := func() int64 {
 		return estimateStreamingCompletionTokens(maxInt64(emitted, serializedEmitted), maxTokens)
 	}
-	settleGatewayTerminalOutputExceeded := func() {
+	cleanLengthFallbackCompletion := func(observedBytes int64) int64 {
+		completion := estimateStreamingCompletionTokens(maxInt64(maxInt64(emitted, serializedEmitted), observedBytes), maxTokens)
+		if completion == 0 && maxTokens > 0 {
+			return 1
+		}
+		return completion
+	}
+	setCleanLengthFallbackUsage := func(completion int64) {
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			adapter.setFallbackStreamUsage(promptEstimate, completion)
+		}
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			adapter.setFallbackStreamUsage(promptEstimate, completion)
+		}
+	}
+	cleanLengthFacadeCompletion := func(completion int64) int64 {
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			return completion
+		}
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			return completion
+		}
+		return 0
+	}
+	settleGatewayTerminalOutputExceeded := func(completion int64) {
 		// This is a gateway-authored terminal SSE error. The gateway cancels
 		// the coordinator stream before EOF, so declared settlement trailers
 		// may be unavailable and must not rewrite the buyer-visible outcome.
@@ -1025,7 +1152,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			}
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
+		s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
 	}
 	settleTruncated := func() {
 		if reported != nil {
@@ -1113,8 +1240,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				if terminalStructuredErrorCode != "" {
 					return true
 				}
-				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
-					terminalStructuredErrorCode = code
+				terminalCode := terminalSSEErrorCode(data)
+				cleanLengthTerminalFrame := sseErrorDeliveredClean(w, terminalCode)
+				if isSpec019TerminalSSEErrorCode(terminalCode) && !cleanLengthTerminalFrame {
+					terminalStructuredErrorCode = terminalCode
 					// #762: a 200 stream that ends in a SPEC-019 terminal
 					// error envelope is refunded, not an answer. Caching it
 					// would replay a stale provider error to a retry that
@@ -1129,6 +1258,42 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						flusher.Flush()
 					}
 					return true
+				}
+				anthropicTerminalFrame := false
+				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+					anthropicTerminalFrame = terminalCode != ""
+					if gatewayCleanLengthTruncationTerminalCode(terminalCode) {
+						adapter.setFallbackStreamUsage(promptEstimate, cleanLengthFallbackCompletion(0))
+					}
+				}
+				if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && cleanLengthTerminalFrame {
+					adapter.setFallbackStreamUsage(promptEstimate, cleanLengthFallbackCompletion(0))
+				}
+				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame && anthropicRawHasDuplicateKeys([]byte(data)) {
+					slog.Warn("anthropic stream saw duplicate-key provider chunk; rejecting before normalization", "request_id", requestID(r))
+					adapter.emitInvalidProviderResponse("Upstream provider returned ambiguous stream data")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					poisonDedupeCapture(w)
+					cancelCoordinator()
+					completion := gatewayContentEstimatedCompletion()
+					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+					return false
+				}
+				if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !anthropicTerminalFrame {
+					if err := anthropicValidateStreamProviderRaw([]byte(data)); err != nil {
+						slog.Warn("anthropic stream rejected provider chunk before accounting", "request_id", requestID(r), "error", err)
+						adapter.emitInvalidProviderResponse(err.Error())
+						if flusher != nil {
+							flusher.Flush()
+						}
+						poisonDedupeCapture(w)
+						cancelCoordinator()
+						completion := gatewayContentEstimatedCompletion()
+						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+						return false
+					}
 				}
 				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
 				if deltaBytes > 0 {
@@ -1168,7 +1333,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else {
 						line = nil
 					}
-				} else if !hasChoices {
+				} else if !hasChoices && !anthropicTerminalFrame && !cleanLengthTerminalFrame {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
 					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
@@ -1190,22 +1355,26 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					if projectedContentBytes > hardByteCeiling {
 						slog.Warn("streaming gateway estimate exceeded hard byte ceiling; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", estimateTokensFromBytes(projectedContentBytes), "max_completion_tokens", maxCompletion, "emitted_bytes", projectedContentBytes, "hard_byte_ceiling", hardByteCeiling)
+						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
+						setCleanLengthFallbackUsage(completion)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						settleGatewayTerminalOutputExceeded()
+						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
 						return false
 					}
 					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
 						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", maxStreamingFallbackMetadataBytes)
+						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
+						setCleanLengthFallbackUsage(completion)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						settleGatewayTerminalOutputExceeded()
+						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
 						return false
 					}
 					emitted = projectedContentBytes
@@ -1216,6 +1385,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if len(line) == 0 {
 			return true
 		}
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && bytes.Equal(bytes.TrimSpace(line), []byte("data: [DONE]")) && reported == nil {
+			adapter.setFallbackStreamUsage(promptEstimate, gatewaySerializedEstimatedCompletion())
+		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
 			// #762: explicit, even though settleCancelled poisons too — this
@@ -1223,6 +1395,40 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			// never-delivered 2xx.
 			poisonDedupeCapture(w)
 			settleCancelled()
+			return false
+		}
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.hasStreamInvalid() {
+			slog.Warn("anthropic stream translation rejected provider data", "request_id", requestID(r), "error", adapter.invalidMessage())
+			poisonDedupeCapture(w)
+			cancelCoordinator()
+			completion := gatewayContentEstimatedCompletion()
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+			return false
+		}
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.streamDone && terminalStructuredErrorCode == "" {
+			if reported != nil && !invalidReportedUsage {
+				settleReported(adapter.settlementOutcome("ok"))
+			} else {
+				outcome := adapter.settlementOutcome("ok")
+				completion := gatewaySerializedEstimatedCompletion()
+				if outcome == "stream_output_exceeded" {
+					completion = cleanLengthFallbackCompletion(0)
+				}
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
+			}
+			return false
+		}
+		if adapter := responsesAdapterFromContext(r.Context()); adapter != nil && adapter.streamTerminal && terminalStructuredErrorCode == "" {
+			if reported != nil && !invalidReportedUsage {
+				settleReported(adapter.settlementOutcome("ok"))
+			} else {
+				outcome := adapter.settlementOutcome("ok")
+				completion := gatewaySerializedEstimatedCompletion()
+				if outcome == "stream_output_exceeded" {
+					completion = cleanLengthFallbackCompletion(0)
+				}
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
+			}
 			return false
 		}
 		if flusher != nil {
@@ -1248,7 +1454,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if errors.Is(err, errStreamingIdleTimeout) {
 			slog.Warn("streaming coordinator idle timeout",
 				"request_id", requestID(r),
-				"timeout_ms", s.cfg.Timeouts.StreamingIdleMS,
+				"timeout_ms", idleTimeout.Milliseconds(),
 				"deadline_phase", deadlineReasonDecodeIdle,
 			)
 			deadlines.noteReason(deadlineReasonDecodeIdle)
@@ -1334,12 +1540,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		refundTerminalStructuredError()
 		return
 	}
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream && !adapter.streamDone {
+		if err := adapter.validateStreamComplete(); err != nil {
+			adapter.emitInvalidProviderResponse(err.Error())
+			if sw, ok := w.(*statusWriter); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+				sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			poisonDedupeCapture(w)
+			if adapter.writeErr != nil {
+				slog.Warn("anthropic stream invalid-response write failed", "request_id", requestID(r), "error", adapter.writeErr)
+				settleCancelled()
+				return
+			}
+			completion := gatewayContentEstimatedCompletion()
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "invalid_provider_response", reservationWindow, resp)
+			return
+		}
+		fallbackCompletion := gatewaySerializedEstimatedCompletion()
+		adapter.setFallbackStreamUsage(promptEstimate, fallbackCompletion)
+		adapter.emitMessageStop()
+		if sw, ok := w.(*statusWriter); ok && sw.captureArmed && !sw.overflowed && !sw.poisoned {
+			sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
+		}
+		if adapter.writeErr != nil {
+			slog.Warn("anthropic stream finalization buyer write failed", "request_id", requestID(r), "error", adapter.writeErr)
+			poisonDedupeCapture(w)
+			settleCancelled()
+			return
+		}
+	}
 	if reported != nil && !invalidReportedUsage {
-		settleReported("ok")
+		outcome := "ok"
+		if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+			outcome = adapter.settlementOutcome(outcome)
+		}
+		settleReported(outcome)
 		return
 	}
 	completion := gatewaySerializedEstimatedCompletion()
 	outcome := "ok"
+	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && adapter.stream {
+		outcome = adapter.settlementOutcome(outcome)
+	}
 	if estimateTokensFromBytes(maxInt64(emitted, serializedEmitted)) > maxStreamingCompletionTokens(maxTokens) {
 		outcome = "stream_output_exceeded"
 	}
@@ -1360,6 +1605,40 @@ func streamingProgressDeadline(idleTimeout time.Duration) time.Time {
 		return time.Time{}
 	}
 	return time.Now().Add(idleTimeout)
+}
+
+func adaptiveDecodeIdleTimeout(model string, cfg config.Config) time.Duration {
+	base := cfg.StreamingIdleTimeout()
+	if base <= 0 {
+		return base
+	}
+	expectedTPS, ok := expectedDecodeTokensPerSecond(model)
+	if !ok || expectedTPS <= 0 {
+		return base
+	}
+	perToken := time.Duration(math.Ceil(float64(time.Second) / expectedTPS))
+	adaptive := perToken * decodeIdleSlowModelProgressTokens
+	if adaptive > decodeIdleSlowModelMax {
+		adaptive = decodeIdleSlowModelMax
+	}
+	if adaptive > base {
+		return adaptive
+	}
+	return base
+}
+
+func expectedDecodeTokensPerSecond(model string) (float64, bool) {
+	name := strings.ToLower(model)
+	switch {
+	case strings.Contains(name, "70b"), strings.Contains(name, "72b"):
+		return 0.17, true
+	case strings.Contains(name, "30b"), strings.Contains(name, "32b"):
+		return 0.25, true
+	case strings.Contains(name, "20b"), strings.Contains(name, "22b"), strings.Contains(name, "24b"):
+		return 0.5, true
+	default:
+		return 0, false
+	}
 }
 
 // readStreamingLineWithIdleTimeout reads one SSE line, giving up at deadline.
@@ -1819,6 +2098,9 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
 }
 
 func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
+	if gatewayInvalidResponseOverridesCoordinatorFinality(outcome) {
+		return s.settleBeforeResponse(w, r, subject, prompt, completion, maxTotal, source, outcome)
+	}
 	finality := coordinatorSettlementFinalityFromHeaders(h)
 	switch finality.Action {
 	case settlementFinalityLegacy:
@@ -1872,6 +2154,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 }
 
 func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
+	if gatewayInvalidResponseOverridesCoordinatorFinality(outcome) {
+		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
+		return
+	}
 	finality := coordinatorStreamingSettlementFinality(resp)
 	switch finality.Action {
 	case settlementFinalityLegacy:
@@ -1909,6 +2195,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 	default:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	}
+}
+
+func gatewayInvalidResponseOverridesCoordinatorFinality(outcome string) bool {
+	return outcome == "invalid_provider_response"
 }
 
 func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
@@ -2685,6 +2975,22 @@ func isSpec019TerminalSSEErrorCode(code string) bool {
 	}
 }
 
+func gatewayCleanLengthTruncationTerminalCode(code string) bool {
+	switch code {
+	case "stream_output_exceeded", "response_byte_cap_exceeded":
+		return true
+	default:
+		return false
+	}
+}
+
+func gatewayCleanLengthTruncationSettlementOutcome(code string) string {
+	if gatewayCleanLengthTruncationTerminalCode(code) {
+		return "stream_output_exceeded"
+	}
+	return ""
+}
+
 func demoTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -2736,6 +3042,14 @@ type statusWriter struct {
 	poisoned bool
 }
 
+type transformedDedupeCapture interface {
+	drainDedupeCapture() []byte
+}
+
+type cleanSSEErrorDedupeTransformer interface {
+	dedupeCleanSSEError(code string) bool
+}
+
 // armDedupeCapture starts recording the buyer-visible body, up to limit bytes.
 func (sw *statusWriter) armDedupeCapture(limit int) {
 	sw.captureArmed = true
@@ -2745,7 +3059,11 @@ func (sw *statusWriter) armDedupeCapture(limit int) {
 // dedupePublishable reports whether the captured response may be replayed to
 // an identical id-less retry: a complete, buyer-visible 2xx that fit the cap.
 func (sw *statusWriter) dedupePublishable() bool {
-	return sw.captureArmed && !sw.poisoned && !sw.overflowed &&
+	return sw.dedupeDelivered2xx() && !sw.overflowed
+}
+
+func (sw *statusWriter) dedupeDelivered2xx() bool {
+	return sw.captureArmed && !sw.poisoned &&
 		sw.statusCode >= 200 && sw.statusCode < 300
 }
 
@@ -2775,12 +3093,34 @@ func poisonDedupeCapture(w http.ResponseWriter) {
 	}
 }
 
+func sseErrorDedupePoisonRequired(w http.ResponseWriter, code string) bool {
+	return !sseErrorDeliveredClean(w, code)
+}
+
+func sseErrorDeliveredClean(w http.ResponseWriter, code string) bool {
+	if code == "" {
+		return false
+	}
+	if sw, ok := w.(*statusWriter); ok {
+		if transformed, ok := sw.ResponseWriter.(cleanSSEErrorDedupeTransformer); ok {
+			return transformed.dedupeCleanSSEError(code)
+		}
+	}
+	if transformed, ok := w.(cleanSSEErrorDedupeTransformer); ok {
+		return transformed.dedupeCleanSSEError(code)
+	}
+	return false
+}
+
 func (sw *statusWriter) WriteHeader(code int) {
 	if !sw.flushed {
 		sw.statusCode = code
 		sw.flushed = true
 	}
 	sw.ResponseWriter.WriteHeader(code)
+	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
+		sw.captureDedupeBytes(sw.drainTransformedDedupeBytes(nil))
+	}
 }
 
 func (sw *statusWriter) Write(b []byte) (int, error) {
@@ -2794,22 +3134,39 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 	// complete 2xx and replayed to the next retry.
 	n, err := sw.ResponseWriter.Write(b)
 	if sw.captureArmed && !sw.overflowed && !sw.poisoned {
+		captured := sw.drainTransformedDedupeBytes(b[:n])
 		switch {
 		case err != nil:
 			// The buyer did not get all of this. Whatever we hold is a
 			// partial response; it must never be replayed.
 			sw.poisoned = true
 			sw.capture = nil
-		case len(sw.capture)+n > sw.captureCap:
-			// Oversize responses are not cached at all (rather than
-			// truncated): a partial replay would be a wrong answer.
-			sw.overflowed = true
-			sw.capture = nil
 		default:
-			sw.capture = append(sw.capture, b[:n]...)
+			sw.captureDedupeBytes(captured)
 		}
 	}
 	return n, err
+}
+
+func (sw *statusWriter) drainTransformedDedupeBytes(fallback []byte) []byte {
+	if transformed, ok := sw.ResponseWriter.(transformedDedupeCapture); ok {
+		return transformed.drainDedupeCapture()
+	}
+	return fallback
+}
+
+func (sw *statusWriter) captureDedupeBytes(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	if len(sw.capture)+len(b) > sw.captureCap {
+		// Oversize responses are not cached at all (rather than
+		// truncated): a partial replay would be a wrong answer.
+		sw.overflowed = true
+		sw.capture = nil
+		return
+	}
+	sw.capture = append(sw.capture, b...)
 }
 
 // Flush satisfies http.Flusher so SSE streaming through this wrapper still
@@ -2834,7 +3191,9 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	// #762: an SSE error frame means this 200 stream is NOT a complete
 	// answer. Poison the dedupe capture so an identical id-less retry gets a
 	// fresh dispatch instead of replaying a truncated generation.
-	poisonDedupeCapture(w)
+	if sseErrorDedupePoisonRequired(w, code) {
+		poisonDedupeCapture(w)
+	}
 	// H1: SSE error frames carry retryable too, classified by the same
 	// gatewayRetryableByCode table writeError uses. Headers are already
 	// flushed by the time an SSE frame is emitted (the stream started as

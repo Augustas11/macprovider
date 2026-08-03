@@ -23,9 +23,9 @@ done
 
 grep -qF 'STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror binary variable"
-grep -qF 'STATS_BILLING_MIRROR_SERVICE="$DIST_DIR/stats-billing-mirror.service"' "$DEPLOY_SH" ||
+grep -qF 'STATS_BILLING_MIRROR_SERVICE="$PINNED_DIST_DIR/stats-billing-mirror.service"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror service variable"
-grep -qF 'STATS_BILLING_MIRROR_TIMER="$DIST_DIR/stats-billing-mirror.timer"' "$DEPLOY_SH" ||
+grep -qF 'STATS_BILLING_MIRROR_TIMER="$PINNED_DIST_DIR/stats-billing-mirror.timer"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror timer variable"
 grep -qF '$SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror-linux-amd64"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror binary upload"
