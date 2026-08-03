@@ -252,7 +252,7 @@ jobs:
             --output "$destination/unsigned-acceptance-manifest.json"
 
       - name: Upload unsigned candidate build data
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: unsigned-acceptance-${{ steps.source.outputs.candidate_commit }}
           path: ${{ runner.temp }}/unsigned-acceptance-inputs/
@@ -366,7 +366,7 @@ jobs:
             "$CANDIDATE_REF" "$CANDIDATE_COMMIT" "$TAG"
 
       - name: Upload short-lived private acceptance artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: acceptance-candidate-${{ needs.build_candidate.outputs.candidate_commit }}
           path: ${{ runner.temp }}/acceptance-candidate/
