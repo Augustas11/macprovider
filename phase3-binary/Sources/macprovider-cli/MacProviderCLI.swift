@@ -198,6 +198,8 @@ struct ServeCommand: AsyncParsableCommand {
     // TestParseHeartbeatAcceptsSpecDecodeOptInFieldsAsForwardCompatible and
     // TestHeartbeatSpecDecodeOptInFieldsPreserveStatePath.
     static let bundledCoordinatorAcceptsSpecDecodeTelemetry = true
+    static let pagedKVStrictStartupRejectEvent =
+        "event=paged_kv_attach status=rejected reason=paged_preflight_reject detail=strict_runtime_proof_unavailable"
 
     static let configuration = CommandConfiguration(
         commandName: "serve",
@@ -345,6 +347,18 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .customLong("kv-disk-cache-shutdown-drain-s"), help: "KV disk-tier graceful-shutdown drain budget in seconds (≥0). Overrides MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S and config key kv_disk_cache.shutdown_drain_seconds.")
     var kvDiskCacheShutdownDrainSeconds: Int?
 
+    @Flag(name: .customLong("paged-kv-enabled"), inversion: .prefixedNo, help: "Opt into the provider-local paged KV engine. Default off; activation still requires attach/parity/packaging gates.")
+    var pagedKVEnabled: Bool?
+
+    @Option(name: .customLong("paged-kv-block-size-tokens"), help: "Paged KV fixed block size in tokens (>0). Overrides MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS and config key paged_kv.block_size_tokens.")
+    var pagedKVBlockSizeTokens: Int?
+
+    @Option(name: .customLong("paged-kv-max-physical-blocks"), help: "Paged KV pool capacity in physical blocks (>0). Overrides MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS and config key paged_kv.max_physical_blocks.")
+    var pagedKVMaxPhysicalBlocks: Int?
+
+    @Option(name: .customLong("paged-kv-fallback-policy"), help: "Paged KV fallback policy: permissive or strict. Overrides MACPROVIDER_PAGED_KV_FALLBACK_POLICY and config key paged_kv.fallback_policy.")
+    var pagedKVFallbackPolicy: String?
+
     /// SPEC-037 FR-KVP11 (MEDIUM-5): the KV disk-tier CLI overrides assembled from the
     /// parsed `--kv-disk-cache-*` flags. Exposed so tests can assert the flag → override
     /// wiring (and CLI-wins precedence / allow_buyer_keys rejection) without running serve.
@@ -362,6 +376,15 @@ struct ServeCommand: AsyncParsableCommand {
             minFreeBytes: kvDiskCacheMinFreeBytes,
             promotionMaxSeconds: kvDiskCachePromotionMaxSeconds,
             shutdownDrainSeconds: kvDiskCacheShutdownDrainSeconds
+        )
+    }
+
+    var pagedKVCLIOverrides: PagedKVCLIOverrides {
+        PagedKVCLIOverrides(
+            enabled: pagedKVEnabled,
+            blockSizeTokens: pagedKVBlockSizeTokens,
+            maxPhysicalBlocks: pagedKVMaxPhysicalBlocks,
+            fallbackPolicy: pagedKVFallbackPolicy
         )
     }
 
@@ -476,6 +499,16 @@ struct ServeCommand: AsyncParsableCommand {
         if let hash = resolved.draftModelArtifactSHA256,
            hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
             FileHandle.standardError.write(Data("draft_model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
+            throw ExitCode(2)
+        }
+        for error in resolved.pagedKV.errors {
+            FileHandle.standardError.write(Data(("paged_kv: \(error)\n").utf8))
+        }
+        if resolved.pagedKV.effectiveEnabled && resolved.pagedKV.fallbackPolicy == .strict {
+            FileHandle.standardError.write(Data((
+                "\(Self.pagedKVStrictStartupRejectEvent)\n"
+                + "paged_kv strict fallback is unavailable until packaged metallib, kernel, parity, and sizing proof are installed\n"
+            ).utf8))
             throw ExitCode(2)
         }
     }
@@ -859,7 +892,8 @@ struct ServeCommand: AsyncParsableCommand {
                 prefillStepSize: prefillStepSize,
                 // SPEC-037 FR-KVP11 (MEDIUM-5): forward the KV disk-tier flags so the
                 // triple-source config surface (CLI → env → YAML) is complete.
-                kvDiskCache: kvDiskCacheCLIOverrides
+                kvDiskCache: kvDiskCacheCLIOverrides,
+                pagedKV: pagedKVCLIOverrides
             )
         )
 
@@ -1080,6 +1114,7 @@ struct ServeCommand: AsyncParsableCommand {
                 numDraftTokens: resolved.numDraftTokens,
                 maxContextTokensOverride: resolved.maxContextOverride,
                 kvBitsOverride: effectiveKVBits,
+                pagedKVConfig: resolved.pagedKV,
                 prefillStepSize: resolved.prefillStepSize,
                 maxBatch: resolved.maxConcurrencyOverride ?? 1,
                 warmSwapEnabled: resolved.enableWarmSwap,

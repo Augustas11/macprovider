@@ -828,6 +828,47 @@ final class InferenceRelayTests: XCTestCase {
         let error = try XCTUnwrap(frames[0]["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? String, "tier2_encrypted_frame_required")
     }
+
+    func testRelayStreamingPreflightRejectsBeforeOpeningChunk() async throws {
+        let runtime = FakePreflightRejectRuntime()
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-paged-preflight",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "inference_response_chunk" })
+        let end = try XCTUnwrap(frames.first { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(end["request_id"] as? String, "req-paged-preflight")
+        XCTAssertEqual(end["status"] as? String, "error_internal")
+        let errorMessage = try XCTUnwrap(end["error"] as? String)
+        XCTAssertFalse(errorMessage.localizedCaseInsensitiveContains("paged"))
+        XCTAssertFalse(errorMessage.localizedCaseInsensitiveContains("kv"))
+        XCTAssertEqual(end["chunks_sent"] as? Int, 0)
+    }
 }
 
 /// SPEC-015 §M.2.2 — atomic served-snapshot override so the relay
@@ -1015,6 +1056,52 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         return CompletionResult(content: "onetwo", finishReason: "stop", promptTokens: 7, completionTokens: 2)
+    }
+
+    func unregisterInFlight(_ id: Int) { }
+}
+
+private actor FakePreflightRejectRuntime: ModelRuntimeServing {
+    func currentSnapshot() async -> RuntimeSnapshot {
+        RuntimeSnapshot(state: .ready, container: nil, modelID: "mlx-community/Test-Model", modelHash: nil)
+    }
+
+    func complete(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> CompletionResult {
+        throw APIError(status: 503, message: "Inference engine unavailable", type: "server_error", code: "internal_error")
+    }
+
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        throw APIError(status: 503, message: "Inference engine unavailable", type: "server_error", code: "internal_error")
+    }
+
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        RequestHandle(
+            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: request.model, modelHash: nil),
+            registrationID: 0,
+            drainCancelled: DrainCancelToken()
+        )
+    }
+
+    func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        throw APIError(status: 503, message: "Inference engine unavailable", type: "server_error", code: "internal_error")
+    }
+
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
+
+    func stream(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
+    ) async throws -> CompletionResult {
+        XCTFail("relay must reject before stream starts")
+        throw APIError(status: 503, message: "Inference engine unavailable", type: "server_error", code: "internal_error")
     }
 
     func unregisterInFlight(_ id: Int) { }

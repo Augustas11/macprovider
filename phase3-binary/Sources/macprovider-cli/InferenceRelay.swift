@@ -616,6 +616,7 @@ actor InferenceRelay {
             defer {
                 Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
             }
+            try await modelRuntime.pagedKVPreflight(request, with: handle)
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                 id: id,
                 created: created,

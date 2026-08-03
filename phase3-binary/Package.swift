@@ -83,6 +83,13 @@ let package = Package(
             dependencies: [
                 "MacProviderCore",
                 "macprovider-cli",
+                // Real-model paged-KV parity fixtures (PagedKVParityTests) load MLX models
+                // from the local HF cache and drive the paged gather. Test-target only —
+                // the shipped product dependency set / pins are unchanged.
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Tests/macprovider-cliTests",
             resources: [

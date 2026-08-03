@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 import MLX
 import MLXLMCommon
 import MLXNN
@@ -771,6 +772,74 @@ final class KVConversationColdTierTests: XCTestCase {
             "non-eligible serveCache keeps maxKVSize → a rotating (non-simple) cache")
         XCTAssertTrue(buyerCaches.allSatisfy { $0 is RotatingKVCache },
             "non-eligible params must select RotatingKVCache")
+    }
+
+    func testPagedKVCacheClassProbeUsesUnforcedServeParameters() {
+        let model = FakeDimensionModel(layers: 3)
+        let base = GenerateParameters(
+            maxTokens: 128, maxKVSize: 4096, kvBits: nil,
+            temperature: 0.0, topP: 1.0, prefillStepSize: 512)
+
+        let forced = ModelRuntime.serveCache(model: model, baseParameters: base, eligible: true)
+        XCTAssertNotNil(forced as? [KVCacheSimple])
+
+        let observed = ModelRuntime.pagedKVRuntimeCacheClass(model: model, baseParameters: base)
+        XCTAssertEqual(observed, "RotatingKVCache")
+    }
+
+    func testPagedKVCacheSeamRegistersKernelWithoutExecutingMetal() async throws {
+        let proofModelID = "mlx-community/Qwen-Test"
+        let proofModelSHA256 = String(repeating: "a", count: 64)
+        let proofTokenizerSHA256 = String(repeating: "b", count: 64)
+        let proofChatTemplateSHA256 = String(repeating: "c", count: 64)
+        let proof = PagedKVHardwareSizingProof(
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            modelFamily: "qwen",
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: PagedKVGatherKernel.registeredKernelName,
+            blockSizeTokens: 2,
+            maxPhysicalBlocks: 4,
+            maxResidentTokens: 8,
+            parityLabel: "sdpa-parity-v1"
+        )
+        let decision = PagedKVAttachGate.decide(
+            config: PagedKVConfig(enabled: true, blockSizeTokens: 2, maxPhysicalBlocks: 4),
+            runtimeCacheClass: "KVCacheSimple",
+            kvBits: nil,
+            modelID: proofModelID,
+            modelSHA256: proofModelSHA256,
+            tokenizerSHA256: proofTokenizerSHA256,
+            chatTemplateSHA256: proofChatTemplateSHA256,
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            gates: PagedKVGates(
+                identityAvailable: true,
+                observedHardwareClass: "apple-silicon-test",
+                metallibAvailable: true,
+                kernelRegistered: true,
+                parityEstablished: true,
+                hardwareSizingProof: proof,
+                observedMetallibSHA256: proof.metallibSHA256,
+                observedKernelIdentifier: proof.kernelIdentifier,
+                observedParityLabel: proof.parityLabel,
+                engineBridgeAvailable: true
+            )
+        )
+        let descriptor = try XCTUnwrap(decision.descriptor)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 2, maxPhysicalBlocks: 4)
+        let handle = try await allocator.allocate(conversationKey: "conv:paged", maxTokens: 8, initialTokens: 0)
+        let binding = try await allocator.binding(for: handle)
+        let paged = PagedKVCache(descriptor: descriptor, binding: binding)
+
+        XCTAssertEqual(PagedKVGatherKernel.registeredKernelName, "macprovider_paged_kv_gather_v1")
+        XCTAssertTrue(PagedKVGatherKernel.source.contains("block_ids[logical_block]"))
+        XCTAssertEqual(paged.offset, 0)
+        XCTAssertEqual(paged.maxSize, 8)
+        XCTAssertEqual(paged.metaState.first, "macprovider_paged_kv_v1")
     }
 
     /// SPEC-037 MEDIUM-A/LOW/INFO — a tier-eligible commit holding a NON-KVCacheSimple
