@@ -21,6 +21,11 @@ SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §7 OQ-1 (case preservation) and OQ-2 (admission counter) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-010.
 
+**Compatibility note 2026-07-30 (SPEC-023 v0.9.1 / issue #687):**
+SPEC-023 owns candidate-catalog `bench_gate` provenance, including
+`bench_gate.provenance.source == "omlx_seeded"` and required
+`bench_gate.gate_seed` metadata. SPEC-010 does not treat oMLX evidence as provider admission or promotion authority; verified provider autotune and existing model identity/hash checks remain binding.
+
 **Change log v1.6 (issue #609 canonical model identity):**
 - Names the canonical signed-snapshot identity
   `macprovider.snapshot-manifest.v1` while reusing the canonical byte
