@@ -81,7 +81,7 @@
     <h1>Register payout wallet</h1>
     <p>
       Non-custodial: Malibu never sees your private key. Sign with your browser wallet
-      (MetaMask, Rabby, or any EIP-1193 / WalletConnect-injected provider). The connected
+      (MetaMask, Rabby, or any WalletConnect-compatible wallet). The connected
       account is the address that will be registered.
     </p>
 
@@ -99,7 +99,7 @@
     </div>
 
     <button id="btnInjected" type="button">Connect browser wallet</button>
-    <button id="btnWC" type="button" class="secondary">WalletConnect / other injected</button>
+    <button id="btnWC" type="button" class="secondary">WalletConnect / other wallet</button>
     <button id="btnSign" type="button" disabled>Sign registration</button>
 
     <div id="status" class="status info">Load parameters from Malibu, then connect a wallet.</div>
@@ -184,7 +184,7 @@
     const provider = pickProvider(preferWC);
     if (!provider) {
       setStatus("err", preferWC
-        ? "No WalletConnect-injected provider found. Install MetaMask, Rabby, or a WC-capable browser wallet."
+        ? "No WalletConnect-compatible wallet found. Install MetaMask, Rabby, or a WalletConnect-capable browser wallet."
         : "No browser wallet detected. Install MetaMask or Rabby, then reload.");
       return;
     }

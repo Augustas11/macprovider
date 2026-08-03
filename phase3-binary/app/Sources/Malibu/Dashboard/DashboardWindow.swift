@@ -359,7 +359,7 @@ private struct AddWalletSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add payout wallet")
                 .font(.title3.weight(.semibold))
-            Text("Non-custodial: Malibu never sees your private key. You sign in your own browser wallet (MetaMask, Rabby, or WalletConnect-injected). The connected account becomes your payout address.")
+            Text("Non-custodial: Malibu never sees your private key. You sign in your own browser wallet (MetaMask, Rabby, or any WalletConnect-compatible wallet). The connected account becomes your payout address.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
