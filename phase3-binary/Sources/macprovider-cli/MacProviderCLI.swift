@@ -347,16 +347,16 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .customLong("kv-disk-cache-shutdown-drain-s"), help: "KV disk-tier graceful-shutdown drain budget in seconds (≥0). Overrides MACPROVIDER_KV_DISK_CACHE_SHUTDOWN_DRAIN_S and config key kv_disk_cache.shutdown_drain_seconds.")
     var kvDiskCacheShutdownDrainSeconds: Int?
 
-    @Flag(name: .customLong("paged-kv-enabled"), inversion: .prefixedNo, help: "Opt into the SPEC-039 provider-local paged KV engine. Default off; activation still requires attach/parity/packaging gates.")
+    @Flag(name: .customLong("paged-kv-enabled"), inversion: .prefixedNo, help: "Opt into the provider-local paged KV engine. Default off; activation still requires attach/parity/packaging gates.")
     var pagedKVEnabled: Bool?
 
-    @Option(name: .customLong("paged-kv-block-size-tokens"), help: "SPEC-039 paged KV fixed block size in tokens (>0). Overrides MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS and config key paged_kv.block_size_tokens.")
+    @Option(name: .customLong("paged-kv-block-size-tokens"), help: "Paged KV fixed block size in tokens (>0). Overrides MACPROVIDER_PAGED_KV_BLOCK_SIZE_TOKENS and config key paged_kv.block_size_tokens.")
     var pagedKVBlockSizeTokens: Int?
 
-    @Option(name: .customLong("paged-kv-max-physical-blocks"), help: "SPEC-039 paged KV pool capacity in physical blocks (>0). Overrides MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS and config key paged_kv.max_physical_blocks.")
+    @Option(name: .customLong("paged-kv-max-physical-blocks"), help: "Paged KV pool capacity in physical blocks (>0). Overrides MACPROVIDER_PAGED_KV_MAX_PHYSICAL_BLOCKS and config key paged_kv.max_physical_blocks.")
     var pagedKVMaxPhysicalBlocks: Int?
 
-    @Option(name: .customLong("paged-kv-fallback-policy"), help: "SPEC-039 paged KV fallback policy: permissive or strict. Overrides MACPROVIDER_PAGED_KV_FALLBACK_POLICY and config key paged_kv.fallback_policy.")
+    @Option(name: .customLong("paged-kv-fallback-policy"), help: "Paged KV fallback policy: permissive or strict. Overrides MACPROVIDER_PAGED_KV_FALLBACK_POLICY and config key paged_kv.fallback_policy.")
     var pagedKVFallbackPolicy: String?
 
     /// SPEC-037 FR-KVP11 (MEDIUM-5): the KV disk-tier CLI overrides assembled from the
