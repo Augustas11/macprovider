@@ -111,7 +111,7 @@ def unique_step(job, name):
     return job.split(marker, 1)[1].split("\n      - name:", 1)[0]
 
 
-PEARL_SETUP_GO_SHA = "924ae3a1cded613372ab5595356fb5720e22ba16"
+PEARL_SETUP_GO_SHA = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
 PEARL_GO_SEAL_STEP = (
     "        if: ${{ github.event.inputs.promote_run_id == '' }}\n"
     "        shell: bash\n"
