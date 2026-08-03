@@ -1,0 +1,47 @@
+{
+  "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "chain": "base-mainnet",
+  "description": "Cross-language EIP-712 digest fixture for SPEC-016 §3 PayoutAddressRegistration. Go buildDigest MUST equal ethers.TypedDataEncoder.hash.",
+  "digest": "0xcc905f9ecb678053925ab5a21d61bd9aa872708a820bea84cc13faf3733f8b4e",
+  "domain": {
+    "chainId": 8453,
+    "name": "macprovider-payout",
+    "verifyingContract": "0x52908400098527886E0F7030069857D2E4169EE7",
+    "version": "1"
+  },
+  "nonce": "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "providerId": "test-provider-id",
+  "tsUtc": 1719234896,
+  "types": {
+    "PayoutAddressRegistration": [
+      {
+        "name": "providerId",
+        "type": "string"
+      },
+      {
+        "name": "address",
+        "type": "address"
+      },
+      {
+        "name": "chain",
+        "type": "string"
+      },
+      {
+        "name": "nonce",
+        "type": "bytes32"
+      },
+      {
+        "name": "tsUtc",
+        "type": "uint64"
+      }
+    ]
+  },
+  "value": {
+    "address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "chain": "base-mainnet",
+    "nonce": "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "providerId": "test-provider-id",
+    "tsUtc": 1719234896
+  },
+  "verifyingContract": "0x52908400098527886E0F7030069857D2E4169EE7"
+}

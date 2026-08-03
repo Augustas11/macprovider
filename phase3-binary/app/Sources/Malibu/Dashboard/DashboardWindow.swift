@@ -50,6 +50,7 @@ enum DashboardCopy {
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
     let onExportDiagnostics: () -> Void
+    @State private var showAddWalletSheet = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -88,8 +89,36 @@ private struct DashboardView: View {
                             .font(.caption)
                             .foregroundStyle(MalibuBrand.coral)
                     }
-                    Button("Add wallet") { }
-                        .disabled(true)
+                    if let address = agent.snapshot.payoutRegisteredAddress {
+                        Text("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        if let pending = agent.snapshot.payoutPendingUntilUTC,
+                           let end = Self.parseUTC(pending),
+                           end > Date() {
+                            Text("Cooling off until \(end.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Button(agent.snapshot.payoutRegistrationInProgress
+                           ? "Waiting for wallet…"
+                           : (agent.snapshot.payoutRegisteredAddress == nil ? "Add wallet" : "Change wallet")) {
+                        showAddWalletSheet = true
+                    }
+                    .disabled(agent.snapshot.payoutRegistrationInProgress
+                              || agent.snapshot.localProviderID == nil)
+                    if let error = agent.snapshot.payoutLastError {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let status = agent.snapshot.payoutLastStatus {
+                        Text(status == "rotated" ? "Wallet rotated." : "Wallet registered.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 statsPanel {
@@ -200,6 +229,13 @@ private struct DashboardView: View {
             Spacer(minLength: 0)
         }
         .padding(20)
+        .sheet(isPresented: $showAddWalletSheet) {
+            AddWalletSheet(agent: agent, isPresented: $showAddWalletSheet)
+        }
+        .task(id: agent.snapshot.localProviderID) {
+            guard agent.snapshot.localProviderID != nil else { return }
+            await agent.refreshPayoutRegistration()
+        }
     }
 
     @ViewBuilder
@@ -297,6 +333,119 @@ private struct DashboardView: View {
         case .error: return .red
         case .idle: return .secondary
         }
+    }
+
+    private static func parseUTC(_ raw: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = withFraction.date(from: raw) { return d }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: raw)
+    }
+}
+
+private struct AddWalletSheet: View {
+    @ObservedObject var agent: MalibuAgent
+    @Binding var isPresented: Bool
+    @State private var pasteAddress = ""
+    @State private var pasteSignature = ""
+    @State private var pasteNonce = ""
+    @State private var pasteTsUtc = ""
+    @State private var showPaste = false
+    @State private var localError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add payout wallet")
+                .font(.title3.weight(.semibold))
+            Text("Non-custodial: Malibu never sees your private key. You sign in your own browser wallet (MetaMask, Rabby, or any WalletConnect-compatible wallet). The connected account becomes your payout address.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Payouts stay off by default. This only registers the address; it does not send funds.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if agent.snapshot.payoutRegistrationInProgress {
+                ProgressView("Waiting for browser wallet signature…")
+                    .controlSize(.small)
+            }
+
+            HStack(spacing: 10) {
+                Button("Open browser wallet") {
+                    localError = nil
+                    Task {
+                        await agent.registerPayoutWallet()
+                        if agent.snapshot.payoutLastError == nil,
+                           agent.snapshot.payoutRegisteredAddress != nil {
+                            isPresented = false
+                        }
+                    }
+                }
+                .disabled(agent.snapshot.payoutRegistrationInProgress)
+                .keyboardShortcut(.defaultAction)
+
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .disabled(agent.snapshot.payoutRegistrationInProgress)
+            }
+
+            DisclosureGroup("Paste signature instead", isExpanded: $showPaste) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("If the browser cannot reach Malibu, paste the address and signature from the signer page.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("0x… address", text: $pasteAddress)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("0x… signature (130 hex)", text: $pasteSignature)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("0x… nonce (64 hex)", text: $pasteNonce)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("ts_utc (unix seconds)", text: $pasteTsUtc)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Submit pasted signature") {
+                        Task {
+                            guard let ts = UInt64(pasteTsUtc.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                                localError = "ts_utc must be a unix-seconds integer."
+                                return
+                            }
+                            localError = nil
+                            let payload = PayoutSignedPayload(
+                                address: pasteAddress.trimmingCharacters(in: .whitespacesAndNewlines),
+                                nonce: pasteNonce.trimmingCharacters(in: .whitespacesAndNewlines),
+                                tsUtc: ts,
+                                signature: pasteSignature.trimmingCharacters(in: .whitespacesAndNewlines),
+                                state: "paste"
+                            )
+                            await agent.registerPayoutWallet(pasted: payload)
+                            if agent.snapshot.payoutLastError == nil,
+                               agent.snapshot.payoutRegisteredAddress != nil {
+                                isPresented = false
+                            }
+                        }
+                    }
+                    .disabled(
+                        agent.snapshot.payoutRegistrationInProgress
+                            || pasteAddress.isEmpty
+                            || pasteSignature.isEmpty
+                            || pasteNonce.isEmpty
+                            || pasteTsUtc.isEmpty
+                    )
+                }
+                .padding(.top, 6)
+            }
+
+            if let error = localError ?? agent.snapshot.payoutLastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
 

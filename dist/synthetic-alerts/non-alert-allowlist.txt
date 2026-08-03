@@ -59,5 +59,7 @@ payout_stale_outbox_producer_failed	info-event
 payout_stale_outbox_reaper_failed	info-event
 payout_tuning_sighup_received	info-event
 provider_payout_address_changed	info-event
+provider_payout_address_challenge	info-event
+provider_payout_address_challenge_rejected	info-event
 provider_payout_address_nonces	db-table
 provider_payout_addresses	db-table
