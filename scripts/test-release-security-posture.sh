@@ -103,6 +103,29 @@ provider_runtime = text.split("\n  verify_provider_runtime:\n", 1)[1].split(
 )[0]
 publish = text.split("\n  sign_publish:\n", 1)[1]
 
+TAGGED_PROMOTION_CHECKOUT = (
+    "          ref: ${{ github.event.inputs.promote_run_id != '' "
+    "&& github.event.inputs.version || github.ref }}"
+)
+if TAGGED_PROMOTION_CHECKOUT not in build:
+    raise SystemExit(
+        "promoted releases must checkout the immutable requested tag while candidate builds use main"
+    )
+if build.count('GITHUB_SHA="$commit" bash scripts/verify-release-source.sh') != 1:
+    raise SystemExit(
+        "build source verification must bind GITHUB_SHA to the checked-out release commit"
+    )
+if publish.count(
+    'GITHUB_SHA="${{ needs.build.outputs.commit }}" bash scripts/verify-release-source.sh'
+) != 1 or publish.count(
+    'GITHUB_SHA="$release_commit" bash scripts/verify-release-source.sh'
+) != 1 or publish.count(
+    'GITHUB_SHA="$commit" bash scripts/verify-release-source.sh'
+) != 1:
+    raise SystemExit(
+        "protected publication source gates must bind GITHUB_SHA to the captured release commit"
+    )
+
 
 def unique_step(job, name):
     marker = f"\n      - name: {name}\n"

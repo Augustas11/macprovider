@@ -57,6 +57,10 @@ jobs:
         # when upgrading the action rather than trusting a mutable tag.
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
+          # A promoted candidate is bound to the already-created signed tag.
+          # Checkout that immutable source commit while the workflow itself
+          # remains dispatched from fresh main; candidate builds use main.
+          ref: ${{ github.event.inputs.promote_run_id != '' && github.event.inputs.version || github.ref }}
           persist-credentials: false
 
       - name: Verify reviewed release source
@@ -93,7 +97,10 @@ jobs:
               exit 1
             fi
           fi
-          bash scripts/verify-release-source.sh \
+          # The checkout above is the immutable tagged source for promoted
+          # candidates, so bind the guard to that checked-out commit rather
+          # than the workflow dispatch SHA on main.
+          GITHUB_SHA="$commit" bash scripts/verify-release-source.sh \
             "$tag" "$commit" origin "$absence_policy"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -449,7 +456,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
-          bash scripts/verify-release-source.sh \
+          GITHUB_SHA="${{ needs.build.outputs.commit }}" bash scripts/verify-release-source.sh \
             "$tag" "${{ needs.build.outputs.commit }}" origin --require-existing
           unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
           unsigned_assets=(
@@ -1706,7 +1713,7 @@ jobs:
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
           release_commit="${{ needs.build.outputs.commit }}"
-          bash scripts/verify-release-source.sh \
+          GITHUB_SHA="$release_commit" bash scripts/verify-release-source.sh \
             "$tag" "$release_commit" origin --require-existing
           GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
             bash scripts/verify-github-release-posture.sh \
@@ -1796,7 +1803,7 @@ jobs:
           # source, tag, repository-posture, numeric-ID, and asset assertion
           # directly before changing draft=false. The coordinator may still
           # advertise the previous stable CLI until this release is public.
-          bash scripts/verify-release-source.sh \
+          GITHUB_SHA="$commit" bash scripts/verify-release-source.sh \
             "$tag" "$commit" origin --require-existing
           GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
             bash scripts/verify-github-release-posture.sh \
