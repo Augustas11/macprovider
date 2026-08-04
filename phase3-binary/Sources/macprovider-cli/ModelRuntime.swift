@@ -1342,7 +1342,8 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func continuousBatchingCapability(
         draftConfigured: Bool,
-        stickyCacheEligible: Bool
+        stickyCacheEligible: Bool,
+        requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
         // The independently observed runtime tuple and scheduler backend are
         // installed by the deferred SPEC-039 engine bridge. Do not manufacture
@@ -1355,24 +1356,44 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: kvBitsOverride,
             draftConfigured: draftConfigured,
             stickyCacheEligible: stickyCacheEligible,
+            requestStateRepresentable: requestStateRepresentable,
             schedulerBackendAvailable: false,
             pagedKVDecision: pagedKVAttachDecision,
             requestedTuple: requestedTuple
         )
     }
 
+    /// A request is representable by the batched shared-forward contract only if
+    /// its generation is fully described by the scalar sampling parameters the
+    /// contract carries. Structured-output/grammar validation and tool-constrained
+    /// decoding impose row-local decoder state the contract does not model, so such
+    /// requests must serial-route (canary) / fail closed (strict) before admission —
+    /// a gate that holds even after the deferred SPEC-039 bridge lands.
+    private func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
+        if Self.requiresStructuredValidation(request.responseFormat) { return false }
+        if request.promptSource.toolChoice != nil { return false }
+        return true
+    }
+
     private func applyContinuousBatchingPolicy(
         request: ChatCompletionRequest,
-        snapshot: RuntimeSnapshot
+        snapshot: RuntimeSnapshot,
+        emitTelemetry: Bool = true
     ) throws {
         let capability = continuousBatchingCapability(
             draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
             // v0.2 admits keyless fresh requests only. A conversation key is
             // conservatively treated as sticky/cross-turn until the cache
             // bridge can prove that it has no reusable state.
-            stickyCacheEligible: request.conversationKey != nil
+            stickyCacheEligible: request.conversationKey != nil,
+            requestStateRepresentable: requestStateRepresentable(request)
         )
-        ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
+        // Telemetry is emitted once per request at preflight; execution paths
+        // re-validate for fail-closed safety but must not re-log the same
+        // serial-route event (avoids double-counting canary promotion evidence).
+        if emitTelemetry {
+            ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
+        }
         try ContinuousBatchingPolicy.validateStrictStartup(capability)
     }
 
@@ -1811,7 +1832,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let completionStartedAt = Date()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
-        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot)
+        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: false)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
         if let testSpeculativeCompletion,
@@ -2226,7 +2247,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
-        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot)
+        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: false)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))

@@ -682,6 +682,66 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertTrue(capability.shouldUseSerialPath)
     }
 
+    func testUnrepresentableRequestStateSerialRoutesInCanary() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            stickyCacheEligible: false,
+            requestStateRepresentable: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertEqual(capability.unsupportedReason, .requestStateUnrepresented)
+        XCTAssertTrue(capability.shouldUseSerialPath)
+    }
+
+    func testUnrepresentableRequestStateFailsClosedInStrict() {
+        // The gate must win even when the backend is available and the tuple
+        // would otherwise be admitted: row-local generation state the shared
+        // forward cannot represent must never enter a batch.
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 4,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            stickyCacheEligible: false,
+            requestStateRepresentable: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertEqual(capability.unsupportedReason, .requestStateUnrepresented)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability)) { error in
+            guard let apiError = error as? APIError else {
+                return XCTFail("expected APIError, got \(error)")
+            }
+            XCTAssertEqual(apiError.code, "continuous_batching_request_state_unsupported")
+            XCTAssertEqual(apiError.status, 400)
+        }
+    }
+
+    func testRepresentableRequestStateDoesNotTripTheGate() {
+        // Default representable=true path must be unaffected by the new gate.
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            stickyCacheEligible: false,
+            requestStateRepresentable: true,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: .disabled,
+            requestedTuple: nil
+        )
+        XCTAssertNotEqual(capability.unsupportedReason, .requestStateUnrepresented)
+    }
+
     func testMoETupleRemainsUnsupportedUntilCorrectnessAndMSB04EvidenceExist() {
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: 16,

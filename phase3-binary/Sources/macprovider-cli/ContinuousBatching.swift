@@ -13,6 +13,7 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case draftSpecDecodeMutualExclusion = "draft_spec_decode_mutual_exclusion"
     case stickyCacheBridgeUnavailable = "sticky_cache_bridge_unavailable"
     case moePromotionEvidenceUnavailable = "moe_promotion_evidence_unavailable"
+    case requestStateUnrepresented = "request_local_state_unrepresented"
 
     var apiCode: String {
         switch self {
@@ -24,6 +25,8 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
             return "continuous_batching_sticky_cache_unavailable"
         case .moePromotionEvidenceUnavailable:
             return "continuous_batching_moe_promotion_evidence_unavailable"
+        case .requestStateUnrepresented:
+            return "continuous_batching_request_state_unsupported"
         case .localCapabilityUnavailable, .pagedKVDisabled,
              .pagedKVCapabilityUnavailable, .tupleNotAdvertised:
             return "continuous_batching_local_capability_unavailable"
@@ -34,6 +37,7 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
         switch self {
         case .kvBitsUnsupported, .draftSpecDecodeMutualExclusion,
              .stickyCacheBridgeUnavailable, .moePromotionEvidenceUnavailable,
+             .requestStateUnrepresented,
              .tupleNotAdvertised:
             return 400
         case .localCapabilityUnavailable, .pagedKVDisabled, .pagedKVCapabilityUnavailable:
@@ -147,6 +151,7 @@ enum ContinuousBatchingPolicy {
         kvBits: Int?,
         draftConfigured: Bool,
         stickyCacheEligible: Bool = false,
+        requestStateRepresentable: Bool = true,
         schedulerBackendAvailable: Bool,
         pagedKVDecision: PagedKVAttachDecision,
         requestedTuple: ContinuousBatchingRequestedTuple?
@@ -158,6 +163,7 @@ enum ContinuousBatchingPolicy {
             kvBits: kvBits,
             draftConfigured: draftConfigured,
             stickyCacheEligible: stickyCacheEligible,
+            requestStateRepresentable: requestStateRepresentable,
             descriptor: pagedKVDecision.descriptor,
             tuple: requestedTuple,
             schedulerBackendAvailable: schedulerBackendAvailable,
@@ -173,6 +179,7 @@ enum ContinuousBatchingPolicy {
         kvBits: Int?,
         draftConfigured: Bool,
         stickyCacheEligible: Bool,
+        requestStateRepresentable: Bool = true,
         descriptor: PagedKVDescriptor?,
         tuple: ContinuousBatchingRequestedTuple?,
         schedulerBackendAvailable: Bool = false,
@@ -184,6 +191,15 @@ enum ContinuousBatchingPolicy {
         let reason: ContinuousBatchingUnsupportedReason?
         if mode == .off {
             reason = nil
+        } else if !requestStateRepresentable {
+            // The shared-forward backend contract carries only scalar sampling
+            // parameters. A request needing row-local generation state the
+            // contract does not represent (structured-output/grammar-constrained
+            // decoding, tool-forced decoding, custom logit processors) must never
+            // enter a batch: serial-route in canary, fail closed in strict. This
+            // gate holds even once the deferred SPEC-039 bridge lands, so a future
+            // backend cannot silently ignore or cross-contaminate that state.
+            reason = .requestStateUnrepresented
         } else if draftConfigured {
             reason = .draftSpecDecodeMutualExclusion
         } else if kvBits != nil {
@@ -262,6 +278,8 @@ enum ContinuousBatchingPolicy {
             return "continuous batching requires the local contiguous-cache bridge for sticky-cache requests"
         case .moePromotionEvidenceUnavailable:
             return "continuous batching requires the representative MoE correctness fixture and live MSB-04 promotion evidence"
+        case .requestStateUnrepresented:
+            return "continuous batching does not support requests requiring row-local generation state (structured output or tool-constrained decoding) in this release"
         }
     }
 
