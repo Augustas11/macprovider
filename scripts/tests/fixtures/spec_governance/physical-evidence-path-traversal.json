@@ -1,4 +1,4 @@
 {
   "mutation": {"operation": "physical_evidence_path_traversal"},
-  "expected": "requires sha256 journey evidence under journeys/evidence/"
+  "expected": "requires valid signed journey-result evidence"
 }

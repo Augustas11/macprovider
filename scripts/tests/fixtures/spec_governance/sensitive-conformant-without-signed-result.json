@@ -1,1 +1,1 @@
-{"mutation":{"operation":"sensitive_conformant_without_signed_result"},"expected":"sensitive conformant requirement requires signed journey-result contract before promotion"}
+{"mutation":{"operation":"sensitive_conformant_without_signed_result"},"expected":"sensitive conformant requirement requires valid signed journey-result evidence"}

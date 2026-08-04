@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Augustas11/macprovider/schemas/journey-result-v1.schema.json",
+  "title": "Macprovider signed journey-result envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "signatures", "signed"],
+  "properties": {
+    "schema_version": {"const": "macprovider.journey-result-envelope.v1"},
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/signature"}
+    },
+    "signed": {"$ref": "#/$defs/signed"}
+  },
+  "$defs": {
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "signature", "signed_sha256", "verified_at", "verifier"],
+      "properties": {
+        "algorithm": {"const": "ecdsa-p256-sha256"},
+        "key_id": {"const": "macprovider-acceptance-p256-v1"},
+        "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+        "signed_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "verified_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "verifier": {"type": "string", "minLength": 1}
+      }
+    },
+    "signed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "journey_id",
+        "requirement_ids",
+        "repository",
+        "captured_at",
+        "expires_at",
+        "operator",
+        "environment",
+        "artifacts",
+        "result",
+        "steps",
+        "redaction"
+      ],
+      "properties": {
+        "schema_version": {"const": "macprovider.journey-result.v1"},
+        "journey_id": {"type": "string", "pattern": "^JOURNEY-[A-Z0-9]+(?:-[A-Z0-9]+)*$"},
+        "requirement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^SPEC-[0-9]{3}-R[0-9]{3}$"}
+        },
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "commit"],
+          "properties": {
+            "name": {"const": "Augustas11/macprovider"},
+            "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          }
+        },
+        "captured_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "expires_at": {"type": "string", "format": "date"},
+        "operator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "identity_fingerprint"],
+          "properties": {
+            "role": {"type": "string", "minLength": 1},
+            "identity_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class", "hardware_profile", "candidate"],
+          "properties": {
+            "class": {"type": "string", "minLength": 1},
+            "hardware_profile": {"type": "string", "minLength": 1},
+            "candidate": {"type": "string", "minLength": 1}
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "sha256", "source"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "source": {"type": "string", "pattern": "^journeys/evidence/.+"}
+            }
+          }
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": {"const": "pass"},
+            "summary": {"type": "string", "minLength": 1}
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "status", "artifacts"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "status": {"const": "pass"},
+              "assertion": {"type": "string", "minLength": 1},
+              "artifacts": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        },
+        "redaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secrets_redacted", "operator_identity_redacted", "local_account_names_redacted"],
+          "properties": {
+            "secrets_redacted": {"const": true},
+            "operator_identity_redacted": {"const": true},
+            "local_account_names_redacted": {"const": true}
+          }
+        }
+      }
+    }
+  }
+}
