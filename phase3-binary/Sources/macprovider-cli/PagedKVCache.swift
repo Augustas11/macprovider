@@ -13,6 +13,12 @@ struct PagedKVGatherKernel {
         uint within_block = logical_token - (logical_block * block_size_tokens);
         uint physical_block = uint(block_ids[logical_block]);
         uint physical_token = (physical_block * block_size_tokens) + within_block;
+        if (logical_token >= logical_token_count || lane >= token_stride
+            || logical_block >= block_count || physical_block >= block_count
+            || physical_token >= physical_token_count) {
+            gathered[elem] = 0;
+            return;
+        }
         gathered[elem] = physical[physical_token * token_stride + lane];
     """
 
@@ -32,6 +38,8 @@ struct PagedKVGatherKernel {
         logicalTokens: Int,
         blockSizeTokens: Int,
         tokenStride: Int,
+        physicalTokenCount: Int,
+        blockCount: Int,
         outputShape: [Int],
         using kernel: MLXFast.MLXFastKernel
     ) -> MLXArray {
@@ -41,6 +49,9 @@ struct PagedKVGatherKernel {
             template: [
                 ("block_size_tokens", blockSizeTokens),
                 ("token_stride", tokenStride),
+                ("logical_token_count", logicalTokens),
+                ("physical_token_count", physicalTokenCount),
+                ("block_count", blockCount),
             ],
             grid: (count, 1, 1),
             threadGroup: (min(count, 256), 1, 1),
@@ -50,13 +61,9 @@ struct PagedKVGatherKernel {
     }
 }
 
-/// Compile-time `KVCache` seam for the future installed paged runtime bridge.
-///
-/// `ModelRuntime` deliberately never injects this class in the current merge:
-/// `engineBridgeAvailable` is false in runtime gates and `.attached` preflight
-/// fails closed. The class remains type-checked against `mlx-swift-lm` so the
-/// follow-up bridge can wire request-level reservation, real gather execution,
-/// and parity tests without changing public buyer behavior.
+/// Paged serving cache backed by the SPEC-039 block binding. The runtime bridge
+/// owns reservation/lifecycle; this cache owns the `KVCache` contract and the
+/// bounded logical-to-physical gather for one transformer layer.
 final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     let descriptor: PagedKVDescriptor
     let binding: PagedKVStorageBinding
@@ -105,7 +112,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        // Controlled handling for this inert seam: never abort the host process on
+        // Controlled handling for the serving bridge: never abort the host process on
         // malformed/out-of-contract input. Guard the invariants and return safely instead
         // of `precondition`-crashing. The happy path (shape-consistent, within reserved
         // capacity) is unchanged. NOTE: KERNEL-SIDE (Metal) index/bounds validation is a
@@ -140,11 +147,9 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         // arithmetic BEFORE launching the kernel. Any invalid or overflowing configuration
         // returns the logical tensor unchanged and does NOT launch the kernel.
         //
-        // IMPORTANT: these are SWIFT-SIDE guards only. KERNEL-SIDE (Metal) bounds validation
-        // — clamping/rejecting out-of-range block_ids and physical_token indices inside the
-        // shader before any `physical[...]` read — remains a REQUIRED before-runtime-enable
-        // gate item and is intentionally NOT added in this inert (non-serving) merge; the
-        // kernel source is frozen here because the seam regression test pins it.
+        // The same invariants are repeated in the shader before every physical read. This
+        // is intentional defense in depth: host-side validation prevents invalid launches,
+        // while the kernel remains safe if a future caller supplies malformed metadata.
         let blockSize = descriptor.blockSizeTokens
         guard logical.ndim == 4 else { return logical }
         let H = logical.dim(1)
@@ -198,6 +203,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             logicalTokens: S,
             blockSizeTokens: blockSize,
             tokenStride: tokenStride,
+            physicalTokenCount: sPad * tokenStride,
+            blockCount: nBlocks,
             outputShape: [S, tokenStride],
             using: kernel
         )
@@ -219,7 +226,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             return [keys, values]
         }
         set {
-            // Controlled handling (inert seam): ignore malformed state assignments rather
+            // Controlled handling: ignore malformed state assignments rather
             // than aborting the process. A well-formed [keys, values] pair with matching
             // sequence length is required; anything else is a no-op.
             guard newValue.count == 2 else { return }
@@ -242,7 +249,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             ]
         }
         set {
-            // Controlled handling (inert seam): a mismatched meta_state marker is ignored
+            // Controlled handling: a mismatched meta_state marker is ignored
             // rather than aborting the process. The stored metadata is derived from the
             // descriptor/binding, so there is nothing to mutate on a valid marker either.
             guard newValue.first == "macprovider_paged_kv_v1" else { return }
@@ -267,6 +274,58 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let copied = PagedKVCache(descriptor: descriptor, binding: binding, gatherKernel: gatherKernel)
         copied.state = state
         return copied
+    }
+
+    /// Extract the current logical K/V tensors into the neutral FR-PKV10 byte
+    /// representation. The allocator validates the block table separately; this
+    /// method is deliberately limited to one layer and never invents shape/dtype
+    /// metadata.
+    func materializedByteLayer(layerIndex: Int) throws -> PagedKVMaterializedByteLayer {
+        guard layerIndex >= 0,
+              let keys = materialized(keyBlocks),
+              let values = materialized(valueBlocks),
+              keys.ndim == 4,
+              values.ndim == 4,
+              keys.shape == values.shape,
+              keys.dim(2) == offset,
+              keys.dtype == .float16,
+              values.dtype == .float16
+        else {
+            throw PagedKVAllocatorError.invalidBlockTable("paged cache state is not contiguous fp16 K/V")
+        }
+        let keyData = keys.asData()
+        let valueData = values.asData()
+        guard keyData.shape == valueData.shape,
+              keyData.dType == .float16,
+              valueData.dType == .float16
+        else {
+            throw PagedKVAllocatorError.invalidBlockTable("paged cache byte state mismatch")
+        }
+        return PagedKVMaterializedByteLayer(
+            layerIndex: layerIndex,
+            keyShape: keyData.shape,
+            valueShape: valueData.shape,
+            dtype: .fp16,
+            logicalTokenCount: offset,
+            keyBytes: keyData.data,
+            valueBytes: valueData.data
+        )
+    }
+
+    /// Rehydrate a layer from a validated FR-PKV10 contiguous snapshot. The
+    /// caller must validate the snapshot against the allocator's current table
+    /// before calling this method.
+    func inject(materialized layer: PagedKVMaterializedByteLayer) throws {
+        guard layer.dtype == .fp16,
+              layer.keyShape == layer.valueShape,
+              layer.keyShape.count == 4,
+              layer.keyShape[2] == layer.logicalTokenCount
+        else {
+            throw PagedKVAllocatorError.invalidBlockTable("invalid contiguous K/V layer")
+        }
+        let keys = MLXArray(layer.keyBytes, layer.keyShape, dtype: .float16)
+        let values = MLXArray(layer.valueBytes, layer.valueShape, dtype: .float16)
+        state = [keys, values]
     }
 
     func makeMask(

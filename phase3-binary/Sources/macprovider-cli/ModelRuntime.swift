@@ -597,6 +597,15 @@ actor ModelRuntime: ModelRuntimeServing {
     private let prefillStepSize: Int
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
+    /// An observed tuple is optional by design. Nil keeps the shipped path
+    /// fail-closed; it is never synthesized from the descriptor.
+    private var pagedKVRuntimeObservation: PagedKVRuntimeObservation?
+    /// The descriptor is supplied by the trusted packaging/probe layer. The
+    /// runtime attach path may compare an observation with it, but never
+    /// promotes a descriptor manufactured from that same observation.
+    private var pagedKVTrustedDescriptor: PagedKVDescriptor?
+    private var pagedKVRuntimeBridge: PagedKVRuntimeBridge?
+    private let pagedKVSharedForwardBackend: PagedKVSharedForwardBackend?
     private let conversationCache: ConversationCache
     /// SPEC-037 stage 5 — set once the serve process activates the encrypted disk
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
@@ -724,7 +733,8 @@ actor ModelRuntime: ModelRuntimeServing {
         chatTemplateSHA256: String?,
         kvBitsOverride: Int?,
         runtimeCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil
+        modelCapabilities: PagedKVRuntimeModelCapabilities? = nil,
+        gates: PagedKVGates? = nil
     ) -> PagedKVAttachDecision {
         let cacheClassForDecision = runtimeCacheClass == Self.pagedKVUnavailableCacheClass
             ? PagedKVAttachGate.allowedCacheClasses[0]
@@ -737,9 +747,91 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: cacheClassForDecision,
-            gates: .runtimeClosed(identityAvailable: modelHash?.isEmpty == false),
+            gates: gates ?? .runtimeClosed(identityAvailable: modelHash?.isEmpty == false),
             modelCapabilities: modelCapabilities
         )
+    }
+
+    /// Resolve the decision and bridge together. The bridge is created only
+    /// after a candidate descriptor exists, and a failed bridge construction
+    /// recomputes the decision with `engineBridgeAvailable == false`.
+    private nonisolated static func pagedKVRuntimeAttach(
+        config: PagedKVConfig,
+        modelID: String?,
+        modelHash: String?,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        kvBitsOverride: Int?,
+        runtimeCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        observation: PagedKVRuntimeObservation?,
+        trustedDescriptor: PagedKVDescriptor?
+    ) -> (PagedKVAttachDecision, PagedKVRuntimeBridge?) {
+        let cacheClass = runtimeCacheClass == Self.pagedKVUnavailableCacheClass
+            ? PagedKVAttachGate.allowedCacheClasses[0]
+            : runtimeCacheClass
+        guard let observation, let trustedDescriptor else {
+            let closed = Self.pagedKVAttachDecision(
+                config: config,
+                modelID: modelID,
+                modelHash: modelHash,
+                tokenizerSHA256: tokenizerSHA256,
+                chatTemplateSHA256: chatTemplateSHA256,
+                kvBitsOverride: kvBitsOverride,
+                runtimeCacheClass: cacheClass,
+                gates: observation?.gates(config: config, bridgeAvailable: false)
+                    ?? .runtimeClosed(identityAvailable: modelHash?.isEmpty == false),
+                modelCapabilities: modelCapabilities
+            )
+            return (closed, nil)
+        }
+        let candidateGates = observation.gates(config: config, bridgeAvailable: true)
+        let candidate = Self.pagedKVAttachDecision(
+            config: config,
+            modelID: modelID,
+            modelHash: modelHash,
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            kvBitsOverride: kvBitsOverride,
+            runtimeCacheClass: cacheClass,
+            gates: candidateGates,
+            modelCapabilities: modelCapabilities
+        )
+        guard let candidateDescriptor = candidate.descriptor,
+              candidateDescriptor == trustedDescriptor
+        else {
+            let closed = Self.pagedKVAttachDecision(
+                config: config,
+                modelID: modelID,
+                modelHash: modelHash,
+                tokenizerSHA256: tokenizerSHA256,
+                chatTemplateSHA256: chatTemplateSHA256,
+                kvBitsOverride: kvBitsOverride,
+                runtimeCacheClass: cacheClass,
+                gates: observation.gates(config: config, bridgeAvailable: false),
+                modelCapabilities: modelCapabilities
+            )
+            return (closed, nil)
+        }
+        guard let bridge = try? PagedKVRuntimeBridge(
+            config: config,
+            observation: observation,
+            descriptor: trustedDescriptor
+        ) else {
+            let closed = Self.pagedKVAttachDecision(
+                config: config,
+                modelID: modelID,
+                modelHash: modelHash,
+                tokenizerSHA256: tokenizerSHA256,
+                chatTemplateSHA256: chatTemplateSHA256,
+                kvBitsOverride: kvBitsOverride,
+                runtimeCacheClass: cacheClass,
+                gates: observation.gates(config: config, bridgeAvailable: false),
+                modelCapabilities: modelCapabilities
+            )
+            return (closed, nil)
+        }
+        return (candidate, bridge)
     }
 
     private static let pagedKVUnavailableCacheClass = "unavailable"
@@ -846,11 +938,11 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    nonisolated static func enforcePagedKVPreflight(_ decision: PagedKVAttachDecision) throws {
-        if case .attached = decision {
-            // This IMPL installs the default-off contract and attach gate only. Serving
-            // still requires a runtime owner that reserves a request lease, injects
-            // PagedKVCache, and releases/retains the handle around TokenIterator.
+    nonisolated static func enforcePagedKVPreflight(
+        _ decision: PagedKVAttachDecision,
+        bridgeAvailable: Bool = false
+    ) throws {
+        if case .attached = decision, !bridgeAvailable {
             throw APIError(
                 status: 503,
                 message: "Inference engine unavailable",
@@ -912,6 +1004,9 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        pagedKVRuntimeObservation: PagedKVRuntimeObservation? = nil,
+        pagedKVTrustedDescriptor: PagedKVDescriptor? = nil,
+        pagedKVSharedForwardDriver: (any PagedKVSharedForwardDriver)? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -942,6 +1037,31 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
+        self.pagedKVRuntimeObservation = pagedKVRuntimeObservation
+        self.pagedKVTrustedDescriptor = pagedKVTrustedDescriptor
+        self.pagedKVRuntimeBridge = nil
+        self.pagedKVSharedForwardBackend = pagedKVSharedForwardDriver.map {
+            PagedKVSharedForwardBackend(driver: $0)
+        }
+        if let pagedKVRuntimeObservation {
+            let runtimeAttach = Self.pagedKVRuntimeAttach(
+                config: pagedKVConfig,
+                modelID: modelID,
+                modelHash: verifiedModelArtifactSHA256,
+                tokenizerSHA256: pagedKVRuntimeObservation.tokenizerSHA256,
+                chatTemplateSHA256: pagedKVRuntimeObservation.chatTemplateSHA256,
+                kvBitsOverride: kvBitsOverride,
+                runtimeCacheClass: pagedKVRuntimeObservation.cacheClass,
+                modelCapabilities: Self.pagedKVModelCapabilities(
+                    modelID: modelID,
+                    configJSONData: nil
+                ),
+                observation: pagedKVRuntimeObservation,
+                trustedDescriptor: pagedKVTrustedDescriptor
+            )
+            self.pagedKVAttachDecision = runtimeAttach.0
+            self.pagedKVRuntimeBridge = runtimeAttach.1
+        }
         self.conversationCache = ConversationCache()
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
@@ -1013,7 +1133,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             : Self.pagedKVUnavailableCacheClass
         let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
-        self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+        let runtimeAttach = Self.pagedKVRuntimeAttach(
             config: self.pagedKVConfig,
             modelID: modelID,
             modelHash: self.currentModelHash,
@@ -1021,8 +1141,12 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: tokenizerHashes.template,
             kvBitsOverride: self.kvBitsOverride,
             runtimeCacheClass: runtimeCacheClass,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            observation: pagedKVRuntimeObservation,
+            trustedDescriptor: self.pagedKVTrustedDescriptor
         )
+        self.pagedKVAttachDecision = runtimeAttach.0
+        self.pagedKVRuntimeBridge = runtimeAttach.1
         Self.logPagedKVAttachDecision(self.pagedKVAttachDecision)
 
         if let draftModelID = normalizedDraftModelID {
@@ -1072,6 +1196,9 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        pagedKVRuntimeObservation: PagedKVRuntimeObservation? = nil,
+        pagedKVTrustedDescriptor: PagedKVDescriptor? = nil,
+        pagedKVSharedForwardDriver: (any PagedKVSharedForwardDriver)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -1114,6 +1241,31 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: Self.pagedKVUnavailableCacheClass
         )
+        self.pagedKVRuntimeObservation = pagedKVRuntimeObservation
+        self.pagedKVTrustedDescriptor = pagedKVTrustedDescriptor
+        self.pagedKVRuntimeBridge = nil
+        self.pagedKVSharedForwardBackend = pagedKVSharedForwardDriver.map {
+            PagedKVSharedForwardBackend(driver: $0)
+        }
+        if let pagedKVRuntimeObservation {
+            let runtimeAttach = Self.pagedKVRuntimeAttach(
+                config: pagedKVConfig,
+                modelID: modelID,
+                modelHash: modelHash,
+                tokenizerSHA256: pagedKVRuntimeObservation.tokenizerSHA256,
+                chatTemplateSHA256: pagedKVRuntimeObservation.chatTemplateSHA256,
+                kvBitsOverride: kvBitsOverride,
+                runtimeCacheClass: pagedKVRuntimeObservation.cacheClass,
+                modelCapabilities: Self.pagedKVModelCapabilities(
+                    modelID: modelID,
+                    configJSONData: nil
+                ),
+                observation: pagedKVRuntimeObservation,
+                trustedDescriptor: pagedKVTrustedDescriptor
+            )
+            self.pagedKVAttachDecision = runtimeAttach.0
+            self.pagedKVRuntimeBridge = runtimeAttach.1
+        }
         self.conversationCache = ConversationCache()
         let boundedMaxBatch = min(max(1, maxBatch), ProviderCapacity.maxConcurrencyOverrideLimit)
         self.maxBatch = boundedMaxBatch
@@ -1361,10 +1513,31 @@ actor ModelRuntime: ModelRuntimeServing {
         stickyCacheEligible: Bool,
         requestStateRepresentable: Bool = true
     ) -> ContinuousBatchingCapability {
-        // The independently observed runtime tuple and scheduler backend are
-        // installed by the deferred SPEC-039 engine bridge. Do not manufacture
-        // a self-fulfilling tuple from the advertised descriptor.
-        let requestedTuple: ContinuousBatchingRequestedTuple? = nil
+        // Do not manufacture a self-fulfilling tuple from the advertised
+        // descriptor. The tuple is copied only from the independently observed
+        // runtime identity, and the backend must have been installed as well.
+        let requestedTuple: ContinuousBatchingRequestedTuple? = {
+            guard let observation = pagedKVRuntimeObservation,
+                  let bridge = pagedKVRuntimeBridge,
+                  bridge.isAttached
+            else { return nil }
+            return ContinuousBatchingRequestedTuple(
+                modelID: observation.modelID,
+                modelSHA256: observation.modelSHA256,
+                tokenizerSHA256: observation.tokenizerSHA256,
+                chatTemplateSHA256: observation.chatTemplateSHA256,
+                cacheClass: observation.cacheClass,
+                kvDType: observation.kvDType,
+                requiresMoE: observation.requiresMoEDispatch,
+                hardwareClass: observation.hardwareClass ?? "",
+                metallibSHA256: observation.metallibSHA256 ?? "",
+                kernelIdentifier: observation.kernelIdentifier ?? "",
+                parityLabel: observation.parityLabel ?? "",
+                poolEpoch: observation.poolEpoch ?? -1
+            )
+        }()
+        let schedulerBackendAvailable = pagedKVRuntimeBridge?.isAttached == true
+            && pagedKVSharedForwardBackend != nil
         return ContinuousBatchingPolicy.capability(
             mode: continuousBatchingMode,
             maxBatch: maxBatch,
@@ -1373,7 +1546,7 @@ actor ModelRuntime: ModelRuntimeServing {
             draftConfigured: draftConfigured,
             stickyCacheEligible: stickyCacheEligible,
             requestStateRepresentable: requestStateRepresentable,
-            schedulerBackendAvailable: false,
+            schedulerBackendAvailable: schedulerBackendAvailable,
             pagedKVDecision: pagedKVAttachDecision,
             requestedTuple: requestedTuple
         )
@@ -1556,7 +1729,12 @@ actor ModelRuntime: ModelRuntimeServing {
                 prefillStepSize: prefillStepSize
             )
             : Self.pagedKVUnavailableCacheClass
-        pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
+        let observationForTarget = pagedKVRuntimeObservation.flatMap { observation in
+            observation.modelID == modelID && observation.modelSHA256 == modelHash
+                ? observation
+                : nil
+        }
+        let runtimeAttach = Self.pagedKVRuntimeAttach(
             config: pagedKVConfig,
             modelID: modelID,
             modelHash: modelHash,
@@ -1564,8 +1742,22 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: chatTemplateSHA256,
             kvBitsOverride: kvBitsOverride,
             runtimeCacheClass: runtimeCacheClass,
-            modelCapabilities: modelCapabilities
+            modelCapabilities: modelCapabilities,
+            observation: observationForTarget,
+            trustedDescriptor: pagedKVTrustedDescriptor.flatMap { descriptor in
+                descriptor.modelID == modelID && descriptor.modelSHA256 == modelHash
+                    ? descriptor
+                    : nil
+            }
         )
+        pagedKVRuntimeObservation = observationForTarget
+        pagedKVTrustedDescriptor = pagedKVTrustedDescriptor.flatMap { descriptor in
+            descriptor.modelID == modelID && descriptor.modelSHA256 == modelHash
+                ? descriptor
+                : nil
+        }
+        pagedKVAttachDecision = runtimeAttach.0
+        pagedKVRuntimeBridge = runtimeAttach.1
         Self.logPagedKVAttachDecision(pagedKVAttachDecision)
         currentDraftModelID = draftModelID
         currentDraftTargetModelID = draftModelID == nil ? nil : modelID
@@ -1711,7 +1903,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        try Self.enforcePagedKVPreflight(
+            pagedKVAttachDecision,
+            bridgeAvailable: pagedKVRuntimeBridge?.isAttached == true
+        )
         try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
@@ -1735,7 +1930,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
         try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        try Self.enforcePagedKVPreflight(
+            pagedKVAttachDecision,
+            bridgeAvailable: pagedKVRuntimeBridge?.isAttached == true
+        )
         try handle.drainCancelled.check()
     }
 
@@ -1887,7 +2085,10 @@ actor ModelRuntime: ModelRuntimeServing {
         // emission for this request. (Streaming preflights first and suppresses
         // here to stay exactly-once.)
         try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: true)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        try Self.enforcePagedKVPreflight(
+            pagedKVAttachDecision,
+            bridgeAvailable: pagedKVRuntimeBridge?.isAttached == true
+        )
         try drainCancelled.check()
         if let testSpeculativeCompletion,
            Self.speculativeRoute(
@@ -1928,11 +2129,25 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
-        let completion = try await Self.withDrainCancellation(drainCancelled) {
-            try await inferenceGate.withPermit {
-                try drainCancelled.check()
-                try Task.checkCancellation()
-                return try await container.perform { context in
+        let pagedAttachment: PagedKVRequestAttachment?
+        if let pagedBridge = pagedKVRuntimeBridge,
+           pagedBridge.isAttached,
+           case .attached = pagedKVAttachDecision,
+           request.conversationKey == nil {
+            pagedAttachment = try await pagedBridge.reserve(
+                requestID: "request-\(UUID().uuidString)",
+                maxTokens: maxContextTokens
+            )
+        } else {
+            pagedAttachment = nil
+        }
+        let completion: CompletionResult
+        do {
+            completion = try await Self.withDrainCancellation(drainCancelled) {
+                try await inferenceGate.withPermit {
+                    try drainCancelled.check()
+                    try Task.checkCancellation()
+                    return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
                     let input = try Self.userInput(for: request)
@@ -1998,6 +2213,10 @@ actor ModelRuntime: ModelRuntimeServing {
                             if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
+                            } else if let pagedAttachment {
+                                let layerCount = generationContext.model.newCache(parameters: nil).count
+                                kvCache = try pagedAttachment.makeCacheLayers(count: layerCount)
+                                iteratorInput = lmInput
                             } else {
                                 // SPEC-037 FR-KVP1: a tier-eligible request must run on a
                                 // KVCacheSimple so captureSnapshot can serialize it; keep the
@@ -2106,7 +2325,22 @@ actor ModelRuntime: ModelRuntimeServing {
                         }
                         throw error
                     }
+                    }
                 }
+            }
+        } catch {
+            if let pagedAttachment {
+                try? await pagedAttachment.release()
+            }
+            throw error
+        }
+        if let pagedAttachment {
+            do {
+                _ = try await pagedAttachment.checkpoint()
+                try await pagedAttachment.release()
+            } catch {
+                try? await pagedAttachment.release()
+                throw error
             }
         }
         return (completion, snapshot)
@@ -2302,7 +2536,10 @@ actor ModelRuntime: ModelRuntimeServing {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
         try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: false)
-        try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
+        try Self.enforcePagedKVPreflight(
+            pagedKVAttachDecision,
+            bridgeAvailable: pagedKVRuntimeBridge?.isAttached == true
+        )
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         if let testSpeculativeStream,
