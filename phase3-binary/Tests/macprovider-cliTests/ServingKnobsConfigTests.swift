@@ -766,6 +766,10 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
             "logprobs": true
         ])))
+        // top_logprobs (response metadata) is rejected too so the gate is provably complete.
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "logprobs": true, "top_logprobs": 5
+        ])))
     }
 
     func testRepresentableRequestStateDoesNotTripTheGate() {

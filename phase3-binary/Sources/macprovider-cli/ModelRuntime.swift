@@ -1378,9 +1378,13 @@ actor ModelRuntime: ModelRuntimeServing {
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
         if hasEnabledTools(request.promptSource.tools) { return false }
-        // logit_bias and logprobs have no carrier in the scheduler row contract.
+        // logit_bias and logprobs (incl. top_logprobs metadata) have no carrier in
+        // the scheduler row contract. top_logprobs only shapes response metadata,
+        // not token selection, but is rejected here too so the gate is provably
+        // complete and no per-request logprob surface can reach a batch unrepresented.
         if isActiveJSONValue(request.promptSource.logitBias) { return false }
         if isRequestedLogprobs(request.promptSource.logprobs) { return false }
+        if isActiveJSONValue(request.promptSource.topLogprobs) { return false }
         return true
     }
 
