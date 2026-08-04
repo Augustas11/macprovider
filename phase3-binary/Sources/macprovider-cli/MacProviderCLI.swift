@@ -306,7 +306,7 @@ struct ServeCommand: AsyncParsableCommand {
     )
     var prefillStepSize: Int?
 
-    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails closed unless the requested tuple is advertised by the local SPEC-039 engine. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
+    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails closed unless the requested tuple is advertised by the local paged-KV engine. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
     var continuousBatching: String?
 
     @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
