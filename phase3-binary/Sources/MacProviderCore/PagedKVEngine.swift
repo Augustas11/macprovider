@@ -75,7 +75,22 @@ public struct PagedKVDescriptor: Equatable, Sendable, Codable {
         parityLabel: String,
         poolEpoch: Int
     ) -> Bool {
-        self.modelID == modelID
+        guard let descriptorTokenizerSHA256 = self.tokenizerSHA256,
+              !descriptorTokenizerSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let descriptorChatTemplateSHA256 = self.chatTemplateSHA256,
+              !descriptorChatTemplateSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let tokenizerSHA256,
+              !tokenizerSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let chatTemplateSHA256,
+              !chatTemplateSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !modelSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !hardwareClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !metallibSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !kernelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !parityLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return false }
+        return self.modelID == modelID
             && self.modelSHA256 == modelSHA256
             && self.tokenizerSHA256 == tokenizerSHA256
             && self.chatTemplateSHA256 == chatTemplateSHA256
@@ -109,6 +124,26 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
     public let blockSizeTokens: Int
     public let maxPhysicalBlocks: Int
     public let maxResidentTokens: Int
+    /// FR-PKV13 evidence for the live production 30B / 32 GiB envelope. These
+    /// values are supplied by the offline sizing run; the attach gate never
+    /// derives them from the requested pool configuration.
+    public let sizingModelClass: String
+    public let unifiedMemoryGB: Int
+    public let modelWeightsGB: Double
+    public let perRequestActivationGB: Double
+    public let pagedBlockPoolGB: Double
+    /// Aggregate fp16 K/V bytes per resident token across the model's layers,
+    /// measured by the sizing fixture. This binds the recorded pool budget to
+    /// the configured block capacity rather than treating it as decoration.
+    public let kvBytesPerToken: Int
+    /// A nil pair records the honest v0.1 batch-1 result that no differentiated
+    /// stock-vs-paged context envelope has been established yet.
+    public let stockContiguousMaxContextTokens: Int?
+    public let pagedMaxContextTokens: Int?
+    /// Measured gather overhead and the maximum accepted regression, both as
+    /// percentages versus the stock contiguous path.
+    public let measuredGatherOverheadPercent: Double
+    public let gatherOverheadCeilingPercent: Double
     public let poolEpoch: Int
     public let parityLabel: String
 
@@ -124,6 +159,16 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
         blockSizeTokens: Int,
         maxPhysicalBlocks: Int,
         maxResidentTokens: Int,
+        sizingModelClass: String,
+        unifiedMemoryGB: Int,
+        modelWeightsGB: Double,
+        perRequestActivationGB: Double,
+        pagedBlockPoolGB: Double,
+        kvBytesPerToken: Int,
+        stockContiguousMaxContextTokens: Int? = nil,
+        pagedMaxContextTokens: Int? = nil,
+        measuredGatherOverheadPercent: Double,
+        gatherOverheadCeilingPercent: Double,
         poolEpoch: Int = 1,
         parityLabel: String
     ) {
@@ -138,6 +183,16 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.maxResidentTokens = maxResidentTokens
+        self.sizingModelClass = sizingModelClass
+        self.unifiedMemoryGB = unifiedMemoryGB
+        self.modelWeightsGB = modelWeightsGB
+        self.perRequestActivationGB = perRequestActivationGB
+        self.pagedBlockPoolGB = pagedBlockPoolGB
+        self.kvBytesPerToken = kvBytesPerToken
+        self.stockContiguousMaxContextTokens = stockContiguousMaxContextTokens
+        self.pagedMaxContextTokens = pagedMaxContextTokens
+        self.measuredGatherOverheadPercent = measuredGatherOverheadPercent
+        self.gatherOverheadCeilingPercent = gatherOverheadCeilingPercent
         self.poolEpoch = poolEpoch
         self.parityLabel = parityLabel
     }
@@ -155,7 +210,44 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
         observedParityLabel: String,
         poolEpoch: Int
     ) -> Bool {
-        self.modelID == modelID
+        guard let proofTokenizerSHA256 = self.tokenizerSHA256,
+              !proofTokenizerSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let proofChatTemplateSHA256 = self.chatTemplateSHA256,
+              !proofChatTemplateSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let tokenizerSHA256,
+              !tokenizerSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let chatTemplateSHA256,
+              !chatTemplateSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !modelSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              sizingModelClass == Self.requiredSizingModelClass,
+              unifiedMemoryGB == Self.requiredUnifiedMemoryGB,
+              modelWeightsGB.isFinite,
+              perRequestActivationGB.isFinite,
+              pagedBlockPoolGB.isFinite,
+              modelWeightsGB > 0,
+              perRequestActivationGB > 0,
+              pagedBlockPoolGB > 0,
+              kvBytesPerToken > 0,
+              modelWeightsGB + perRequestActivationGB + pagedBlockPoolGB <= Double(unifiedMemoryGB),
+              measuredGatherOverheadPercent.isFinite,
+              gatherOverheadCeilingPercent.isFinite,
+              measuredGatherOverheadPercent >= 0,
+              gatherOverheadCeilingPercent > 0,
+              measuredGatherOverheadPercent <= gatherOverheadCeilingPercent,
+              (stockContiguousMaxContextTokens == nil && pagedMaxContextTokens == nil)
+                || (stockContiguousMaxContextTokens ?? -1 >= 0
+                    && (pagedMaxContextTokens ?? -1) > (stockContiguousMaxContextTokens ?? -1))
+        else { return false }
+        let (poolTokens, poolTokenOverflow) = config.blockSizeTokens
+            .multipliedReportingOverflow(by: config.maxPhysicalBlocks)
+        let (requiredPoolBytes, poolByteOverflow) = poolTokens
+            .multipliedReportingOverflow(by: kvBytesPerToken)
+        guard !poolTokenOverflow,
+              !poolByteOverflow,
+              Double(requiredPoolBytes) <= pagedBlockPoolGB * 1_073_741_824
+        else { return false }
+        return self.modelID == modelID
             && self.modelSHA256 == modelSHA256
             && self.tokenizerSHA256 == tokenizerSHA256
             && self.chatTemplateSHA256 == chatTemplateSHA256
@@ -173,6 +265,9 @@ public struct PagedKVHardwareSizingProof: Equatable, Sendable, Codable {
             && maxResidentTokens >= config.maxResidentTokens
             && self.poolEpoch == poolEpoch
     }
+
+    public static let requiredSizingModelClass = "live-production-30B"
+    public static let requiredUnifiedMemoryGB = 32
 }
 
 public struct PagedKVGates: Equatable, Sendable {
@@ -322,7 +417,11 @@ public struct PagedKVRuntimeObservation: Equatable, Sendable {
     /// Returns whether every observed identity field is complete and covered by
     /// the sizing proof for this exact configuration and allocator epoch.
     public func matches(config: PagedKVConfig) -> Bool {
-        guard let hardwareClass,
+        guard let tokenizerSHA256,
+              !tokenizerSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let chatTemplateSHA256,
+              !chatTemplateSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let hardwareClass,
               let metallibSHA256,
               let kernelIdentifier,
               let parityLabel,
@@ -428,6 +527,11 @@ public enum PagedKVAttachGate {
         guard kvBits == nil else { return fail(.quantized) }
         guard recognizedModelFamilies.contains(modelFamily) else { return fail(.identity) }
         guard gates.identityAvailable else { return fail(.identity) }
+        guard let tokenizerSHA256,
+              !tokenizerSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let chatTemplateSHA256,
+              !chatTemplateSHA256.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return fail(.identity) }
         guard allowedCacheClasses.contains(runtimeCacheClass) else { return fail(.cacheClass) }
         guard gates.metallibAvailable else { return fail(.metallib) }
         guard gates.kernelRegistered else { return fail(.kernel) }
@@ -437,6 +541,7 @@ public enum PagedKVAttachGate {
               let observedMetallibSHA256 = gates.observedMetallibSHA256,
               let observedKernelIdentifier = gates.observedKernelIdentifier,
               let observedParityLabel = gates.observedParityLabel,
+              let observedPoolEpoch = gates.observedPoolEpoch,
               sizingProof.covers(
                   config: config,
                   modelID: modelID,
@@ -448,7 +553,7 @@ public enum PagedKVAttachGate {
                   observedMetallibSHA256: observedMetallibSHA256,
                   observedKernelIdentifier: observedKernelIdentifier,
                   observedParityLabel: observedParityLabel,
-                  poolEpoch: gates.observedPoolEpoch ?? sizingProof.poolEpoch
+                  poolEpoch: observedPoolEpoch
               )
         else {
             return fail(.allocator)
@@ -525,6 +630,8 @@ public struct PagedKVRetainedSequence: Equatable, Sendable {
     public let handle: PagedKVBlockTableHandle
     let conversationKey: String
     public let logicalTokenCount: Int
+
+    public var conversationKeyForValidation: String { conversationKey }
 }
 
 public struct PagedKVStorageBinding: Equatable, Sendable {
@@ -532,7 +639,28 @@ public struct PagedKVStorageBinding: Equatable, Sendable {
     public let blockSizeTokens: Int
     public let maxLogicalTokens: Int
     public let currentTable: PagedKVBlockTable
+    /// All physical blocks reserved for this handle, including blocks that are
+    /// not live at the current logical length. Runtime caches use this allocator-
+    /// issued order as their physical backing; `currentTable` remains the live
+    /// block-table view used by materialization and validation.
+    public let reservedPhysicalBlocks: [Int]
     public let poolEpoch: Int
+
+    public init(
+        handle: PagedKVBlockTableHandle,
+        blockSizeTokens: Int,
+        maxLogicalTokens: Int,
+        currentTable: PagedKVBlockTable,
+        reservedPhysicalBlocks: [Int]? = nil,
+        poolEpoch: Int
+    ) {
+        self.handle = handle
+        self.blockSizeTokens = blockSizeTokens
+        self.maxLogicalTokens = maxLogicalTokens
+        self.currentTable = currentTable
+        self.reservedPhysicalBlocks = reservedPhysicalBlocks ?? currentTable.physicalBlocks
+        self.poolEpoch = poolEpoch
+    }
 }
 
 struct PagedKVPhysicalLayerBlocks: Equatable, Sendable {
@@ -858,6 +986,7 @@ public actor PagedKVBlockAllocator {
             blockSizeTokens: blockSizeTokens,
             maxLogicalTokens: state.maxLogicalTokens,
             currentTable: try validate(handle),
+            reservedPhysicalBlocks: state.reservedBlocks,
             poolEpoch: poolEpoch
         )
     }

@@ -616,6 +616,11 @@ actor InferenceRelay {
             defer {
                 Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
             }
+            // The paged preflight hook is the relay's capability boundary. The
+            // production runtime delegates it to full preflight (including
+            // prompt-plus-generation validation and prepared-input handoff)
+            // before this first buyer-visible SSE frame; test doubles may still
+            // provide their own rejection behavior through this hook.
             try await modelRuntime.pagedKVPreflight(request, with: handle)
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                 id: id,

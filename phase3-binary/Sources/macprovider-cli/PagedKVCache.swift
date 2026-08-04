@@ -11,11 +11,18 @@ struct PagedKVGatherKernel {
         uint lane = elem - (logical_token * token_stride);
         uint logical_block = logical_token / block_size_tokens;
         uint within_block = logical_token - (logical_block * block_size_tokens);
-        uint physical_block = uint(block_ids[logical_block]);
-        uint physical_token = (physical_block * block_size_tokens) + within_block;
         if (logical_token >= logical_token_count || lane >= token_stride
-            || logical_block >= block_count || physical_block >= block_count
-            || physical_token >= physical_token_count) {
+            || logical_block >= logical_block_count) {
+            gathered[elem] = 0;
+            return;
+        }
+        uint physical_block = uint(block_ids[logical_block]);
+        if (physical_block >= physical_block_count) {
+            gathered[elem] = 0;
+            return;
+        }
+        uint physical_token = (physical_block * block_size_tokens) + within_block;
+        if (physical_token >= physical_token_count) {
             gathered[elem] = 0;
             return;
         }
@@ -39,7 +46,8 @@ struct PagedKVGatherKernel {
         blockSizeTokens: Int,
         tokenStride: Int,
         physicalTokenCount: Int,
-        blockCount: Int,
+        logicalBlockCount: Int,
+        physicalBlockCount: Int,
         outputShape: [Int],
         using kernel: MLXFast.MLXFastKernel
     ) -> MLXArray {
@@ -50,8 +58,9 @@ struct PagedKVGatherKernel {
                 ("block_size_tokens", blockSizeTokens),
                 ("token_stride", tokenStride),
                 ("logical_token_count", logicalTokens),
+                ("logical_block_count", logicalBlockCount),
                 ("physical_token_count", physicalTokenCount),
-                ("block_count", blockCount),
+                ("physical_block_count", physicalBlockCount),
             ],
             grid: (count, 1, 1),
             threadGroup: (min(count, 256), 1, 1),
@@ -66,15 +75,25 @@ struct PagedKVGatherKernel {
 /// bounded logical-to-physical gather for one transformer layer.
 final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     let descriptor: PagedKVDescriptor
-    let binding: PagedKVStorageBinding
+    private(set) var binding: PagedKVStorageBinding
 
     private let gatherKernel: PagedKVGatherKernel
     /// Lazily-registered Metal gather kernel. Created on first `update()` so mere
     /// construction of the seam (the SPEC-038-facing metadata surface) still runs no
     /// Metal — only driving the cache through a real forward pass executes the kernel.
     private var registeredKernel: MLXFast.MLXFastKernel?
-    private var keyBlocks: [MLXArray] = []
-    private var valueBlocks: [MLXArray] = []
+    /// Physical K/V blocks keyed by allocator-issued block ID. Logical order is
+    /// reconstructed from `binding.reservedPhysicalBlocks` when a cache state is
+    /// read; the cache never invents its own physical permutation.
+    private var keyBlocks: [Int: MLXArray] = [:]
+    private var valueBlocks: [Int: MLXArray] = [:]
+    /// `KVCache.update` is nonthrowing, so latch malformed buyer-controlled
+    /// input and let the request bridge convert it into a request-local error.
+    private(set) var invariantFailure: String?
+    /// Stable non-sequence dimensions established by the first valid update.
+    /// Later K/V tensors must remain batch/head/width compatible before host
+    /// concatenation or block reshaping is attempted.
+    private var tensorShape: [Int]?
     var offset: Int
 
     /// Number of times the paged Metal gather kernel actually executed. Proof, for the
@@ -105,6 +124,20 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         self.offset = binding.currentTable.logicalTokenCount
     }
 
+    /// Refresh the allocator-issued reservation/table after an extend, trim, or
+    /// retain/reattach transition. The K/V arrays remain owned by this cache;
+    /// only the authoritative physical binding changes.
+    func refresh(binding: PagedKVStorageBinding) {
+        guard binding.handle == self.binding.handle,
+              binding.blockSizeTokens == descriptor.blockSizeTokens,
+              binding.poolEpoch == descriptor.poolEpoch
+        else {
+            invariantViolation("allocator binding refresh mismatch")
+            return
+        }
+        self.binding = binding
+    }
+
     var maxSize: Int? { maxResidentTokens }
 
     func innerState() -> [MLXArray] {
@@ -112,81 +145,173 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        // Controlled handling for the serving bridge: never abort the host process on
-        // malformed/out-of-contract input. Guard the invariants and return safely instead
-        // of `precondition`-crashing. The happy path (shape-consistent, within reserved
-        // capacity) is unchanged. NOTE: KERNEL-SIDE (Metal) index/bounds validation is a
-        // SEPARATE, still-REQUIRED before-runtime-enable gate item — these Swift-side guards
-        // do not substitute for in-shader bounds checks (see pagedGather()).
-        guard keys.ndim == 4, values.ndim == 4 else { return (keys, values) }
+        // KVCache.update cannot throw. Latch malformed or over-capacity updates and
+        // return the protocol-required tensors; the request bridge checks the latch
+        // before committing or returning the generated result. Kernel-side checks below
+        // remain defense in depth.
+        if invariantFailure != nil {
+            return (keys, values)
+        }
+        guard keys.ndim == 4,
+              values.ndim == 4,
+              keys.shape == values.shape,
+              keys.dtype == values.dtype,
+              keys.dtype == .float16,
+              keys.dim(0) == 1,
+              keys.dim(1) > 0,
+              keys.dim(2) > 0,
+              keys.dim(3) > 0
+        else {
+            invariantViolation("KV tensors have incompatible rank or shape")
+            return (keys, values)
+        }
+        let incomingTensorShape = [keys.dim(0), keys.dim(1), keys.dim(3)]
+        if let tensorShape, tensorShape != incomingTensorShape {
+            invariantViolation("KV tensor dimensions changed during request")
+            return (keys, values)
+        }
         let incomingTokens = keys.dim(2)
-        guard incomingTokens == values.dim(2) else { return (keys, values) }
+        guard incomingTokens == values.dim(2) else {
+            invariantViolation("key/value token counts differ")
+            return (keys, values)
+        }
         let (projectedOffset, offsetOverflow) = offset.addingReportingOverflow(incomingTokens)
-        guard !offsetOverflow, projectedOffset <= maxResidentTokens else { return (keys, values) }
+        guard !offsetOverflow, projectedOffset <= maxResidentTokens else {
+            invariantViolation("KV update exceeds reserved capacity")
+            return (keys, values)
+        }
 
         let mergedKeys = append(keys, to: keyBlocks)
         let mergedValues = append(values, to: valueBlocks)
-        offset += incomingTokens
-        keyBlocks = splitIntoBlocks(mergedKeys)
-        valueBlocks = splitIntoBlocks(mergedValues)
-        // Reconstruct the logical K/V through the REAL Metal gather over a non-identity
-        // (reversed) physical block order. The gather is a lossless permutation round-trip,
-        // so a correct paged reconstruction returns tensors identical to `mergedKeys/Values`
-        // — the parity fixtures gate exactly that (token-for-token argmax equality).
-        let gatheredKeys = pagedGather(mergedKeys)
-        let gatheredValues = pagedGather(mergedValues)
+        let nextOffset = projectedOffset
+        guard let newKeyBlocks = physicalBlocks(for: mergedKeys, logicalTokens: nextOffset),
+              let newValueBlocks = physicalBlocks(for: mergedValues, logicalTokens: nextOffset)
+        else {
+            invariantViolation("allocator block table cannot represent KV update")
+            return (keys, values)
+        }
+        offset = nextOffset
+        keyBlocks = newKeyBlocks
+        valueBlocks = newValueBlocks
+        tensorShape = incomingTensorShape
+        // Reconstruct the logical K/V through the REAL Metal gather using the
+        // allocator-issued physical block IDs and table order.
+        let gatheredKeys = pagedGather(mergedKeys, physicalBlocks: keyBlocks)
+        let gatheredValues = pagedGather(mergedValues, physicalBlocks: valueBlocks)
         return (gatheredKeys, gatheredValues)
     }
 
-    /// Split a contiguous logical `[1, H, S, D]` tensor into fixed-size blocks placed in
-    /// REVERSED physical order, then gather them back to logical order with the registered
-    /// `PagedKVGatherKernel` via a block table. Forces genuine physical non-contiguity so
-    /// the gather is exercised, not bypassed. Returns a tensor identical to the input.
-    private func pagedGather(_ logical: MLXArray) -> MLXArray {
+    /// Gather allocator-owned physical blocks back to logical `[1, H, S, D]`
+    /// order with the registered Metal kernel.
+    private func pagedGather(_ logical: MLXArray, physicalBlocks: [Int: MLXArray]) -> MLXArray {
         // Validate rank/dims and compute all shape/grid math with overflow-checked
-        // arithmetic BEFORE launching the kernel. Any invalid or overflowing configuration
-        // returns the logical tensor unchanged and does NOT launch the kernel.
+        // arithmetic BEFORE launching the kernel. An invalid attached configuration is
+        // latched; returning the logical tensor keeps the nonthrowing protocol well-formed
+        // while the request bridge prevents the request from succeeding.
         //
         // The same invariants are repeated in the shader before every physical read. This
         // is intentional defense in depth: host-side validation prevents invalid launches,
         // while the kernel remains safe if a future caller supplies malformed metadata.
         let blockSize = descriptor.blockSizeTokens
-        guard logical.ndim == 4 else { return logical }
+        guard logical.ndim == 4 else {
+            invariantViolation("logical KV tensor must be rank 4")
+            return logical
+        }
         let H = logical.dim(1)
         let S = logical.dim(2)
         let D = logical.dim(3)
-        guard blockSize > 0, H > 0, S > 0, D > 0 else { return logical }
+        guard blockSize > 0, H > 0, S > 0, D > 0 else {
+            invariantViolation("logical KV tensor has invalid dimensions")
+            return logical
+        }
 
-        let nBlocks = (S + blockSize - 1) / blockSize
+        let (roundedTokens, roundedOverflow) = S.addingReportingOverflow(blockSize - 1)
+        guard !roundedOverflow else {
+            invariantViolation("logical block count overflow")
+            return logical
+        }
+        let nBlocks = roundedTokens / blockSize
         let (sPad, sPadOverflow) = nBlocks.multipliedReportingOverflow(by: blockSize)
-        guard !sPadOverflow else { return logical }
+        guard !sPadOverflow else {
+            invariantViolation("padded token count overflow")
+            return logical
+        }
         let (tokenStride, strideOverflow) = H.multipliedReportingOverflow(by: D)
-        guard !strideOverflow, tokenStride > 0 else { return logical }
+        guard !strideOverflow, tokenStride > 0 else {
+            invariantViolation("KV token stride overflow")
+            return logical
+        }
         // Grid size the kernel will launch (materialize uses logicalTokens * tokenStride);
         // reject before launch if it overflows Int.
         let (gridCount, gridOverflow) = S.multipliedReportingOverflow(by: tokenStride)
-        guard !gridOverflow, gridCount > 0 else { return logical }
+        guard !gridOverflow, gridCount > 0 else {
+            invariantViolation("Metal grid size overflow")
+            return logical
+        }
         // Physical buffer element count must also be representable.
-        guard case (_, false) = sPad.multipliedReportingOverflow(by: tokenStride) else { return logical }
-
-        // [1, H, S, D] -> token-major [S, H*D]
-        var tokenMajor = logical.reshaped([H, S, D]).transposed(1, 0, 2).reshaped([S, tokenStride])
-        if sPad > S {
-            // Padding rows are never read (kernel only gathers the first S logical tokens).
-            let pad = MLXArray.zeros([sPad - S, tokenStride], dtype: logical.dtype)
-            tokenMajor = concatenated([tokenMajor, pad], axis: 0)
+        let (_, physicalElementOverflow) = sPad.multipliedReportingOverflow(by: tokenStride)
+        guard !physicalElementOverflow else {
+            invariantViolation("physical buffer size overflow")
+            return logical
         }
 
-        // Physical buffer: physical slot p holds logical block (nBlocks-1-p) → reversed order.
-        let physOrder = MLXArray((0 ..< nBlocks).reversed().map { Int32($0) })
-        let physical = tokenMajor
-            .reshaped([nBlocks, blockSize, tokenStride])
-            .take(physOrder, axis: 0)
-            .reshaped([sPad, tokenStride])
-        // block_ids[logicalBlock] = physical slot holding it = nBlocks-1-logicalBlock. By
-        // construction every id is in [0, nBlocks); assert the invariant before launch.
-        let blockIDValues = (0 ..< nBlocks).map { Int32(nBlocks - 1 - $0) }
-        guard blockIDValues.allSatisfy({ $0 >= 0 && $0 < Int32(nBlocks) }) else { return logical }
+        // The allocator, rather than this cache, owns physical placement. Resolve
+        // each allocator-issued physical ID into a launch-local dense arena in the
+        // exact reserved-table order. This preserves the authoritative physical
+        // mapping without allocating a buffer proportional to a sparse high ID.
+        let physicalIDs = Array(binding.reservedPhysicalBlocks.prefix(nBlocks))
+        guard physicalIDs.count == nBlocks,
+              Set(physicalIDs).count == nBlocks,
+              physicalIDs.allSatisfy({ $0 >= 0 && $0 < descriptor.maxPhysicalBlocks })
+        else {
+            invariantViolation("allocator physical table is invalid")
+            return logical
+        }
+        let physicalBlockCount = nBlocks
+        let (physicalTokenCount, physicalTokenOverflow) = physicalBlockCount.multipliedReportingOverflow(by: blockSize)
+        guard !physicalTokenOverflow, physicalTokenCount > 0 else {
+            invariantViolation("physical token count overflow")
+            return logical
+        }
+        let (physicalStorageElementCount, physicalStorageOverflow) = physicalTokenCount.multipliedReportingOverflow(by: tokenStride)
+        guard !physicalStorageOverflow else {
+            invariantViolation("physical storage size overflow")
+            return logical
+        }
+        // Keep the launch-local arena in a stable physical-slot order. The
+        // logical block table supplied to Metal then remains a real permutation
+        // of those dense slots instead of being erased by host-side reordering.
+        let densePhysicalIDs = physicalIDs.sorted()
+        let densePhysicalBlocks = densePhysicalIDs.compactMap { physicalBlocks[$0] }.map {
+            $0.reshaped([H, blockSize, D])
+                .transposed(1, 0, 2)
+                .reshaped([blockSize, tokenStride])
+        }
+        guard densePhysicalBlocks.count == nBlocks else {
+            invariantViolation("physical KV blocks are incomplete")
+            return logical
+        }
+        // Each dense block is already `[blockSize, H*D]`; concatenating on the
+        // token axis produces the exact rank-2 arena consumed by the Metal
+        // kernel. Do not append a differently-ranked sentinel or take rows by
+        // block index: that would select individual tokens and make the final
+        // reshape inconsistent whenever `blockSize > 1`.
+        let physical = concatenated(densePhysicalBlocks, axis: 0)
+        guard physical.shape == [physicalTokenCount, tokenStride],
+              physicalTokenCount * tokenStride == physicalStorageElementCount
+        else {
+            invariantViolation("physical KV arena shape is invalid")
+            return logical
+        }
+        let denseSlotByPhysicalID = Dictionary(
+            uniqueKeysWithValues: densePhysicalIDs.enumerated().map { ($1, Int32($0)) }
+        )
+        guard let blockIDValues = physicalIDs.compactMap({ denseSlotByPhysicalID[$0] }) as [Int32]?,
+              blockIDValues.count == nBlocks
+        else {
+            invariantViolation("physical KV block remap is incomplete")
+            return logical
+        }
         let blockIDs = MLXArray(blockIDValues)
 
         let kernel: MLXFast.MLXFastKernel
@@ -203,17 +328,26 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             logicalTokens: S,
             blockSizeTokens: blockSize,
             tokenStride: tokenStride,
-            physicalTokenCount: sPad * tokenStride,
-            blockCount: nBlocks,
+            physicalTokenCount: physicalTokenCount,
+            logicalBlockCount: nBlocks,
+            physicalBlockCount: physicalBlockCount,
             outputShape: [S, tokenStride],
             using: kernel
         )
         PagedKVCache.gatherKernelCalls += 1
         PagedKVCache.maxLogicalBlocksObserved = max(PagedKVCache.maxLogicalBlocksObserved, nBlocks)
-        if nBlocks > 1 { PagedKVCache.observedNonIdentityPermutation = true }
+        if blockIDValues != Array(0 ..< nBlocks).map(Int32.init) {
+            PagedKVCache.observedNonIdentityPermutation = true
+        }
 
         // token-major [S, H*D] -> [1, H, S, D]
         return gathered.reshaped([S, H, D]).transposed(1, 0, 2).reshaped([1, H, S, D])
+    }
+
+    private func invariantViolation(_ message: String) {
+        if invariantFailure == nil {
+            invariantFailure = message
+        }
     }
 
     var state: [MLXArray] {
@@ -229,13 +363,49 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             // Controlled handling: ignore malformed state assignments rather
             // than aborting the process. A well-formed [keys, values] pair with matching
             // sequence length is required; anything else is a no-op.
-            guard newValue.count == 2 else { return }
+            if newValue.isEmpty {
+                guard offset == 0, keyBlocks.isEmpty, valueBlocks.isEmpty else {
+                    invariantViolation("empty KV state is only valid before the first token")
+                    return
+                }
+                return
+            }
+            guard newValue.count == 2 else {
+                invariantViolation("KV state must contain key and value tensors")
+                return
+            }
             let keys = newValue[0]
             let values = newValue[1]
-            guard keys.ndim == 4, values.ndim == 4, keys.dim(2) == values.dim(2) else { return }
-            offset = keys.dim(2)
-            keyBlocks = splitIntoBlocks(keys)
-            valueBlocks = splitIntoBlocks(values)
+            guard keys.ndim == 4,
+                  values.ndim == 4,
+                  keys.shape == values.shape,
+                  keys.dtype == values.dtype,
+                  keys.dtype == .float16,
+                  keys.dim(0) == 1,
+                  keys.dim(1) > 0,
+                  keys.dim(2) > 0,
+                  keys.dim(3) > 0,
+                  keys.dim(2) == values.dim(2)
+            else {
+                invariantViolation("KV state has invalid shape")
+                return
+            }
+            let newTensorShape = [keys.dim(0), keys.dim(1), keys.dim(3)]
+            if let tensorShape, tensorShape != newTensorShape {
+                invariantViolation("KV state dimensions changed during request")
+                return
+            }
+            let nextOffset = keys.dim(2)
+            guard let newKeyBlocks = physicalBlocks(for: keys, logicalTokens: nextOffset),
+                  let newValueBlocks = physicalBlocks(for: values, logicalTokens: nextOffset)
+            else {
+                invariantViolation("KV state cannot be represented by allocator table")
+                return
+            }
+            offset = nextOffset
+            keyBlocks = newKeyBlocks
+            valueBlocks = newValueBlocks
+            tensorShape = newTensorShape
         }
     }
 
@@ -252,7 +422,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             // Controlled handling: a mismatched meta_state marker is ignored
             // rather than aborting the process. The stored metadata is derived from the
             // descriptor/binding, so there is nothing to mutate on a valid marker either.
-            guard newValue.first == "macprovider_paged_kv_v1" else { return }
+            guard newValue.first == "macprovider_paged_kv_v1" else {
+                invariantViolation("KV meta_state marker mismatch")
+                return
+            }
         }
     }
 
@@ -263,9 +436,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let trimmed = min(offset, max(n, 0))
         guard trimmed > 0 else { return 0 }
         offset -= trimmed
-        if let keys = materialized(keyBlocks), let values = materialized(valueBlocks) {
-            keyBlocks = splitIntoBlocks(keys[.ellipsis, ..<offset, 0...])
-            valueBlocks = splitIntoBlocks(values[.ellipsis, ..<offset, 0...])
+        if let keys = materialized(keyBlocks), let values = materialized(valueBlocks),
+           let newKeyBlocks = physicalBlocks(for: keys[.ellipsis, ..<offset, 0...], logicalTokens: offset),
+           let newValueBlocks = physicalBlocks(for: values[.ellipsis, ..<offset, 0...], logicalTokens: offset) {
+            keyBlocks = newKeyBlocks
+            valueBlocks = newValueBlocks
+        } else if !keyBlocks.isEmpty || !valueBlocks.isEmpty {
+            invariantViolation("trimmed KV state cannot be represented by allocator table")
         }
         return trimmed
     }
@@ -273,6 +450,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     func copy() -> any KVCache {
         let copied = PagedKVCache(descriptor: descriptor, binding: binding, gatherKernel: gatherKernel)
         copied.state = state
+        copied.invariantFailure = invariantFailure
         return copied
     }
 
@@ -346,32 +524,57 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
 
     private var maxResidentTokens: Int {
         let (value, overflow) = descriptor.blockSizeTokens.multipliedReportingOverflow(by: descriptor.maxPhysicalBlocks)
-        return overflow ? Int.max : value
+        let poolCapacity = overflow ? Int.max : value
+        return min(binding.maxLogicalTokens, poolCapacity)
     }
 
-    private func append(_ array: MLXArray, to blocks: [MLXArray]) -> MLXArray {
+    private func append(_ array: MLXArray, to blocks: [Int: MLXArray]) -> MLXArray {
         guard let current = materialized(blocks) else { return array }
         return concatenated([current, array], axis: 2)
     }
 
-    private func materialized(_ blocks: [MLXArray]) -> MLXArray? {
+    private func materialized(_ blocks: [Int: MLXArray]) -> MLXArray? {
         guard !blocks.isEmpty else { return nil }
-        // Storage retrieval only (logical accumulation). The paged Metal gather runs in
-        // `update()` via `pagedGather`, which reconstructs logical order from a non-identity
-        // physical block layout; this helper just returns the accumulated logical K/V.
         _ = gatherKernel
-        return blocks.count == 1 ? blocks[0] : concatenated(blocks, axis: 2)
+        let blockCount = max(1, (offset + descriptor.blockSizeTokens - 1) / descriptor.blockSizeTokens)
+        let orderedIDs = Array(binding.reservedPhysicalBlocks.prefix(blockCount))
+        let ordered = orderedIDs.compactMap { blocks[$0] }
+        guard ordered.count == blockCount else { return nil }
+        let joined = ordered.count == 1 ? ordered[0] : concatenated(ordered, axis: 2)
+        let logicalCount = min(offset, joined.dim(2))
+        return joined[.ellipsis, ..<logicalCount, 0...]
     }
 
-    private func splitIntoBlocks(_ array: MLXArray) -> [MLXArray] {
+    private func physicalBlocks(for array: MLXArray, logicalTokens: Int) -> [Int: MLXArray]? {
         let tokens = array.dim(2)
-        guard tokens > 0 else { return [] }
-        var blocks: [MLXArray] = []
+        guard tokens == logicalTokens else { return nil }
+        let blockCount = tokens == 0
+            ? 0
+            : (tokens + descriptor.blockSizeTokens - 1) / descriptor.blockSizeTokens
+        let physicalIDs = Array(binding.reservedPhysicalBlocks.prefix(blockCount))
+        guard physicalIDs.count == blockCount,
+              Set(physicalIDs).count == blockCount,
+              physicalIDs.allSatisfy({ $0 >= 0 && $0 < descriptor.maxPhysicalBlocks })
+        else { return nil }
+        guard blockCount > 0 else { return [:] }
+        var blocks: [Int: MLXArray] = [:]
         var start = 0
+        var blockIndex = 0
         while start < tokens {
             let end = min(start + descriptor.blockSizeTokens, tokens)
-            blocks.append(array[.ellipsis, start ..< end, 0...])
+            let block = array[.ellipsis, start ..< end, 0...]
+            let validTokens = end - start
+            if validTokens < descriptor.blockSizeTokens {
+                let pad = MLXArray.zeros(
+                    [array.dim(0), array.dim(1), descriptor.blockSizeTokens - validTokens, array.dim(3)],
+                    dtype: array.dtype
+                )
+                blocks[physicalIDs[blockIndex]] = concatenated([block, pad], axis: 2)
+            } else {
+                blocks[physicalIDs[blockIndex]] = block
+            }
             start = end
+            blockIndex += 1
         }
         return blocks
     }

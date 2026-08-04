@@ -57,11 +57,13 @@ final class PagedKVRequestAttachment: @unchecked Sendable {
     init(
         bridge: PagedKVRuntimeBridge,
         handle: PagedKVBlockTableHandle,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        cacheLayers: [PagedKVCache] = []
     ) {
         self.bridge = bridge
         self.handle = handle
         self.binding = binding
+        self.cacheLayers = cacheLayers
     }
 
     func makeCacheLayers(count: Int) throws -> [PagedKVCache] {
@@ -80,12 +82,23 @@ final class PagedKVRequestAttachment: @unchecked Sendable {
         return try await bridge.checkpoint(handle: handle, layers: cacheLayers)
     }
 
+    func validate() throws {
+        try bridge.validate(layers: cacheLayers)
+    }
+
     func retain() async throws -> PagedKVRetainedSequence {
         try await bridge.retain(handle: handle)
     }
 
     func release() async throws {
         try await bridge.release(handle: handle)
+    }
+
+    func discardRetained(_ retained: PagedKVRetainedSequence) async throws {
+        try await bridge.discardRetained(
+            retained,
+            conversationKey: retained.conversationKeyForValidation
+        )
     }
 }
 
@@ -105,6 +118,10 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
     private let byteSnapshotStore: PagedKVByteSnapshotStore
     private var liveLayers: [UUID: [PagedKVCache]] = [:]
     private var snapshots: [UUID: PagedKVMaterializedByteCache] = [:]
+    /// A failed release leaves allocator-owned blocks unresolved. Stop accepting
+    /// new reservations until the process can be restarted with a fresh pool;
+    /// explicit release retries remain allowed for the failed handle.
+    private var unhealthy = false
 
     init(
         config: PagedKVConfig,
@@ -146,7 +163,16 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
     }
 
     var isAttached: Bool {
-        observation.matches(config: config)
+        lock.lock()
+        let healthy = !unhealthy
+        lock.unlock()
+        return healthy && observation.matches(config: config)
+    }
+
+    var isUnhealthy: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return unhealthy
     }
 
     func reserve(
@@ -160,7 +186,21 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
             maxTokens: maxTokens,
             initialTokens: initialTokens
         )
-        let binding = try await allocator.binding(for: handle)
+        guard isAttached else {
+            await releaseAllocatorHandle(handle)
+            throw PagedKVRuntimeBridgeError.unavailable
+        }
+        let binding: PagedKVStorageBinding
+        do {
+            binding = try await allocator.binding(for: handle)
+        } catch {
+            await releaseAllocatorHandle(handle)
+            throw error
+        }
+        guard isAttached else {
+            await releaseAllocatorHandle(handle)
+            throw PagedKVRuntimeBridgeError.unavailable
+        }
         return PagedKVRequestAttachment(bridge: self, handle: handle, binding: binding)
     }
 
@@ -188,6 +228,10 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
         layers: [PagedKVCache]
     ) async throws -> PagedKVMaterializedByteCache {
         guard !layers.isEmpty else { throw PagedKVRuntimeBridgeError.noCacheLayers }
+        guard layers.allSatisfy({ $0.binding.handle == handle }) else {
+            throw PagedKVRuntimeBridgeError.cacheStateMismatch
+        }
+        try validate(layers: layers)
         let logicalLengths = Set(layers.map(\.offset))
         guard logicalLengths.count == 1,
               let logicalLength = logicalLengths.first
@@ -202,6 +246,10 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
         let table = try await allocator.table(for: handle)
         guard table.logicalTokenCount == logicalLength else {
             throw PagedKVRuntimeBridgeError.logicalLengthMismatch
+        }
+        let binding = try await allocator.binding(for: handle)
+        for layer in layers {
+            layer.refresh(binding: binding)
         }
 
         let materializedLayers = try layers.enumerated().map { index, layer in
@@ -218,6 +266,13 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
         store(snapshot, layers: layers)
         byteSnapshotStore.store(snapshot)
         return snapshot
+    }
+
+    func validate(layers: [PagedKVCache]) throws {
+        guard !layers.isEmpty else { throw PagedKVRuntimeBridgeError.noCacheLayers }
+        guard layers.allSatisfy({ $0.invariantFailure == nil }) else {
+            throw PagedKVRuntimeBridgeError.cacheStateMismatch
+        }
     }
 
     /// The frozen engine protocol remains synchronous. It reads the last
@@ -239,8 +294,7 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
     }
 
     /// Builds standalone `KVCacheSimple` layers from the validated contiguous
-    /// snapshot. This is the live FR-PKV10 handoff consumed by cold-tier and
-    /// cross-turn callers; it is not a byte-only placeholder.
+    /// snapshot for callers that explicitly request a contiguous handoff.
     func materializeContiguousKVCache(
         handle: PagedKVBlockTableHandle
     ) async throws -> [KVCache] {
@@ -272,29 +326,84 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
         layerCount: Int
     ) async throws -> (PagedKVRequestAttachment, [PagedKVCache]) {
         guard layerCount > 0 else { throw PagedKVRuntimeBridgeError.noCacheLayers }
+        guard isAttached else { throw PagedKVRuntimeBridgeError.unavailable }
+        let retainedLayers = layers(for: retained.handle)
+        guard let retainedLayers, retainedLayers.count == layerCount else {
+            throw PagedKVRuntimeBridgeError.retainedSequenceUnavailable
+        }
+
+        // Reattach the still-live allocator/cache backing directly. A retained
+        // sequence must not round-trip through a contiguous byte snapshot: that
+        // path is reserved for explicit materialization/export only.
         let handle = try await allocator.reattach(retained, conversationKey: conversationKey)
-        let binding = try await allocator.binding(for: handle)
-        let attachment = PagedKVRequestAttachment(bridge: self, handle: handle, binding: binding)
-        let layers = try attachment.makeCacheLayers(count: layerCount)
-        let snapshot = try materializeContiguousByteCache(
+        guard isAttached else {
+            await releaseAllocatorHandle(handle)
+            remove(handle)
+            throw PagedKVRuntimeBridgeError.unavailable
+        }
+        let binding: PagedKVStorageBinding
+        do {
+            binding = try await allocator.binding(for: handle)
+        } catch {
+            // Reattach clears the allocator's retained bit before binding is
+            // read. Roll back the active handle so a partial reattach cannot
+            // strand its reserved blocks.
+            await releaseAllocatorHandle(handle)
+            remove(handle)
+            throw error
+        }
+        guard isAttached else {
+            await releaseAllocatorHandle(handle)
+            remove(handle)
+            throw PagedKVRuntimeBridgeError.unavailable
+        }
+        for layer in retainedLayers {
+            layer.refresh(binding: binding)
+        }
+        let attachment = PagedKVRequestAttachment(
+            bridge: self,
             handle: handle,
-            table: try await allocator.table(for: handle)
+            binding: binding,
+            cacheLayers: retainedLayers
         )
-        guard snapshot.layers.count == layerCount else {
-            throw PagedKVRuntimeBridgeError.cacheLayerCountMismatch
-        }
-        for layer in snapshot.layers {
-            guard layer.layerIndex < layers.count else {
-                throw PagedKVRuntimeBridgeError.cacheLayerCountMismatch
-            }
-            try layers[layer.layerIndex].inject(materialized: layer)
-        }
-        return (attachment, layers)
+        register(layers: retainedLayers, for: handle)
+        return (attachment, retainedLayers)
+    }
+
+    func discardRetained(
+        _ retained: PagedKVRetainedSequence,
+        conversationKey: String
+    ) async throws {
+        try await allocator.discardRetained(retained, conversationKey: conversationKey)
+        remove(retained.handle)
     }
 
     func release(handle: PagedKVBlockTableHandle) async throws {
-        try await allocator.release(handle)
-        remove(handle)
+        do {
+            try await allocator.release(handle)
+            remove(handle)
+        } catch {
+            markUnhealthy()
+            throw error
+        }
+    }
+
+    private func markUnhealthy() {
+        lock.lock()
+        unhealthy = true
+        lock.unlock()
+    }
+
+    private func releaseAllocatorHandle(_ handle: PagedKVBlockTableHandle) async {
+        for _ in 0..<2 {
+            do {
+                try await allocator.release(handle)
+                return
+            } catch {
+                continue
+            }
+        }
+        markUnhealthy()
     }
 
     private func remove(_ handle: PagedKVBlockTableHandle) {
@@ -303,6 +412,12 @@ final class PagedKVRuntimeBridge: @unchecked Sendable, PagedKVContiguousCacheBri
         snapshots.removeValue(forKey: handle.handleID)
         lock.unlock()
         byteSnapshotStore.remove(handle)
+    }
+
+    private func layers(for handle: PagedKVBlockTableHandle) -> [PagedKVCache]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return liveLayers[handle.handleID]
     }
 }
 

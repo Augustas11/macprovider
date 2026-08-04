@@ -49,6 +49,14 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             blockSizeTokens: 4,
             maxPhysicalBlocks: 4,
             maxResidentTokens: 16,
+            sizingModelClass: PagedKVHardwareSizingProof.requiredSizingModelClass,
+            unifiedMemoryGB: 32,
+            modelWeightsGB: 20,
+            perRequestActivationGB: 4,
+            pagedBlockPoolGB: 4,
+            kvBytesPerToken: 1_024,
+            measuredGatherOverheadPercent: 2,
+            gatherOverheadCeilingPercent: 10,
             poolEpoch: poolEpoch,
             parityLabel: parityLabel
         )

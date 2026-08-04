@@ -37,6 +37,22 @@ final class PagedKVParityTests: XCTestCase {
     private static let nNew = 40
     private static let prompt = "Explain in one paragraph why the sky appears blue during the day."
 
+    private func requireMLXMetalLibrary() throws {
+        let binaryURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        let binaryDirectory = binaryURL.deletingLastPathComponent()
+        let candidates = [
+            binaryDirectory.appendingPathComponent("mlx.metallib"),
+            binaryDirectory.appendingPathComponent("default.metallib"),
+            binaryDirectory.appendingPathComponent("Resources/mlx.metallib"),
+            binaryDirectory.appendingPathComponent("Resources/default.metallib"),
+            binaryDirectory.appendingPathComponent("mlx-swift_Cmlx.bundle/default.metallib"),
+            binaryDirectory.appendingPathComponent("Contents/Resources/mlx-swift_Cmlx.bundle/default.metallib"),
+        ]
+        guard candidates.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            throw XCTSkip("MLX default metallib is not present in the test bundle")
+        }
+    }
+
     private func findSnapshotDir(_ modelName: String) -> String? {
         let base = ("~/.cache/huggingface/hub/models--mlx-community--\(modelName)/snapshots"
             as NSString).expandingTildeInPath
@@ -81,9 +97,8 @@ final class PagedKVParityTests: XCTestCase {
         return a.count == b.count ? nil : min(a.count, b.count)
     }
 
-    /// Generous descriptor/binding: metadata only (SPEC-038-facing surface). `update()`
-    /// holds K/V in-tensor and never touches the allocator, so a single value-type binding
-    /// is reused for every layer.
+    /// Generous descriptor/binding using an allocator-issued non-identity physical
+    /// order so the parity run exercises the real block-table mapping.
     private func makePagedCacheFactory(modelName: String, nLayers: Int) async throws -> () -> [KVCache] {
         let maxBlocks = 512
         let descriptor = PagedKVDescriptor(
@@ -97,7 +112,12 @@ final class PagedKVParityTests: XCTestCase {
             kernelIdentifier: PagedKVGatherKernel.registeredKernelName,
             parityLabel: "sdpa-parity-v1"
         )
-        let allocator = try PagedKVBlockAllocator(blockSizeTokens: Self.blockSize, maxPhysicalBlocks: maxBlocks)
+        let physicalOrder = [1, 0] + Array(2 ..< maxBlocks)
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: Self.blockSize,
+            maxPhysicalBlocks: maxBlocks,
+            physicalBlockOrder: physicalOrder
+        )
         let handle = try await allocator.allocate(
             conversationKey: "parity-\(modelName)",
             maxTokens: Self.blockSize * maxBlocks,
@@ -105,6 +125,38 @@ final class PagedKVParityTests: XCTestCase {
         )
         let binding = try await allocator.binding(for: handle)
         return { (0 ..< nLayers).map { _ in PagedKVCache(descriptor: descriptor, binding: binding) } }
+    }
+
+    func testPagedKVCacheCopyPreservesLatchedInvariantFailure() async throws {
+        try requireMLXMetalLibrary()
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            modelID: "copy-invariant-test",
+            modelSHA256: String(repeating: "0", count: 64),
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: false,
+            metallibSHA256: String(repeating: "0", count: 64),
+            kernelIdentifier: PagedKVGatherKernel.registeredKernelName,
+            parityLabel: "copy-test"
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            physicalBlockOrder: [1, 0, 2, 3]
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "copy-invariant-test",
+            maxTokens: 16
+        )
+        let binding = try await allocator.binding(for: handle)
+        let cache = PagedKVCache(descriptor: descriptor, binding: binding)
+        let invalid = MLXArray([Float32(0)]).reshaped([1, 1, 1, 1])
+        _ = cache.update(keys: invalid, values: invalid)
+        let failure = try XCTUnwrap(cache.invariantFailure)
+
+        let copied = try XCTUnwrap(cache.copy() as? PagedKVCache)
+        XCTAssertEqual(copied.invariantFailure, failure)
     }
 
     private struct ParityOutcome {
