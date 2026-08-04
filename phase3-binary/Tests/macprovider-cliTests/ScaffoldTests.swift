@@ -76,4 +76,54 @@ final class DecodeBenchHelperTests: XCTestCase {
         let long = String(repeating: "x", count: 100)
         XCTAssertEqual(decodeBenchSanitizeFilenameComponent(long).count, 80)
     }
+
+    func testMSBAggregateThroughputUsesCommonWallClock() throws {
+        let base = Date(timeIntervalSince1970: 100)
+        let report = try msbAggregateThroughput([
+            MSBAggregateThroughputInput(
+                decodedTokens: 100,
+                decodeStartedAt: base,
+                decodeEndedAt: base.addingTimeInterval(10)
+            ),
+            MSBAggregateThroughputInput(
+                decodedTokens: 100,
+                decodeStartedAt: base.addingTimeInterval(2),
+                decodeEndedAt: base.addingTimeInterval(12)
+            ),
+        ])
+
+        XCTAssertEqual(report.totalDecodedTokens, 200)
+        XCTAssertEqual(report.commonWallSeconds, 12, accuracy: 0.001)
+        XCTAssertEqual(report.aggregateTokensPerSecond, 200.0 / 12.0, accuracy: 0.001)
+    }
+
+    func testMSBAggregateThroughputRejectsInvalidSamples() {
+        XCTAssertThrowsError(try msbAggregateThroughput([])) { error in
+            XCTAssertEqual(error as? MSBAggregateThroughputError, .emptySamples)
+        }
+        let now = Date()
+        XCTAssertThrowsError(try msbAggregateThroughput([
+            MSBAggregateThroughputInput(decodedTokens: 1, decodeStartedAt: now, decodeEndedAt: now),
+        ])) { error in
+            XCTAssertEqual(error as? MSBAggregateThroughputError, .invalidSample)
+        }
+    }
+
+    func testMSBAggregateThroughputRejectsTokenCountOverflow() {
+        let base = Date(timeIntervalSince1970: 100)
+        XCTAssertThrowsError(try msbAggregateThroughput([
+            MSBAggregateThroughputInput(
+                decodedTokens: Int.max,
+                decodeStartedAt: base,
+                decodeEndedAt: base.addingTimeInterval(1)
+            ),
+            MSBAggregateThroughputInput(
+                decodedTokens: 1,
+                decodeStartedAt: base,
+                decodeEndedAt: base.addingTimeInterval(1)
+            ),
+        ])) { error in
+            XCTAssertEqual(error as? MSBAggregateThroughputError, .tokenCountOverflow)
+        }
+    }
 }

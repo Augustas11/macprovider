@@ -16,6 +16,12 @@ public enum LogLevel: String, Sendable {
     case critical
 }
 
+public enum ContinuousBatchingMode: String, Sendable {
+    case off
+    case canary
+    case on
+}
+
 public struct AppConfig: Equatable, Sendable {
     public var port: Int
     public var model: String?
@@ -108,6 +114,8 @@ public struct AppConfig: Equatable, Sendable {
     // Triple-exposed: yaml key `prefill_step_size`, env `MACPROVIDER_PREFILL_STEP_SIZE`,
     // CLI `--prefill-step-size`.
     public var prefillStepSize: Int
+    public var continuousBatching: ContinuousBatchingMode
+    public var continuousBatchQueueLimit: Int?
 
     // SPEC-037 FR-KVP11: encrypted KV survival disk tier. Default-off; resolved
     // fail-closed (invalid value ⇒ tier disabled + `errors` populated, never a
@@ -174,6 +182,8 @@ public struct AppConfig: Equatable, Sendable {
             managedBy: nil,
             streamInterval: 1,
             prefillStepSize: 512,
+            continuousBatching: .off,
+            continuousBatchQueueLimit: nil,
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
         )
@@ -216,6 +226,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var idlePrewarmRunOnBattery: Bool?
     public var streamInterval: Int?
     public var prefillStepSize: Int?
+    public var continuousBatching: String?
+    public var continuousBatchQueueLimit: Int?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
     // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
@@ -255,6 +267,8 @@ public struct CLIOverrides: Equatable, Sendable {
         streamInterval: Int? = nil,
         prefillStepSize: Int? = nil,
         kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
+        continuousBatching: String? = nil,
+        continuousBatchQueueLimit: Int? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
@@ -289,6 +303,8 @@ public struct CLIOverrides: Equatable, Sendable {
         self.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
         self.streamInterval = streamInterval
         self.prefillStepSize = prefillStepSize
+        self.continuousBatching = continuousBatching
+        self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
     }
@@ -394,8 +410,10 @@ public enum ConfigLoader {
         }
 
         let raw: Any?
+        let rawNode: Node?
         do {
             raw = try Yams.load(yaml: text)
+            rawNode = try Yams.compose(yaml: text)
         } catch {
             throw ConfigError.invalidYAML(path: path, underlying: String(describing: error))
         }
@@ -459,6 +477,18 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
+        if dict["continuous_batching"] != nil {
+            guard let rawMode = rawNode?["continuous_batching"]?.scalar?.string,
+                  let mode = ContinuousBatchingMode(rawValue: rawMode.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "continuous_batching",
+                    value: String(describing: dict["continuous_batching"]),
+                    expected: "off, canary, or on"
+                )
+            }
+            config.continuousBatching = mode
+        }
+        try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
         return config
     }
 
@@ -510,6 +540,8 @@ public enum ConfigLoader {
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
+        try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
+        try assign(&config.continuousBatchQueueLimit, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT", expected: "integer >= 1")
         return config
     }
 
@@ -649,6 +681,19 @@ public enum ConfigLoader {
         }
         if let prefillStepSize = cli.prefillStepSize {
             config.prefillStepSize = prefillStepSize
+        }
+        if let continuousBatching = cli.continuousBatching {
+            guard let mode = ContinuousBatchingMode(rawValue: continuousBatching.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "--continuous-batching",
+                    value: continuousBatching,
+                    expected: "off, canary, or on"
+                )
+            }
+            config.continuousBatching = mode
+        }
+        if let continuousBatchQueueLimit = cli.continuousBatchQueueLimit {
+            config.continuousBatchQueueLimit = continuousBatchQueueLimit
         }
         return config
     }
@@ -873,6 +918,14 @@ public enum ConfigLoader {
             throw ConfigError.invalidValue(key: key, value: value, expected: expected)
         }
         field = format
+    }
+
+    private static func assign(_ field: inout ContinuousBatchingMode, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let mode = ContinuousBatchingMode(rawValue: value.lowercased()) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = mode
     }
 
     private static func parseBool(_ value: String) -> Bool? {

@@ -599,6 +599,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private let inferenceGate: AsyncSemaphore
     private let blockingInferenceExecutor: BlockingInferenceExecutor
     private let maxBatch: Int
+    private let continuousBatchingMode: ContinuousBatchingMode
+    private let continuousBatchQueueLimit: Int?
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -902,6 +904,8 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
+        continuousBatchingMode: ContinuousBatchingMode = .off,
+        continuousBatchQueueLimit: Int? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -937,6 +941,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
+        self.continuousBatchingMode = continuousBatchingMode
+        self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
@@ -1048,6 +1054,8 @@ actor ModelRuntime: ModelRuntimeServing {
         pagedKVConfig: PagedKVConfig = .defaults(),
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
+        continuousBatchingMode: ContinuousBatchingMode = .off,
+        continuousBatchQueueLimit: Int? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -1095,6 +1103,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxBatch = boundedMaxBatch
         self.inferenceGate = AsyncSemaphore(value: boundedMaxBatch)
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.streamvc.macprovider.inference")
+        self.continuousBatchingMode = continuousBatchingMode
+        self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
@@ -1281,6 +1291,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
                 if didTimeout {
                     await self.cancelAllInFlightForDrainTimeout()
+                    // Cancellation is only a request to stop old-generation
+                    // work, not proof that the old container is quiescent.
+                    // Keep the old snapshot installed and fail this swap.
+                    throw DrainCancelledError()
                 }
                 await self.completeSwapAtomically(
                     container: container,
@@ -1317,6 +1331,104 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func maxBatchForTest() -> Int {
         maxBatch
+    }
+
+    func continuousBatchingCapabilityForTest(stickyCacheEligible: Bool = false) -> ContinuousBatchingCapability {
+        continuousBatchingCapability(
+            draftConfigured: currentDraftModelID != nil,
+            stickyCacheEligible: stickyCacheEligible
+        )
+    }
+
+    private func continuousBatchingCapability(
+        draftConfigured: Bool,
+        stickyCacheEligible: Bool,
+        requestStateRepresentable: Bool = true
+    ) -> ContinuousBatchingCapability {
+        // The independently observed runtime tuple and scheduler backend are
+        // installed by the deferred SPEC-039 engine bridge. Do not manufacture
+        // a self-fulfilling tuple from the advertised descriptor.
+        let requestedTuple: ContinuousBatchingRequestedTuple? = nil
+        return ContinuousBatchingPolicy.capability(
+            mode: continuousBatchingMode,
+            maxBatch: maxBatch,
+            queueLimit: continuousBatchQueueLimit,
+            kvBits: kvBitsOverride,
+            draftConfigured: draftConfigured,
+            stickyCacheEligible: stickyCacheEligible,
+            requestStateRepresentable: requestStateRepresentable,
+            schedulerBackendAvailable: false,
+            pagedKVDecision: pagedKVAttachDecision,
+            requestedTuple: requestedTuple
+        )
+    }
+
+    /// A request is representable by the batched shared-forward contract only if
+    /// its generation is fully described by the scalar sampling parameters the
+    /// contract carries. Structured-output/grammar validation, tool-constrained
+    /// decoding, logit_bias, and logprobs all impose row-local decoder state the
+    /// contract does not model, so such requests must serial-route (canary) / fail
+    /// closed (strict) before admission — a gate that holds even after the deferred
+    /// SPEC-039 bridge lands, so a future backend cannot silently drop that state.
+    static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
+        // Structured-output / grammar-constrained decoding.
+        if requiresStructuredValidation(request.responseFormat) { return false }
+        // Tool-bearing requests carry tool schemas + tool-call parser state.
+        // hasEnabledTools treats an absent, explicit-null, or empty tools array as
+        // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
+        // here (the meaningful signal is whether tools are actually enabled).
+        if hasEnabledTools(request.promptSource.tools) { return false }
+        // logit_bias and logprobs (incl. top_logprobs metadata) have no carrier in
+        // the scheduler row contract. top_logprobs only shapes response metadata,
+        // not token selection, but is rejected here too so the gate is provably
+        // complete and no per-request logprob surface can reach a batch unrepresented.
+        if isActiveJSONValue(request.promptSource.logitBias) { return false }
+        if isRequestedLogprobs(request.promptSource.logprobs) { return false }
+        if isActiveJSONValue(request.promptSource.topLogprobs) { return false }
+        return true
+    }
+
+    /// True when a JSON field is present and not explicit null. `optionalJSONValue`
+    /// preserves JSON `null` as `.null`, so a bare `!= nil` check would misclassify
+    /// an explicit-null field as active.
+    static func isActiveJSONValue(_ value: MacProviderCore.JSONValue?) -> Bool {
+        guard let value else { return false }
+        if case .null = value { return false }
+        return true
+    }
+
+    /// True when logprobs are actually requested. Absent, null, or `false` are not
+    /// requests and must not force serial routing.
+    static func isRequestedLogprobs(_ value: MacProviderCore.JSONValue?) -> Bool {
+        guard let value else { return false }
+        switch value {
+        case .null, .bool(false):
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func applyContinuousBatchingPolicy(
+        request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot,
+        emitTelemetry: Bool = true
+    ) throws {
+        let capability = continuousBatchingCapability(
+            draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
+            // v0.2 admits keyless fresh requests only. A conversation key is
+            // conservatively treated as sticky/cross-turn until the cache
+            // bridge can prove that it has no reusable state.
+            stickyCacheEligible: request.conversationKey != nil,
+            requestStateRepresentable: Self.requestStateRepresentable(request)
+        )
+        // Telemetry is emitted once per request at preflight; execution paths
+        // re-validate for fail-closed safety but must not re-log the same
+        // serial-route event (avoids double-counting canary promotion evidence).
+        if emitTelemetry {
+            ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
+        }
+        try ContinuousBatchingPolicy.validateStrictStartup(capability)
     }
 
     func maxContextTokensForTest() -> Int {
@@ -1582,6 +1694,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
@@ -1605,6 +1718,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func pagedKVPreflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try applyContinuousBatchingPolicy(request: request, snapshot: handle.snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try handle.drainCancelled.check()
     }
@@ -1752,6 +1866,11 @@ actor ModelRuntime: ModelRuntimeServing {
         let completionStartedAt = Date()
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        // Non-streaming execution is a direct entry path with no preceding
+        // preflight (HTTP + relay), so it OWNS the single serial-route telemetry
+        // emission for this request. (Streaming preflights first and suppresses
+        // here to stay exactly-once.)
+        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: true)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
         if let testSpeculativeCompletion,
@@ -2166,6 +2285,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: false)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))

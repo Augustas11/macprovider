@@ -354,7 +354,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(finalSnapshot.modelID, "new-model")
     }
 
-    func testDrainTimeoutProceedsWithAtomicSwap() async throws {
+    func testDrainTimeoutFailsSwapAndKeepsOldGeneration() async throws {
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
         let runtime = makeRuntime(
             modelID: "old-model",
@@ -372,8 +372,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
         let snapshot = await runtime.currentSnapshot()
 
         XCTAssertEqual(snapshot.state, .ready)
-        XCTAssertEqual(snapshot.modelID, "new-model")
-        XCTAssertEqual(snapshot.modelHash, "new-hash")
+        XCTAssertEqual(snapshot.modelID, "old-model")
+        XCTAssertEqual(snapshot.modelHash, "old-hash")
     }
 
     func testDrainTimeoutCancelsInFlightRequests() async throws {
@@ -420,8 +420,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
         let snapshot = await runtime.currentSnapshot()
         XCTAssertEqual(snapshot.state, .ready)
-        XCTAssertEqual(snapshot.modelID, "new-model")
-        XCTAssertEqual(snapshot.modelHash, "new-hash")
+        XCTAssertEqual(snapshot.modelID, "old-model")
+        XCTAssertEqual(snapshot.modelHash, "old-hash")
     }
 
     func testInFlightCompletesIfWithinDrainWindow() async throws {
@@ -641,8 +641,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
             await runtime.unregisterInFlight(handle.registrationID)
             let snapshot = await runtime.currentSnapshot()
             XCTAssertEqual(snapshot.state, .ready)
-            XCTAssertEqual(snapshot.modelID, "new-model")
-            XCTAssertEqual(snapshot.modelHash, "new-hash")
+            XCTAssertEqual(snapshot.modelID, "old-model")
+            XCTAssertEqual(snapshot.modelHash, "old-hash")
         } catch {
             await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
             await runtime.unregisterInFlight(handle.registrationID)
