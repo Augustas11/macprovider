@@ -146,6 +146,31 @@ scope, evidence, rollback, expiry, and unresolved journey. Such an exception
 cannot mark the missing evidence conformant or close #613. Missing, stale,
 skipped, or failed evidence otherwise blocks promotion.
 
+## Release-scoped reconciliation slices
+
+Issue #614 is the complete reconciliation program, not a standing blocker for
+every release. A bounded release may name a narrower reconciliation slice when
+the release scope is explicit, owned, and evidence-backed.
+
+A release-scoped slice must record:
+
+- the product outcome being released;
+- the SPEC IDs, requirement IDs, and authority domains that are active for that
+  outcome;
+- the specs and requirements that are default-off, future, historical,
+  not-deployed, or otherwise outside the release scope;
+- the minimum journeys, automated tests, and production or physical evidence
+  required for that outcome;
+- the stop condition for promotion and the issue that tracks any remaining
+  non-blocking conformance debt.
+
+Unknown governance debt outside the named slice does not block the scoped
+release. Unknown governance debt inside the named slice must be arbitrated as
+`CODE_BUG`, `SPEC_BUG`, `DECISION_REQUIRED`, `DUPLICATE_AUTHORITY`, `UNKNOWN`,
+`not-applicable`, or `not-deployed` before promotion. A release-scoped slice
+may narrow the gate; it may not mark a requirement conformant without the
+evidence required by this process.
+
 Every PR body contains exactly one raw, marker-delimited JSON declaration:
 
 ```text
