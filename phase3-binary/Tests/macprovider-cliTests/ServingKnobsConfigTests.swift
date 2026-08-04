@@ -725,6 +725,49 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
+    private func parsedRequest(_ body: [String: Any]) throws -> ChatCompletionRequest {
+        var dict = body
+        dict["model"] = dict["model"] ?? "catalog/model"
+        dict["messages"] = dict["messages"] ?? [["role": "user", "content": "hi"]]
+        let data = try JSONSerialization.data(withJSONObject: dict)
+        return try ChatCompletionRequest.parse(data: data)
+    }
+
+    func testRequestStateRepresentableGateOnParsedRequests() throws {
+        // Plain request → representable.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
+
+        // Structured output (json_schema) → not representable.
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "response_format": ["type": "json_schema",
+                                "json_schema": ["name": "s",
+                                                "schema": ["type": "object",
+                                                           "additionalProperties": false]]]
+        ])))
+
+        // Tools present WITHOUT tool_choice → not representable (the HIGH the gate missed).
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "tools": [["type": "function",
+                       "function": ["name": "f", "parameters": ["type": "object"]]]]
+        ])))
+
+        // Explicit JSON null tool_choice, no tools → representable (must NOT false-positive).
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "tool_choice": NSNull()
+        ])))
+
+        // logit_bias → not representable; logprobs:false → representable.
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "logit_bias": ["123": -100]
+        ])))
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "logprobs": false
+        ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "logprobs": true
+        ])))
+    }
+
     func testRepresentableRequestStateDoesNotTripTheGate() {
         // Default representable=true path must be unaffected by the new gate.
         let capability = ContinuousBatchingPolicy.capability(
