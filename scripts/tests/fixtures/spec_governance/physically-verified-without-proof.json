@@ -1,1 +1,1 @@
-{"mutation":{"operation":"physically_verified_without_proof"},"expected":"physically-verified requires signed journey-result contract before promotion"}
+{"mutation":{"operation":"physically_verified_without_proof"},"expected":"physically-verified requires every owned requirement to be conformant"}

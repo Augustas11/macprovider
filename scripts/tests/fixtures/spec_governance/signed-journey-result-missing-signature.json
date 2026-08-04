@@ -1,0 +1,1 @@
+{"mutation":{"operation":"signed_journey_result_missing_signature"},"expected":"signed journey-result requires at least one signature"}

@@ -1,0 +1,1 @@
+{"mutation":{"operation":"signed_journey_result_empty_artifacts"},"expected":"artifacts: must contain at least one artifact reference"}

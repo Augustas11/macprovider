@@ -48,6 +48,7 @@ GOVERNANCE_ONLY_PATHS = (
     "beta/DECISION_CRITERIA.md",
     "docs/spec-governance-foundation.md",
     "docs/spec-history/",
+    "schemas/journey-",
     "schemas/spec-",
     "scripts/check_spec_governance.py",
     "scripts/check_spec_pr_declaration.py",
