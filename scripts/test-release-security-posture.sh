@@ -389,8 +389,11 @@ def validate_pearl_toolchain(job):
     sealed_go_path = str(pathlib.PurePosixPath(SEALED_GO_EXECUTABLE).parent.parent)
     if job.count(sealed_go_path) != PEARL_GO_SEAL_STEP.count(sealed_go_path):
         raise SystemExit("sealed Go verifier path must appear only in the exact seal step")
+    if SLOW_BUILD_SKIP_GUARD in setup_go:
+        raise SystemExit(
+            "Setup Go for Pearl binaries must remain available when promoting a candidate artifact"
+        )
     for name, step in (
-        ("Setup Go for Pearl binaries", setup_go),
         ("Build Pearl linux-amd64 binaries", pearl_build),
         ("Build package", package_build),
     ):

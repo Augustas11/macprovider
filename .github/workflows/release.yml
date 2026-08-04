@@ -120,9 +120,11 @@ jobs:
           bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
 
       - name: Setup Go for Pearl binaries
-        if: ${{ github.event.inputs.promote_run_id == '' }}
         # Pinned to actions/setup-go v7.0.0. Linux binaries are cross-compiled
         # without CGO and carried as unsigned inputs into the protected signer.
+        # The promoted-candidate path still runs the final embedded-build-info
+        # verifier, so it needs the same pinned Go toolchain even though it
+        # does not compile the binaries again.
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: phase4-coordinator/go.mod
