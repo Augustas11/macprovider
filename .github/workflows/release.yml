@@ -105,6 +105,7 @@ jobs:
 
       - name: Verify release version cohesion
         shell: bash
+        # Keep this a literal block: YAML folds plain multiline scalars before Bash parses them.
         run: |
           bash scripts/test-coordinator-advertised-version.sh \
             "${{ steps.release_source.outputs.tag }}" \
