@@ -13,6 +13,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,24 @@ JOURNEY_RESULT_SIGNING_KEY_ID = "macprovider-acceptance-p256-v1"
 JOURNEY_RESULT_SIGNING_DOMAIN = b"macprovider.journey-result.v1\n"
 JOURNEY_RESULT_PUBLIC_KEY_PATH = "security/acceptance-candidate-signing-public.pem"
 JOURNEY_RESULT_PUBLIC_KEY_SHA256 = "849e9c9bc53db1fb8e28d3b46ab431089b12cb50b398c5317ced682d39bdbd38"
+TRUSTED_OPENSSL_CANDIDATES = (
+    "/usr/bin/openssl",
+    "/opt/homebrew/opt/openssl@3/bin/openssl",
+    "/opt/homebrew/bin/openssl",
+    "/usr/local/bin/openssl",
+)
+
+
+def _trusted_openssl_paths() -> set[Path]:
+    trusted: set[Path] = set()
+    for candidate in TRUSTED_OPENSSL_CANDIDATES:
+        try:
+            resolved = Path(candidate).resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            trusted.add(resolved)
+    return trusted
 SPEC_ID_RE = re.compile(r"^SPEC-\d{3}$")
 SPEC_PATH_RE = re.compile(r"^specs/SPEC-\d{3}-[a-z0-9-]+\.md$")
 REQUIREMENT_ID_RE = re.compile(r"^(SPEC-\d{3})-R\d{3}$")
@@ -129,6 +148,32 @@ def _load_json(path: Path, result: ValidationResult) -> Any | None:
     except OSError as exc:
         result.error(str(path), f"cannot read: {exc}")
     return None
+
+
+def resolve_trusted_openssl(path: str | None = None) -> str:
+    trusted_paths = _trusted_openssl_paths()
+    if path:
+        openssl = Path(path)
+        if not openssl.is_absolute():
+            raise ValueError("OpenSSL path must be absolute")
+        try:
+            resolved = openssl.resolve(strict=True)
+        except OSError:
+            raise ValueError(f"OpenSSL binary is absent or unsafe: {openssl}")
+        if resolved not in trusted_paths:
+            raise ValueError("OpenSSL path is not in the trusted allowlist")
+        return str(resolved)
+
+    candidates = list(TRUSTED_OPENSSL_CANDIDATES)
+    for value in candidates:
+        openssl = Path(value)
+        try:
+            resolved = openssl.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return str(resolved)
+    raise ValueError("could not resolve trusted OpenSSL binary")
 
 
 def _expect_object(value: Any, location: str, result: ValidationResult) -> bool:
@@ -363,6 +408,7 @@ def _verify_journey_result_signature(
     signed: dict[str, Any],
     signature: dict[str, Any],
     trusted_public_key_sha256: str,
+    openssl_bin: str,
     location: str,
     result: ValidationResult,
 ) -> bool:
@@ -406,7 +452,7 @@ def _verify_journey_result_signature(
         signature_path.write_bytes(signature_bytes)
         completed = subprocess.run(
             [
-                "openssl",
+                openssl_bin,
                 "dgst",
                 "-sha256",
                 "-verify",
@@ -420,6 +466,7 @@ def _verify_journey_result_signature(
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            env={"PATH": "/usr/bin:/bin"},
             timeout=20,
         )
     if completed.returncode != 0:
@@ -435,6 +482,7 @@ def _validate_signed_journey_result(
     journeys: list[str],
     evidence_commits: set[str],
     trusted_public_key_sha256: str,
+    openssl_bin: str,
     location: str,
     result: ValidationResult,
 ) -> bool:
@@ -477,7 +525,7 @@ def _validate_signed_journey_result(
             result.error(f"{loc}.signed_sha256", "does not match canonical signed payload SHA-256")
         _datetime_z(signature.get("verified_at"), f"{loc}.verified_at", result)
         _string(signature.get("verifier"), None, f"{loc}.verifier", result)
-        if digest == signed_digest and _verify_journey_result_signature(root, signed, signature, trusted_public_key_sha256, loc, result):
+        if digest == signed_digest and _verify_journey_result_signature(root, signed, signature, trusted_public_key_sha256, openssl_bin, loc, result):
             matching_verified_signature = True
     if not matching_verified_signature:
         result.error(location, "signed journey-result requires a verified signature over the signed payload")
@@ -638,6 +686,7 @@ def _signed_journey_result_satisfies(
     location: str,
     result: ValidationResult,
     trusted_public_key_sha256: str,
+    openssl_bin: str,
     emit_errors: bool = True,
 ) -> bool:
     requirement_id = requirement.get("requirement_id")
@@ -676,6 +725,7 @@ def _signed_journey_result_satisfies(
                 [item for item in journeys if isinstance(item, str)],
                 evidence_commits,
                 trusted_public_key_sha256,
+                openssl_bin,
                 f"{location}.evidence[{index}].source",
                 candidate_result,
             ):
@@ -769,7 +819,11 @@ def _validate_base_manifest_immutability(
         return
     base_authority = _git_show_json(root, base_ref, "specs/AUTHORITY.json")
     base_conformance = _git_show_json(root, base_ref, "specs/CONFORMANCE.json")
-    if not isinstance(base_authority, dict) or not isinstance(base_conformance, dict):
+    if not isinstance(base_authority, dict):
+        result.error("base-ref", f"cannot load specs/AUTHORITY.json from {base_ref!r}")
+        return
+    if not isinstance(base_conformance, dict):
+        result.error("base-ref", f"cannot load specs/CONFORMANCE.json from {base_ref!r}")
         return
 
     head_domains = {
@@ -1064,11 +1118,18 @@ def validate_repository(
     root: Path,
     base_ref: str | None = None,
     trusted_journey_result_public_key_sha256: str = JOURNEY_RESULT_PUBLIC_KEY_SHA256,
+    conformance_override: dict[str, Any] | None = None,
+    openssl_bin: str | None = None,
 ) -> ValidationResult:
     root = root.resolve()
     result = ValidationResult()
+    try:
+        trusted_openssl = resolve_trusted_openssl(openssl_bin)
+    except ValueError as exc:
+        result.error("openssl", str(exc))
+        return result
     authority = _load_json(root / "specs" / "AUTHORITY.json", result)
-    conformance = _load_json(root / "specs" / "CONFORMANCE.json", result)
+    conformance = conformance_override if conformance_override is not None else _load_json(root / "specs" / "CONFORMANCE.json", result)
     if authority is None or conformance is None:
         return result
 
@@ -1248,6 +1309,7 @@ def validate_repository(
                         str(item.get("requirement_id")),
                         result,
                         trusted_journey_result_public_key_sha256,
+                        trusted_openssl,
                         emit_errors=False,
                     )
                 ]
@@ -1272,6 +1334,7 @@ def validate_repository(
                         str(item.get("requirement_id")),
                         result,
                         trusted_journey_result_public_key_sha256,
+                        trusted_openssl,
                         emit_errors=False,
                     )
                 ]
@@ -1297,6 +1360,7 @@ def validate_repository(
                     requirement_id,
                     result,
                     trusted_journey_result_public_key_sha256,
+                    trusted_openssl,
                 ):
                     result.error(requirement_id, "sensitive conformant requirement requires valid signed journey-result evidence")
 
@@ -1307,8 +1371,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".", help="repository root")
     parser.add_argument("--base-ref", default=None, help="trusted base ref for structured identity immutability checks")
+    parser.add_argument("--openssl-bin", default=None, help="absolute path to trusted OpenSSL")
     args = parser.parse_args(argv)
-    result = validate_repository(Path(args.root), args.base_ref)
+    result = validate_repository(Path(args.root), args.base_ref, openssl_bin=args.openssl_bin)
     if result.errors:
         for error in result.errors:
             print(f"error: {error}", file=sys.stderr)
