@@ -185,6 +185,10 @@ public struct PagedKVGates: Equatable, Sendable {
     public let observedMetallibSHA256: String?
     public let observedKernelIdentifier: String?
     public let observedParityLabel: String?
+    /// Pool epoch observed from the live allocator/runtime. Keeping this separate
+    /// from the sizing proof prevents a proof for epoch N from being reused after
+    /// the allocator has rolled to epoch N+1.
+    public let observedPoolEpoch: Int?
     public let moeDispatchProven: Bool
     public let engineBridgeAvailable: Bool
 
@@ -198,6 +202,7 @@ public struct PagedKVGates: Equatable, Sendable {
         observedMetallibSHA256: String? = nil,
         observedKernelIdentifier: String? = nil,
         observedParityLabel: String? = nil,
+        observedPoolEpoch: Int? = nil,
         moeDispatchProven: Bool = false,
         engineBridgeAvailable: Bool = false
     ) {
@@ -210,6 +215,7 @@ public struct PagedKVGates: Equatable, Sendable {
         self.observedMetallibSHA256 = observedMetallibSHA256
         self.observedKernelIdentifier = observedKernelIdentifier
         self.observedParityLabel = observedParityLabel
+        self.observedPoolEpoch = observedPoolEpoch
         self.moeDispatchProven = moeDispatchProven
         self.engineBridgeAvailable = engineBridgeAvailable
     }
@@ -224,6 +230,7 @@ public struct PagedKVGates: Equatable, Sendable {
         observedMetallibSHA256: nil,
         observedKernelIdentifier: nil,
         observedParityLabel: nil,
+        observedPoolEpoch: nil,
         moeDispatchProven: false,
         engineBridgeAvailable: false
     )
@@ -239,8 +246,131 @@ public struct PagedKVGates: Equatable, Sendable {
             observedMetallibSHA256: nil,
             observedKernelIdentifier: nil,
             observedParityLabel: nil,
+            observedPoolEpoch: nil,
             moeDispatchProven: false,
             engineBridgeAvailable: false
+        )
+    }
+}
+
+/// A provider-local observation of the runtime tuple used by SPEC-039 attach.
+///
+/// The values in this type are observations, not descriptor defaults. Callers
+/// must obtain them from the loaded model/runtime probe (or an offline fixture
+/// that represents that probe); the attach gate never derives them from the
+/// descriptor it is about to advertise.
+public struct PagedKVRuntimeObservation: Equatable, Sendable {
+    public let modelID: String
+    public let modelSHA256: String
+    public let tokenizerSHA256: String?
+    public let chatTemplateSHA256: String?
+    public let modelFamily: String
+    public let cacheClass: String
+    public let kvDType: PagedKVDType
+    public let requiresMoEDispatch: Bool
+    public let hardwareClass: String?
+    public let metallibSHA256: String?
+    public let kernelIdentifier: String?
+    public let parityLabel: String?
+    public let poolEpoch: Int?
+    public let metallibAvailable: Bool
+    public let kernelRegistered: Bool
+    public let parityEstablished: Bool
+    public let hardwareSizingProof: PagedKVHardwareSizingProof?
+    public let moeDispatchProven: Bool
+
+    public init(
+        modelID: String,
+        modelSHA256: String,
+        tokenizerSHA256: String?,
+        chatTemplateSHA256: String?,
+        modelFamily: String,
+        cacheClass: String,
+        kvDType: PagedKVDType = .fp16,
+        requiresMoEDispatch: Bool,
+        hardwareClass: String?,
+        metallibSHA256: String?,
+        kernelIdentifier: String?,
+        parityLabel: String?,
+        poolEpoch: Int?,
+        metallibAvailable: Bool,
+        kernelRegistered: Bool,
+        parityEstablished: Bool,
+        hardwareSizingProof: PagedKVHardwareSizingProof?,
+        moeDispatchProven: Bool
+    ) {
+        self.modelID = modelID
+        self.modelSHA256 = modelSHA256
+        self.tokenizerSHA256 = tokenizerSHA256
+        self.chatTemplateSHA256 = chatTemplateSHA256
+        self.modelFamily = modelFamily
+        self.cacheClass = cacheClass
+        self.kvDType = kvDType
+        self.requiresMoEDispatch = requiresMoEDispatch
+        self.hardwareClass = hardwareClass
+        self.metallibSHA256 = metallibSHA256
+        self.kernelIdentifier = kernelIdentifier
+        self.parityLabel = parityLabel
+        self.poolEpoch = poolEpoch
+        self.metallibAvailable = metallibAvailable
+        self.kernelRegistered = kernelRegistered
+        self.parityEstablished = parityEstablished
+        self.hardwareSizingProof = hardwareSizingProof
+        self.moeDispatchProven = moeDispatchProven
+    }
+
+    /// Returns whether every observed identity field is complete and covered by
+    /// the sizing proof for this exact configuration and allocator epoch.
+    public func matches(config: PagedKVConfig) -> Bool {
+        guard let hardwareClass,
+              let metallibSHA256,
+              let kernelIdentifier,
+              let parityLabel,
+              let poolEpoch,
+              let hardwareSizingProof
+        else { return false }
+        guard PagedKVAttachGate.recognizedModelFamilies.contains(modelFamily),
+              PagedKVAttachGate.allowedCacheClasses.contains(cacheClass),
+              !modelID.isEmpty,
+              !modelSHA256.isEmpty,
+              kvDType == .fp16,
+              metallibAvailable,
+              kernelRegistered,
+              parityEstablished,
+              !requiresMoEDispatch || moeDispatchProven
+        else { return false }
+        return hardwareSizingProof.covers(
+            config: config,
+            modelID: modelID,
+            modelSHA256: modelSHA256,
+            tokenizerSHA256: tokenizerSHA256,
+            chatTemplateSHA256: chatTemplateSHA256,
+            modelFamily: modelFamily,
+            observedHardwareClass: hardwareClass,
+            observedMetallibSHA256: metallibSHA256,
+            observedKernelIdentifier: kernelIdentifier,
+            observedParityLabel: parityLabel,
+            poolEpoch: poolEpoch
+        )
+    }
+
+    /// Converts a validated observation into the gate input consumed by the
+    /// existing attach decision. `bridgeAvailable` is deliberately supplied by
+    /// the runtime owner only after it has installed the request-level bridge.
+    public func gates(config: PagedKVConfig, bridgeAvailable: Bool) -> PagedKVGates {
+        PagedKVGates(
+            identityAvailable: !modelID.isEmpty && !modelSHA256.isEmpty,
+            observedHardwareClass: hardwareClass,
+            metallibAvailable: metallibAvailable,
+            kernelRegistered: kernelRegistered,
+            parityEstablished: parityEstablished,
+            hardwareSizingProof: hardwareSizingProof,
+            observedMetallibSHA256: metallibSHA256,
+            observedKernelIdentifier: kernelIdentifier,
+            observedParityLabel: parityLabel,
+            observedPoolEpoch: poolEpoch,
+            moeDispatchProven: moeDispatchProven,
+            engineBridgeAvailable: bridgeAvailable && matches(config: config)
         )
     }
 }
@@ -318,7 +448,7 @@ public enum PagedKVAttachGate {
                   observedMetallibSHA256: observedMetallibSHA256,
                   observedKernelIdentifier: observedKernelIdentifier,
                   observedParityLabel: observedParityLabel,
-                  poolEpoch: 1
+                  poolEpoch: gates.observedPoolEpoch ?? sizingProof.poolEpoch
               )
         else {
             return fail(.allocator)
