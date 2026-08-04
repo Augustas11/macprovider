@@ -2592,6 +2592,7 @@ struct LocalStatusFormatter {
             title = "Pending hardware verification"
             nextStep = "Run `macprovider-cli autotune --recommend --freshness-check --require-hardware-evidence` while online. Recently submitted evidence may still be awaiting operator approval."
         } else if lifecycleReason == "autotune_evidence_invalid"
+            || lifecycleReason == "autotune_evidence_binary_version_mismatch"
             || lifecycleReason == "autotune_model_cap_exceeded"
         {
             title = "Not eligible: admission evidence failed"

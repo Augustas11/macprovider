@@ -559,6 +559,38 @@ final class ServeCommandTests: XCTestCase {
         )
     }
 
+    func testAutotuneCandidateIsolationRootIsFreshAndOwnerOnly() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("serve-candidate-root-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+
+        let first = try ServeCommand.makeCandidateIsolationRoot(temporaryDirectory: temporaryDirectory)
+        let second = try ServeCommand.makeCandidateIsolationRoot(temporaryDirectory: temporaryDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        XCTAssertNotEqual(first, second)
+        var info = stat()
+        XCTAssertEqual(lstat(first.path, &info), 0)
+        XCTAssertEqual(info.st_uid, geteuid())
+        XCTAssertEqual(info.st_mode & 0o777, 0o700)
+        XCTAssertEqual(
+            ServeCommand.candidateControlSocketPath(rootDirectory: first),
+            first.appendingPathComponent("control.sock").path
+        )
+        XCTAssertEqual(
+            ProviderLifecycleLeaseStore.candidateURL(rootDirectory: first),
+            first.appendingPathComponent("lifecycle/lease.json")
+        )
+    }
+
     func testEnableReceiptsFlagParses() throws {
         let command = try ServeCommand.parse([
             "--enable-receipts",

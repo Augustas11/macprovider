@@ -193,6 +193,8 @@ public struct AppConfig: Equatable, Sendable {
 public struct CLIOverrides: Equatable, Sendable {
     public var port: Int?
     public var model: String?
+    public var modelArtifactPath: String?
+    public var modelArtifactSHA256: String?
     public var draftModel: String?
     public var draftModelArtifactSHA256: String?
     public var numDraftTokens: Int?
@@ -236,6 +238,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public init(
         port: Int? = nil,
         model: String? = nil,
+        modelArtifactPath: String? = nil,
+        modelArtifactSHA256: String? = nil,
         draftModel: String? = nil,
         draftModelArtifactSHA256: String? = nil,
         numDraftTokens: Int? = nil,
@@ -273,6 +277,8 @@ public struct CLIOverrides: Equatable, Sendable {
     ) {
         self.port = port
         self.model = model
+        self.modelArtifactPath = modelArtifactPath
+        self.modelArtifactSHA256 = modelArtifactSHA256
         self.draftModel = draftModel
         self.draftModelArtifactSHA256 = draftModelArtifactSHA256
         self.numDraftTokens = numDraftTokens
@@ -590,6 +596,12 @@ public enum ConfigLoader {
         }
         if let draftModel = cli.draftModel {
             config.draftModel = draftModel
+        }
+        if let modelArtifactSHA256 = cli.modelArtifactSHA256 {
+            config.modelArtifactSHA256 = modelArtifactSHA256
+        }
+        if let modelArtifactPath = cli.modelArtifactPath {
+            config.modelArtifactPath = modelArtifactPath
         }
         if let draftModelArtifactSHA256 = cli.draftModelArtifactSHA256 {
             config.draftModelArtifactSHA256 = draftModelArtifactSHA256

@@ -23,14 +23,7 @@ func ResolveMaxAdmission(catalog *Catalog, evidence VerifiedEvidence) (Admission
 		return AdmissionCap{}, fmt.Errorf("verified evidence missing candidate_catalog_sha256")
 	}
 	catalogDigestMatches := strings.EqualFold(strings.TrimSpace(evidence.CandidateCatalogSHA256), catalog.SHA256)
-	hasRowIdentity := false
-	for _, benchmark := range evidence.Benchmarks {
-		if strings.TrimSpace(benchmark.CandidateRowIdentity) != "" {
-			hasRowIdentity = true
-			break
-		}
-	}
-	if !catalogDigestMatches && !hasRowIdentity {
+	if !catalogDigestMatches {
 		return AdmissionCap{}, fmt.Errorf("verified evidence candidate_catalog_sha256 mismatch")
 	}
 	var cap AdmissionCap
@@ -58,6 +51,27 @@ func ResolveMaxAdmission(catalog *Catalog, evidence VerifiedEvidence) (Admission
 }
 
 func EvaluateHelloGate(catalog *Catalog, evidence VerifiedEvidence, helloModelID string) HelloGateDecision {
+	return evaluateHelloGate(catalog, evidence, helloModelID, "")
+}
+
+// EvaluateHelloGateForHello applies the admission decision to the exact hello
+// metadata being admitted. v2 evidence is only useful for this purpose if its
+// protocol and binary-version bindings survive the database verification path
+// and match the live provider hello. The executable digest remains metadata
+// bound here; execution authenticity is intentionally a separate signed
+// compatibility-manifest concern.
+func EvaluateHelloGateForHello(catalog *Catalog, evidence VerifiedEvidence, helloModelID, helloBinaryVersion string) HelloGateDecision {
+	if evidence.ProbeProtocol != "spec-023-harmony-stream.v2" ||
+		strings.TrimSpace(evidence.BinaryVersion) == "" ||
+		strings.TrimSpace(evidence.ExecutableSHA256) == "" ||
+		strings.TrimSpace(helloBinaryVersion) == "" ||
+		strings.TrimSpace(evidence.BinaryVersion) != strings.TrimSpace(helloBinaryVersion) {
+		return HelloGateDecision{Allowed: false, Reason: "autotune_evidence_binary_version_mismatch"}
+	}
+	return evaluateHelloGate(catalog, evidence, helloModelID, helloBinaryVersion)
+}
+
+func evaluateHelloGate(catalog *Catalog, evidence VerifiedEvidence, helloModelID, _ string) HelloGateDecision {
 	decision := HelloGateDecision{Allowed: true}
 	cap, err := ResolveMaxAdmission(catalog, evidence)
 	if err != nil {
@@ -91,11 +105,8 @@ func benchmarkPassesGate(benchmark VerifiedBenchmark, row Row, catalogSHA256, ro
 	if benchmark.SwapDetected {
 		return false
 	}
-	if strings.TrimSpace(benchmark.CandidateRowIdentity) != "" {
-		if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateRowIdentity), strings.TrimSpace(rowIdentity)) {
-			return false
-		}
-	} else if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateCatalogSHA256), strings.TrimSpace(catalogSHA256)) {
+	if strings.TrimSpace(benchmark.CandidateRowIdentity) == "" ||
+		!strings.EqualFold(strings.TrimSpace(benchmark.CandidateRowIdentity), strings.TrimSpace(rowIdentity)) {
 		return false
 	}
 	if strings.TrimSpace(benchmark.ModelID) == "" || !strings.EqualFold(strings.TrimSpace(benchmark.ModelID), strings.TrimSpace(row.ModelID)) {

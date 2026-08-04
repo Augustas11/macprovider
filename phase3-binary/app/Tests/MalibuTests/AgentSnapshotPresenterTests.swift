@@ -117,6 +117,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
             "Not eligible: admission evidence failed · Retry provider setup while online"
         )
 
+        var binaryMismatch = rejected
+        binaryMismatch.lifecycleReason = "autotune_evidence_binary_version_mismatch"
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(binaryMismatch).title,
+            "Not eligible: admission evidence failed"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.short(binaryMismatch), "Ineligible")
+
         var uncatalogued = AgentSnapshot.empty
         uncatalogued.state = .reconnecting
         uncatalogued.currentModelID = "llama"

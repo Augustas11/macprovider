@@ -273,9 +273,15 @@ public struct DrainCancelledError: Error { }
 
 struct ModelRuntimeLoadError: Error, CustomStringConvertible {
     let target: String
+    let reason: String?
+
+    init(target: String, reason: String? = nil) {
+        self.target = target
+        self.reason = reason
+    }
 
     var description: String {
-        "model load target must resolve to a local snapshot directory: \(target)"
+        reason ?? "model load target must resolve to a local snapshot directory: \(target)"
     }
 }
 
@@ -972,6 +978,16 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let (container, directory) = try await Self.loadLocalContainer(from: modelLoadPath ?? modelID)
+        if let expectedArtifactHash = verifiedModelArtifactSHA256 {
+            let loadedArtifactHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
+            guard loadedArtifactHash == expectedArtifactHash else {
+                let observedArtifactHash = loadedArtifactHash ?? "unavailable"
+                throw ModelRuntimeLoadError(
+                    target: directory.path,
+                    reason: "verified model artifact changed during load: expected \(expectedArtifactHash), observed \(observedArtifactHash)"
+                )
+            }
+        }
         self.currentContainer = container
 
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")

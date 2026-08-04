@@ -33,8 +33,8 @@ the migration and `dist/*.sql` files are the byte-authoritative shape.**
 ### 1.1 Purpose
 
 A provider's autotune run (SPEC-023) produces a **hardware-evidence document**
-(`hardware_evidence.autotune.v1`) describing its Apple-silicon chip, unified memory, OS/binary
-versions, a stable `hardware_identity_hash`, and local model benchmarks. The provider binary
+(`hardware_evidence.autotune.v2`) describing its Apple-silicon chip, unified memory, OS/binary
+versions, the exact probe protocol/executable identity, a stable `hardware_identity_hash`, and local model benchmarks. The provider binary
 submits it (§3.1); a row lands in `hardware_verification_jobs`. The **hardware-evidence
 verifier** is a coordinator-side **batch job** that reads pending jobs, runs a deterministic
 ordered gate pipeline over each evidence document, and transitions the job to **`verified`**,
@@ -216,14 +216,15 @@ provider-submitted evidence semantics:
 
 ---
 
-## 3. Evidence document schema (`hardware_evidence.autotune.v1`)
+## 3. Evidence document schema (`hardware_evidence.autotune.v2`)
 
 The `evidence` JSONB decodes to (`hardwareverify.Evidence`):
 
 ```
-schema_version           string   // MUST equal "hardware_evidence.autotune.v1"
+schema_version           string   // MUST equal "hardware_evidence.autotune.v2"
 provider_id              string
 generated_at             string   // RFC3339
+probe_protocol           string   // MUST equal "spec-023-harmony-stream.v2"
 hardware {
   chip                   string
   memory_gb              int
@@ -232,6 +233,7 @@ hardware {
   os_version             string
   binary_version         string
   hardware_identity_hash string   // lowercase hex SHA-256 (64 chars)
+  executable_sha256      string   // lowercase hex SHA-256 of the submitting CLI executable
 }
 candidate_catalog_sha256 string    // lowercase hex SHA-256
 recommended_model        string
@@ -242,20 +244,17 @@ benchmarks []{
   swap_detected, thermal_throttle_detected bool
   artifact_sha256, candidate_catalog_sha256 string
   benchmark_id                         string  // optional
-  candidate_row_identity               string  // optional; if present MUST be 64 lowercase hex
+  candidate_row_identity               string  // required; MUST be 64 lowercase hex
   generated_at                         string  // RFC3339
   binary_version, hardware_identity_hash string
 }
 ```
 
-A **lowercase hex SHA-256** is exactly 64 chars in `[0-9a-f]` (`isLowerSHA256`). The optional
-`candidate_row_identity` shown above is a field of the **HTTP handler's** request/benchmark struct
-(validated there — 64 lowercase hex if non-empty). It is **not** a field of the *verifier's*
-`hardwareverify.Benchmark`, so the `Evaluate` gate pipeline (§5) discards it — **but** it is
-persisted in the raw `evidence` JSONB and **is** decoded and used by **downstream** SPEC-032
-admission (`internal/autotune/evidence_pg.go`, `gate.go`). So "not consumed by `Evaluate`" is
-correct; "handler-only" would be wrong. (The `hardware`/`benchmark` field names/types above
-otherwise match `hardwareverify.Evidence`/`Hardware`/`Benchmark` exactly.)
+A **lowercase hex SHA-256** is exactly 64 chars in `[0-9a-f]` (`isLowerSHA256`). The v2
+`candidate_row_identity` is required by the HTTP handler, verifier, and downstream SPEC-032
+admission. The coordinator also requires the top-level probe protocol and executable digest to
+bind the submitted measurements to the released probe contract; a v1 document is not accepted
+by the v2 path.
 
 ### 3.1 Submission and replay (enqueue path)
 
@@ -264,8 +263,8 @@ authenticated bearer identity; the handler (`HandleHardwareEvidence`) binds the 
 **authenticated** `provider_id` (a provider cannot enqueue for another provider). The handler:
 
 - enforces **strict request validation**: `POST`-only; a bounded body; **unknown-field rejection**
-  (strict JSON); numeric precision/range checks; and field-binding checks (e.g. the optional
-  `candidate_row_identity` must be 64 lowercase hex);
+  (strict JSON); numeric precision/range checks; and field-binding checks (including the required
+  protocol, executable digest, and 64-lowercase-hex `candidate_row_identity`);
 - applies **two rate limiters**: an **IP** limiter (`10/min`, HTTP `429` `Retry-After: 60`) and a
   **per-provider** limiter (HTTP `429` `Retry-After: 600`). The per-provider limit is **broader
   than a fixed window**: a new *distinct* evidence submission is rejected while the provider has
@@ -300,7 +299,9 @@ incoming observation.
 ## 4. Decision constants, versioning, and downstream acceptance
 
 - **Verifier version:** `hardware-verifier.v2` (`verifierDecisionVersion`).
-- **Evidence schema version:** `hardware_evidence.autotune.v1` (`evidenceSchemaVersion`).
+- **Evidence schema version:** `hardware_evidence.autotune.v2` (`evidenceSchemaVersion`).
+- **Probe protocol:** `spec-023-harmony-stream.v2`; this is an immutable binding for the
+  context-bounded Harmony stream probe used by Stage 1 and Stage 2.
 - **Success constant:** `hardware-verifier.v2:verified_trusted_hardware` (`VerifiedDecisionReason`).
 - **Reject/wait reasons** are persisted as `hardware-verifier.v2:<bare reason>` —
   `rejectJob`/`waitTrustJob` prefix the version at write time (e.g.
@@ -462,16 +463,16 @@ the batch tally.
 - `evidence_sha256` is `UNIQUE` and computed by a **canonical** hash (`canonicalEvidenceSHA`); the
   enqueue path keys on it, so the **same evidence document creates at most one queue row** — a
   replay collides and is routed through the fail-closed replay state machine (§3.1).
-- A provider-authenticated install/update resubmission for the **same active
-  `hardware_identity_hash`** may return an admission-success replay while a prior job is
-  `pending`/`waiting_trust`. This is not a new queue row and not a trust verdict; it only
-  acknowledges that evidence for the same hardware root is already awaiting verifier/operator
-  progress. Changed hardware identities still enter the normal admission cap and trust flow.
+- A provider-authenticated install/update resubmission is replay-safe only when it repeats the
+  **same canonical evidence document** (`evidence_sha256`) for the same provider. A changed
+  document with the same `hardware_identity_hash` is not an admission-success replay: it goes
+  through the normal admission cap, rate limiting, and trust flow. This prevents a provider from
+  relabeling changed evidence as an already-accepted hardware-root replay.
 - **One queue row does NOT mean one evaluation.** A `waiting_trust` job is re-`Evaluate`d on every
   batch run until it reaches a terminal state; this is by design (§6). Idempotency is preserved by
   the terminal-safe write `WHERE` + trigger B: a job cannot double-promote or be reopened.
-- Net: **at most one active admission row per hardware root during pending trust; exactly one
-  *terminal verdict* committed; possibly many interim `waiting_trust` evaluations.**
+- Net: **at most one active queue row per canonical evidence document; exactly one *terminal
+  verdict* committed for that document; possibly many interim `waiting_trust` evaluations.**
 
 ---
 
@@ -699,8 +700,10 @@ R3 confirmed every v0.3 scope/consumer/grant fix and narrowed to predicate-preci
 - **§3.1** pre-job `cli_hello` upsert **preserves** `OLD.verified` on an unchanged existing tuple
   (only insert/chip/memory-change forces FALSE) — reinforcing R1.
 - **AC-HV-3** qualified: `waiting_trust` promotes only if the job still passes the §5 freshness gates.
-- **§3** `candidate_row_identity` is an HTTP-handler field, not part of the `hardwareverify.Benchmark`
-  decode shape. **§4** adds the telemetry-drift (`internal/pow/drift.go`) exact-v2 consumer.
+- **§3** `candidate_row_identity` is an HTTP-handler field and is not part of the
+  pre-v2 `hardwareverify.Benchmark` decode shape; the v2 contract now propagates and
+  validates it through the verifier and downstream gate. **§4** adds the telemetry-drift
+  (`internal/pow/drift.go`) exact-v2 consumer.
 
 **v0.3-draft (2026-07-12) — audit reconciliation (SPEC-033 R2, 3-lane codex).**
 R2 confirmed the §3/§5/§6/§8 core and the no-initial-self-certification property, and caught a

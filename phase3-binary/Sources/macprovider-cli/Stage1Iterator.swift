@@ -1,5 +1,13 @@
 import Foundation
 
+/// Exact artifact identity selected and verified by the recommendation parent.
+/// Candidate processes must receive this binding instead of resolving a model
+/// name again from mutable local cache state.
+struct CandidateArtifactBinding: Equatable, Sendable {
+    let path: String
+    let sha256: String
+}
+
 protocol Stage1ProviderRunning: AnyObject {
     func start(
         model: String,
@@ -8,9 +16,32 @@ protocol Stage1ProviderRunning: AnyObject {
         maxContext: Int?,
         maxBatch: Int?
     ) throws
+    func start(
+        model: String,
+        port: Int,
+        kvBits: Int?,
+        maxContext: Int?,
+        maxBatch: Int?,
+        artifactBinding: CandidateArtifactBinding?
+    ) throws
     func waitForReady(timeout: TimeInterval) async throws -> ReadyStatus
     @discardableResult
     func stop(graceSeconds: Double) -> StopResult
+}
+
+extension Stage1ProviderRunning {
+    func start(
+        model: String,
+        port: Int,
+        kvBits: Int?,
+        maxContext: Int?,
+        maxBatch: Int?,
+        artifactBinding: CandidateArtifactBinding?
+    ) throws {
+        // Existing test/fallback runners do not need artifact binding; the
+        // production runner supplies the stronger witness below.
+        try start(model: model, port: port, kvBits: kvBits, maxContext: maxContext, maxBatch: maxBatch)
+    }
 }
 
 extension CandidateProviderRunner: Stage1ProviderRunning {}
@@ -70,6 +101,36 @@ protocol Stage1Probing {
         gateTTFTMS: Int,
         replicates: Int
     ) async throws -> Stage1ProbeResult
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?
+    ) async throws -> Stage1ProbeResult
+}
+
+extension Stage1Probing {
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?
+    ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates
+        )
+    }
 }
 
 struct Stage1IteratorResult {
@@ -119,6 +180,40 @@ enum Stage1IteratorError: Error, Equatable, CustomStringConvertible {
             return lr == rr && lt == rt && le == re
         default:
             return false
+        }
+    }
+}
+
+enum CandidateProviderTeardownError: Error, Equatable, CustomStringConvertible {
+    case stuck(pid: Int32)
+
+    var description: String {
+        switch self {
+        case .stuck(let pid):
+            return "candidate provider teardown remained stuck (pid \(pid))"
+        }
+    }
+}
+
+func withCandidateProviderCleanup<T>(
+    _ runner: Stage1ProviderRunning,
+    graceSeconds: Double,
+    operation: () async throws -> T
+) async throws -> T {
+    do {
+        let value = try await operation()
+        switch runner.stop(graceSeconds: graceSeconds) {
+        case .stopped:
+            return value
+        case .stuck(let pid):
+            throw CandidateProviderTeardownError.stuck(pid: pid)
+        }
+    } catch {
+        switch runner.stop(graceSeconds: graceSeconds) {
+        case .stopped:
+            throw error
+        case .stuck(let pid):
+            throw CandidateProviderTeardownError.stuck(pid: pid)
         }
     }
 }
@@ -345,7 +440,7 @@ struct Stage1Iterator {
             model: model,
             targetContext: targetContext,
             measuredPromptTokens: measuredPromptTokens,
-            maxTokens: Stage1Prober.maxTokens,
+            maxTokens: Stage1Prober.maxTokens(for: targetContext),
             aggThroughputTPS: medianTPS,
             ttftP95MS: p95TTFTMS,
             fits: fits,
@@ -377,7 +472,19 @@ private extension Stage1ProbeResult {
 }
 
 struct Stage1Prober: Stage1Probing {
-    static let maxTokens = 64
+    // Harmony reasoning models such as gpt-oss-20b may need more than a
+    // short visible answer budget to finish their internal response framing.
+    // At 64 tokens the 3,200-token admission probe can truncate the Harmony
+    // tool-call JSON and the provider returns malformed_tool_call_final_json
+    // without terminal usage. This is the maximum for Stage 1; the actual
+    // request cap is reduced for smaller target contexts below.
+    static let maxTokens = 512
+    // Reserve space for the chat template and Harmony framing around the
+    // padded user prompt. The measured 4,000-token admission request uses
+    // 3,269 prompt tokens, so this leaves the full 512-token completion cap
+    // within that context while keeping smaller classic autotune requests
+    // bounded too.
+    private static let promptOverheadReserve = 128
     /// URL request idle-timeout (URLSession semantics: max seconds without any
     /// bytes arriving from the server). Must cover prefill TTFT for the largest
     /// supported candidate on the weakest supported hardware (30B MoE on M-Base
@@ -385,12 +492,18 @@ struct Stage1Prober: Stage1Probing {
     /// A value below 200s produced silent .infeasible timeouts on M-Base;
     /// keeping headroom above measured maxima. See SPEC-023 v1.7.5.
     static let defaultProbeIdleTimeoutSec: TimeInterval = 300
+    /// Hard wall-clock ceiling for one streamed probe. URLRequest's timeout is
+    /// an idle timeout, so it cannot bound a stream that emits bytes slowly.
+    /// The task race below enforces this total duration as well as the idle
+    /// timeout.
+    static let defaultProbeTotalTimeoutSec: TimeInterval = 300
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
     private let session: URLSession
     private let readyTimeoutSec: TimeInterval
     private let stopGraceSeconds: Double
     private let probeIdleTimeoutSec: TimeInterval
+    private let probeTotalTimeoutSec: TimeInterval
     private let clock: () -> Date
 
     init(
@@ -398,12 +511,14 @@ struct Stage1Prober: Stage1Probing {
         readyTimeoutSec: TimeInterval = 120,
         stopGraceSeconds: Double = 10,
         probeIdleTimeoutSec: TimeInterval = Stage1Prober.defaultProbeIdleTimeoutSec,
+        probeTotalTimeoutSec: TimeInterval = Stage1Prober.defaultProbeTotalTimeoutSec,
         clock: @escaping () -> Date = Date.init
     ) {
         self.session = session
         self.readyTimeoutSec = readyTimeoutSec
         self.stopGraceSeconds = stopGraceSeconds
         self.probeIdleTimeoutSec = max(1, probeIdleTimeoutSec)
+        self.probeTotalTimeoutSec = max(1, probeTotalTimeoutSec)
         self.clock = clock
     }
 
@@ -433,17 +548,35 @@ struct Stage1Prober: Stage1Probing {
         gateTTFTMS: Int,
         replicates: Int
     ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates,
+            artifactBinding: nil
+        )
+    }
+
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?
+    ) async throws -> Stage1ProbeResult {
         try runner.start(
             model: model,
             port: port,
             kvBits: nil,
             maxContext: targetContext,
-            maxBatch: nil
+            maxBatch: nil,
+            artifactBinding: artifactBinding
         )
-        defer {
-            runner.stop(graceSeconds: stopGraceSeconds)
-        }
-
+        return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
         switch try await runner.waitForReady(timeout: readyTimeoutSec) {
         case .ready:
             break
@@ -549,6 +682,7 @@ struct Stage1Prober: Stage1Probing {
             medianTPS: medianTPS,
             p95TTFTMS: p95
         )
+        }
     }
 
     static func promptTokenEstimate(targetContext: Int) -> Int {
@@ -560,7 +694,30 @@ struct Stage1Prober: Stage1Probing {
             .joined(separator: " ")
     }
 
+    static func maxTokens(for targetContext: Int) -> Int {
+        let available = targetContext
+            - promptTokenEstimate(targetContext: targetContext)
+            - promptOverheadReserve
+        return max(1, min(maxTokens, available))
+    }
+
     private func probeOnce(model: String, port: Int, targetContext: Int) async throws -> SingleProbeResult {
+        try await withThrowingTaskGroup(of: SingleProbeResult.self) { group in
+            group.addTask {
+                try await self.probeOnceWithoutDeadline(model: model, port: port, targetContext: targetContext)
+            }
+            group.addTask {
+                let nanoseconds = UInt64(self.probeTotalTimeoutSec * 1_000_000_000)
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    private func probeOnceWithoutDeadline(model: String, port: Int, targetContext: Int) async throws -> SingleProbeResult {
+        let maxTokens = Self.maxTokens(for: targetContext)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.timeoutInterval = probeIdleTimeoutSec
@@ -569,7 +726,7 @@ struct Stage1Prober: Stage1Probing {
             "model": model,
             "stream": true,
             "temperature": 0,
-            "max_tokens": Self.maxTokens,
+            "max_tokens": maxTokens,
             "messages": [
                 [
                     "role": "user",
@@ -618,7 +775,7 @@ struct Stage1Prober: Stage1Probing {
             if payload == "[DONE]" {
                 break
             }
-            if let usage = Self.usageDecodedTokens(from: payload) {
+            if let usage = Self.usageDecodedTokens(from: payload, maxTokens: maxTokens) {
                 usageDecodedTokens = usage
             }
             if let generationMS = Self.usageGenerationMS(from: payload) {
@@ -795,7 +952,7 @@ struct Stage1Prober: Stage1Probing {
     /// Returns nil for ordinary content chunks, `[DONE]`, malformed payloads,
     /// and any value failing validation, which makes finalization fall back
     /// rather than trust an inflated count.
-    static func usageDecodedTokens(from payload: String) -> Int? {
+    static func usageDecodedTokens(from payload: String, maxTokens: Int = Self.maxTokens) -> Int? {
         guard let usage = terminalUsageObject(from: payload) else {
             return nil
         }
@@ -808,10 +965,10 @@ struct Stage1Prober: Stage1Probing {
         // final-channel `completion_tokens` instead.
         if let generatedRaw = usage["macprovider_generated_completion_tokens"] {
             guard let generated = generatedRaw as? NSNumber else { return nil }
-            return validatedTokenCount(generated)
+            return validatedTokenCount(generated, maxTokens: maxTokens)
         }
         if let completionTokens = usage["completion_tokens"] as? NSNumber {
-            return validatedTokenCount(completionTokens)
+            return validatedTokenCount(completionTokens, maxTokens: maxTokens)
         }
         return nil
     }
@@ -819,14 +976,14 @@ struct Stage1Prober: Stage1Probing {
     /// Validates an `NSNumber` token count: not a boolean, integral,
     /// nonnegative, and not greater than `maxTokens`. Returns the `Int` value
     /// or nil.
-    private static func validatedTokenCount(_ num: NSNumber) -> Int? {
+    private static func validatedTokenCount(_ num: NSNumber, maxTokens: Int) -> Int? {
         guard !isBoolean(num) else { return nil }
         let value = num.doubleValue
         guard value.isFinite else { return nil }
         // Integral check: reject fractional values.
         guard Double(num.int64Value) == value else { return nil }
         let tokens = num.int64Value
-        guard tokens >= 0, tokens <= Int64(maxTokens) else { return nil }
+        guard tokens >= 0, tokens <= Int64(max(1, maxTokens)) else { return nil }
         return Int(tokens)
     }
 

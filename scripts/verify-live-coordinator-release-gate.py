@@ -307,6 +307,20 @@ def main() -> int:
         help="OpenSSL executable used for Ed25519 verification",
     )
     parser.add_argument(
+        "--publication-phase",
+        choices=("pre-publication", "post-publication"),
+        default="post-publication",
+        help=(
+            "pre-publication verifies release-bound feed bytes without requiring "
+            "the live recommendation; post-publication requires exact recommendation "
+            "equality (default)"
+        ),
+    )
+    parser.add_argument(
+        "--expected-previous-recommendation",
+        help="pre-publication recommendation that must remain live until publication",
+    )
+    parser.add_argument(
         "--now",
         help=argparse.SUPPRESS,
     )
@@ -386,22 +400,57 @@ def main() -> int:
                 f"release {expected_version}"
             )
         recommended_value = healthz.get("recommended_binary_version")
-        recommended_version = parse_advertised_version(
-            recommended_value,
-            "/healthz recommended_binary_version",
-        )
-        if recommended_version != required_version or recommended_value != expected_version:
-            fail(
-                f"/healthz recommended_binary_version {recommended_value!r} "
-                f"does not match release {expected_version}"
+        if (
+            args.publication_phase == "pre-publication"
+            and args.expected_previous_recommendation is not None
+            and recommended_value is None
+        ):
+            fail("/healthz recommended_binary_version is missing or not the expected previous stable version")
+        if recommended_value is None and args.publication_phase == "post-publication":
+            fail("/healthz recommended_binary_version is missing or not a version string")
+        if recommended_value is not None:
+            recommended_version = parse_advertised_version(
+                recommended_value,
+                "/healthz recommended_binary_version",
             )
+            if (
+                args.publication_phase == "post-publication"
+                and (
+                    recommended_version != required_version
+                    or recommended_value != expected_version
+                )
+            ):
+                fail(
+                    f"/healthz recommended_binary_version {recommended_value!r} "
+                    f"does not match release {expected_version}"
+                )
+            if (
+                args.publication_phase == "pre-publication"
+                and args.expected_previous_recommendation is not None
+                and (
+                    recommended_value != args.expected_previous_recommendation
+                    or recommended_version
+                    != parse_advertised_version(
+                        args.expected_previous_recommendation,
+                        "expected previous recommendation",
+                    )
+                )
+            ):
+                fail(
+                    f"/healthz recommended_binary_version {recommended_value!r} "
+                    f"does not match expected previous stable "
+                    f"{args.expected_previous_recommendation}"
+                )
+        else:
+            recommended_value = "<not advertised>"
 
         print(
             "[verify-live-coordinator-release-gate] ok: "
             f"{args.coordinator_url.rstrip('/')} serves {args.tag} feed set "
             f"generated_at={generated_at} policy_version={policy_version} "
             f"healthz_version={healthz.get('version')} "
-            f"recommended_binary_version={recommended_value}"
+            f"recommended_binary_version={recommended_value} "
+            f"publication_phase={args.publication_phase}"
         )
         return 0
     except GateError as exc:

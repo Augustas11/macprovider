@@ -5,6 +5,18 @@ import XCTest
 @testable import macprovider_cli
 
 final class Stage1IteratorTests: XCTestCase {
+    func testCandidateProviderCleanupFailureDoesNotReturnProbeValue() async throws {
+        let runner = StubProviderRunner()
+        runner.stopResult = .stuck(pid: 4242)
+
+        do {
+            _ = try await withCandidateProviderCleanup(runner, graceSeconds: 0) { 123 }
+            XCTFail("stuck candidate teardown must fail closed")
+        } catch let error as CandidateProviderTeardownError {
+            XCTAssertEqual(error, .stuck(pid: 4242))
+        }
+    }
+
     func testStage1IteratorStopsOnFirstFeasible() async throws {
         let dbURL = try temporaryDBURL()
         let db = try AutotuneDB(path: dbURL.path)
@@ -464,7 +476,7 @@ final class Stage1IteratorTests: XCTestCase {
             model: "gpt-oss-20b",
             port: port,
             runner: runner,
-            targetContext: 64,
+            targetContext: 4_000,
             gateTTFTMS: 60_000,
             replicates: 1
         )
@@ -763,14 +775,18 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertNil(Stage1Prober.usageDecodedTokens(from: intMaxChunk),
             "Int.max token count must be rejected")
 
-        // Greater than the probe's max_tokens cap (64): an honest provider
+        // Greater than the probe's max_tokens cap (512): an honest provider
         // cannot decode more completion tokens than the cap.
-        let oversizedChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":65}}"#
+        let oversizedChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":513}}"#
         XCTAssertNil(Stage1Prober.usageDecodedTokens(from: oversizedChunk),
             "value > maxTokens must be rejected")
         // Exactly the cap is valid.
-        let atCapChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":64}}"#
-        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: atCapChunk), 64)
+        let atCapChunk = #"{"choices":[],"usage":{"macprovider_generated_completion_tokens":512}}"#
+        XCTAssertEqual(Stage1Prober.usageDecodedTokens(from: atCapChunk), 512)
+
+        XCTAssertEqual(Stage1Prober.maxTokens(for: 4_000), 512)
+        XCTAssertEqual(Stage1Prober.maxTokens(for: 2_000), 272)
+        XCTAssertEqual(Stage1Prober.maxTokens(for: 128), 1)
 
         // A content chunk that ALSO carries usage (non-empty choices) must
         // NOT be treated as the terminal usage chunk.
@@ -877,9 +893,9 @@ final class Stage1IteratorTests: XCTestCase {
     /// PRESENT but invalid, the parser returns nil and must NOT silently fall
     /// back to `completion_tokens`.
     func testUsageDecodedTokensPresentButInvalidDoesNotFallBack() {
-        // Generated > maxTokens cap (65 > 64) with a valid completion_tokens 32:
+        // Generated > maxTokens cap (513 > 512) with a valid completion_tokens 32:
         // present-but-invalid → nil, NOT 32.
-        let overCapChunk = #"{"choices":[],"usage":{"completion_tokens":32,"macprovider_generated_completion_tokens":65}}"#
+        let overCapChunk = #"{"choices":[],"usage":{"completion_tokens":32,"macprovider_generated_completion_tokens":513}}"#
         XCTAssertNil(Stage1Prober.usageDecodedTokens(from: overCapChunk),
             "present-but-over-cap generated field must yield nil, not fall back to completion_tokens")
 
@@ -1684,6 +1700,8 @@ final class Stage1IteratorTests: XCTestCase {
 }
 
 private final class StubProviderRunner: Stage1ProviderRunning {
+    var stopResult: StopResult = .stopped
+
     func start(
         model: String,
         port: Int,
@@ -1697,7 +1715,7 @@ private final class StubProviderRunner: Stage1ProviderRunning {
     }
 
     func stop(graceSeconds: Double) -> StopResult {
-        .stopped
+        stopResult
     }
 }
 

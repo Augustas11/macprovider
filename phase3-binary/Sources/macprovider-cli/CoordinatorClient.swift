@@ -146,7 +146,7 @@ actor CoordinatorClient {
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
-    static let binaryVersion = "1.8.81"
+    static let binaryVersion = "1.8.82"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -1013,6 +1013,7 @@ actor CoordinatorClient {
                 )
             }
             if normalized == "autotune_evidence_invalid"
+                || normalized == "autotune_evidence_binary_version_mismatch"
                 || normalized == "autotune_model_cap_exceeded" {
                 return ConnectionLifecycleClassification(
                     state: .catalogIncompatible,
@@ -1687,6 +1688,7 @@ actor CoordinatorClient {
             )
         case 4001 where reason == "autotune_evidence_required"
             || reason == "autotune_evidence_invalid"
+            || reason == "autotune_evidence_binary_version_mismatch"
             || reason == "autotune_model_uncatalogued"
             || reason == "autotune_model_cap_exceeded"
             || reason == "autotune_gate_unavailable"

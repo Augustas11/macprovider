@@ -394,6 +394,12 @@ struct ProviderLifecycleLeaseStore: @unchecked Sendable {
             .appendingPathComponent("lease.json")
     }
 
+    static func candidateURL(rootDirectory: URL) -> URL {
+        rootDirectory
+            .appendingPathComponent("lifecycle", isDirectory: true)
+            .appendingPathComponent("lease.json")
+    }
+
     /// A non-throwing observation surface for watchdog and status consumers.
     /// Unsafe or unreadable storage is never treated as a valid grace period.
     func inspect() -> ProviderLifecycleLeaseInspection {

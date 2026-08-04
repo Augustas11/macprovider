@@ -869,7 +869,9 @@ struct AutotuneCommand: AsyncParsableCommand {
             donorMode: donorMode,
             buyerTTFTCeilingMS: buyerTTFTCeilingMS
         )
-        let outcomes = try await AutotuneRecommendationBenchmarker().benchmarks(
+        let outcomes = try await AutotuneRecommendationBenchmarker(
+            runnerFactory: { try CandidateProviderRunner() }
+        ).benchmarks(
             request: request,
             targetContext: Self.spec023RecommendationProbeContext,
             gateTTFTMS: resolvedGateTTFTMS(forRecommend: true),

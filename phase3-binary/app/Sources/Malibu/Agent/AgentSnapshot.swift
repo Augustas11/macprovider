@@ -603,7 +603,7 @@ enum AgentSnapshotPresenter {
     private static func isHardwareEvidenceRejected(_ s: AgentSnapshot) -> Bool {
         guard s.isLocalStatusObservationCurrent() else { return false }
         switch s.lifecycleReason {
-        case "autotune_evidence_invalid", "autotune_model_cap_exceeded":
+        case "autotune_evidence_invalid", "autotune_evidence_binary_version_mismatch", "autotune_model_cap_exceeded":
             return true
         default:
             return false

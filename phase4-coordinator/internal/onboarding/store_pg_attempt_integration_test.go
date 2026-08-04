@@ -164,6 +164,7 @@ func TestProviderHardwareUpsertsRespectColumnLimitedGrants(t *testing.T) {
 		GeneratedAt:            observedAt.Format(time.RFC3339),
 		CandidateCatalogSHA256: "catalog-sha",
 		RecommendedModel:       "model-a",
+		ProbeProtocol:          hardwareEvidenceProbeProtocol,
 		Hardware: HardwareEvidenceHardware{
 			Chip:                 "Apple M5",
 			MemoryGB:             32,
@@ -172,6 +173,7 @@ func TestProviderHardwareUpsertsRespectColumnLimitedGrants(t *testing.T) {
 			OSVersion:            "26.5",
 			BinaryVersion:        "1.8.42",
 			HardwareIdentityHash: "hardware-hash",
+			ExecutableSHA256:     strings.Repeat("d", 64),
 		},
 		Benchmarks: []HardwareEvidenceBenchmark{{
 			ModelKey:               "model-a",
@@ -182,6 +184,7 @@ func TestProviderHardwareUpsertsRespectColumnLimitedGrants(t *testing.T) {
 			GeneratedAt:            observedAt.Format(time.RFC3339),
 			BinaryVersion:          "1.8.42",
 			HardwareIdentityHash:   "hardware-hash",
+			CandidateRowIdentity:   strings.Repeat("e", 64),
 		}},
 	}
 	record, err := store.InsertHardwareVerificationJob(ctx, "provider-cli", evidence, observedAt)

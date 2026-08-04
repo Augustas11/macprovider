@@ -106,11 +106,8 @@ struct ProviderPreWarmer {
             ? .alreadyCached
             : .fetchedDuringLoad
         let started = now()
-        defer {
-            runner.stop(graceSeconds: stopGraceSeconds)
-        }
-
         try runner.start(model: model, port: port)
+        return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
         let readyStatus = try await runner.waitForReady(timeout: readyTimeoutSec)
 
         switch readyStatus {
@@ -124,6 +121,7 @@ struct ProviderPreWarmer {
             )
         case .timeout(let lastError):
             return .failed(failureClass: .transient, reason: "load timeout: \(lastError)")
+        }
         }
     }
 

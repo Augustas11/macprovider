@@ -112,9 +112,11 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 	var payload struct {
 		GeneratedAt            string `json:"generated_at"`
 		CandidateCatalogSHA256 string `json:"candidate_catalog_sha256"`
+		ProbeProtocol          string `json:"probe_protocol"`
 		Hardware               struct {
 			BinaryVersion        string `json:"binary_version"`
 			HardwareIdentityHash string `json:"hardware_identity_hash"`
+			ExecutableSHA256     string `json:"executable_sha256"`
 		} `json:"hardware"`
 		Benchmarks []struct {
 			ModelKey                string  `json:"model_key"`
@@ -139,7 +141,11 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 		return VerifiedEvidence{}, errors.New("verified autotune evidence generated_at binding mismatch")
 	}
 	catalogSHA := strings.TrimSpace(payload.CandidateCatalogSHA256)
-	if !isLowerSHA256(catalogSHA) || strings.TrimSpace(payload.Hardware.BinaryVersion) == "" || !isLowerSHA256(payload.Hardware.HardwareIdentityHash) {
+	if payload.ProbeProtocol != "spec-023-harmony-stream.v2" ||
+		!isLowerSHA256(catalogSHA) ||
+		strings.TrimSpace(payload.Hardware.BinaryVersion) == "" ||
+		!isLowerSHA256(payload.Hardware.HardwareIdentityHash) ||
+		!isLowerSHA256(payload.Hardware.ExecutableSHA256) {
 		return VerifiedEvidence{}, errors.New("verified autotune evidence has invalid immutable bindings")
 	}
 	if len(payload.Benchmarks) == 0 {
@@ -148,6 +154,9 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 	out := VerifiedEvidence{
 		GeneratedAt:            generatedAt.UTC(),
 		CandidateCatalogSHA256: catalogSHA,
+		ProbeProtocol:          payload.ProbeProtocol,
+		BinaryVersion:          strings.TrimSpace(payload.Hardware.BinaryVersion),
+		ExecutableSHA256:       strings.TrimSpace(payload.Hardware.ExecutableSHA256),
 		// FIX B (issue #582): the hardware_identity_hash from the immutable
 		// evidence binding — the same tuple element the trust join matches.
 		HardwareIdentityHash: strings.TrimSpace(payload.Hardware.HardwareIdentityHash),
@@ -162,7 +171,7 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 			b.CandidateCatalogSHA256 != catalogSHA ||
 			b.BinaryVersion != payload.Hardware.BinaryVersion ||
 			b.HardwareIdentityHash != payload.Hardware.HardwareIdentityHash ||
-			(strings.TrimSpace(b.CandidateRowIdentity) != "" && !isLowerSHA256(strings.TrimSpace(b.CandidateRowIdentity))) {
+			!isLowerSHA256(strings.TrimSpace(b.CandidateRowIdentity)) {
 			return VerifiedEvidence{}, errors.New("verified autotune benchmark binding mismatch")
 		}
 		out.Benchmarks = append(out.Benchmarks, VerifiedBenchmark{

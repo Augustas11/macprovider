@@ -309,7 +309,7 @@ struct Stage2HillClimb {
             model: selectedModel,
             targetContext: targetContext,
             measuredPromptTokens: measuredPromptTokens,
-            maxTokens: Stage1Prober.maxTokens,
+            maxTokens: Stage2Prober.maxTokens(for: targetContext),
             aggThroughputTPS: medianTPS,
             ttftP95MS: p95TTFTMS,
             fits: fits,
@@ -337,22 +337,34 @@ struct Stage2HillClimb {
 }
 
 struct Stage2Prober: Stage2Probing {
+    // Stage 2 deliberately uses the same context-bounded completion budget as
+    // Stage 1. Both stages send the same padded Harmony probe; retaining a
+    // 64-token Stage 2 cap would make gpt-oss-20b fail tuning after Stage 1
+    // had established that its terminal framing needs the larger allowance.
+    static func maxTokens(for targetContext: Int) -> Int {
+        Stage1Prober.maxTokens(for: targetContext)
+    }
+    static let defaultProbeIdleTimeoutSec: TimeInterval = 300
+    static let defaultProbeTotalTimeoutSec: TimeInterval = 300
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
     private let session: URLSession
     private let readyTimeoutSec: TimeInterval
     private let stopGraceSeconds: Double
+    private let probeTotalTimeoutSec: TimeInterval
     private let clock: () -> Date
 
     init(
         session: URLSession = .shared,
         readyTimeoutSec: TimeInterval = 120,
         stopGraceSeconds: Double = 10,
+        probeTotalTimeoutSec: TimeInterval = Stage2Prober.defaultProbeTotalTimeoutSec,
         clock: @escaping () -> Date = Date.init
     ) {
         self.session = session
         self.readyTimeoutSec = readyTimeoutSec
         self.stopGraceSeconds = stopGraceSeconds
+        self.probeTotalTimeoutSec = max(1, probeTotalTimeoutSec)
         self.clock = clock
     }
 
@@ -395,10 +407,7 @@ struct Stage2Prober: Stage2Probing {
             maxContext: knobs.maxContext,
             maxBatch: knobs.maxBatch
         )
-        defer {
-            runner.stop(graceSeconds: stopGraceSeconds)
-        }
-
+        return try await withCandidateProviderCleanup(runner, graceSeconds: stopGraceSeconds) {
         switch try await runner.waitForReady(timeout: readyTimeoutSec) {
         case .ready:
             break
@@ -514,18 +523,35 @@ struct Stage2Prober: Stage2Probing {
             p95TTFTMS: p95TTFTMS,
             measuredPromptTokens: measuredPromptTokens
         )
+        }
     }
 
     private func probeOnce(model: String, port: Int, targetContext: Int) async throws -> Stage2SingleProbeResult {
+        try await withThrowingTaskGroup(of: Stage2SingleProbeResult.self) { group in
+            group.addTask {
+                try await self.probeOnceWithoutDeadline(model: model, port: port, targetContext: targetContext)
+            }
+            group.addTask {
+                let nanoseconds = UInt64(self.probeTotalTimeoutSec * 1_000_000_000)
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    private func probeOnceWithoutDeadline(model: String, port: Int, targetContext: Int) async throws -> Stage2SingleProbeResult {
+        let maxTokens = Self.maxTokens(for: targetContext)
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
-        request.timeoutInterval = max(1, TimeInterval(Stage1Prober.maxTokens))
+        request.timeoutInterval = Self.defaultProbeIdleTimeoutSec
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
             "stream": true,
             "temperature": 0,
-            "max_tokens": Stage1Prober.maxTokens,
+            "max_tokens": maxTokens,
             "messages": [
                 [
                     "role": "user",
@@ -562,7 +588,7 @@ struct Stage2Prober: Stage2Probing {
             if payload == "[DONE]" {
                 break
             }
-            if let usage = Stage1Prober.usageDecodedTokens(from: payload) {
+            if let usage = Stage1Prober.usageDecodedTokens(from: payload, maxTokens: maxTokens) {
                 usageDecodedTokens = usage
             }
             if let generationMS = Stage1Prober.usageGenerationMS(from: payload) {

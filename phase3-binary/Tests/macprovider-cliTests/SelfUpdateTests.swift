@@ -283,7 +283,15 @@ final class SelfUpdateTests: XCTestCase {
     }
 
     func testAcceptanceCandidateRejectsDowngradeBeforeReadingAssets() async {
-        let update = SelfUpdate(currentVersion: "1.8.34", releasesAPIURL: nil)
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-downgrade-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let update = SelfUpdate(
+            currentVersion: "1.8.34",
+            releasesAPIURL: nil,
+            markerStore: AutoUpdateMarkerStore(homeDirectory: home)
+        )
         do {
             try await update.runAcceptanceCandidate(
                 from: URL(fileURLWithPath: "/path/that/does/not/exist", isDirectory: true),

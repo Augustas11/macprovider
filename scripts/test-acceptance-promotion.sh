@@ -45,7 +45,6 @@ for required in (
     "scripts/verify-acceptance-promotion.py verify-directory",
     "scripts/verify-release-checksums.sh",
     "scripts/verify-release-discovery-transport.py",
-    "scripts/verify-anonymous-release-discovery.sh",
     "scripts/verify-tier2-provider-release.sh",
     'cmp "$accepted/$name" "$download/$name"',
 ):
@@ -73,14 +72,13 @@ if "brew install openssl@3" in text or "brew --prefix openssl@3" in text:
     raise SystemExit("promotion must not select mutable Homebrew OpenSSL directly")
 if "OPENSSL_BIN=" in text or "GITHUB_ENV" in text:
     raise SystemExit("promotion must not publish mutable OpenSSL environment state")
-if text.count(SEALED_OUTPUT) != 5:
+if text.count(SEALED_OUTPUT) != 4:
     raise SystemExit("every promotion crypto consumer must bind the sealed step output")
 for step_name in (
     "Verify the signed acceptance set and production metadata",
     "Require an advancing immutable discovery head",
     "Generate only the production checksum signature",
     "Reverify and publish only the captured numeric draft",
-    "Publish one append-only immutable discovery transport",
 ):
     step = text.split(f"- name: {step_name}", 1)[1].split("\n      - name:", 1)[0]
     if step.count(SEALED_OUTPUT) != 1:
@@ -114,20 +112,23 @@ if protected.count('scripts/verify-release-tag-target.sh "$TAG" "$CANDIDATE_SHA"
 publish_step = protected.split(
     "- name: Reverify and publish only the captured numeric draft", 1
 )[1].split("\n      - name:", 1)[0]
-live_gate = publish_step.find("scripts/verify-live-coordinator-release-gate.py")
+pre_gate = publish_step.find("scripts/verify-live-coordinator-release-gate.py")
+pre_gate_label = publish_step.rfind("echo \"::group::Verify pre-publication live coordinator feed gate\"", 0, pre_gate)
 patch = publish_step.find("gh api --method PATCH")
 final_draft_capture = publish_step.find("scripts/capture-release-publication.py --draft")
 final_authority = publish_step.find("origin/main moved under bound exception authority before undraft")
-if live_gate < 0:
-    raise SystemExit("promotion public-transition step omits the live coordinator release gate")
+if pre_gate < 0:
+    raise SystemExit("promotion public-transition step omits the pre-publication live coordinator gate")
 if patch < 0:
     raise SystemExit("promotion public-transition step lost numeric release PATCH")
 if final_draft_capture < 0 or final_authority < 0:
     raise SystemExit("promotion public-transition step lost final draft or authority regate")
-if live_gate < final_draft_capture or live_gate < final_authority:
-    raise SystemExit("promotion live coordinator gate must run after final draft and authority regates")
-if live_gate > patch or publish_step.find("-F draft=false") < live_gate:
-    raise SystemExit("promotion live coordinator gate must run before undraft/latest publication")
+if pre_gate < final_draft_capture or pre_gate < final_authority:
+    raise SystemExit("promotion pre-publication gate must run after final draft and authority regates")
+if pre_gate > patch or publish_step.find("-F draft=false") < pre_gate:
+    raise SystemExit("promotion pre-publication gate must run before undraft/latest publication")
+if "--publication-phase pre-publication" not in publish_step[pre_gate:]:
+    raise SystemExit("promotion pre-publication gate does not select the pre-publication policy")
 for requirement in (
     "env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN",
     "--tag \"$TAG\"",
@@ -135,9 +136,21 @@ for requirement in (
     "--trusted-keys \"$accepted/trusted-keys.json\"",
     "--coordinator-url https://coordinator.streamvc.live",
     "--openssl \"$OPENSSL_BIN\"",
+    "--expected-previous-recommendation 1.8.81",
 ):
-    if requirement not in publish_step:
+    if requirement not in publish_step[pre_gate_label:]:
         raise SystemExit(f"promotion live coordinator gate omits: {requirement}")
+rollout = pathlib.Path(sys.argv[1]).parent / "verify-live-coordinator-release-rollout.yml"
+rollout_text = rollout.read_text(encoding="utf-8")
+if (
+    "workflow_dispatch:" not in rollout_text
+    or "# Pearl recommendation deployment is the serialized external step" not in rollout_text
+    or "--publication-phase post-publication" not in rollout_text
+    or "scripts/verify-published-release.py" not in rollout_text
+    or "contents: write" not in rollout_text
+    or 'gh release create "$transport_tag"' not in rollout_text
+):
+    raise SystemExit("promotion must hand post-publication coordinator proof to the rollout workflow")
 if '[\\"candidate_ref\\"]' in protected or '.removeprefix(\\"refs/heads/\\")' in protected:
     raise SystemExit("candidate ref extraction contains shell-literal Python escapes")
 if 'print(json.load(open(sys.argv[1]))["candidate_ref"])' not in protected:
@@ -154,31 +167,8 @@ for requirement in (
 ):
     if requirement not in protected[discovery_gate:draft_create]:
         raise SystemExit(f"promotion discovery gate omits: {requirement}")
-transport_publish = protected.find("- name: Publish one append-only immutable discovery transport")
-if transport_publish < draft_create:
-    raise SystemExit("append-only discovery transport must publish after the numeric release")
-for requirement in (
-    'git ls-remote --tags origin "$TRANSPORT_TAG"',
-    "--prerelease",
-    "--latest=false",
-    "--require-immutable",
-):
-    if requirement not in protected[transport_publish:]:
-        raise SystemExit(f"append-only promotion transport omits: {requirement}")
-if "--clobber" in protected[transport_publish:]:
-    raise SystemExit("append-only discovery transport must never overwrite an asset")
 if 'transport_tag="release-discovery-v1-$candidate_sequence"' not in protected[discovery_gate:draft_create]:
     raise SystemExit("promotion does not derive the transport tag from the signed sequence")
-if '[[ "$PREVIOUS_TAG" == v1.8.55 ]]' not in public_verify:
-    raise SystemExit("anonymous proof does not bound the immutable v1.8.55 bridge")
-if "scripts/verify-v1855-discovery-bridge.sh" not in public_verify:
-    raise SystemExit("promotion must anonymously prove the v1.8.55 trust-preserving bridge")
-if public_verify.count("scripts/verify-anonymous-release-discovery.sh") != 2:
-    raise SystemExit("public verifier must prove target and prior clients")
-if '"$TAG" "$CANDIDATE_SHA" "$TAG" "$TRANSPORT_TAG"' not in public_verify:
-    raise SystemExit("public verifier does not bind the anonymous target proof to its transport")
-if 'scripts/verify-v1855-discovery-bridge.sh "$TAG" "$CANDIDATE_SHA" "$TRANSPORT_TAG"' not in public_verify:
-    raise SystemExit("v1.8.55 bridge proof is not bound to the promoted transport")
 PY
 
 repository=Augustas11/macprovider

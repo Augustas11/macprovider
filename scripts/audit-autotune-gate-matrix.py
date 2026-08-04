@@ -171,8 +171,8 @@ def validate_hardware(value: object, label: str) -> tuple[str, int, str, str, st
         fail(f"{label}: expected object")
     exact_keys(
         value,
-        {"chip", "memory_gb", "bandwidth_tier", "detected", "os_version", "binary_version", "hardware_identity_hash"},
-        {"chip", "memory_gb", "bandwidth_tier", "detected", "os_version", "binary_version", "hardware_identity_hash"},
+        {"chip", "memory_gb", "bandwidth_tier", "detected", "os_version", "binary_version", "hardware_identity_hash", "executable_sha256"},
+        {"chip", "memory_gb", "bandwidth_tier", "detected", "os_version", "binary_version", "hardware_identity_hash", "executable_sha256"},
         label,
     )
     chip = non_empty_string(value["chip"], f"{label}.chip")
@@ -189,6 +189,8 @@ def validate_hardware(value: object, label: str) -> tuple[str, int, str, str, st
         fail(f"{label}.detected: trusted matrix requires detected hardware")
     if not is_sha256(value["hardware_identity_hash"]):
         fail(f"{label}.hardware_identity_hash: expected lowercase SHA-256")
+    if not is_sha256(value["executable_sha256"]):
+        fail(f"{label}.executable_sha256: expected lowercase SHA-256")
     hardware_class = f"{normalize_chip(chip)}:{value['memory_gb']}gb:{value['bandwidth_tier']}"
     return hardware_class, value["memory_gb"], value["bandwidth_tier"], binary_version, value["hardware_identity_hash"]
 
@@ -358,8 +360,8 @@ def audit_matrix(
         evidence = provider["evidence"]
         if not isinstance(evidence, dict):
             fail(f"{label}.evidence: expected object")
-        exact_keys(evidence, {"schema_version", "provider_id", "generated_at", "hardware", "candidate_catalog_sha256", "recommended_model", "benchmarks"}, {"schema_version", "provider_id", "generated_at", "hardware", "candidate_catalog_sha256", "recommended_model", "benchmarks"}, f"{label}.evidence")
-        if evidence["schema_version"] != "hardware_evidence.autotune.v1" or evidence["provider_id"] != provider_id:
+        exact_keys(evidence, {"schema_version", "provider_id", "generated_at", "hardware", "candidate_catalog_sha256", "recommended_model", "probe_protocol", "benchmarks"}, {"schema_version", "provider_id", "generated_at", "hardware", "candidate_catalog_sha256", "recommended_model", "probe_protocol", "benchmarks"}, f"{label}.evidence")
+        if evidence["schema_version"] != "hardware_evidence.autotune.v2" or evidence["probe_protocol"] != "spec-023-harmony-stream.v2" or evidence["provider_id"] != provider_id:
             fail(f"{label}.evidence: unsupported schema or provider binding")
         evidence_generated_at = parse_time(evidence["generated_at"], f"{label}.evidence.generated_at")
         if evidence_generated_at < min_generated_at:

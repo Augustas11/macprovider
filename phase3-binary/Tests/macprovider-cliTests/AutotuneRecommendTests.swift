@@ -2384,6 +2384,12 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(outcomes.diagnostics[badKey]).contains("hash mismatch"))
         XCTAssertNotNil(outcomes.benchmarks[goodKey])
         XCTAssertEqual(prober.probedModels, [goodArtifactPath])
+        XCTAssertEqual(prober.probedArtifactBindings.count, 1)
+        XCTAssertEqual(prober.probedArtifactBindings[0]?.path, goodArtifactPath)
+        XCTAssertEqual(
+            prober.probedArtifactBindings[0]?.sha256,
+            request.candidateCatalog.rows[goodKey]?.modelSHA256
+        )
     }
 
     func testBenchmarksScopesToCandidateModelsWhenFilterProvided() async throws {
@@ -3979,6 +3985,7 @@ final class AutotuneRecommendTests: XCTestCase {
 private final class RecordingStage1Prober: Stage1Probing {
     private let results: [String: Stage1ProbeResult]
     private(set) var probedModels: [String] = []
+    private(set) var probedArtifactBindings: [CandidateArtifactBinding?] = []
 
     init(results: [String: Stage1ProbeResult]) {
         self.results = results
@@ -3992,7 +3999,28 @@ private final class RecordingStage1Prober: Stage1Probing {
         gateTTFTMS: Int,
         replicates: Int
     ) async throws -> Stage1ProbeResult {
+        try await probe(
+            model: model,
+            port: port,
+            runner: runner,
+            targetContext: targetContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: replicates,
+            artifactBinding: nil
+        )
+    }
+
+    func probe(
+        model: String,
+        port: Int,
+        runner: Stage1ProviderRunning,
+        targetContext: Int,
+        gateTTFTMS: Int,
+        replicates: Int,
+        artifactBinding: CandidateArtifactBinding?
+    ) async throws -> Stage1ProbeResult {
         probedModels.append(model)
+        probedArtifactBindings.append(artifactBinding)
         return results[model] ?? .infeasible(reason: "missing stub probe result", nErr: 1)
     }
 }

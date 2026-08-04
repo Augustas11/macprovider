@@ -62,9 +62,10 @@ for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 64, "S"), ("
             "decision_reason": module.VERIFIED_DECISION_REASON,
         },
         "evidence": {
-            "schema_version": "hardware_evidence.autotune.v1",
+            "schema_version": "hardware_evidence.autotune.v2",
             "provider_id": provider_id,
             "generated_at": generated_at,
+            "probe_protocol": "spec-023-harmony-stream.v2",
             "hardware": {
                 "chip": chip,
                 "memory_gb": memory_gb,
@@ -73,6 +74,7 @@ for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 64, "S"), ("
                 "os_version": "macOS test",
                 "binary_version": "1.9.0",
                 "hardware_identity_hash": hardware_hash,
+                "executable_sha256": "e" * 64,
             },
             "candidate_catalog_sha256": catalog_sha,
             "recommended_model": "test-model",

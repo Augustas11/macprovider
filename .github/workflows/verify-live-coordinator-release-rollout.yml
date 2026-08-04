@@ -1,0 +1,213 @@
+name: Verify live coordinator release rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Public stable release tag after Pearl recommends it, for example v1.8.82"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# The Pearl recommendation must be deployed by its owner before dispatch.
+# This workflow is the serialized promotion boundary: it proves that live
+# recommendation, then publishes the append-only discovery transport.
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify public release, Pearl recommendation, and discovery rollout
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify public immutable release and live rollout
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "rollout checkout is not the workflow event commit" >&2
+            exit 1
+          }
+          test "$(git rev-parse origin/main)" = "$GITHUB_SHA" || {
+            echo "main moved after workflow dispatch; rerun against the new exact head" >&2
+            exit 1
+          }
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "TAG must be an exact vX.Y.Z stable release tag" >&2
+            exit 1
+          fi
+          assets="$RUNNER_TEMP/release-assets"
+          mkdir -p "$assets"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            > "$RUNNER_TEMP/release-by-tag.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/latest" \
+            > "$RUNNER_TEMP/latest-release.json"
+          release_id="$(python3 - "$RUNNER_TEMP/release-by-tag.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          release_id = release.get("id")
+          if type(release_id) is not int or release_id <= 0:
+              raise SystemExit("public release has no valid numeric id")
+          if release.get("draft") is not False or release.get("immutable") is not True:
+              raise SystemExit("tag lookup is not a public immutable release")
+          if release.get("prerelease") is not False:
+              raise SystemExit("rollout proof accepts stable releases only")
+          print(release_id)
+          PY
+          )"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            > "$RUNNER_TEMP/release-by-id.json"
+          python3 scripts/verify-published-release.py \
+            "$release_id" false \
+            "$RUNNER_TEMP/release-by-id.json" \
+            "$RUNNER_TEMP/release-by-tag.json" \
+            "$RUNNER_TEMP/latest-release.json"
+          target_commit="$(python3 - "$RUNNER_TEMP/release-by-id.json" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          target_commit = release.get("target_commitish")
+          if not isinstance(target_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", target_commit):
+              raise SystemExit("public release is not bound to an exact commit")
+          print(target_commit)
+          PY
+          )"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern pearl-release.json \
+            --pattern trusted-keys.json \
+            --pattern compatibility-artifact-index.json \
+            --pattern macprovider-release-discovery.json \
+            --pattern macprovider-release-discovery.json.sig \
+            --dir "$assets" \
+            --clobber
+          test -s "$assets/pearl-release.json"
+          test -s "$assets/trusted-keys.json"
+          test -s "$assets/compatibility-artifact-index.json"
+          test -s "$assets/macprovider-release-discovery.json"
+          test -s "$assets/macprovider-release-discovery.json.sig"
+          # Pearl recommendation deployment is the serialized external step;
+          # this exact post-publication gate proves it is now live before the
+          # release becomes discoverable through the append-only transport.
+          env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
+            python3 scripts/verify-live-coordinator-release-gate.py \
+            --tag "$TAG" \
+            --pearl-release-json "$assets/pearl-release.json" \
+            --trusted-keys "$assets/trusted-keys.json" \
+            --coordinator-url https://coordinator.streamvc.live \
+            --publication-phase post-publication
+          transport_tag="$(python3 - "$assets/macprovider-release-discovery.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          sequence = value.get("signed", {}).get("release_sequence")
+          if type(sequence) is not int or sequence <= 0:
+              raise SystemExit("signed discovery sequence is invalid")
+          print(f"release-discovery-v1-{sequence}")
+          PY
+          )"
+          [[ "$transport_tag" =~ ^release-discovery-v1-[1-9][0-9]*$ ]]
+          python3 scripts/verify-release-discovery-transport.py \
+            --head "$assets/macprovider-release-discovery.json" \
+            --signature "$assets/macprovider-release-discovery.json.sig" \
+            --artifact-index "$assets/compatibility-artifact-index.json" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "$transport_tag" \
+            --target-tag "$TAG" \
+            --target-commit "$target_commit" \
+            --openssl "${OPENSSL_BIN:-openssl}" >/dev/null
+          if git ls-remote --tags origin "$transport_tag" | grep -q .; then
+            echo "discovery transport tag already exists: $transport_tag" >&2
+            exit 1
+          fi
+          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            > "$RUNNER_TEMP/releases-before-discovery.json"
+          python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$transport_tag" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if any(
+              isinstance(release, dict) and release.get("tag_name") == sys.argv[2]
+              for page in pages if isinstance(page, list)
+              for release in page
+          ):
+              raise SystemExit("append-only discovery release already exists")
+          PY
+          # GitHub concurrency serializes this publisher, but it cannot lock
+          # the external Pearl recommendation. Re-check immediately before
+          # the irreversible append-only discovery publication.
+          env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
+            python3 scripts/verify-live-coordinator-release-gate.py \
+            --tag "$TAG" \
+            --pearl-release-json "$assets/pearl-release.json" \
+            --trusted-keys "$assets/trusted-keys.json" \
+            --coordinator-url https://coordinator.streamvc.live \
+            --publication-phase post-publication
+          notes="$RUNNER_TEMP/discovery-notes.md"
+          printf 'Signed append-only discovery transport for %s.\n' "$TAG" > "$notes"
+          gh release create "$transport_tag" \
+            "$assets/compatibility-artifact-index.json" \
+            "$assets/macprovider-release-discovery.json" \
+            "$assets/macprovider-release-discovery.json.sig" \
+            --title "macprovider signed release discovery" \
+            --notes-file "$notes" \
+            --target "$target_commit" \
+            --draft \
+            --prerelease \
+            --latest=false
+          transport_id="$(gh release view "$transport_tag" --json databaseId --jq .databaseId)"
+          [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
+          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+            -F draft=false -F prerelease=true -f make_latest=false \
+            > "$RUNNER_TEMP/discovery-published.json"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
+            > "$RUNNER_TEMP/discovery-immutable.json"
+          python3 scripts/verify-release-discovery-transport.py \
+            --release-json "$RUNNER_TEMP/discovery-immutable.json" \
+            --head "$assets/macprovider-release-discovery.json" \
+            --signature "$assets/macprovider-release-discovery.json.sig" \
+            --artifact-index "$assets/compatibility-artifact-index.json" \
+            --public-key ops/pearl-updater/release-signing-public.pem \
+            --repository "$GITHUB_REPOSITORY" \
+            --transport-tag "$transport_tag" \
+            --target-tag "$TAG" \
+            --target-commit "$target_commit" \
+            --require-immutable \
+            --openssl "${OPENSSL_BIN:-openssl}" >/dev/null
+          GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            scripts/verify-anonymous-release-discovery.sh \
+              "$TAG" "$target_commit" "$TAG" "$transport_tag"

@@ -4,6 +4,11 @@ import XCTest
 @testable import macprovider_cli
 
 final class Stage2HillClimbTests: XCTestCase {
+    func testStage2UsesTheContextBoundedHarmonyProbeBudget() {
+        XCTAssertEqual(Stage2Prober.maxTokens(for: 4_000), 512)
+        XCTAssertEqual(Stage2Prober.maxTokens(for: 2_000), 272)
+    }
+
     func testStage2HillClimbPicksFirstFeasibleAsBaseline() async throws {
         let dbURL = try temporaryDBURL()
         let db = try AutotuneDB(path: dbURL.path)

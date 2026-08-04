@@ -115,6 +115,12 @@ if '"cli_version": "1.8.40"' in text:
     raise SystemExit("candidate publication must validate the dispatched CLI version")
 if text.count("scripts/validate-malibu-release-cli-inputs.sh") != 2:
     raise SystemExit("candidate and publication paths must both validate exact CLI inputs")
+for policy in (
+    "--allow-previous-stable=1.8.81",
+    "--staged-candidate=1.8.82",
+):
+    if text.count(policy) != 2:
+        raise SystemExit(f"candidate and publication paths must bind staged coordinator policy: {policy}")
 if "Malibu/CLI marketing-version equality is required" in text:
     raise SystemExit("Malibu release workflow must not couple app and CLI marketing versions")
 
@@ -129,11 +135,14 @@ valid_cli_version="$(
     "$root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 )"
 valid_cli_tag="v$valid_cli_version"
+staged_coordinator_policy="--allow-previous-stable=1.8.81"
+staged_candidate_policy="--staged-candidate=1.8.82"
 
-"$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" >/dev/null
+"$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" \
+  "$staged_coordinator_policy" "$staged_candidate_policy" >/dev/null
 
 expect_failure() {
-  if "$validator" "$@" >/dev/null 2>&1; then
+  if "$validator" "$@" "$staged_coordinator_policy" "$staged_candidate_policy" >/dev/null 2>&1; then
     echo "Malibu release CLI input validation unexpectedly succeeded: $*" >&2
     exit 1
   fi
