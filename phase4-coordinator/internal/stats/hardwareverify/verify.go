@@ -14,7 +14,8 @@ import (
 )
 
 const verifierDecisionVersion = "hardware-verifier.v2"
-const evidenceSchemaVersion = "hardware_evidence.autotune.v1"
+const evidenceSchemaVersion = "hardware_evidence.autotune.v2"
+const evidenceProbeProtocol = "spec-023-harmony-stream.v2"
 
 // MaxEvidenceAgeDays is the evidence-age limit (in whole days) the verifier
 // enforces: a job whose generated_at is older than this is rejected as
@@ -61,6 +62,7 @@ type Evidence struct {
 	Hardware               Hardware    `json:"hardware"`
 	CandidateCatalogSHA256 string      `json:"candidate_catalog_sha256"`
 	RecommendedModel       string      `json:"recommended_model"`
+	ProbeProtocol          string      `json:"probe_protocol"`
 	Benchmarks             []Benchmark `json:"benchmarks"`
 }
 
@@ -72,6 +74,7 @@ type Hardware struct {
 	OSVersion            string `json:"os_version"`
 	BinaryVersion        string `json:"binary_version"`
 	HardwareIdentityHash string `json:"hardware_identity_hash"`
+	ExecutableSHA256     string `json:"executable_sha256"`
 }
 
 type Benchmark struct {
@@ -87,6 +90,7 @@ type Benchmark struct {
 	GeneratedAt             string  `json:"generated_at"`
 	BinaryVersion           string  `json:"binary_version"`
 	HardwareIdentityHash    string  `json:"hardware_identity_hash"`
+	CandidateRowIdentity    string  `json:"candidate_row_identity"`
 }
 
 type Decision struct {
@@ -279,6 +283,9 @@ func evaluateAt(job Job, now time.Time) Decision {
 	if evidence.SchemaVersion != evidenceSchemaVersion {
 		return reject("schema_version_mismatch")
 	}
+	if evidence.ProbeProtocol != evidenceProbeProtocol {
+		return reject("probe_protocol_mismatch")
+	}
 	if evidence.ProviderID != job.ProviderID {
 		return reject("provider_id_mismatch")
 	}
@@ -310,6 +317,9 @@ func evaluateAt(job Job, now time.Time) Decision {
 	if !isLowerSHA256(evidence.Hardware.HardwareIdentityHash) {
 		return reject("invalid_hardware_identity_hash")
 	}
+	if !isLowerSHA256(evidence.Hardware.ExecutableSHA256) {
+		return reject("invalid_executable_sha256")
+	}
 	if !isLowerSHA256(evidence.CandidateCatalogSHA256) {
 		return reject("invalid_candidate_catalog_sha256")
 	}
@@ -337,6 +347,9 @@ func evaluateAt(job Job, now time.Time) Decision {
 		}
 		if benchmark.HardwareIdentityHash != evidence.Hardware.HardwareIdentityHash {
 			return reject("benchmark_hardware_identity_mismatch")
+		}
+		if !isLowerSHA256(benchmark.CandidateRowIdentity) {
+			return reject("invalid_benchmark_candidate_row_identity")
 		}
 		benchmarkGeneratedAt, parseErr := time.Parse(time.RFC3339, benchmark.GeneratedAt)
 		if parseErr != nil {

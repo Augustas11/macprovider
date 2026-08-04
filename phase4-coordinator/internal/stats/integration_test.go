@@ -1657,7 +1657,7 @@ RETURNING id`, tc.providerID, tc.status, tc.decisionReason, tc.evidenceSHA).Scan
 	}
 }
 
-func TestHardwareEvidenceSameIdentityReplayBypassesAdmissionCap(t *testing.T) {
+func TestHardwareEvidenceSameIdentityDoesNotBypassAdmissionCap(t *testing.T) {
 	fx := startPostgres(t)
 	adminDB := applyMigrationsAndStubOLTP(t, fx)
 	store, err := onboarding.OpenPGStore(fx.roleDSN(roleProviderOnboard))
@@ -1690,15 +1690,8 @@ RETURNING id`, providerID, oldEvidenceJSON, oldEvidenceSHA).Scan(&oldJobID); err
 
 	generatedAt := time.Date(2026, 7, 31, 13, 0, 0, 0, time.UTC)
 	evidence := hardwareEvidenceRequestForIntegration(providerID, sameHash, "1.8.68", generatedAt)
-	record, err := store.InsertHardwareVerificationJob(ctx, providerID, evidence, generatedAt)
-	if err != nil {
-		t.Fatalf("same hardware replay insert: %v", err)
-	}
-	if record.JobID != oldJobID || record.Status != "waiting_trust" || !record.Replay {
-		t.Fatalf("same hardware record=%+v, want old waiting_trust replay job %d", record, oldJobID)
-	}
-	if record.EvidenceSHA == oldEvidenceSHA || len(record.EvidenceSHA) != 64 {
-		t.Fatalf("replay evidence sha=%q, want submitted payload sha distinct from old row", record.EvidenceSHA)
+	if _, err := store.InsertHardwareVerificationJob(ctx, providerID, evidence, generatedAt); !errors.Is(err, onboarding.ErrHardwareEvidenceRateLimited) {
+		t.Fatalf("same hardware error=%v, want rate limited", err)
 	}
 	var jobCount int
 	if err := adminDB.QueryRowContext(ctx,
@@ -1708,7 +1701,7 @@ RETURNING id`, providerID, oldEvidenceJSON, oldEvidenceSHA).Scan(&oldJobID); err
 		t.Fatalf("count jobs: %v", err)
 	}
 	if jobCount != 1 {
-		t.Fatalf("job count=%d, want replay without new job", jobCount)
+		t.Fatalf("job count=%d, want no new job", jobCount)
 	}
 
 	changedEvidence := hardwareEvidenceRequestForIntegration(providerID, changedHash, "1.8.68", generatedAt)
@@ -1719,7 +1712,8 @@ RETURNING id`, providerID, oldEvidenceJSON, oldEvidenceSHA).Scan(&oldJobID); err
 
 func hardwareEvidenceRequestForIntegration(providerID, hardwareIdentityHash, binaryVersion string, generatedAt time.Time) onboarding.HardwareEvidenceRequest {
 	return onboarding.HardwareEvidenceRequest{
-		SchemaVersion:          "hardware_evidence.autotune.v1",
+		SchemaVersion:          "hardware_evidence.autotune.v2",
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
 		ProviderID:             providerID,
 		GeneratedAt:            generatedAt.Format(time.RFC3339),
 		CandidateCatalogSHA256: strings.Repeat("b", 64),
@@ -1732,6 +1726,7 @@ func hardwareEvidenceRequestForIntegration(providerID, hardwareIdentityHash, bin
 			OSVersion:            "15.5",
 			BinaryVersion:        binaryVersion,
 			HardwareIdentityHash: hardwareIdentityHash,
+			ExecutableSHA256:     strings.Repeat("f", 64),
 		},
 		Benchmarks: []onboarding.HardwareEvidenceBenchmark{{
 			ModelKey:                "qwen-7b",
@@ -1746,6 +1741,7 @@ func hardwareEvidenceRequestForIntegration(providerID, hardwareIdentityHash, bin
 			GeneratedAt:             generatedAt.Format(time.RFC3339),
 			BinaryVersion:           binaryVersion,
 			HardwareIdentityHash:    hardwareIdentityHash,
+			CandidateRowIdentity:    strings.Repeat("a", 64),
 		}},
 	}
 }

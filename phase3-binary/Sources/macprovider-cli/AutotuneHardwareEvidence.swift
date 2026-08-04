@@ -2,6 +2,35 @@ import CryptoKit
 import Foundation
 import MacProviderCore
 
+enum AutotuneHardwareEvidenceContract {
+    static let schemaVersion = "hardware_evidence.autotune.v2"
+    static let probeProtocol = "spec-023-harmony-stream.v2"
+
+    static func currentExecutableSHA256() -> String {
+        guard let executableURL = currentExecutableURL(),
+              let data = try? Data(contentsOf: executableURL)
+        else {
+            return ""
+        }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func currentExecutableURL() -> URL? {
+        guard let raw = CommandLine.arguments.first, !raw.isEmpty else { return nil }
+        if raw.contains("/") {
+            return URL(fileURLWithPath: raw).standardizedFileURL
+        }
+        let pathEntries = ProcessInfo.processInfo.environment["PATH"]?.split(separator: ":") ?? []
+        for entry in pathEntries {
+            let candidate = URL(fileURLWithPath: String(entry)).appendingPathComponent(raw)
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate.standardizedFileURL
+            }
+        }
+        return nil
+    }
+}
+
 enum AutotuneHardwareEvidenceSubmission: Equatable {
     case submitted
     case skipped(String)
@@ -124,18 +153,43 @@ struct AutotuneHardwareEvidenceSubmitter {
         providerID: String,
         snapshot: AutotuneHardwareEvidenceSnapshot
     ) throws -> (data: Data, evidenceSHA: String) {
+        guard snapshot.probeProtocol == AutotuneHardwareEvidenceContract.probeProtocol,
+              isLowerSHA256(snapshot.hardware.executableSHA256),
+              snapshot.benchmarks.allSatisfy({
+                  guard let identity = $0.candidateRowIdentity else { return false }
+                  return isLowerSHA256(identity)
+              })
+        else {
+            throw NSError(
+                domain: "AutotuneHardwareEvidence",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "evidence protocol or executable/row identity binding is invalid"]
+            )
+        }
         let payload = HardwareEvidencePayload(
-            schemaVersion: "hardware_evidence.autotune.v1",
+            schemaVersion: AutotuneHardwareEvidenceContract.schemaVersion,
             providerID: providerID,
             generatedAt: snapshot.generatedAt,
             hardware: snapshot.hardware,
             candidateCatalogSHA256: snapshot.candidateCatalogSHA256,
             recommendedModel: snapshot.recommendedModel ?? "",
-            benchmarks: snapshot.benchmarks
+            benchmarks: snapshot.benchmarks,
+            probeProtocol: snapshot.probeProtocol
         )
         let data = Data(try RFC8785JCS.canonicalString(payload.canonicalValue).utf8)
         let evidenceSHA = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         return (data, evidenceSHA)
+    }
+
+    private static func isLowerSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 48...57, 97...102:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     static func validateSuccessResponse(
@@ -183,6 +237,7 @@ struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
     var candidateCatalogSHA256: String
     var recommendedModel: String?
     var benchmarks: [BenchmarkPayload]
+    var probeProtocol: String
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -190,9 +245,14 @@ struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
         case candidateCatalogSHA256 = "candidate_catalog_sha256"
         case recommendedModel = "recommended_model"
         case benchmarks
+        case probeProtocol = "probe_protocol"
     }
 
-    init(result: AutotuneRecommendResult, benchmarks: [String: CandidateBenchmark]) {
+    init(
+        result: AutotuneRecommendResult,
+        benchmarks: [String: CandidateBenchmark],
+        executableSHA256: String = AutotuneHardwareEvidenceContract.currentExecutableSHA256()
+    ) {
         generatedAt = ISO8601DateFormatter.autotuneInternet.string(from: result.generatedAt)
         hardware = HardwarePayload(
             chip: result.hardware.chip,
@@ -201,7 +261,8 @@ struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
             detected: result.hardware.detected,
             osVersion: result.hardware.osVersion,
             binaryVersion: result.hardware.binaryVersion,
-            hardwareIdentityHash: result.hardware.hardwareIdentityHash
+            hardwareIdentityHash: result.hardware.hardwareIdentityHash,
+            executableSHA256: executableSHA256
         )
         candidateCatalogSHA256 = result.candidateCatalogSHA256
         recommendedModel = result.recommendedModel
@@ -224,6 +285,7 @@ struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
                 hardwareIdentityHash: benchmark.hardwareIdentityHash
             )
         }
+        probeProtocol = AutotuneHardwareEvidenceContract.probeProtocol
     }
 }
 
@@ -235,6 +297,7 @@ private struct HardwareEvidencePayload: Encodable {
     var candidateCatalogSHA256: String
     var recommendedModel: String
     var benchmarks: [BenchmarkPayload]
+    var probeProtocol: String
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -244,6 +307,7 @@ private struct HardwareEvidencePayload: Encodable {
         case candidateCatalogSHA256 = "candidate_catalog_sha256"
         case recommendedModel = "recommended_model"
         case benchmarks
+        case probeProtocol = "probe_protocol"
     }
 }
 
@@ -271,6 +335,7 @@ private extension HardwareEvidencePayload {
             "candidate_catalog_sha256": .string(candidateCatalogSHA256),
             "recommended_model": .string(recommendedModel),
             "benchmarks": .array(benchmarks.map(\.canonicalValue)),
+            "probe_protocol": .string(probeProtocol),
         ])
     }
 }
@@ -285,6 +350,7 @@ private extension HardwarePayload {
             "os_version": .string(osVersion),
             "binary_version": .string(binaryVersion),
             "hardware_identity_hash": .string(hardwareIdentityHash),
+            "executable_sha256": .string(executableSHA256),
         ])
     }
 }
@@ -325,6 +391,7 @@ struct HardwarePayload: Codable, Equatable {
     var osVersion: String
     var binaryVersion: String
     var hardwareIdentityHash: String
+    var executableSHA256: String
 
     enum CodingKeys: String, CodingKey {
         case chip
@@ -334,6 +401,7 @@ struct HardwarePayload: Codable, Equatable {
         case osVersion = "os_version"
         case binaryVersion = "binary_version"
         case hardwareIdentityHash = "hardware_identity_hash"
+        case executableSHA256 = "executable_sha256"
     }
 }
 

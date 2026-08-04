@@ -2701,7 +2701,7 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (autotuneAdm
 		}
 		return autotuneAdmissionObservation{}, true
 	}
-	decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
+	decision := autotune.EvaluateHelloGateForHello(s.autotuneCatalog, evidence, hello.ModelID, hello.BinaryVersion)
 	if !decision.Allowed {
 		if !requireGate {
 			return autotuneAdmissionObservation{

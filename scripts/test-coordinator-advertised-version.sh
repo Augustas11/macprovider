@@ -7,6 +7,42 @@ app_project_file="$repo_root/phase3-binary/app/project.yml"
 release_builds_file="$repo_root/phase3-binary/app/release-builds.tsv"
 expected_version="${1:-}"
 expected_version="${expected_version#v}"
+previous_stable_version=""
+staged_candidate_version=""
+if [[ "$#" -gt 3 ]]; then
+  echo "usage: $0 [vX.Y.Z] [--allow-previous-stable=X.Y.Z] [--staged-candidate=X.Y.Z]" >&2
+  exit 2
+fi
+for policy in "${@:2}"; do
+  case "$policy" in
+    --allow-previous-stable=*)
+      previous_stable_version="${policy#--allow-previous-stable=}"
+      ;;
+    --staged-candidate=*)
+      staged_candidate_version="${policy#--staged-candidate=}"
+      ;;
+    *)
+      echo "usage: $0 [vX.Y.Z] [--allow-previous-stable=X.Y.Z] [--staged-candidate=X.Y.Z]" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -n "$previous_stable_version" && ! "$previous_stable_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "previous stable coordinator recommendation is not semver: $previous_stable_version" >&2
+  exit 1
+fi
+if [[ -n "$staged_candidate_version" && ! "$staged_candidate_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "staged candidate coordinator version is not semver: $staged_candidate_version" >&2
+  exit 1
+fi
+if [[ -n "$previous_stable_version" && -z "$staged_candidate_version" ]]; then
+  echo "staged previous stable policy must bind an explicit candidate version" >&2
+  exit 1
+fi
+if [[ -z "$previous_stable_version" && -n "$staged_candidate_version" ]]; then
+  echo "staged candidate policy requires a previous stable coordinator policy" >&2
+  exit 1
+fi
 
 if [[ ! -f "$source_file" ]]; then
   echo "missing CLI version source: $source_file" >&2
@@ -138,10 +174,27 @@ for config_file in "${config_files[@]}"; do
     exit 1
   fi
 
-  if [[ "$advertised_version" != "$binary_version" ]]; then
+  if [[ -n "$previous_stable_version" ]]; then
+    if [[ "$previous_stable_version" == "$binary_version" ]]; then
+      echo "previous stable coordinator recommendation must differ from candidate $binary_version" >&2
+      exit 1
+    fi
+    if [[ "$advertised_version" != "$previous_stable_version" ]]; then
+      echo "$config_file advertises $advertised_version; expected staged previous stable $previous_stable_version" >&2
+      exit 1
+    fi
+  elif [[ "$advertised_version" != "$binary_version" ]]; then
     echo "$config_file advertises $advertised_version; expected $binary_version" >&2
     exit 1
   fi
 done
 
-echo "CLI and coordinator advertised versions are aligned at $binary_version; Malibu $app_version build $app_build is validated independently"
+if [[ -n "$previous_stable_version" ]]; then
+  if [[ "$staged_candidate_version" != "$binary_version" ]]; then
+    echo "staged candidate $staged_candidate_version does not match CLI binary $binary_version" >&2
+    exit 1
+  fi
+  echo "CLI $binary_version is staged with previous stable coordinator recommendation $previous_stable_version; Malibu $app_version build $app_build is validated independently"
+else
+  echo "CLI and coordinator advertised versions are aligned at $binary_version; Malibu $app_version build $app_build is validated independently"
+fi

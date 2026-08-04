@@ -365,7 +365,9 @@ providers:
 # the already-true rejection explicit and machine-readable instead of leaving
 # a legacy build to fail later, opaquely, on catalog admission.
 #
-# It is deliberately far below the current release (1.8.79) and below the
+# It is deliberately pinned to the previous stable recommendation (1.8.81)
+# until the signed 1.8.82 assets have been published and byte-identity
+# verified, and remains below the
 # #610 first-hop bridge build (1.8.48, which is additionally exempt from the
 # floor by construction — see prepareProviderAdmission's firstHopOnly skip),
 # so raising it is a separate, deliberate act. Raise it only in lockstep with

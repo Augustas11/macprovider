@@ -28,7 +28,7 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             benchmarks: fixture.benchmarks
         )
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        XCTAssertEqual(object?["schema_version"] as? String, "hardware_evidence.autotune.v1")
+        XCTAssertEqual(object?["schema_version"] as? String, "hardware_evidence.autotune.v2")
         XCTAssertEqual(object?["provider_id"] as? String, "mac")
         XCTAssertEqual(object?["generated_at"] as? String, ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))
         let hardware = object?["hardware"] as? [String: Any]
@@ -49,13 +49,33 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         // Golden updated for #745: benchmarks now include model_artifact_path.
         XCTAssertEqual(
             payload.evidenceSHA,
-            "ddd18c573548d79cfa1caac0977f373db06d77d0c099ab48b1e2b45ebe618d21"
+            "1c477957d51a8064a311f55b8ae86c963d83737c7d276a6a44e87e0a0fb350b7"
         )
         XCTAssertEqual(
             payload.data,
             try AutotuneHardwareEvidenceSubmitter.payloadData(
                 providerID: "mac",
                 snapshot: makeFixture().snapshot
+            )
+        )
+    }
+
+    func testCanonicalPayloadRejectsNonLowercaseSHA256Bindings() throws {
+        var snapshot = makeFixture().snapshot
+        snapshot.hardware.executableSHA256 = String(repeating: "A", count: 64)
+        XCTAssertThrowsError(
+            try AutotuneHardwareEvidenceSubmitter.canonicalPayload(
+                providerID: "mac",
+                snapshot: snapshot
+            )
+        )
+
+        snapshot = makeFixture().snapshot
+        snapshot.benchmarks[0].candidateRowIdentity = String(repeating: "a", count: 63) + "Ａ"
+        XCTAssertThrowsError(
+            try AutotuneHardwareEvidenceSubmitter.canonicalPayload(
+                providerID: "mac",
+                snapshot: snapshot
             )
         )
     }
@@ -183,7 +203,7 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         let fixture = makeFixture()
         let expectedSHA = try AutotuneHardwareEvidenceSubmitter.canonicalPayload(
             providerID: providerID,
-            snapshot: fixture.snapshot
+            snapshot: AutotuneHardwareEvidenceSnapshot(result: fixture.result, benchmarks: fixture.benchmarks)
         ).evidenceSHA
         let config = try makeTokenlessConfig(providerID: providerID)
         let session = evidenceSession { request in
@@ -361,9 +381,13 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
 
     func testStoredEvidenceRetainsImmutableMeasurementTimestamp() throws {
         let fixture = makeFixture()
+        let runtimeSnapshot = AutotuneHardwareEvidenceSnapshot(
+            result: fixture.result,
+            benchmarks: fixture.benchmarks
+        )
         let replayData = try AutotuneHardwareEvidenceSubmitter.payloadData(
             providerID: "mac",
-            snapshot: fixture.snapshot
+            snapshot: runtimeSnapshot
         )
         let initialData = try AutotuneHardwareEvidenceSubmitter.payloadData(
             providerID: "mac",
@@ -395,7 +419,10 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         )
         let stored = try RecommendationStateStore.read(from: stateURL)
 
-        XCTAssertEqual(stored.hardwareEvidence, fixture.snapshot)
+        XCTAssertEqual(
+            stored.hardwareEvidence,
+            AutotuneHardwareEvidenceSnapshot(result: fixture.result, benchmarks: fixture.benchmarks)
+        )
     }
 
     func testRecommendationStateUsesPrivateDirectoryAndFilePermissions() throws {
@@ -495,7 +522,11 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
         return (
             result,
             benchmarks,
-            AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks)
+            AutotuneHardwareEvidenceSnapshot(
+                result: result,
+                benchmarks: benchmarks,
+                executableSHA256: String(repeating: "d", count: 64)
+            )
         )
     }
 

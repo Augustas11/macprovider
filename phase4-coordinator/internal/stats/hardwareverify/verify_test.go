@@ -189,6 +189,7 @@ func validJob(t *testing.T, now time.Time, chip, tier string) Job {
 		GeneratedAt:            now.Format(time.RFC3339),
 		CandidateCatalogSHA256: catalogSHA,
 		RecommendedModel:       "mlx-community/model",
+		ProbeProtocol:          evidenceProbeProtocol,
 		Hardware: Hardware{
 			Chip:                 chip,
 			MemoryGB:             32,
@@ -197,6 +198,7 @@ func validJob(t *testing.T, now time.Time, chip, tier string) Job {
 			OSVersion:            "15.5",
 			BinaryVersion:        "1.7.9",
 			HardwareIdentityHash: hardwareIdentity,
+			ExecutableSHA256:     strings.Repeat("e", 64),
 		},
 		Benchmarks: []Benchmark{{
 			ModelKey:               "model",
@@ -209,6 +211,7 @@ func validJob(t *testing.T, now time.Time, chip, tier string) Job {
 			GeneratedAt:            now.Format(time.RFC3339),
 			BinaryVersion:          "1.7.9",
 			HardwareIdentityHash:   hardwareIdentity,
+			CandidateRowIdentity:   strings.Repeat("f", 64),
 		}},
 	}
 	return Job{

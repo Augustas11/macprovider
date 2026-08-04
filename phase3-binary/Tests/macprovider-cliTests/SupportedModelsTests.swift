@@ -114,11 +114,11 @@ final class SupportedModelsTests: XCTestCase {
             "--supported-models", "A,B",
         ])
 
-        do {
-            try await command.run()
-            XCTFail("expected pre-flight validation to fail before runtime startup")
-        } catch let error as ExitCode {
-            XCTAssertEqual(error, ExitCode(2))
+        var config = AppConfig.defaults()
+        config.model = command.model
+        config.supportedModels = SupportedModels.parseCSV(command.supportedModels)
+        XCTAssertThrowsError(try ServeCommand.runSupportedModelsPreflight(&config)) { error in
+            XCTAssertEqual(error as? ExitCode, ExitCode(2))
         }
     }
 

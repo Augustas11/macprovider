@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 guard="$root/scripts/verify-live-coordinator-release-gate.py"
 workflow="$root/.github/workflows/release.yml"
 promotion_workflow="$root/.github/workflows/promote-acceptance-candidate.yml"
+rollout_workflow="$root/.github/workflows/verify-live-coordinator-release-rollout.yml"
 work="$(mktemp -d "${TMPDIR:-/tmp}/live-coordinator-release-gate.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -170,13 +171,21 @@ PY
 
 run_guard() {
   local directory="$1"
+  run_guard_phase "$directory" post-publication
+}
+
+run_guard_phase() {
+  local directory="$1"
+  local phase="$2"
   python3 "$guard" \
     --tag v1.8.68 \
     --pearl-release-json "$directory/pearl-release.json" \
     --trusted-keys "$directory/trusted-keys.json" \
     --coordinator-url https://coordinator.fixture.invalid \
     --coordinator-dir "$directory/live" \
-    --now 2026-07-30T12:05:00Z
+    --now 2026-07-30T12:05:00Z \
+    ${phase:+--expected-previous-recommendation 1.8.67} \
+    --publication-phase "$phase"
 }
 
 make_fixture "$work/ok"
@@ -221,6 +230,18 @@ if run_guard "$work/missing-recommended" >"$work/missing-recommended.out" 2>&1; 
   fail "accepted a live coordinator without recommended_binary_version"
 fi
 grep -q '/healthz recommended_binary_version is missing or not a version string' "$work/missing-recommended.out"
+if run_guard_phase "$work/missing-recommended" pre-publication >"$work/missing-recommended-pre.out" 2>&1; then
+  fail "pre-publication gate accepted a coordinator without the previous recommendation"
+fi
+grep -q 'recommended_binary_version is missing or not the expected previous stable version' \
+  "$work/missing-recommended-pre.out"
+
+make_fixture "$work/previous-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if ! run_guard_phase "$work/previous-recommended" pre-publication >"$work/previous-recommended.out" 2>&1; then
+  fail "pre-publication gate rejected the previous stable recommendation"
+fi
+grep -q 'recommended_binary_version=1.8.67 publication_phase=pre-publication' \
+  "$work/previous-recommended.out"
 
 make_fixture "$work/malformed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 latest
 if run_guard "$work/malformed-recommended" >"$work/malformed-recommended.out" 2>&1; then
@@ -423,7 +444,7 @@ if captured_headers.get("User-agent") not in ("", None):
     raise SystemExit(f"expected no gate-specific user-agent, got: {captured_headers}")
 PY
 
-python3 - "$workflow" "$promotion_workflow" <<'PY'
+python3 - "$workflow" "$promotion_workflow" "$rollout_workflow" <<'PY'
 import pathlib
 import sys
 
@@ -436,8 +457,10 @@ def require_stable_gate(
     final_authority_marker=None,
 ):
     workflow = pathlib.Path(workflow_path).read_text(encoding="utf-8")
-    if "Verify live coordinator release gate" not in workflow:
-        raise SystemExit(f"{workflow_path} must include the live coordinator release gate")
+    if "Verify pre-publication live coordinator feed gate" not in workflow:
+        raise SystemExit(f"{workflow_path} must include the pre-publication live coordinator phase")
+    if "Verify post-publication live coordinator release gate" in workflow:
+        raise SystemExit(f"{workflow_path} must not run the post-publication gate inline")
     if "scripts/verify-live-coordinator-release-gate.py" not in workflow:
         raise SystemExit(f"{workflow_path} must call the live coordinator release gate")
     publish = workflow.split(f"- name: {step_name}", 1)[1]
@@ -452,8 +475,8 @@ def require_stable_gate(
     draft_false = publish.find("-F draft=false")
     make_latest = publish.find("-f make_latest")
     published = publish.find("scripts/verify-published-release.py")
-    gate_label = publish.find("Verify live coordinator release gate")
-    gate = publish.find("scripts/verify-live-coordinator-release-gate.py")
+    pre_gate_label = publish.find("Verify pre-publication live coordinator feed gate")
+    pre_gate = publish.find("scripts/verify-live-coordinator-release-gate.py", pre_gate_label)
     discovery = publish.find("- name: Publish one append-only immutable discovery transport")
     if checksum_verify < 0:
         raise SystemExit(f"{workflow_path} lost signed checksum verification")
@@ -465,32 +488,89 @@ def require_stable_gate(
         raise SystemExit(f"{workflow_path} lost public/latest publication transition")
     if published < 0:
         raise SystemExit(f"{workflow_path} lost immutable publication verification")
-    if gate_label < 0 or gate < 0:
-        raise SystemExit(f"{workflow_path} lost live coordinator gate label or command")
-    if gate < gate_label:
+    if pre_gate_label < 0 or pre_gate < 0:
+        raise SystemExit(f"{workflow_path} lost pre-publication live coordinator gate")
+    if pre_gate < pre_gate_label:
         raise SystemExit("live coordinator gate command must follow its gate label")
-    if gate < checksum_verify:
-        raise SystemExit("live coordinator gate command must run after signed checksum verification")
-    if gate < draft_capture:
-        raise SystemExit("live coordinator gate command must run after final draft publication capture")
-    if final_authority_marker is not None and gate < final_authority:
-        raise SystemExit("live coordinator gate command must run after final exception/source authority gate")
-    if gate > public_patch or gate > draft_false or gate > make_latest:
-        raise SystemExit("live coordinator gate command must run before public/latest publication")
+    if pre_gate < checksum_verify:
+        raise SystemExit("pre-publication gate must run after signed checksum verification")
+    if pre_gate < draft_capture:
+        raise SystemExit("pre-publication gate must run after final draft publication capture")
+    if final_authority_marker is not None and pre_gate < final_authority:
+        raise SystemExit("pre-publication gate must run after final exception/source authority gate")
+    if pre_gate > public_patch or pre_gate > draft_false or pre_gate > make_latest:
+        raise SystemExit("pre-publication gate must run before public/latest publication")
     if published < public_patch:
         raise SystemExit("immutable publication verification must run after publication")
-    if discovery >= 0 and gate > discovery:
-        raise SystemExit("live coordinator gate command must run before follow-on publication side effects")
+    if discovery >= 0:
+        raise SystemExit("append-only discovery transport must be published by the post-publication rollout workflow")
+    if "--publication-phase pre-publication" not in publish[pre_gate:]:
+        raise SystemExit("pre-publication gate does not select the pre-publication policy")
     for required in (
         tag_arg,
         pearl_release_arg,
         trusted_keys_arg,
         "--coordinator-url https://coordinator.streamvc.live",
         "--openssl \"$OPENSSL_BIN\"",
+        "--expected-previous-recommendation 1.8.81",
         "env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN",
     ):
-        if required not in publish:
+        if required not in publish[pre_gate_label:]:
             raise SystemExit(f"live coordinator gate call is missing {required}")
+
+def require_rollout(workflow_path):
+    workflow = pathlib.Path(workflow_path).read_text(encoding="utf-8")
+    if "workflow_dispatch:" not in workflow:
+        raise SystemExit("post-publication rollout proof must be manually dispatchable")
+    if "environment: production-release" not in workflow:
+        raise SystemExit("post-publication rollout proof must use the production environment")
+    if "concurrency:" not in workflow or "group: production-release" not in workflow:
+        raise SystemExit("post-publication rollout proof must share the production serialization")
+    if "contents: write" not in workflow or "secrets." in workflow:
+        raise SystemExit("post-publication rollout must have only GitHub contents publication authority")
+    if "runs-on: macos-15" not in workflow or "runs-on: ubuntu-" in workflow:
+        raise SystemExit("rollout anonymous discovery proof must run on the reviewed macOS runner")
+    if "ref: refs/heads/main" not in workflow or "fetch-depth: 0" not in workflow:
+        raise SystemExit("rollout proof must check out the reviewed main branch with history")
+    if "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main" not in workflow:
+        raise SystemExit("rollout proof must refresh the exact main source authority")
+    if 'git rev-parse origin/main)" = "$GITHUB_SHA"' not in workflow:
+        raise SystemExit("rollout proof must bind source authority to GITHUB_SHA")
+    published = workflow.find("scripts/verify-published-release.py")
+    download = workflow.find("gh release download")
+    post_label = workflow.find("# Pearl recommendation deployment is the serialized external step")
+    post_gate = workflow.find("scripts/verify-live-coordinator-release-gate.py", post_label)
+    transport_publish = workflow.find("gh release create \"$transport_tag\"")
+    final_post_gate = workflow.rfind("scripts/verify-live-coordinator-release-gate.py")
+    transport_verify = workflow.find("scripts/verify-release-discovery-transport.py", transport_publish)
+    anonymous_verify = workflow.find("scripts/verify-anonymous-release-discovery.sh", transport_verify)
+    if published < 0 or download < published:
+        raise SystemExit("rollout proof must verify the public release before downloading metadata")
+    if post_label < 0 or post_gate < post_label:
+        raise SystemExit("rollout proof must mark the external Pearl boundary before the gate")
+    if "--publication-phase post-publication" not in workflow[post_gate:]:
+        raise SystemExit("rollout proof must select the post-publication policy")
+    if transport_publish < post_gate:
+        raise SystemExit("discovery transport must publish only after the post-publication gate")
+    if workflow.count("--publication-phase post-publication") < 2 or not (
+        post_gate < final_post_gate < transport_publish
+    ):
+        raise SystemExit("rollout must re-check Pearl immediately before discovery publication")
+    if transport_verify < transport_publish or anonymous_verify < transport_verify:
+        raise SystemExit("rollout must verify the immutable discovery transport and anonymous client path")
+    for required in (
+        '"repos/$GITHUB_REPOSITORY/releases/tags/$TAG"',
+        '"repos/$GITHUB_REPOSITORY/releases/latest"',
+        '"repos/$GITHUB_REPOSITORY/releases/$release_id"',
+        "pearl-release.json",
+        "trusted-keys.json",
+        "compatibility-artifact-index.json",
+        "macprovider-release-discovery.json",
+        "--require-immutable",
+        "https://coordinator.streamvc.live",
+    ):
+        if required not in workflow:
+            raise SystemExit(f"rollout proof omits {required}")
 
 require_stable_gate(
     sys.argv[1],
@@ -507,6 +587,7 @@ require_stable_gate(
     "--trusted-keys \"$accepted/trusted-keys.json\"",
     final_authority_marker="origin/main moved under bound exception authority before undraft",
 )
+require_rollout(sys.argv[3])
 PY
 
 echo "PASS: live coordinator release gate"

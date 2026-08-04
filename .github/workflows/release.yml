@@ -105,7 +105,10 @@ jobs:
 
       - name: Verify release version cohesion
         shell: bash
-        run: bash scripts/test-coordinator-advertised-version.sh "${{ steps.release_source.outputs.tag }}"
+        run: bash scripts/test-coordinator-advertised-version.sh \
+          "${{ steps.release_source.outputs.tag }}" \
+          --allow-previous-stable=1.8.81 \
+          --staged-candidate=1.8.82
 
       - name: Select and verify reviewed release toolchain
         shell: bash
@@ -1262,7 +1265,10 @@ jobs:
             python3 scripts/verify-malibu-sparkle-signature.py \
               "$tag" "$dmg" "$appcast" \
               scripts/dist/malibu-v1.8.32-sparkle-public-key
-            bash scripts/test-coordinator-advertised-version.sh "$tag"
+            bash scripts/test-coordinator-advertised-version.sh \
+              "$tag" \
+              --allow-previous-stable=1.8.81 \
+              --staged-candidate=1.8.82
           elif [ -e phase3-binary/app/dist/appcast.xml ]; then
             echo "::error::legacy appcast must exist only for v1.8.39" >&2
             exit 1
@@ -1685,7 +1691,6 @@ jobs:
             --minimum-sequence "$previous_sequence" \
             --openssl "$OPENSSL_BIN")"
           [[ "$verified_sequence" == "$candidate_sequence" ]]
-          printf '%s\n' "$transport_tag" > discovery-transport-tag.txt
 
       - name: Create verified draft GitHub release
         env:
@@ -1783,9 +1788,10 @@ jobs:
             [ -n "$release_asset" ] && release_assets+=("$release_asset")
           done < release-assets.txt
 
-          # This is the final public-transition gate: repeat every mutable
+          # This is the final pre-publication gate: repeat every mutable
           # source, tag, repository-posture, numeric-ID, and asset assertion
-          # directly before changing draft=false.
+          # directly before changing draft=false. The coordinator may still
+          # advertise the previous stable CLI until this release is public.
           bash scripts/verify-release-source.sh \
             "$tag" "$commit" origin --require-existing
           GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
@@ -1809,14 +1815,16 @@ jobs:
             "${release_assets[@]}" checksums.txt checksums.txt.sig
 
           if [ "$PRERELEASE_INPUT" = false ]; then
-            echo "::group::Verify live coordinator release gate"
+            echo "::group::Verify pre-publication live coordinator feed gate"
             env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
               python3 scripts/verify-live-coordinator-release-gate.py \
               --tag "$tag" \
               --pearl-release-json pearl-release.json \
               --trusted-keys trusted-keys.json \
               --coordinator-url https://coordinator.streamvc.live \
-              --openssl "$OPENSSL_BIN"
+              --openssl "$OPENSSL_BIN" \
+              --expected-previous-recommendation 1.8.81 \
+              --publication-phase pre-publication
             echo "::endgroup::"
           fi
 
@@ -1846,75 +1854,6 @@ jobs:
             immutable-release-by-id.json release-provenance.json publication-manifest.json \
             "${release_assets[@]}" checksums.txt checksums.txt.sig
           cmp final-draft-manifest.json publication-manifest.json
-
-      - name: Publish one append-only immutable discovery transport
-        if: needs.build.outputs.prerelease == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ needs.build.outputs.tag }}"
-          commit="${{ needs.build.outputs.commit }}"
-          transport_tag="$(cat discovery-transport-tag.txt)"
-          [[ "$transport_tag" =~ ^release-discovery-v1-[1-9][0-9]*$ ]]
-
-          remote_tag="$(git ls-remote --tags origin "$transport_tag")"
-          [ -z "$remote_tag" ] || {
-            echo "::error::append-only discovery tag already exists" >&2
-            exit 1
-          }
-          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            > "$RUNNER_TEMP/releases-before-discovery.json"
-          python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$transport_tag" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if any(
-              isinstance(release, dict) and release.get("tag_name") == sys.argv[2]
-              for page in pages if isinstance(page, list)
-              for release in page
-          ):
-              raise SystemExit("append-only discovery release already exists")
-          PY
-
-          notes="$RUNNER_TEMP/discovery-notes.md"
-          printf 'Signed append-only discovery transport for %s.\n' "$tag" > "$notes"
-          gh release create "$transport_tag" \
-            compatibility-artifact-index.json \
-            macprovider-release-discovery.json \
-            macprovider-release-discovery.json.sig \
-            --title "macprovider signed release discovery" \
-            --notes-file "$notes" \
-            --target "$commit" \
-            --draft \
-            --prerelease \
-            --latest=false
-          transport_id="$(gh release view "$transport_tag" --json databaseId --jq .databaseId)"
-          [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
-          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
-            -F draft=false -F prerelease=true -f make_latest=false \
-            > "$RUNNER_TEMP/discovery-published.json"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
-            > "$RUNNER_TEMP/discovery-immutable.json"
-          python3 scripts/verify-release-discovery-transport.py \
-            --release-json "$RUNNER_TEMP/discovery-immutable.json" \
-            --head macprovider-release-discovery.json \
-            --signature macprovider-release-discovery.json.sig \
-            --artifact-index compatibility-artifact-index.json \
-            --public-key ops/pearl-updater/release-signing-public.pem \
-            --repository "$GITHUB_REPOSITORY" \
-            --transport-tag "$transport_tag" \
-            --target-tag "$tag" \
-            --target-commit "$commit" \
-            --require-immutable \
-            --openssl "$OPENSSL_BIN" >/dev/null
 
       - name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl
         if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'
@@ -1958,14 +1897,3 @@ jobs:
             PROVIDER_EXPECTED_ARCHES=arm64 \
             PROVIDER_LIPO_BIN=/usr/bin/lipo \
             scripts/verify-tier2-provider-release.sh --tag "$tag"
-
-      - name: Verify anonymous signed discovery for stable release
-        if: needs.build.outputs.prerelease == 'false'
-        shell: bash
-        run: |
-          set -euo pipefail
-          scripts/verify-anonymous-release-discovery.sh \
-            "${{ needs.build.outputs.tag }}" \
-            "${{ needs.build.outputs.commit }}" \
-            "${{ needs.build.outputs.tag }}" \
-            "$(cat discovery-transport-tag.txt)"

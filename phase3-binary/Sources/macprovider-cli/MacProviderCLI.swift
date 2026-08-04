@@ -212,6 +212,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model. When this disagrees with config model_artifact_path, the CLI model wins and the configured artifact binding is cleared (#745).")
     var model: String?
 
+    @Option(name: .customLong("model-artifact-sha256"), help: "Lowercase SHA-256 artifact hash for the model snapshot. Used by isolated autotune candidates to bind the child load to the bytes selected by the parent probe.")
+    var modelArtifactSha256: String?
+
+    @Option(name: .customLong("model-artifact-path"), help: "Absolute local model snapshot path paired with --model-artifact-sha256. Used by isolated autotune candidates after hashing the selected bytes.")
+    var modelArtifactPath: String?
+
     @Option(help: "Optional speculative decoding draft model identifier or local path. Overrides MACPROVIDER_DRAFT_MODEL and config key draft_model.")
     var draftModel: String?
 
@@ -870,12 +876,90 @@ struct ServeCommand: AsyncParsableCommand {
     /// it can be unit-tested with an injected home directory.
     static func lifecycleStateStore(
         autotuneCandidate: Bool,
-        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        candidateRootDirectory: URL? = nil
     ) -> ProviderLifecycleStateStore {
-        let url = autotuneCandidate
-            ? ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
-            : ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        let url: URL
+        if autotuneCandidate, let candidateRootDirectory {
+            url = ProviderLifecycleStateStore.candidateURL(rootDirectory: candidateRootDirectory)
+        } else if autotuneCandidate {
+            url = ProviderLifecycleStateStore.candidateURL(homeDirectory: homeDirectory)
+        } else {
+            url = ProviderLifecycleStateStore.defaultURL(homeDirectory: homeDirectory)
+        }
         return ProviderLifecycleStateStore(url: url)
+    }
+
+    /// Make a fresh owner-only root for one candidate process. The random
+    /// final component prevents a same-user process from pre-seeding a
+    /// predictable lifecycle, lease, or control path in the temporary area.
+    static func makeCandidateIsolationRoot(
+        // macOS AF_UNIX paths are capped at 104 bytes. The system temporary
+        // directory is often nested under a long per-user path, so use the
+        // short system temp root for the fresh random leaf.
+        temporaryDirectory: URL = URL(fileURLWithPath: "/tmp", isDirectory: true)
+    ) throws -> URL {
+        let root = temporaryDirectory.appendingPathComponent(
+            "macprovider-autotune-" + UUID().uuidString.lowercased(),
+            isDirectory: true
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: root,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            throw NSError(
+                domain: "ServeCommand",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "candidate isolation directory creation failed"]
+            )
+        }
+        var info = stat()
+        guard lstat(root.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == geteuid(),
+              (info.st_mode & 0o777) == 0o700 else {
+            try? FileManager.default.removeItem(at: root)
+            throw NSError(
+                domain: "ServeCommand",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "candidate isolation directory is unsafe"]
+            )
+        }
+        return root
+    }
+
+    /// Candidate providers are short-lived local probe processes. Give them
+    /// their own control/switch paths so an autotune run cannot bind the
+    /// incumbent's operator socket or mutate its model-switch marker.
+    static func candidateControlSocketPath(
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        processID: Int32 = getpid()
+    ) -> String {
+        temporaryDirectory
+            .appendingPathComponent("macprovider-cli", isDirectory: true)
+            .appendingPathComponent("autotune-candidate-\(processID).ctl.sock")
+            .path
+    }
+
+    static func candidateControlSocketPath(rootDirectory: URL) -> String {
+        rootDirectory.appendingPathComponent("control.sock").path
+    }
+
+    static func candidateSwitchStatePath(
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        processID: Int32 = getpid()
+    ) -> String {
+        temporaryDirectory
+            .appendingPathComponent("macprovider-cli", isDirectory: true)
+            .appendingPathComponent("autotune-candidate-\(processID).switch.ts")
+            .path
+    }
+
+    static func candidateSwitchStatePath(rootDirectory: URL) -> String {
+        rootDirectory.appendingPathComponent("switch.ts").path
     }
 
     func run() async throws {
@@ -885,7 +969,8 @@ struct ServeCommand: AsyncParsableCommand {
         // replace the already-running stale inode; identity must freeze on the
         // binary that matches the signed set's provider_cli member.
         let serveMarkerStore = AutoUpdateMarkerStore()
-        if let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
+        if !autotuneCandidate,
+           let canonical = try serveMarkerStore.ensurePathEntrypointMatchesInstallAuthority(),
            let launched = Bundle.main.executableURL?.standardizedFileURL,
            launched.path != canonical.standardizedFileURL.path {
             try execCanonicalInstall(canonical)
@@ -896,13 +981,16 @@ struct ServeCommand: AsyncParsableCommand {
         // helper before configuration/model work, but only while two durable
         // authorities agree that this exact executable is the intended
         // self-update child. Ordinary launches never touch reload jobs.
-        let startupReloadFenceAuthorized =
-            try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
+        let startupReloadFenceAuthorized = autotuneCandidate
+            ? false
+            : try Self.fenceAuthorizedSelfUpdateReloadJobsAtStartup()
 
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
                 model: model,
+                modelArtifactPath: modelArtifactPath,
+                modelArtifactSHA256: modelArtifactSha256,
                 draftModel: draftModel,
                 draftModelArtifactSHA256: draftModelArtifactSha256,
                 numDraftTokens: numDraftTokens,
@@ -955,16 +1043,41 @@ struct ServeCommand: AsyncParsableCommand {
         // downstream sees a draft model for a candidate.
         Self.applyAutotuneCandidateDraftSuppression(&resolved, autotuneCandidate: autotuneCandidate)
 
-        // Autotune candidates (`--autotune-candidate`, always with `--no-join`)
-        // share the incumbent's lifecycle directory but persist to a distinct
-        // candidate-scoped store so a successful candidate reaching
-        // `degraded_serving` never overwrites the installed incumbent's
-        // Malibu-visible `state-v1.json` (ARCHITECT finding). The transition
-        // graph is still enforced against the candidate's own history; only the
-        // persistence file changes. Incumbent serve is untouched: same path,
-        // schema, and fields.
-        let lifecycleStateStore = Self.lifecycleStateStore(autotuneCandidate: autotuneCandidate)
-        let lifecycleLeaseStore = ProviderLifecycleLeaseStore()
+        let candidateIsolationRoot = autotuneCandidate
+            ? try Self.makeCandidateIsolationRoot()
+            : nil
+        defer {
+            if let candidateIsolationRoot {
+                try? FileManager.default.removeItem(at: candidateIsolationRoot)
+            }
+        }
+
+        if autotuneCandidate {
+            // A candidate must be a local, credential-free subprocess. Its
+            // parent may use the production YAML for model/catalog inputs, but
+            // the child must never resolve provider identity, bearer custody,
+            // receipts, coordinator URLs, or incumbent control paths.
+            resolved.providerID = nil
+            resolved.providerToken = nil
+            resolved.coordinatorURL = nil
+            resolved.enableReceipts = false
+            guard let candidateIsolationRoot else {
+                throw ValidationError("candidate isolation root unavailable")
+            }
+            resolved.ctlSocketPath = Self.candidateControlSocketPath(rootDirectory: candidateIsolationRoot)
+            resolved.switchStatePath = Self.candidateSwitchStatePath(rootDirectory: candidateIsolationRoot)
+        }
+
+        // Candidate lifecycle, lease, and singleton-lock files all live under
+        // the fresh owner-only root. This keeps a probe from fencing,
+        // replacing, or being mistaken for the installed provider.
+        let lifecycleStateStore = Self.lifecycleStateStore(
+            autotuneCandidate: autotuneCandidate,
+            candidateRootDirectory: candidateIsolationRoot
+        )
+        let lifecycleLeaseStore = candidateIsolationRoot.map {
+            ProviderLifecycleLeaseStore(url: ProviderLifecycleLeaseStore.candidateURL(rootDirectory: $0))
+        } ?? ProviderLifecycleLeaseStore()
         let existingLifecycle: ProviderLifecycleStateRecord?
         let operatorPausedInitially: Bool
         if case .valid(let record) = lifecycleStateStore.inspect() {
@@ -1008,48 +1121,63 @@ struct ServeCommand: AsyncParsableCommand {
         unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
         let credentialStore = KeychainProviderCredentialStore()
-        _ = try lifecycleStateStore.transition(
-            to: .importingCredentials,
-            reasonCode: "resolving_cli_keychain_custody",
-            writer: .serve,
-            providerID: resolved.providerID,
-            modelID: resolved.model,
-            operationID: lifecycleOperationID
-        )
-        let credentialStatus = try ProviderCredentialResolver.resolve(
-            config: &resolved,
-            store: credentialStore
-        )
-        switch credentialStatus.state {
-        case .locked, .notLoggedIn, .permissionDenied, .keychainFailure, .incompatible, .unavailable:
+        let credentialStatus: ProviderCredentialStatus
+        if autotuneCandidate {
             _ = try lifecycleStateStore.transition(
-                to: .keychainUnavailable,
-                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                to: .importingCredentials,
+                reasonCode: "candidate_credentials_skipped",
                 writer: .serve,
                 providerID: resolved.providerID,
                 modelID: resolved.model,
                 operationID: lifecycleOperationID
             )
-        case .missing, .unconfigured:
+            credentialStatus = .unconfigured
+        } else {
             _ = try lifecycleStateStore.transition(
-                to: .authenticationRequired,
-                reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                to: .importingCredentials,
+                reasonCode: "resolving_cli_keychain_custody",
                 writer: .serve,
                 providerID: resolved.providerID,
                 modelID: resolved.model,
                 operationID: lifecycleOperationID
             )
-        case .conflict, .corrupt:
-            _ = try lifecycleStateStore.transition(
-                to: .identityMigrationRequired,
-                reasonCode: "credential_\(credentialStatus.state.rawValue)",
-                writer: .serve,
-                providerID: resolved.providerID,
-                modelID: resolved.model,
-                operationID: lifecycleOperationID
+            credentialStatus = try ProviderCredentialResolver.resolve(
+                config: &resolved,
+                store: credentialStore
             )
-        case .ready, .degraded:
-            break
+        }
+        if !autotuneCandidate {
+            switch credentialStatus.state {
+            case .locked, .notLoggedIn, .permissionDenied, .keychainFailure, .incompatible, .unavailable:
+                _ = try lifecycleStateStore.transition(
+                    to: .keychainUnavailable,
+                    reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                    writer: .serve,
+                    providerID: resolved.providerID,
+                    modelID: resolved.model,
+                    operationID: lifecycleOperationID
+                )
+            case .missing, .unconfigured:
+                _ = try lifecycleStateStore.transition(
+                    to: .authenticationRequired,
+                    reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                    writer: .serve,
+                    providerID: resolved.providerID,
+                    modelID: resolved.model,
+                    operationID: lifecycleOperationID
+                )
+            case .conflict, .corrupt:
+                _ = try lifecycleStateStore.transition(
+                    to: .identityMigrationRequired,
+                    reasonCode: "credential_\(credentialStatus.state.rawValue)",
+                    writer: .serve,
+                    providerID: resolved.providerID,
+                    modelID: resolved.model,
+                    operationID: lifecycleOperationID
+                )
+            case .ready, .degraded:
+                break
+            }
         }
         try Self.validateCoordinatorCredential(
             config: resolved,
@@ -1073,6 +1201,13 @@ struct ServeCommand: AsyncParsableCommand {
             startupPreflight = try await Self.runServeStartupPreflights(
                 &resolved,
                 joiningCoordinator: !noJoin,
+                acquireServeLock: { candidateConfig in
+                    try Self.acquireProviderServeLock(
+                        candidateConfig,
+                        directory: candidateIsolationRoot?.appendingPathComponent("locks", isDirectory: true)
+                            ?? ProviderServeLock.defaultDirectory()
+                    )
+                },
                 afterServeLockAcquired: {
                     acquiredStartupLease = try Self.acquireStartupLifecycleLease(
                         store: lifecycleLeaseStore,
@@ -1110,6 +1245,7 @@ struct ServeCommand: AsyncParsableCommand {
             if let catalogError = error as? ServeCatalogPreflightError {
                 throw catalogError.underlying
             }
+            FileHandle.standardError.write(Data(("provider startup preflight failed: \(error)\n").utf8))
             throw error
         }
         let serveLock = startupPreflight.serveLock
@@ -1182,6 +1318,7 @@ struct ServeCommand: AsyncParsableCommand {
                 modelID: resolved.model,
                 operationID: lifecycleOperationID
             )
+            FileHandle.standardError.write(Data(("provider model load failed: \(error)\n").utf8))
             throw error
         }
         // SPEC-037 stage 5 (FR-KVP7/KVP11) — activate the encrypted KV survival
@@ -1455,27 +1592,29 @@ struct ServeCommand: AsyncParsableCommand {
             )
         }()
         let admissionIdentityStatusRuntime = ProviderAdmissionIdentityStatusRuntime(admissionIdentityStatus)
-        let installedCompatibilityManifest: CompatibilitySetManifest? = try { () throws -> CompatibilitySetManifest? in
-            let launched = Bundle.main.executableURL
-            let canonical = serveMarkerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
-            if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
-                launchedExecutableURL: launched,
-                canonicalBinaryURL: canonical,
-                expectedVersion: CoordinatorClient.binaryVersion,
-                allowProviderVersionMismatch: false
-            ) {
-                return installed
-            }
-            // Fail closed when a sibling/canonical manifest exists but is invalid.
-            let authority = canonical ?? CompatibilitySetManifest.resolvedExecutableURL(launched)
-            guard let directory = CompatibilitySetManifest.payloadDirectory(for: authority) else { return nil }
-            let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
-            guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
-            return try CompatibilitySetManifest.loadValidated(
-                from: directory,
-                expectedProviderVersion: CoordinatorClient.binaryVersion
-            )
-        }()
+        let installedCompatibilityManifest: CompatibilitySetManifest? = autotuneCandidate
+            ? nil
+            : try { () throws -> CompatibilitySetManifest? in
+                let launched = Bundle.main.executableURL
+                let canonical = serveMarkerStore.resolveCanonicalInstallBinary(launchedExecutableURL: launched)
+                if let installed = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+                    launchedExecutableURL: launched,
+                    canonicalBinaryURL: canonical,
+                    expectedVersion: CoordinatorClient.binaryVersion,
+                    allowProviderVersionMismatch: false
+                ) {
+                    return installed
+                }
+                // Fail closed when a sibling/canonical manifest exists but is invalid.
+                let authority = canonical ?? CompatibilitySetManifest.resolvedExecutableURL(launched)
+                guard let directory = CompatibilitySetManifest.payloadDirectory(for: authority) else { return nil }
+                let manifestURL = directory.appendingPathComponent(CompatibilitySetManifest.fileName)
+                guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
+                return try CompatibilitySetManifest.loadValidated(
+                    from: directory,
+                    expectedProviderVersion: CoordinatorClient.binaryVersion
+                )
+            }()
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
@@ -1656,6 +1795,8 @@ struct ServeCommand: AsyncParsableCommand {
             if let serverError = error as? ControlSocketServerError,
                serverError != .staleSocket(path: socketURL.path) {
                 FileHandle.standardError.write(Data(("\(serverError.description)\n").utf8))
+            } else if !(error is ControlSocketServerError) {
+                FileHandle.standardError.write(Data(("provider control socket failed: \(error)\n").utf8))
             }
             throw ExitCode(1)
         }
@@ -1725,7 +1866,12 @@ struct ServeCommand: AsyncParsableCommand {
             terminationHandlers.forEach { $0.cancel() }
         }
         try withExtendedLifetime(terminationHandlers) {
-            try server.run()
+            do {
+                try server.run()
+            } catch {
+                FileHandle.standardError.write(Data(("provider HTTP server stopped: \(error)\n").utf8))
+                throw error
+            }
         }
     }
 
@@ -1738,9 +1884,16 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
-    static func acquireProviderServeLock(_ config: AppConfig) throws -> ProviderServeLock {
+    static func acquireProviderServeLock(
+        _ config: AppConfig,
+        directory: URL = ProviderServeLock.defaultDirectory()
+    ) throws -> ProviderServeLock {
         do {
-            return try ProviderServeLock.acquire(providerID: config.providerID, port: config.port)
+            return try ProviderServeLock.acquire(
+                providerID: config.providerID,
+                port: config.port,
+                directory: directory
+            )
         } catch let error as ProviderServeLockError {
             FileHandle.standardError.write(Data((
                 "provider singleton conflict: \(error.description)\n"
@@ -2127,7 +2280,9 @@ struct ServeCommand: AsyncParsableCommand {
         joiningCoordinator: Bool,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
-        acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock,
+        acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
+            try Self.acquireProviderServeLock(config)
+        },
         afterServeLockAcquired: () throws -> Void = {},
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
@@ -2170,7 +2325,9 @@ struct ServeCommand: AsyncParsableCommand {
         _ resolved: inout AppConfig,
         coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
         portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
-        acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock
+        acquireServeLock: (AppConfig) throws -> ProviderServeLock = { config in
+            try Self.acquireProviderServeLock(config)
+        }
     ) throws -> ProviderServeLock {
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)

@@ -446,6 +446,7 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 		GeneratedAt:            "2026-08-29T10:40:00Z",
 		CandidateCatalogSHA256: strings.Repeat("a", 64),
 		RecommendedModel:       "model-a",
+		ProbeProtocol:          hardwareEvidenceProbeProtocol,
 		Hardware: HardwareEvidenceHardware{
 			Chip:                 "Apple M5",
 			MemoryGB:             32,
@@ -454,6 +455,7 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 			OSVersion:            "15.5",
 			BinaryVersion:        "1.7.9",
 			HardwareIdentityHash: "hash",
+			ExecutableSHA256:     strings.Repeat("d", 64),
 		},
 		Benchmarks: []HardwareEvidenceBenchmark{{
 			ModelKey:                "model-a",
@@ -478,7 +480,7 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Golden updated for #745: benchmarks now include model_artifact_path.
-	const want = "ddd18c573548d79cfa1caac0977f373db06d77d0c099ab48b1e2b45ebe618d21"
+	const want = "1c477957d51a8064a311f55b8ae86c963d83737c7d276a6a44e87e0a0fb350b7"
 	if sha != want {
 		t.Fatalf("evidence SHA=%q want Swift JCS SHA %q", sha, want)
 	}
@@ -653,7 +655,7 @@ func TestHandleHardwareEvidenceReturnsExistingReplayBeforeProviderRateLimit(t *t
 	}
 }
 
-func TestHandleHardwareEvidenceReturnsSameIdentityReplayBeforeProviderRateLimit(t *testing.T) {
+func TestHandleHardwareEvidenceDoesNotReplayDifferentPayloadByHardwareIdentity(t *testing.T) {
 	now := time.Date(2026, 7, 31, 13, 0, 0, 0, time.UTC)
 	body, err := json.Marshal(validHardwareEvidenceBody(now))
 	if err != nil {
@@ -688,20 +690,11 @@ func TestHandleHardwareEvidenceReturnsSameIdentityReplayBeforeProviderRateLimit(
 
 	handler.HandleHardwareEvidence(rr, req)
 
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), `"status":"existing"`) || !strings.Contains(rr.Body.String(), `"evidence_sha":"`+evidenceSHA+`"`) {
-		t.Fatalf("body=%s, want existing replay with submitted evidence sha", rr.Body.String())
-	}
-	if stats.evidenceProviderID != "" {
-		t.Fatal("same-identity replay inserted a new verification job")
-	}
-	if stats.identityReplayProviderID != "mac" ||
-		stats.identityReplayHash != evidence.Hardware.HardwareIdentityHash ||
-		stats.identityReplaySHA != evidenceSHA {
-		t.Fatalf("unexpected identity replay lookup provider=%q hash=%q sha=%q",
-			stats.identityReplayProviderID, stats.identityReplayHash, stats.identityReplaySHA)
+	if stats.evidenceProviderID != "" || stats.identityReplayProviderID != "" {
+		t.Fatal("same-identity payload reached the queue or an identity replay lookup")
 	}
 }
 
@@ -774,7 +767,8 @@ func TestHandleHardwareEvidenceRejectsReboundOrStaleBenchmarkBindings(t *testing
 
 func validHardwareEvidenceBody(now time.Time) map[string]any {
 	return map[string]any{
-		"schema_version":           "hardware_evidence.autotune.v1",
+		"schema_version":           "hardware_evidence.autotune.v2",
+		"probe_protocol":           "spec-023-harmony-stream.v2",
 		"provider_id":              "mac",
 		"generated_at":             now.Format(time.RFC3339),
 		"candidate_catalog_sha256": strings.Repeat("b", 64),
@@ -787,6 +781,7 @@ func validHardwareEvidenceBody(now time.Time) map[string]any {
 			"os_version":             "15.5",
 			"binary_version":         "1.7.9",
 			"hardware_identity_hash": strings.Repeat("c", 64),
+			"executable_sha256":      strings.Repeat("d", 64),
 		},
 		"benchmarks": []map[string]any{{
 			"model_key":                 "qwen-7b",
@@ -801,6 +796,7 @@ func validHardwareEvidenceBody(now time.Time) map[string]any {
 			"generated_at":              now.Format(time.RFC3339),
 			"binary_version":            "1.7.9",
 			"hardware_identity_hash":    strings.Repeat("c", 64),
+			"candidate_row_identity":    strings.Repeat("e", 64),
 		}},
 	}
 }

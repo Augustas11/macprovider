@@ -42,6 +42,7 @@ func TestEvaluateHelloGateUnderTierAllowedOverTierRejected(t *testing.T) {
 			"large":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable"}
 		}
 	}`)
+	smallIdentity := mustRowIdentity(t, catalog, "small")
 	evidence := autotune.VerifiedEvidence{
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
@@ -52,6 +53,7 @@ func TestEvaluateHelloGateUnderTierAllowedOverTierRejected(t *testing.T) {
 				TTFTMS:                 1000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   smallIdentity,
 			},
 		},
 	}
@@ -75,6 +77,7 @@ func TestEvaluateHelloGateAcceptsCatalogRowKeyHelloModelID(t *testing.T) {
 			"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"recommendable"}
 		}
 	}`)
+	rowIdentity := mustRowIdentity(t, catalog, "qwen3-coder-30b-a3b-instruct")
 	evidence := autotune.VerifiedEvidence{
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
@@ -85,6 +88,7 @@ func TestEvaluateHelloGateAcceptsCatalogRowKeyHelloModelID(t *testing.T) {
 				TTFTMS:                 3064,
 				ArtifactSHA256:         "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   rowIdentity,
 			},
 		},
 	}
@@ -165,6 +169,8 @@ func TestEvaluateHelloGateIgnoresSwappedHigherTierBenchmark(t *testing.T) {
 			"large":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable"}
 		}
 	}`)
+	smallIdentity := mustRowIdentity(t, catalog, "small")
+	largeIdentity := mustRowIdentity(t, catalog, "large")
 	evidence := autotune.VerifiedEvidence{
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
@@ -175,6 +181,7 @@ func TestEvaluateHelloGateIgnoresSwappedHigherTierBenchmark(t *testing.T) {
 				TTFTMS:                 1000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   smallIdentity,
 			},
 			{
 				ModelKey:               "large",
@@ -184,6 +191,7 @@ func TestEvaluateHelloGateIgnoresSwappedHigherTierBenchmark(t *testing.T) {
 				SwapDetected:           true,
 				ArtifactSHA256:         "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   largeIdentity,
 			},
 		},
 	}
@@ -207,6 +215,7 @@ func TestEvaluateHelloGateTreatsTPSAndTTFTMissesAsAdvisory(t *testing.T) {
 			"small":{"model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit","model_revision":"7f0dc925e0d0afb0322d96f9255cfddf2ba5636e","model_sha256":"3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable"}
 		}
 	}`)
+	smallIdentity := mustRowIdentity(t, catalog, "small")
 	evidence := autotune.VerifiedEvidence{
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
@@ -217,6 +226,7 @@ func TestEvaluateHelloGateTreatsTPSAndTTFTMissesAsAdvisory(t *testing.T) {
 				TTFTMS:                 12_000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   smallIdentity,
 			},
 		},
 	}
@@ -278,14 +288,14 @@ func TestEvaluateHelloGateAcceptsUnchangedRowIdentityAcrossCatalogRelease(t *tes
 		t.Fatal("missing row identity")
 	}
 	evidence := autotune.VerifiedEvidence{
-		CandidateCatalogSHA256: "previous-release-digest",
+		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{{
 			ModelKey:               "small",
 			ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
 			SustainedTPS:           20,
 			TTFTMS:                 1000,
 			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
-			CandidateCatalogSHA256: "previous-release-digest",
+			CandidateCatalogSHA256: catalog.SHA256,
 			CandidateRowIdentity:   rowIdentity,
 		}},
 	}
@@ -412,12 +422,8 @@ func TestResolveMaxAdmissionRejectsLegacyRowFromMixedStaleEvidence(t *testing.T)
 		},
 	}
 
-	cap, err := autotune.ResolveMaxAdmission(catalog, evidence)
-	if err != nil {
-		t.Fatalf("ResolveMaxAdmission: %v", err)
-	}
-	if cap.ModelKey != "small" {
-		t.Fatalf("mixed stale legacy benchmark raised cap: %+v", cap)
+	if _, err := autotune.ResolveMaxAdmission(catalog, evidence); err == nil {
+		t.Fatal("stale catalog digest should be rejected even when row identity is present")
 	}
 }
 
@@ -428,4 +434,13 @@ func mustCatalog(t *testing.T, raw string) *autotune.Catalog {
 		t.Fatalf("ParseCatalog: %v", err)
 	}
 	return catalog
+}
+
+func mustRowIdentity(t *testing.T, catalog *autotune.Catalog, modelKey string) string {
+	t.Helper()
+	identity, ok := catalog.RowIdentity(modelKey)
+	if !ok {
+		t.Fatalf("missing row identity for %s", modelKey)
+	}
+	return identity
 }

@@ -22,7 +22,7 @@ the advisory wire field never silently changes meaning.
 ## Readiness preflight
 
 `scripts/audit-autotune-gate-matrix.py` audits an operator export before any
-catalog refresh. The export wraps one `hardware_evidence.autotune.v1` document
+catalog refresh. The export wraps one `hardware_evidence.autotune.v2` document
 per provider with `verification.status = "verified"` and
 `verification.decision_reason = "hardware-verifier.v2:verified_trusted_hardware"`.
 The command requires:

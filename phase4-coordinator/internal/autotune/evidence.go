@@ -20,6 +20,13 @@ type VerifiedBenchmark struct {
 type VerifiedEvidence struct {
 	GeneratedAt            time.Time
 	CandidateCatalogSHA256 string
+	// These immutable v2 bindings are retained after database verification so
+	// admission can compare the evidence to the exact provider hello that is
+	// being admitted. ExecutableSHA256 is an evidence binding, not execution
+	// authenticity; that requires a separately trusted signed manifest.
+	ProbeProtocol    string
+	BinaryVersion    string
+	ExecutableSHA256 string
 	// Admitted hardware-trust tuple (issue #582 FIX B). HardwareIdentityHash
 	// comes from the verified evidence payload; ChipNormalized/UnifiedMemoryGB
 	// come from the matched verified job row. Together they identify the EXACT

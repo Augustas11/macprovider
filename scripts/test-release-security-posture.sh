@@ -287,7 +287,6 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Require an advancing immutable discovery head", 2, 2),
     ("Create verified draft GitHub release", 1, 1),
     ("Publish only the revalidated numeric draft", 2, 2),
-    ("Publish one append-only immutable discovery transport", 1, 1),
     ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
 )
 
@@ -1342,21 +1341,39 @@ for requirement in (
 if 'discovery_tag="release-discovery"' in publish or "gh release upload \"$discovery_tag\"" in publish:
     raise SystemExit("release workflow still mutates the permanently immutable fixed discovery release")
 transport_position = publish.find("- name: Publish one append-only immutable discovery transport")
-if transport_position < draft_position:
-    raise SystemExit("append-only discovery transport must publish after the numeric release")
-transport_publish = publish[transport_position:].split("\n      - name:", 1)[0]
+if transport_position >= 0:
+    raise SystemExit("release workflow must defer append-only discovery publication to the rollout workflow")
+workflow_dir = pathlib.Path(sys.argv[1]).resolve().parent
+rollout = (workflow_dir / "verify-live-coordinator-release-rollout.yml").read_text(
+    encoding="utf-8"
+)
+post_gate = rollout.find("scripts/verify-live-coordinator-release-gate.py")
+transport_publish = rollout.find('gh release create "$transport_tag"')
+transport_verify = rollout.find("scripts/verify-release-discovery-transport.py", transport_publish)
+anonymous = rollout.find("scripts/verify-anonymous-release-discovery.sh", transport_verify)
+if post_gate < 0 or transport_publish < post_gate:
+    raise SystemExit("rollout must gate live recommendation before discovery publication")
+final_post_gate = rollout.rfind("scripts/verify-live-coordinator-release-gate.py")
+if rollout.count("--publication-phase post-publication") < 2 or not (
+    post_gate < final_post_gate < transport_publish
+):
+    raise SystemExit("rollout must re-check Pearl immediately before discovery publication")
+if transport_verify < transport_publish or anonymous < transport_verify:
+    raise SystemExit("rollout must verify immutable and anonymous discovery after publication")
 for requirement in (
-    'git ls-remote --tags origin "$transport_tag"',
+    "contents: write",
+    "ref: refs/heads/main",
+    "fetch-depth: 0",
+    "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main",
+    'git rev-parse origin/main)" = "$GITHUB_SHA"',
+    "--publication-phase post-publication",
+    "--require-immutable",
     "--prerelease",
     "--latest=false",
-    "--transport-tag \"$transport_tag\"",
-    "--require-immutable",
+    'git ls-remote --tags origin "$transport_tag"',
 ):
-    if requirement not in transport_publish:
-        raise SystemExit(f"append-only release transport omits: {requirement}")
-if "--clobber" in transport_publish:
-    raise SystemExit("append-only discovery transport must never overwrite an asset")
-workflow_dir = pathlib.Path(sys.argv[1]).resolve().parent
+    if requirement not in rollout:
+        raise SystemExit(f"post-publication rollout omits: {requirement}")
 renewal = (workflow_dir / "renew-release-discovery-head.yml").read_text(
     encoding="utf-8"
 )
@@ -1375,7 +1392,7 @@ for label, auxiliary, sealed_root, consumer_count in (
         "acceptance promotion",
         promotion,
         "/private/var/macprovider-openssl-acceptance-promotion",
-        5,
+        4,
     ),
 ):
     protected_job = auxiliary.split("\n  verify_public:", 1)[0]
@@ -1488,9 +1505,6 @@ for requirement in (
 ):
     if make_public.find(requirement, patch_position) < 0:
         raise SystemExit(f"post-publication release-state verification is missing: {requirement}")
-anonymous = publish.find("- name: Verify anonymous signed discovery for stable release")
-if anonymous < transport_position or '"$(cat discovery-transport-tag.txt)"' not in publish[anonymous:]:
-    raise SystemExit("anonymous client proof is not bound to the published append-only transport")
 PY
 
 python3 "$pearl_go_verifier" --self-test

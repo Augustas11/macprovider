@@ -139,6 +139,15 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(evidenceRejected.state, .catalogIncompatible)
         XCTAssertEqual(evidenceRejected.reasonCode, "autotune_evidence_invalid")
 
+        let evidenceBinaryMismatch = CoordinatorClient.lifecycleClassification(
+            for: CoordinatorAuthError.rejected(
+                code: "autotune_evidence_binary_version_mismatch",
+                message: "autotune_evidence_binary_version_mismatch"
+            )
+        )
+        XCTAssertEqual(evidenceBinaryMismatch.state, .catalogIncompatible)
+        XCTAssertEqual(evidenceBinaryMismatch.reasonCode, "autotune_evidence_binary_version_mismatch")
+
         let uncatalogued = CoordinatorClient.lifecycleClassification(
             for: CoordinatorAuthError.rejected(
                 code: "autotune_model_uncatalogued",

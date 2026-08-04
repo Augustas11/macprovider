@@ -469,14 +469,16 @@ jobs:
             echo "FAIL: origin/main moved under bound exception authority before undraft" >&2
             exit 1
           fi
-          echo "::group::Verify live coordinator release gate"
+          echo "::group::Verify pre-publication live coordinator feed gate"
           env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
             python3 scripts/verify-live-coordinator-release-gate.py \
             --tag "$TAG" \
             --pearl-release-json "$accepted/pearl-release.json" \
             --trusted-keys "$accepted/trusted-keys.json" \
             --coordinator-url https://coordinator.streamvc.live \
-            --openssl "$OPENSSL_BIN"
+            --openssl "$OPENSSL_BIN" \
+            --expected-previous-recommendation 1.8.81 \
+            --publication-phase pre-publication
           echo "::endgroup::"
           # Repository rules and the production-release environment serialize
           # the sole owner publication path. Re-fetch the exact numeric draft
@@ -499,7 +501,6 @@ jobs:
             "$RUNNER_TEMP/publication.json" \
             "${release_assets[@]}" "$accepted/checksums.txt" "$accepted/checksums.txt.sig"
           cmp "$RUNNER_TEMP/final-draft-publication.json" "$RUNNER_TEMP/publication.json"
-
       - name: Redownload and byte-compare every immutable asset
         shell: bash
         env:
@@ -537,73 +538,6 @@ jobs:
             cmp "$accepted/$name" "$download/$name"
           done < "$RUNNER_TEMP/assets.tsv"
 
-      - name: Publish one append-only immutable discovery transport
-        id: discovery_transport
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
-          TAG: ${{ steps.request.outputs.tag }}
-          CANDIDATE_SHA: ${{ steps.request.outputs.candidate_sha }}
-          TRANSPORT_TAG: ${{ steps.discovery_base.outputs.transport_tag }}
-        run: |
-          set -euo pipefail
-          accepted="$RUNNER_TEMP/accepted"
-          remote_tag="$(git ls-remote --tags origin "$TRANSPORT_TAG")"
-          [ -z "$remote_tag" ] || {
-            echo "::error::append-only discovery tag already exists" >&2
-            exit 1
-          }
-          gh api --paginate --slurp -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            > "$RUNNER_TEMP/releases-before-discovery.json"
-          python3 - "$RUNNER_TEMP/releases-before-discovery.json" "$TRANSPORT_TAG" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          pages = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if any(
-              isinstance(release, dict) and release.get("tag_name") == sys.argv[2]
-              for page in pages if isinstance(page, list)
-              for release in page
-          ):
-              raise SystemExit("append-only discovery release already exists")
-          PY
-          notes="$RUNNER_TEMP/discovery-notes.md"
-          printf 'Signed append-only discovery transport for %s.\n' "$TAG" > "$notes"
-          gh release create "$TRANSPORT_TAG" \
-            "$accepted/compatibility-artifact-index.json" \
-            "$accepted/macprovider-release-discovery.json" \
-            "$accepted/macprovider-release-discovery.json.sig" \
-            --title "macprovider signed release discovery" \
-            --notes-file "$notes" \
-            --target "$CANDIDATE_SHA" \
-            --draft \
-            --prerelease \
-            --latest=false
-          transport_id="$(gh release view "$TRANSPORT_TAG" --json databaseId --jq .databaseId)"
-          [[ "$transport_id" =~ ^[1-9][0-9]*$ ]]
-          gh api --method PATCH -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
-            -F draft=false -F prerelease=true -f make_latest=false \
-            > "$RUNNER_TEMP/discovery-published.json"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/$transport_id" \
-            > "$RUNNER_TEMP/discovery-immutable.json"
-          python3 scripts/verify-release-discovery-transport.py \
-            --release-json "$RUNNER_TEMP/discovery-immutable.json" \
-            --head "$accepted/macprovider-release-discovery.json" \
-            --signature "$accepted/macprovider-release-discovery.json.sig" \
-            --artifact-index "$accepted/compatibility-artifact-index.json" \
-            --public-key ops/pearl-updater/release-signing-public.pem \
-            --repository "$GITHUB_REPOSITORY" \
-            --transport-tag "$TRANSPORT_TAG" \
-            --target-tag "$TAG" \
-            --target-commit "$CANDIDATE_SHA" \
-            --require-immutable \
-            --openssl "$OPENSSL_BIN" >/dev/null
-
   verify_public:
     name: Verify published bytes without protected credentials
     needs: promote
@@ -628,19 +562,3 @@ jobs:
             DOWNLOAD_ATTEMPTS=6 \
             DOWNLOAD_RETRY_SLEEP=5 \
             scripts/verify-tier2-provider-release.sh --tag "$TAG"
-
-      - name: Prove anonymous signed release discovery
-        shell: bash
-        env:
-          TAG: ${{ needs.promote.outputs.tag }}
-          CANDIDATE_SHA: ${{ needs.promote.outputs.candidate_sha }}
-          PREVIOUS_TAG: ${{ needs.promote.outputs.previous_tag }}
-          TRANSPORT_TAG: ${{ needs.promote.outputs.transport_tag }}
-        run: |
-          set -euo pipefail
-          scripts/verify-anonymous-release-discovery.sh "$TAG" "$CANDIDATE_SHA" "$TAG" "$TRANSPORT_TAG"
-          if [[ "$PREVIOUS_TAG" == v1.8.55 ]]; then
-            scripts/verify-v1855-discovery-bridge.sh "$TAG" "$CANDIDATE_SHA" "$TRANSPORT_TAG"
-          else
-            scripts/verify-anonymous-release-discovery.sh "$TAG" "$CANDIDATE_SHA" "$PREVIOUS_TAG" "$TRANSPORT_TAG"
-          fi

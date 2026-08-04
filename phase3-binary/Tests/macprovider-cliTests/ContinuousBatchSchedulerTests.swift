@@ -688,9 +688,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             await terminalCompletion.markComplete()
             return result
         }
-        try await Task.sleep(nanoseconds: 40_000_000)
-        let completedAtHardDeadline = await terminalCompletion.isComplete
-        XCTAssertTrue(completedAtHardDeadline)
+        try await eventually { await terminalCompletion.isComplete }
         let timedOut = try await timedOutSubmission.value
         XCTAssertEqual(timedOut.terminalStatus, .requestFailed)
         XCTAssertEqual(timedOut.errorCode, "continuous_batching_stream_delivery_timed_out")

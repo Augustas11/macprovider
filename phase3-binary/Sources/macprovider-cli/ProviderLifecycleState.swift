@@ -467,16 +467,20 @@ struct ProviderLifecycleStateStore: @unchecked Sendable {
             .appendingPathComponent("state-v1.json")
     }
 
-    /// Autotune candidates (`serve --no-join --autotune-candidate`) share the
-    /// installed incumbent's lifecycle directory but MUST NOT overwrite the
-    /// incumbent's Malibu-visible `state-v1.json`. They persist to a distinct
-    /// candidate-scoped store (own file, own lock — see `init`) so a successful
-    /// candidate reaching `degraded_serving` never masks a healthy incumbent's
-    /// state. The transition graph is still enforced; only the file changes.
+    /// Compatibility helper for callers that need a deterministic candidate path.
+    /// The live `serve --no-join --autotune-candidate` path supplies a fresh,
+    /// owner-only isolation root instead, so its lifecycle state, lock, lease,
+    /// and control paths cannot collide with the installed incumbent.
     static func candidateURL(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         homeDirectory
             .appendingPathComponent("Library/Application Support/macprovider/lifecycle", isDirectory: true)
             .appendingPathComponent("candidate-state-v1.json")
+    }
+
+    static func candidateURL(rootDirectory: URL) -> URL {
+        rootDirectory
+            .appendingPathComponent("lifecycle", isDirectory: true)
+            .appendingPathComponent("state-v1.json")
     }
 
     func inspect() -> ProviderLifecycleStateInspection {

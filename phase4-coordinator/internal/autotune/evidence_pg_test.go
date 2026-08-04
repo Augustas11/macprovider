@@ -225,9 +225,11 @@ func mustVerifiedEvidenceJSON(t *testing.T, generatedAt time.Time) []byte {
 	payload := map[string]any{
 		"generated_at":             generatedAt.Format(time.RFC3339),
 		"candidate_catalog_sha256": strings.Repeat("b", 64),
+		"probe_protocol":           "spec-023-harmony-stream.v2",
 		"hardware": map[string]any{
 			"binary_version":         "1.7.9",
 			"hardware_identity_hash": strings.Repeat("c", 64),
+			"executable_sha256":      strings.Repeat("e", 64),
 		},
 		"benchmarks": []map[string]any{{
 			"model_key":                "model",
@@ -239,6 +241,7 @@ func mustVerifiedEvidenceJSON(t *testing.T, generatedAt time.Time) []byte {
 			"generated_at":             generatedAt.Format(time.RFC3339),
 			"binary_version":           "1.7.9",
 			"hardware_identity_hash":   strings.Repeat("c", 64),
+			"candidate_row_identity":   strings.Repeat("f", 64),
 		}},
 	}
 	raw, err := json.Marshal(payload)

@@ -69,6 +69,9 @@ func (s *sequencedAutotuneEvidence) callCount() int {
 func TestAutotuneHelloGateRejectsOverTierClaim(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
 			{
@@ -78,6 +81,7 @@ func TestAutotuneHelloGateRejectsOverTierClaim(t *testing.T) {
 				TTFTMS:                 1000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 			},
 		},
 	}
@@ -101,6 +105,9 @@ func TestAutotuneHelloGateRejectsOverTierClaim(t *testing.T) {
 func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
 			{
@@ -110,6 +117,7 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 				TTFTMS:                 1000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 			},
 		},
 	}
@@ -165,6 +173,41 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	}
 	if provider.MaxAdmittedMinRAMGB != 4 {
 		t.Fatalf("MaxAdmittedMinRAMGB = %d, want 4", provider.MaxAdmittedMinRAMGB)
+	}
+}
+
+func TestAutotuneHelloGateRejectsEvidenceBinaryVersionMismatch(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.1",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:               "small",
+			ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+			SustainedTPS:           20,
+			TTFTMS:                 1000,
+			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+			CandidateCatalogSHA256: catalog.SHA256,
+			CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
+		}},
+	}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{evidence: evidence, ok: true}),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_binary_version_mismatch" {
+		t.Fatalf("code=%d reason=%q", code, reason)
 	}
 }
 
@@ -288,6 +331,9 @@ func TestProofOfWeightsReloadSandboxesExistingUnverifiedSession(t *testing.T) {
 func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{{
 			ModelKey:               "small",
@@ -296,6 +342,7 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 			TTFTMS:                 1000,
 			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 			CandidateCatalogSHA256: catalog.SHA256,
+			CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 		}},
 	}
 	evidenceStore := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
@@ -324,6 +371,7 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 	defer conn.Close()
 	initial := validAuthInitialWithFreshKey(t, "m4-anon")
 	initial["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, initial, catalog)
 	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
 		t.Fatalf("write auth initial: %v", err)
 	}
@@ -365,6 +413,9 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 func TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{{
 			ModelKey:               "small",
@@ -373,6 +424,7 @@ func TestAutotuneHelloGateV1SandboxKeepsProviderBuyerUnroutable(t *testing.T) {
 			TTFTMS:                 1000,
 			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 			CandidateCatalogSHA256: catalog.SHA256,
+			CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 		}},
 	}
 	evidenceStore := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
@@ -1428,6 +1480,9 @@ func TestAutotuneCatalogAdmissionWorksWithDefaultDisabledEvidenceGate(t *testing
 func TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
 			{
@@ -1437,6 +1492,7 @@ func TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled(t *testing.T) {
 				TTFTMS:                 1000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 			},
 		},
 	}
@@ -1486,6 +1542,9 @@ func TestAutotuneAdmissionCapObservedWhenEvidenceGateDisabled(t *testing.T) {
 func TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup(t *testing.T) {
 	catalog := mustAutotuneCatalog(t)
 	evidence := autotune.VerifiedEvidence{
+		ProbeProtocol:          "spec-023-harmony-stream.v2",
+		BinaryVersion:          "0.1.0",
+		ExecutableSHA256:       "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		CandidateCatalogSHA256: catalog.SHA256,
 		Benchmarks: []autotune.VerifiedBenchmark{
 			{
@@ -1495,6 +1554,7 @@ func TestAutotuneAdmissionCapV2GateOffUsesSingleObserveLookup(t *testing.T) {
 				TTFTMS:                 1000,
 				ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
 				CandidateCatalogSHA256: catalog.SHA256,
+				CandidateRowIdentity:   mustAutotuneRowIdentity(t, catalog, "small"),
 			},
 		},
 	}
@@ -1839,4 +1899,13 @@ func addCatalogAdmissionMetadata(t *testing.T, message map[string]any, catalog *
 	message["catalog_candidate_sha256"] = catalog.SHA256
 	message["catalog_signer_key_id"] = catalog.SignerKeyID
 	message["catalog_row_identity"] = rowIdentity
+}
+
+func mustAutotuneRowIdentity(t *testing.T, catalog *autotune.Catalog, key string) string {
+	t.Helper()
+	rowIdentity, ok := catalog.RowIdentity(key)
+	if !ok {
+		t.Fatalf("catalog row identity for %q", key)
+	}
+	return rowIdentity
 }

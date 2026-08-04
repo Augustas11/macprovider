@@ -3268,7 +3268,11 @@ struct AutotuneRecommendationBenchmarker {
                     runner: runner,
                     targetContext: targetContext,
                     gateTTFTMS: gateTTFTMS,
-                    replicates: replicates
+                    replicates: replicates,
+                    artifactBinding: CandidateArtifactBinding(
+                        path: artifact.modelArgument,
+                        sha256: artifact.sha256
+                    )
                 )
                 // Round-1 audit fix (MEDIUM): stop the sampler and WAIT for its
                 // loop to finish so no in-flight boundary sample races the
