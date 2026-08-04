@@ -105,10 +105,12 @@ jobs:
 
       - name: Verify release version cohesion
         shell: bash
-        run: bash scripts/test-coordinator-advertised-version.sh \
-          "${{ steps.release_source.outputs.tag }}" \
-          --allow-previous-stable=1.8.81 \
-          --staged-candidate=1.8.82
+        # Keep this a literal block: YAML folds plain multiline scalars before Bash parses them.
+        run: |
+          bash scripts/test-coordinator-advertised-version.sh \
+            "${{ steps.release_source.outputs.tag }}" \
+            --allow-previous-stable=1.8.81 \
+            --staged-candidate=1.8.82
 
       - name: Select and verify reviewed release toolchain
         shell: bash
