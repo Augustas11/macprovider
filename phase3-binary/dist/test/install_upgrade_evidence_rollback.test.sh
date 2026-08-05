@@ -56,6 +56,7 @@ while i < len(lines):
         if depth == 0:
             break
 PY
+printf '%s\n' 'REFERRAL_REPLACE_INCUMBENT="${REFERRAL_REPLACE_INCUMBENT:-0}"' >> "$TMP/functions.sh"
 
 # Emit a FULL-schema lifecycle-state record matching the real store's
 # JSONEncoder(.sortedKeys) output (compact, alphabetically sorted keys). This is

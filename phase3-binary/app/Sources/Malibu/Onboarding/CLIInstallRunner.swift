@@ -59,6 +59,7 @@ enum CLIInstallRunner {
     static func run(
         pinnedVersion: String? = nil,
         referralCode: String? = nil,
+        replacingIncumbentProvider: Bool = false,
         onLogLine: @escaping @Sendable @MainActor (String) -> Void
     ) async throws {
         let scriptURL = try resolveInstallScriptURL()
@@ -76,7 +77,8 @@ enum CLIInstallRunner {
             parentEnvironment: ProcessInfo.processInfo.environment,
             installPort: installPort,
             pinnedVersion: pinnedVersion,
-            referralCodeFile: referralFileURL
+            referralCodeFile: referralFileURL,
+            replacingIncumbentProvider: replacingIncumbentProvider
         )
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
@@ -144,7 +146,8 @@ enum CLIInstallRunner {
         parentEnvironment: [String: String],
         installPort: Int?,
         pinnedVersion: String?,
-        referralCodeFile: URL? = nil
+        referralCodeFile: URL? = nil,
+        replacingIncumbentProvider: Bool = false
     ) throws -> [String: String] {
         // Deliberately do not inherit the parent environment. install.sh has
         // authority-changing knobs for repositories, public keys, acceptance
@@ -170,6 +173,9 @@ enum CLIInstallRunner {
         }
         if let referralCodeFile {
             explicit["MACPROVIDER_REFERRAL_CODE_FILE"] = referralCodeFile.path
+            if replacingIncumbentProvider {
+                explicit["MACPROVIDER_REFERRAL_REPLACE_INCUMBENT"] = "1"
+            }
         }
         return try ProcessEnvironmentSanitizer.sanitized(
             from: [:],
