@@ -3073,6 +3073,64 @@ func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 	}
 }
 
+func TestRequestLogPreservesProviderEndErrorDetail(t *testing.T) {
+	const requestID = "provider-detail-req"
+	const providerDetail = "runtime worker timed out waiting for first token"
+	var relayRequestID string
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, gotRequestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			relayRequestID = gotRequestID
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			done <- providerws.InferenceResponseEnd{
+				Type:      "inference_response_end",
+				RequestID: gotRequestID,
+				Status:    "error_internal",
+				Error:     providerDetail,
+			}
+			return &providerws.RelayStream{RequestID: gotRequestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), providerDetail) {
+		t.Fatalf("buyer response leaked provider detail: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"code":"provider_error"`) {
+		t.Fatalf("buyer response missing generic provider_error: %s", rr.Body.String())
+	}
+	var loggedError, loggedCode sql.NullString
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open request log db: %v", err)
+	}
+	defer db.Close()
+	if err := db.QueryRow(`SELECT error, error_code FROM request_log WHERE request_id = ?`, relayRequestID).Scan(&loggedError, &loggedCode); err != nil {
+		t.Fatalf("query request_log detail: %v", err)
+	}
+	if !loggedError.Valid || loggedError.String != "error_internal: "+providerDetail {
+		t.Fatalf("request_log error=%#v, want provider detail", loggedError)
+	}
+	if !loggedCode.Valid || loggedCode.String != "error_internal" {
+		t.Fatalf("request_log error_code=%#v, want error_internal", loggedCode)
+	}
+}
+
 func TestRequestLogBuyerValidationFailure(t *testing.T) {
 	const requestID = "33333333-3333-4333-8333-333333333333"
 	reqLog, dbPath := openBuyerRequestLog(t)
