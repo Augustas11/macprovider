@@ -15,6 +15,7 @@ from scripts.check_spec_governance import ValidationResult, _validate_signed_jou
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILDER = REPO_ROOT / "scripts" / "build-provider-prebeta-journey-result.py"
+VALIDATOR = REPO_ROOT / "scripts" / "validate-provider-prebeta-evidence.py"
 SIGNER = REPO_ROOT / "scripts" / "sign-journey-result.py"
 EVIDENCE_SOURCE = "journeys/evidence/provider-prebeta-admission-demo.redacted.json"
 
@@ -59,6 +60,8 @@ def base_conformance() -> dict:
                 "state": "pending",
                 "evidence": [],
                 "journeys": ["JOURNEY-PROVIDER-PREBETA-ADMISSION"],
+                "implementation": ["provider_prebeta_contract.txt:provider-prebeta-current-selector"],
+                "tests": ["provider_prebeta_contract.txt:provider-prebeta-current-selector"],
                 "gap": {"verdict": "UNKNOWN", "owner": "@Augustas11", "issue": "https://github.com/Augustas11/macprovider/issues/895", "rationale": "pending physical evidence"},
             },
             {
@@ -123,10 +126,11 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
         if conformance_mutation is not None:
             conformance_mutation(conformance)
         (root / "specs" / "CONFORMANCE.json").write_text(json.dumps(conformance, indent=2) + "\n", encoding="utf-8")
+        (root / "provider_prebeta_contract.txt").write_text("provider-prebeta-current-selector\n", encoding="utf-8")
         run("git", "init", cwd=root)
         run("git", "config", "user.name", "test", cwd=root)
         run("git", "config", "user.email", "test@example.com", cwd=root)
-        run("git", "add", "specs/CONFORMANCE.json", cwd=root)
+        run("git", "add", "specs/CONFORMANCE.json", "provider_prebeta_contract.txt", cwd=root)
         run("git", "commit", "-m", "seed conformance", cwd=root)
         source_commit = run("git", "rev-parse", "HEAD", cwd=root).stdout.strip()
         evidence = base_evidence(source_commit)
@@ -137,6 +141,270 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
         run("git", "commit", "-m", "add provider evidence", cwd=root)
         evidence_commit = run("git", "rev-parse", "HEAD", cwd=root).stdout.strip()
         return directory, root, source_commit, evidence_commit
+
+    def test_validator_accepts_uncommitted_redacted_evidence(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        evidence_path = root / EVIDENCE_SOURCE
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["observations"]["precommit_capture_marker"] = "redacted-current-run"
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--requirement-ids",
+                "SPEC-010-R001",
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("validate-provider-prebeta-evidence: ok", completed.stdout)
+        self.assertIn(hashlib.sha256(evidence_path.read_bytes()).hexdigest(), completed.stdout)
+
+    def test_validator_rejects_missing_physical_step(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        evidence_path = root / EVIDENCE_SOURCE
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["steps"] = [step for step in evidence["steps"] if step["id"] != "step-05-hardware-evidence-verifier"]
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("missing provider-prebeta step", completed.stderr)
+
+    def test_validator_rejects_secret_bearing_fields(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        evidence_path = root / EVIDENCE_SOURCE
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["observations"]["bearer_token"] = "redacted-value"
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("forbidden secret-bearing field name", completed.stderr)
+
+    def test_validator_rejects_secret_like_values(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        evidence_path = root / EVIDENCE_SOURCE
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["observations"]["operator_note"] = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345"
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("forbidden secret-like value", completed.stderr)
+
+    def test_validator_rejects_expired_evidence(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        evidence_path = root / EVIDENCE_SOURCE
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["expires_at"] = "2026-01-01"
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("expires_at must not be in the past", completed.stderr)
+
+    def test_validator_rejects_evidence_path_traversal(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "journeys/evidence/../evidence/provider-prebeta-admission-demo.redacted.json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("must not contain parent traversal", completed.stderr)
+
+    def test_validator_rejects_symlinked_evidence_source(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        symlink = root / "journeys" / "evidence" / "provider-prebeta-admission-symlink.redacted.json"
+        try:
+            symlink.symlink_to(root / EVIDENCE_SOURCE)
+        except OSError as exc:
+            raise unittest.SkipTest(f"symlinks are unavailable: {exc}") from exc
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "journeys/evidence/provider-prebeta-admission-symlink.redacted.json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("must not contain symlink components", completed.stderr)
+
+    def test_validator_rejects_symlinked_evidence_parent(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        real_evidence_dir = root / "real-evidence"
+        real_evidence_dir.mkdir()
+        target = real_evidence_dir / "provider-prebeta-admission-demo.redacted.json"
+        target.write_text((root / EVIDENCE_SOURCE).read_text(encoding="utf-8"), encoding="utf-8")
+        shutil.rmtree(root / "journeys" / "evidence")
+        try:
+            (root / "journeys" / "evidence").symlink_to(real_evidence_dir)
+        except OSError as exc:
+            raise unittest.SkipTest(f"symlinks are unavailable: {exc}") from exc
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("must not contain symlink components", completed.stderr)
+
+    def test_validator_rejects_stale_current_selector(self) -> None:
+        directory, root, source_commit, _ = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        (root / "provider_prebeta_contract.txt").write_text("provider-prebeta-current-selector changed\n", encoding="utf-8")
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(VALIDATOR),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("does not match current mapped selector", completed.stderr)
+
+    def test_builder_rejects_secret_like_values(self) -> None:
+        def leak_secret_like_value(evidence: dict) -> None:
+            evidence["observations"]["operator_note"] = "Bearer abcdefghijklmnopqrstuvwxyz012345"
+
+        directory, root, source_commit, evidence_commit = self.make_repo(leak_secret_like_value)
+        self.addCleanup(directory.cleanup)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(root / "payload.json"),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("forbidden secret-like value", completed.stderr)
 
     def test_builder_emits_core_signed_payload(self) -> None:
         directory, root, source_commit, evidence_commit = self.make_repo()

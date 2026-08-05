@@ -15,7 +15,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from check_spec_governance import JOURNEY_RESULT_PAYLOAD_SCHEMA, _load_json, ValidationResult
+from check_spec_governance import (
+    DuplicateJSONKeyError,
+    JOURNEY_RESULT_PAYLOAD_SCHEMA,
+    ValidationResult,
+    _load_json,
+    _unique_json_object,
+)
 
 
 JOURNEY_ID = "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -47,6 +53,16 @@ FORBIDDEN_KEY_FRAGMENTS = (
     "secret_key",
     "wallet_private",
 )
+FORBIDDEN_SECRET_VALUE_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)\bbearer\s+(?!redacted\b)[A-Za-z0-9._~+/=-]{20,}"),
+    re.compile(r"\bghp_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+)
 
 
 def die(message: str) -> None:
@@ -64,6 +80,27 @@ def load_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         die(f"{label} must be a JSON object")
     return value
+
+
+def load_object_bytes(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    try:
+        payload = path.read_bytes()
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    except DuplicateJSONKeyError as exc:
+        print(f"error: {path}: duplicate JSON object key {exc.args[0]!r}", file=sys.stderr)
+        die(f"{label} rejected")
+    except UnicodeDecodeError as exc:
+        print(f"error: {path}: invalid UTF-8: {exc}", file=sys.stderr)
+        die(f"{label} rejected")
+    except json.JSONDecodeError as exc:
+        print(f"error: {path}: invalid JSON: {exc}", file=sys.stderr)
+        die(f"{label} rejected")
+    except OSError as exc:
+        print(f"error: {path}: cannot read: {exc}", file=sys.stderr)
+        die(f"{label} rejected")
+    if not isinstance(value, dict):
+        die(f"{label} must be a JSON object")
+    return value, payload
 
 
 def write_json_atomically(path: Path, value: dict[str, Any]) -> None:
@@ -96,10 +133,19 @@ def repository_relative(root: Path, value: str, label: str) -> str:
     return normalized
 
 
+def reject_symlink_components(root: Path, relative: str, label: str) -> None:
+    candidate = root
+    for component in Path(relative).parts:
+        candidate = candidate / component
+        if candidate.is_symlink():
+            die(f"{label} must not contain symlink components: {relative}")
+
+
 def require_evidence_source(root: Path, source: str) -> tuple[str, Path]:
     normalized = repository_relative(root, source, "redacted evidence source")
     if not normalized.startswith("journeys/evidence/provider-prebeta-admission-") or not normalized.endswith(".redacted.json"):
         die("redacted evidence source must be journeys/evidence/provider-prebeta-admission-*.redacted.json")
+    reject_symlink_components(root, normalized, "redacted evidence source")
     path = root / normalized
     if not path.is_file() or path.is_symlink():
         die(f"redacted evidence source is absent or unsafe: {normalized}")
@@ -185,11 +231,11 @@ def require_ancestor_commit(root: Path, ancestor: str, descendant: str) -> None:
         die("--source-sha must be an ancestor of --evidence-sha")
 
 
-def require_git_file_matches(root: Path, commit: str, source: str, path: Path) -> None:
+def require_git_file_matches(root: Path, commit: str, source: str, expected: bytes) -> None:
     completed = subprocess.run(["git", "show", f"{commit}:{source}"], cwd=root, capture_output=True, check=False)
     if completed.returncode != 0:
         die("redacted evidence source must exist at --evidence-sha")
-    if completed.stdout != path.read_bytes():
+    if completed.stdout != expected:
         die("redacted evidence source bytes must match --evidence-sha")
 
 
@@ -231,13 +277,16 @@ def reject_forbidden_secret_keys(value: Any, location: str = "$") -> None:
     elif isinstance(value, list):
         for index, item in enumerate(value):
             reject_forbidden_secret_keys(item, f"{location}[{index}]")
+    elif isinstance(value, str):
+        if any(pattern.search(value) for pattern in FORBIDDEN_SECRET_VALUE_PATTERNS):
+            die(f"{location} contains a forbidden secret-like value")
 
 
 def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str, requirement_ids: str | None) -> dict[str, Any]:
     require_string(source_sha, COMMIT_RE, "--source-sha")
     require_string(evidence_sha, COMMIT_RE, "--evidence-sha")
     source, path = require_evidence_source(root, source)
-    evidence = load_object(path, "provider-prebeta redacted evidence")
+    evidence, evidence_bytes = load_object_bytes(path, "provider-prebeta redacted evidence")
     reject_forbidden_secret_keys(evidence)
     if evidence.get("schema_version") != EVIDENCE_SCHEMA:
         die(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
@@ -252,7 +301,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     evidence_source_sha = require_string(repository.get("commit"), COMMIT_RE, "repository.commit")
     if evidence_source_sha != source_sha:
         die("repository.commit must exactly match --source-sha")
-    require_git_file_matches(root, evidence_sha, source, path)
+    require_git_file_matches(root, evidence_sha, source, evidence_bytes)
 
     selected_requirements = parse_requirement_ids(requirement_ids, evidence)
     mapped = load_mapped_provider_requirements(root)
@@ -277,7 +326,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
         require_string(result.get("summary"), None, "result.summary")
     steps = require_steps(evidence.get("steps"))
     redaction = require_redaction(evidence.get("redaction"))
-    artifact_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    artifact_sha = hashlib.sha256(evidence_bytes).hexdigest()
     run_id = require_string(evidence.get("run_id"), None, "run_id")
 
     return {

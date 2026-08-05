@@ -164,6 +164,7 @@ required_builder = [
     "redacted evidence source bytes must match --evidence-sha",
     "--source-sha must be an ancestor of --evidence-sha",
     "FORBIDDEN_KEY_FRAGMENTS",
+    "FORBIDDEN_SECRET_VALUE_PATTERNS",
 ]
 for value in required_builder:
     if value not in builder:
