@@ -1,0 +1,9 @@
+{
+  "data": [
+    {"date": "2026-08-03 00:00:00", "model_permaslug": "openai/gpt-oss-20b", "variant": "standard", "total_completion_tokens": 1000},
+    {"date": "2026-08-03 00:00:00", "model_permaslug": "google/gemma-4-26b-a4b-it", "variant": "standard", "total_completion_tokens": 900},
+    {"date": "2026-08-03 00:00:00", "model_permaslug": "nvidia/nemotron-3-nano-30b-a3b", "variant": "standard", "total_completion_tokens": 800},
+    {"date": "2026-08-03 00:00:00", "model_permaslug": "example/new-model", "variant": "standard", "total_completion_tokens": 700},
+    {"date": "2026-08-03 00:00:00", "model_permaslug": "openai/gpt-oss-20b", "variant": "batch", "total_completion_tokens": 25}
+  ]
+}

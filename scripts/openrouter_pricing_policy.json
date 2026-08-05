@@ -1,0 +1,39 @@
+{
+  "policy_version": "research-227-v3-engine-v1",
+  "demand_top_n": 100,
+  "broad_fleet_undercut_fraction": "0.20",
+  "coding_minimum_undercut_fraction": "0.10",
+  "coding_premium_fraction": "0.10",
+  "models": [
+    {
+      "source_model_id": "openai/gpt-oss-20b",
+      "canonical_model_id": "openai/gpt-oss-20b",
+      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/gpt-oss-20b-MXFP4-Q4"},
+      "license": {"commercial_permitted": true, "source_url": "https://huggingface.co/openai/gpt-oss-20b", "verification_note": "Apache-2.0 model-card license."},
+      "profile": {"kind": "broad_fleet", "active_params_b": "3.6", "residency_gb": "10.41", "projected_tps": "52"}
+    },
+    {
+      "source_model_id": "google/gemma-4-26b-a4b-it",
+      "canonical_model_id": "google-gemma-4-26b-a4b-it",
+      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit"},
+      "license": {"commercial_permitted": true, "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4", "verification_note": "Google Gemma 4 model card identifies the model license as Apache 2.0."},
+      "profile": {"kind": "broad_fleet", "active_params_b": "4", "residency_gb": "14.54", "projected_tps": "50"}
+    },
+    {
+      "source_model_id": "nvidia/nemotron-3-nano-30b-a3b",
+      "canonical_model_id": "nemotron-3-nano-30b-a3b",
+      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"},
+      "license": {"commercial_permitted": true, "source_url": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/", "verification_note": "NVIDIA Open Model License states that models are commercially usable, subject to its terms."},
+      "profile": {"kind": "broad_fleet", "active_params_b": "3", "residency_gb": "16.55", "projected_tps": "55"}
+    },
+    {
+      "source_model_id": "qwen/qwen2.5-coder-32b-instruct",
+      "canonical_model_id": "qwen2.5-coder-32b-instruct",
+      "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"},
+      "license": {"commercial_permitted": true, "source_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct", "verification_note": "Apache-2.0 model-card license."},
+      "coding_specialist": true,
+      "general_purpose_baseline_per_mtok": "0.220",
+      "profile": {"kind": "coding_dense", "active_params_b": "32", "residency_gb": "17.17", "projected_tps": "30"}
+    }
+  ]
+}

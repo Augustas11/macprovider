@@ -158,6 +158,40 @@ Latest release and signed binaries: [github.com/augustas11/macprovider/releases]
 
 ## In flight
 
+## OpenRouter pricing proposal engine
+
+`scripts/openrouter_pricing_engine.py` is a standalone, non-money-path tool
+that fetches OpenRouter demand and per-model endpoint pricing, writes a
+validated snapshot, and computes a reviewable pricing proposal. It has no
+apply mode and never modifies `phase3-binary/catalog/autotune/rate-card.json`.
+
+Create a live snapshot in an operator-owned directory, then compute a proposal
+against the read-only rate-card reference:
+
+```bash
+python3 scripts/openrouter_pricing_engine.py fetch --output-dir /var/tmp/openrouter-pricing
+python3 scripts/openrouter_pricing_engine.py compute \
+  --snapshot /var/tmp/openrouter-pricing/openrouter-pricing-snapshot-<timestamp>.json \
+  --rate-card phase3-binary/catalog/autotune/rate-card.json \
+  --output-dir /var/tmp/openrouter-pricing
+```
+
+The fetch command uses the rankings endpoint, model catalog, and each selected
+model's documented endpoints response. Production proposals require a complete
+top-100 snapshot; `--top-n` below 100 is useful only for fetch-only diagnostics.
+It retries transient errors with bounded backoff, honors `Retry-After` for
+429s, and fails closed without writing a snapshot on a timeout, schema change,
+empty result, invalid price, or partial pull. Commands are noninteractive and
+suitable for an external scheduler.
+
+Snapshots contain `schema_version`, `fetched_at`, a reproducible
+`content_digest`, endpoint/schema provenance, and normalized demand/pricing
+rows. Proposals contain their source snapshot digest, policy version,
+rate-card reference digest, and `added`, `changed`, `dropped`, `blocked`, and
+`unchanged` rows with reasons. See
+[`docs/runbooks/openrouter-pricing-engine.md`](docs/runbooks/openrouter-pricing-engine.md)
+for the schemas, policy evidence, and offline test procedure.
+
 - **Native Mac app (SPEC-025, "Malibu").** Signed `.dmg` + menu-bar wrapper around `macprovider-cli` — non-developer-facing brand and installer path. P0 skeleton shipped.
 - **Browserless one-click provider onboarding (SPEC-026 draft).** Deep-link launch flow so new providers can join without a terminal.
 - **Self-hosted coordinator.** For buyers who need local-only trust; see the trust-model note above.

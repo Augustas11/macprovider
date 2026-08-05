@@ -1,0 +1,8 @@
+{
+  "data": [
+    {"id": "openai/gpt-oss-20b", "canonical_slug": "openai/gpt-oss-20b", "name": "OpenAI: gpt-oss-20b", "pricing": {"prompt": "0.00000003", "completion": "0.00000013"}},
+    {"id": "google/gemma-4-26b-a4b-it", "canonical_slug": "google/gemma-4-26b-a4b-it", "name": "Google: Gemma", "pricing": {"prompt": "0.00000006", "completion": "0.00000030"}},
+    {"id": "nvidia/nemotron-3-nano-30b-a3b", "canonical_slug": "nvidia/nemotron-3-nano-30b-a3b", "name": "NVIDIA: Nemotron", "pricing": {"prompt": "0.00000004", "completion": "0.00000020"}},
+    {"id": "example/new-model", "canonical_slug": "example/new-model", "name": "Example: New", "pricing": {"prompt": "0.00000005", "completion": "0.00000025"}}
+  ]
+}
