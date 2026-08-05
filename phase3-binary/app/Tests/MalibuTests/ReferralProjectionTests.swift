@@ -36,7 +36,7 @@ final class ReferralProjectionTests: XCTestCase {
                 .contains("base invite")
         )
         XCTAssertTrue(ReferralPanelPresenter.pathChrome.contains("first paid serve"))
-        XCTAssertTrue(ReferralPanelPresenter.pathChrome.contains("Optional X"))
+        XCTAssertTrue(ReferralPanelPresenter.pathChrome.contains("Each X"))
     }
 
     func testEligibleStatusUsesExactCoordinatorCapacity() throws {
@@ -58,7 +58,18 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertTrue(status.canStartSocialChallenge)
     }
 
-    func testMaturedStatusShowsBaseAndXBonusSplit() throws {
+    func testExhaustedProviderCanStartXChallengeWithoutCopyableInvite() throws {
+        let status = try XCTUnwrap(makeStatus(
+            redemptions: 1,
+            remaining: 0
+        ))
+
+        XCTAssertNil(status.availableInviteURL)
+        XCTAssertEqual(status.socialChallengeInviteURL?.absoluteString, "https://malibu.tech/j#/CODE")
+        XCTAssertTrue(status.canStartSocialChallenge)
+    }
+
+    func testMaturedStatusShowsBaseAndXBonusSplitAndCanStartAgain() throws {
         let status = try XCTUnwrap(makeStatus(
             socialState: ReferralStatusProjection.matured,
             remaining: 3,
@@ -72,13 +83,28 @@ final class ReferralProjectionTests: XCTestCase {
         let detail = ReferralPanelPresenter.detail(availability: .available, status: status)
         XCTAssertTrue(detail.contains("1 base from serving"))
         XCTAssertTrue(detail.contains("2 from X bonus"))
-        XCTAssertTrue(detail.contains("X is not required to invite"))
+        XCTAssertTrue(detail.contains("share another X post"))
         XCTAssertEqual(
             ReferralPanelPresenter.capacity(status),
             "3 remaining · 0 redeemed · 1 base + 2 X bonus (3 total)"
         )
-        XCTAssertFalse(status.canStartSocialChallenge)
+        XCTAssertTrue(status.canStartSocialChallenge)
         XCTAssertNotNil(status.availableInviteURL)
+    }
+
+    func testMaturedLegacyStatusWithoutGrantCapCannotStartAgain() throws {
+        let status = try XCTUnwrap(makeStatus(
+            socialState: ReferralStatusProjection.matured,
+            remaining: 3,
+            bonusCapacity: 2,
+            socialBonusGrantsRemaining: nil
+        ))
+
+        XCTAssertFalse(status.canStartSocialChallenge)
+        XCTAssertFalse(
+            ReferralPanelPresenter.detail(availability: .available, status: status)
+                .contains("share another X post")
+        )
     }
 
     func testCapacityDoesNotAdvertiseXBonusOutsideActionableStates() throws {
@@ -128,6 +154,7 @@ final class ReferralProjectionTests: XCTestCase {
             firstServingSeen: true,
             joinLinksEnabled: true,
             socialBonusEnabled: true,
+            socialBonusGrantsRemaining: 5,
             inviteCode: nil,
             inviteURL: nil,
             observedAt: Date(),
@@ -158,6 +185,7 @@ final class ReferralProjectionTests: XCTestCase {
             firstServingSeen: true,
             joinLinksEnabled: true,
             socialBonusEnabled: true,
+            socialBonusGrantsRemaining: 5,
             inviteCode: nil,
             inviteURL: nil,
             observedAt: Date(),
@@ -374,6 +402,13 @@ final class ReferralProjectionTests: XCTestCase {
         XCTAssertFalse(rolledBack.canStartSocialChallenge)
     }
 
+    func testSocialGrantCapSuppressesAdvocacyActions() throws {
+        let status = try XCTUnwrap(makeStatus(socialBonusGrantsRemaining: 0))
+
+        XCTAssertNotNil(status.socialChallengeInviteURL)
+        XCTAssertFalse(status.canStartSocialChallenge)
+    }
+
     func testReferralBoundaryNegotiatesByCapabilityNotMarketingVersion() {
         var snapshot = AgentSnapshot.empty
         snapshot.cliVersion = "99.1"
@@ -404,6 +439,7 @@ final class ReferralProjectionTests: XCTestCase {
         snapshot.localStatusCapabilities = [
             "referral_status_v1",
             "referral_advocacy_v1",
+            "referral_repeatable_advocacy_v1",
             "referral_fragment_links_v1",
             "service_instance_v1",
             "status_observation_v1",
@@ -422,6 +458,7 @@ final class ReferralProjectionTests: XCTestCase {
         bonusCapacity: Int = 0,
         joinBaseURL: URL = URL(string: "https://malibu.tech/j")!,
         joinLinksEnabled: Bool = true,
+        socialBonusGrantsRemaining: Int? = 5,
         inviteURL: URL? = URL(string: "https://malibu.tech/j#/CODE"),
         observedAt: Date = Date()
     ) -> ReferralStatusProjection? {
@@ -437,6 +474,7 @@ final class ReferralProjectionTests: XCTestCase {
             firstServingSeen: firstServingSeen,
             joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: true,
+            socialBonusGrantsRemaining: socialBonusGrantsRemaining,
             inviteCode: "CODE",
             inviteURL: inviteURL,
             observedAt: observedAt,

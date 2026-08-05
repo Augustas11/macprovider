@@ -297,6 +297,9 @@ enum ControlCodec {
             "social_bonus_enabled": status.socialBonusEnabled,
             "observed_at": ISO8601DateFormatter().string(from: status.observedAt),
         ]
+        if let remaining = status.socialBonusGrantsRemaining {
+            payload["social_bonus_grants_remaining"] = remaining
+        }
         if let inviteCode = status.inviteCode { payload["invite_code"] = inviteCode }
         if let inviteURL = status.inviteURL { payload["invite_url"] = inviteURL.absoluteString }
         if let challenge = status.pendingChallenge {
@@ -332,6 +335,7 @@ enum ControlCodec {
         } else {
             inviteURL = nil
         }
+        let socialBonusGrantsRemaining = intValue(dict["social_bonus_grants_remaining"])
         let pending: ReferralPendingChallengeProjection?
         if let raw = dict["pending_challenge"] as? [String: Any] {
             guard let expiresWire = raw["expires_at"] as? String,
@@ -354,6 +358,7 @@ enum ControlCodec {
             firstServingSeen: firstServingSeen,
             joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
+            socialBonusGrantsRemaining: socialBonusGrantsRemaining,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
             observedAt: observedAt,

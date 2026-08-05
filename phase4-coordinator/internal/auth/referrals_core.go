@@ -44,6 +44,7 @@ type ReferralPolicy struct {
 	HMACKeys                map[string]string
 	ProviderBaseUses        int
 	SocialBonusUses         int
+	SocialBonusMaxGrants    int
 	ChallengeTTL            time.Duration
 	SocialVerificationDwell time.Duration
 }
@@ -73,8 +74,8 @@ func (p ReferralPolicy) Validate() error {
 	if p.ProviderBaseUses <= 0 {
 		return fmt.Errorf("referral provider capacity must be positive")
 	}
-	if p.EnableSocialBonus && (p.SocialBonusUses <= 0 || p.ChallengeTTL <= 0 || p.SocialVerificationDwell <= 0) {
-		return fmt.Errorf("referral social capacity, challenge ttl, and verification dwell must be positive")
+	if p.EnableSocialBonus && (p.SocialBonusUses <= 0 || p.SocialBonusMaxGrants <= 0 || p.ChallengeTTL <= 0 || p.SocialVerificationDwell <= 0) {
+		return fmt.Errorf("referral social capacity, max grants, challenge ttl, and verification dwell must be positive")
 	}
 	return nil
 }

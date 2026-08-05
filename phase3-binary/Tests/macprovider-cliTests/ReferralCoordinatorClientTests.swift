@@ -32,6 +32,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         XCTAssertEqual(status.remaining, 1)
         XCTAssertEqual(status.inviteCode, "invite-1")
         XCTAssertTrue(status.joinLinksEnabled)
+        XCTAssertEqual(status.socialBonusGrantsRemaining, 5)
         XCTAssertEqual(status.observedAt, "2027-01-15T08:00:00.000Z")
         XCTAssertNil(status.pendingChallenge)
     }
@@ -129,6 +130,38 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         XCTAssertGreaterThan(expires, now)
     }
 
+    func testMaturedStatusCanCreateFreshXChallenge() async throws {
+        let challenge = String(repeating: "9", count: 64)
+        let share = "https://malibu.tech/j#/invite-1?c=\(challenge)"
+        let intent = "https://twitter.com/intent/tweet?text=" + share.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
+        let challengeBody = """
+        {"intent_url":"\(intent)","share_url":"\(share)","expires_at":"2027-01-15T08:10:00Z"}
+        """
+        let maturedStatus = statusJSON
+            .replacingOccurrences(of: #""social_state":"eligible""#, with: #""social_state":"matured""#)
+            .replacingOccurrences(of: #""bonus_capacity":0"#, with: #""bonus_capacity":2"#)
+            .replacingOccurrences(of: #""remaining":1"#, with: #""remaining":3"#)
+        let client = try makeClient(session: mockSession { request in
+            self.response(
+                request,
+                status: 200,
+                body: request.httpMethod == "GET" ? maturedStatus : challengeBody
+            )
+        })
+        let openedURL = LockedBox<String?>(nil)
+        let service = ReferralCoordinatorService(
+            client: client,
+            store: ReferralChallengeStore(url: temporaryStoreURL()),
+            now: { self.now },
+            openIntent: { url in openedURL.set(url.absoluteString); return true }
+        )
+
+        let pending = try await service.challenge()
+
+        XCTAssertEqual(openedURL.get(), intent)
+        XCTAssertEqual(pending.expiresAt, "2027-01-15T08:10:00.000Z")
+    }
+
     func testStatusRestoresOnlySafePendingProjectionAcrossServiceRestart() async throws {
         let challenge = String(repeating: "b", count: 64)
         let intent = safeIntent(challenge: challenge)
@@ -182,12 +215,41 @@ final class ReferralCoordinatorClientTests: XCTestCase {
         }
     }
 
-    func testStatusClearsChallengeOutsideEligibleState() async throws {
-        for state in ["locked_until_first_serving", "failed"] {
+    func testStatusRestoresPendingProjectionAcrossRetryableStates() async throws {
+        for state in ["eligible", "failed", "matured"] {
             let store = ReferralChallengeStore(url: temporaryStoreURL())
             try store.save(
                 providerID: "provider-1",
-                payload: payload(challenge: String(repeating: state == "failed" ? "4" : "5", count: 64))
+                payload: payload(challenge: String(repeating: state == "failed" ? "4" : state == "matured" ? "5" : "6", count: 64))
+            )
+            let client = try makeClient(session: mockSession { request in
+                self.response(
+                    request,
+                    status: 200,
+                    body: self.statusJSON.replacingOccurrences(of: "eligible", with: state)
+                )
+            })
+            let service = ReferralCoordinatorService(
+                client: client,
+                store: store,
+                now: { self.now },
+                openIntent: { _ in true }
+            )
+
+            let status = try await service.status()
+            XCTAssertEqual(status.pendingChallenge, ReferralPendingAdvocacy(
+                expiresAt: "2027-01-15T08:10:00.000Z"
+            ), "state=\(state)")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: store.url.path), "state=\(state)")
+        }
+    }
+
+    func testStatusClearsChallengeOutsideRetryableStates() async throws {
+        for state in ["locked_until_first_serving", "pending", "revoked"] {
+            let store = ReferralChallengeStore(url: temporaryStoreURL())
+            try store.save(
+                providerID: "provider-1",
+                payload: payload(challenge: String(repeating: state == "pending" ? "7" : state == "revoked" ? "8" : "9", count: 64))
             )
             let client = try makeClient(session: mockSession { request in
                 self.response(
@@ -207,6 +269,34 @@ final class ReferralCoordinatorClientTests: XCTestCase {
             XCTAssertNil(status.pendingChallenge, "state=\(state)")
             XCTAssertFalse(FileManager.default.fileExists(atPath: store.url.path), "state=\(state)")
         }
+    }
+
+    func testStatusClearsMaturedChallengeWhenRepeatGrantCapReached() async throws {
+        let store = ReferralChallengeStore(url: temporaryStoreURL())
+        try store.save(
+            providerID: "provider-1",
+            payload: payload(challenge: String(repeating: "0", count: 64))
+        )
+        let cappedMatured = statusJSON
+            .replacingOccurrences(of: #""social_state":"eligible""#, with: #""social_state":"matured""#)
+            .replacingOccurrences(of: #""bonus_capacity":0"#, with: #""bonus_capacity":2"#)
+            .replacingOccurrences(of: #""remaining":1"#, with: #""remaining":3"#)
+            .replacingOccurrences(of: #""social_bonus_grants_remaining":5"#, with: #""social_bonus_grants_remaining":0"#)
+        let client = try makeClient(session: mockSession { request in
+            self.response(request, status: 200, body: cappedMatured)
+        })
+        let service = ReferralCoordinatorService(
+            client: client,
+            store: store,
+            now: { self.now },
+            openIntent: { _ in true }
+        )
+
+        let status = try await service.status()
+
+        XCTAssertEqual(status.socialState, "matured")
+        XCTAssertNil(status.pendingChallenge)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.url.path))
     }
 
     func testVerifyReadsChallengeInsideCLIAndClearsItAfterSuccess() async throws {
@@ -448,7 +538,7 @@ final class ReferralCoordinatorClientTests: XCTestCase {
     }
 
     private var statusJSON: String {
-        #"{"campaign":"prebeta","join_base_url":"https://malibu.tech/j","social_state":"eligible","base_capacity":1,"configured_bonus_capacity":2,"bonus_capacity":0,"redemptions":0,"remaining":1,"first_serving_seen":true,"join_links_enabled":true,"social_bonus_enabled":true,"invite_code":"invite-1","invite_url":"https://malibu.tech/j#/invite-1"}"#
+        #"{"campaign":"prebeta","join_base_url":"https://malibu.tech/j","social_state":"eligible","base_capacity":1,"configured_bonus_capacity":2,"bonus_capacity":0,"redemptions":0,"remaining":1,"first_serving_seen":true,"join_links_enabled":true,"social_bonus_enabled":true,"social_bonus_grants_remaining":5,"invite_code":"invite-1","invite_url":"https://malibu.tech/j#/invite-1"}"#
     }
 
     private func makeClient(session: URLSession) throws -> ReferralCoordinatorClient {

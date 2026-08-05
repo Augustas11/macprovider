@@ -501,17 +501,14 @@ private struct ReferralPanel: View {
                     .disabled(!status.isCurrent() || status.availableInviteURL == nil)
 
                     if status.canStartSocialChallenge,
-                       agent.snapshot.localStatusCapabilities.contains("referral_advocacy_v1") {
+                       agent.snapshot.localStatusCapabilities.contains("referral_advocacy_v1"),
+                       (status.socialState != ReferralStatusProjection.matured
+                        || (agent.snapshot.localStatusCapabilities.contains("referral_repeatable_advocacy_v1")
+                            && (status.socialBonusGrantsRemaining ?? 0) > 0)) {
                         Button("Share on X for \(ReferralPanelPresenter.invitePhrase(status.configuredBonusCapacity))") {
                             Task { await agent.startReferralChallenge() }
                         }
                         .disabled(agent.snapshot.referralActionInProgress)
-                    } else if status.socialState == ReferralStatusProjection.matured,
-                              status.socialBonusEnabled,
-                              status.bonusCapacity > 0 {
-                        Text("X bonus already awarded")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
 

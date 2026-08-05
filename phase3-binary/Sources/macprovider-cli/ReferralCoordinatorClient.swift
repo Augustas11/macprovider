@@ -22,6 +22,7 @@ public struct ReferralStatusSnapshot: Codable, Equatable, Sendable {
     public let firstServingSeen: Bool
     public let joinLinksEnabled: Bool
     public let socialBonusEnabled: Bool
+    public let socialBonusGrantsRemaining: Int?
     public let inviteCode: String?
     public let inviteURL: String?
     public let observedAt: String
@@ -39,6 +40,7 @@ public struct ReferralStatusSnapshot: Codable, Equatable, Sendable {
         case firstServingSeen = "first_serving_seen"
         case joinLinksEnabled = "join_links_enabled"
         case socialBonusEnabled = "social_bonus_enabled"
+        case socialBonusGrantsRemaining = "social_bonus_grants_remaining"
         case inviteCode = "invite_code"
         case inviteURL = "invite_url"
         case observedAt = "observed_at"
@@ -58,6 +60,7 @@ public struct ReferralStatusSnapshot: Codable, Equatable, Sendable {
             firstServingSeen: firstServingSeen,
             joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
+            socialBonusGrantsRemaining: socialBonusGrantsRemaining,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
             observedAt: observedAt,
@@ -330,6 +333,15 @@ struct ReferralCoordinatorClient: Sendable {
         } else if inviteURL != nil {
             throw control(.invalidResponse)
         }
+        let socialBonusGrantsRemaining: Int?
+        if object["social_bonus_grants_remaining"] != nil {
+            guard let value = count("social_bonus_grants_remaining", in: object) else {
+                throw control(.invalidResponse)
+            }
+            socialBonusGrantsRemaining = value
+        } else {
+            socialBonusGrantsRemaining = nil
+        }
         return ReferralStatusSnapshot(
             campaign: campaign,
             joinBaseURL: joinBaseURL,
@@ -342,6 +354,7 @@ struct ReferralCoordinatorClient: Sendable {
             firstServingSeen: firstServingSeen,
             joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
+            socialBonusGrantsRemaining: socialBonusGrantsRemaining,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
             observedAt: formatDate(observedAt),
@@ -676,10 +689,9 @@ actor ReferralCoordinatorService {
             try store.clear()
             return status
         }
-        // `pending` means the coordinator durably accepted verification and
-        // consumed the challenge. It also covers response-loss recovery: a
-        // later status read clears the now-terminal local secret.
-        guard status.socialState == "eligible" else {
+        // Keep the local challenge only while the coordinator can still accept
+        // or reopen an X verification for this provider.
+        guard Self.canAttemptSocialChallenge(status) else {
             try store.clear()
             return status
         }
@@ -704,7 +716,7 @@ actor ReferralCoordinatorService {
                 terminalVerify: false
             )
         }
-        guard ["eligible", "failed"].contains(current.socialState),
+        guard Self.canAttemptSocialChallenge(current),
               let inviteCode = current.inviteCode,
               let inviteURL = current.inviteURL else {
             throw ReferralCoordinatorClientError.control(
@@ -739,7 +751,7 @@ actor ReferralCoordinatorService {
                 terminalVerify: false
             )
         }
-        guard current.socialState == "eligible",
+        guard Self.canAttemptSocialChallenge(current),
               let payload = try store.load(providerID: client.providerID, now: now()),
               current.inviteURL == payload.inviteURL,
               let intentURL = URL(string: payload.intentURL),
@@ -752,6 +764,14 @@ actor ReferralCoordinatorService {
             )
         }
         return ReferralPendingAdvocacy(expiresAt: payload.expiresAtWire)
+    }
+
+    private static func canAttemptSocialChallenge(_ status: ReferralStatusSnapshot) -> Bool {
+        guard ["eligible", "failed", "matured"].contains(status.socialState) else { return false }
+        if status.socialState == "matured" {
+            return (status.socialBonusGrantsRemaining ?? 0) > 0
+        }
+        return true
     }
 
     func verify(postURL: String) async throws -> ReferralStatusSnapshot {

@@ -45,8 +45,8 @@ Changelog:
 
 A new provider can redeem a referral through the installed CLI, become
 buyer-serving, earn invite capacity from coordinator-authoritative serving
-evidence, refer another provider, and optionally earn an exactly-once bonus for
-a server-verified X post.
+evidence, refer another provider, and optionally earn bounded repeat bonuses
+for distinct server-verified X posts.
 
 The coordinator is authoritative for code validity, redemption, attribution,
 invite balances, serving qualification, social decisions, grants, and audit.
@@ -167,7 +167,7 @@ one-time Air exception as #613 conformance.
 | X submission | Coordinator | Positively verified canonical post ID/URL digest and provider/campaign/challenge binding; terminal failures use a separate provider-scoped failure row | Verification/recheck worker, audit, status | Verified post ID is globally unique; terminal failure uses `(campaign, provider_id, challenge_digest, post_id)` without reserving the post globally | Duplicate same submission converges; a positively verified reused post or author mismatch rejects; an unverified rejected post cannot deny another provider's later legitimate verification | `pending`, `failed`, or `matured` with truthful reason | Success, bad URL, wrong author, wrong link, replay, cross-provider rejected-post reuse, and rate-limit cases |
 | X verification decision | Coordinator server-side verifier | Current verification or terminal-failure row plus append-only social decision audit | Bonus transaction, status, security/operator review | Verification attempt/event UUID and expected prior state | External transient failure is retryable; terminal failure is stable and response-loss safe without claiming global ownership of unverified evidence; redirects and untrusted origins fail closed | Pending/retryable/terminal failure separated | Audit records challenge, submit, recheck, decision, and redacted cause |
 | X observed-author binding | Coordinator records the positive X API result | Numeric `author_id` in the pending verification and immutable history/audit | Recheck worker and security/operator review | Globally unique positively verified post ID + initial numeric author ID | This is continuity of the observed post author, not proof the provider owns an X account; recheck must return the same nonempty numeric author or fail terminally | No ownership badge; only pending/failed/matured reward state | Empty/non-numeric author rejects; changed author on recheck fails; exact author continuity may mature |
-| Bonus grant | Coordinator | Conditional verification `granted_at` plus issuer bonus or dedicated grant row and audit event | Status and operator audit | `(campaign, provider_id, bonus_kind)` | Transactional conditional grant makes parallel rechecks no-ops after one winner | `matured` and exact bonus/remaining counts | Concurrent promotion grants capacity exactly once |
+| Bonus grant | Coordinator | Conditional verification `granted_at` plus issuer bonus or dedicated grant row and audit event | Status and operator audit | `(campaign, provider_id, bonus_kind)` where repeatable grants bind `bonus_kind` to the positive post digest | Transactional conditional grant makes parallel rechecks no-ops after one winner; configured provider/campaign max-grant cap prevents unbounded minting | `matured` and exact bonus/remaining counts, plus repeat grants remaining when social bonus is enabled | Concurrent promotion grants capacity once per distinct verified post and never above the provider cap |
 | Operator mutation | Coordinator CLI/admin path | Append-only audit with actor, reason, target, expected prior state, result | Operators/security review | Audit event UUID + compare-and-swap expectation | Dry-run and expected-value checks prevent stale writes; rollback is explicit | Not exposed as provider success until committed | Seed, adjust, replace, revoke, and raced mutation audit tests |
 | Malibu referral projection | CLI writes sanitized status from coordinator authority | Versioned local status/control response; no App-side policy database | Malibu only | Capability name + schema version + coordinator revision | Unsupported older/newer CLI renders unavailable and suppresses actions | Truthful disabled/locked/pending/failed/matured/exhausted/revoked/unavailable states | Independent Malibu/CLI marketing versions negotiate by capability, not equality |
 
@@ -290,7 +290,17 @@ interface. The CLI owns all authenticated coordinator calls and exposes only a
 sanitized owner-only control-socket projection under `referral_status_v1`.
 Typed challenge/verify/cancel/reopen actions additionally require
 `referral_advocacy_v1`; a status-capable CLI without that capability remains
-read-only. All referral projection and actions additionally require
+read-only for advocacy. Repeat actions after an already matured X bonus
+additionally require `referral_repeatable_advocacy_v1` and coordinator status
+field `social_bonus_grants_remaining > 0`; without that repeatable capability,
+Malibu MUST suppress post-maturity X actions even when the old advocacy
+capability is present. A repeatable grant is bounded by
+`social_bonus_max_grants_per_provider` for the campaign and is keyed by the
+verified post digest, so a distinct post can grant once and the campaign cap
+prevents unbounded invite minting. The share/challenge invite URL is a canonical
+binding target and may remain present even when `remaining == 0`; Malibu MUST
+separately gate copyable invites on positive remaining capacity.
+All referral projection and actions additionally require
 `referral_fragment_links_v1`; its absence suppresses referral UI rather than
 falling back to the legacy path/query grammar. Malibu and CLI marketing versions are independent;
 compatibility is negotiated by advertised protocol capabilities and schema
