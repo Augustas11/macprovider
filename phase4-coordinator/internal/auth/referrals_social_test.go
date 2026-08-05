@@ -18,6 +18,7 @@ func socialReferralPolicy() ReferralPolicy {
 	policy := coreReferralPolicy()
 	policy.EnableSocialBonus = true
 	policy.SocialBonusUses = 2
+	policy.SocialBonusMaxGrants = 5
 	policy.ChallengeTTL = 15 * time.Minute
 	policy.SocialVerificationDwell = 30 * time.Minute
 	return policy
@@ -351,6 +352,91 @@ func TestParallelPromotersGrantBonusExactlyOnce(t *testing.T) {
 	}
 	if _, err := first.db.Exec(`DELETE FROM referral_social_grants`); err == nil {
 		t.Fatal("grant delete unexpectedly succeeded")
+	}
+}
+
+func TestVerifiedProviderCanEarnRepeatedXPostBonuses(t *testing.T) {
+	store := openSocialStore(t)
+	policy := socialReferralPolicy()
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	providerID := "provider-repeat"
+	createPendingSocialVerification(t, store, policy, providerID, "444", now)
+
+	firstMature := now.Add(policy.SocialVerificationDwell)
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, firstMature, func(context.Context, string, string, string) error { return nil }); err != nil || granted != 1 {
+		t.Fatalf("first grant=%d err=%v", granted, err)
+	}
+	firstStatus, err := store.ProviderReferralStatus(context.Background(), policy, providerID)
+	if err != nil || firstStatus.SocialState != SocialStateMatured || firstStatus.BonusCapacity != policy.SocialBonusUses {
+		t.Fatalf("first status=%+v err=%v", firstStatus, err)
+	}
+	if firstStatus.SocialBonusGrantsRemaining != policy.SocialBonusMaxGrants-1 {
+		t.Fatalf("first grants remaining=%d", firstStatus.SocialBonusGrantsRemaining)
+	}
+
+	secondChallenge, err := store.CreateSocialChallenge(context.Background(), policy, providerID, firstMature.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("second challenge err=%v", err)
+	}
+	if _, err := store.CompleteSocialVerification(context.Background(), policy, providerID, secondChallenge.Cleartext, "444", "456", strings.Repeat("b", 64), "x_api", firstMature.Add(2*time.Minute)); !errors.Is(err, ErrSocialChallenge) {
+		t.Fatalf("post reuse err=%v", err)
+	}
+	secondStatus, err := store.CompleteSocialVerification(context.Background(), policy, providerID, secondChallenge.Cleartext, "555", "456", strings.Repeat("b", 64), "x_api", firstMature.Add(3*time.Minute))
+	if err != nil || secondStatus.SocialState != SocialStatePending {
+		t.Fatalf("second submission status=%+v err=%v", secondStatus, err)
+	}
+
+	secondMature := firstMature.Add(3 * time.Minute).Add(policy.SocialVerificationDwell)
+	if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, secondMature, func(context.Context, string, string, string) error { return nil }); err != nil || granted != 1 {
+		t.Fatalf("second grant=%d err=%v", granted, err)
+	}
+	finalStatus, err := store.ProviderReferralStatus(context.Background(), policy, providerID)
+	if err != nil || finalStatus.SocialState != SocialStateMatured || finalStatus.BonusCapacity != 2*policy.SocialBonusUses {
+		t.Fatalf("final status=%+v err=%v", finalStatus, err)
+	}
+	if finalStatus.SocialBonusGrantsRemaining != policy.SocialBonusMaxGrants-2 {
+		t.Fatalf("final grants remaining=%d", finalStatus.SocialBonusGrantsRemaining)
+	}
+
+	var grants, history int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_social_grants WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM referral_social_verification_history WHERE provider_id = ?`, providerID).Scan(&history); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 2 || history != 1 {
+		t.Fatalf("grants=%d history=%d", grants, history)
+	}
+}
+
+func TestSocialChallengeStopsAtProviderGrantCap(t *testing.T) {
+	store := openSocialStore(t)
+	policy := socialReferralPolicy()
+	policy.SocialBonusMaxGrants = 2
+	now := time.Date(2026, 7, 13, 10, 0, 0, 0, time.UTC)
+	providerID := "provider-cap"
+	qualifyProvider(t, store, policy, providerID, now.Add(-time.Minute))
+
+	for i, postID := range []string{"601", "602"} {
+		challenge, err := store.CreateSocialChallenge(context.Background(), policy, providerID, now.Add(time.Duration(i)*time.Hour))
+		if err != nil {
+			t.Fatalf("challenge %d err=%v", i, err)
+		}
+		if _, err := store.CompleteSocialVerification(context.Background(), policy, providerID, challenge.Cleartext, postID, "456", testSocialShareURLHash, "x_api", now.Add(time.Duration(i)*time.Hour+time.Minute)); err != nil {
+			t.Fatalf("complete %d err=%v", i, err)
+		}
+		if granted, err := store.PromoteMaturedSocialVerifications(context.Background(), policy, now.Add(time.Duration(i)*time.Hour+time.Minute).Add(policy.SocialVerificationDwell), func(context.Context, string, string, string) error { return nil }); err != nil || granted != 1 {
+			t.Fatalf("promote %d granted=%d err=%v", i, granted, err)
+		}
+	}
+
+	status, err := store.ProviderReferralStatus(context.Background(), policy, providerID)
+	if err != nil || status.SocialBonusGrantsRemaining != 0 || status.BonusCapacity != 2*policy.SocialBonusUses {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	if _, err := store.CreateSocialChallenge(context.Background(), policy, providerID, now.Add(3*time.Hour)); !errors.Is(err, ErrSocialChallenge) {
+		t.Fatalf("cap challenge err=%v", err)
 	}
 }
 

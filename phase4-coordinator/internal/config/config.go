@@ -954,6 +954,7 @@ type ReferralConfig struct {
 	HMACKeys                 map[string]string `yaml:"hmac_keys"`
 	ProviderBaseUses         int               `yaml:"provider_base_uses"`
 	SocialBonusUses          int               `yaml:"social_bonus_uses"`
+	SocialBonusMaxGrants     int               `yaml:"social_bonus_max_grants_per_provider"`
 	ChallengeTTLS            int               `yaml:"challenge_ttl_s"`
 	SocialVerificationDwellS int               `yaml:"social_verification_dwell_s"`
 	JoinBaseURL              string            `yaml:"join_base_url"`
@@ -1387,6 +1388,7 @@ func Default() Config {
 		Referrals: ReferralConfig{
 			ProviderBaseUses:         1,
 			SocialBonusUses:          2,
+			SocialBonusMaxGrants:     5,
 			ChallengeTTLS:            900,
 			SocialVerificationDwellS: 1800,
 			JoinBaseURL:              "https://malibu.tech/j",
@@ -2537,8 +2539,8 @@ func (c Config) validateReferrals() error {
 		return fmt.Errorf("referrals.provider_base_uses must be > 0")
 	}
 	if r.EnableSocialInviteBonus {
-		if r.SocialBonusUses <= 0 || r.ChallengeTTLS <= 0 || r.SocialVerificationDwellS <= 0 {
-			return fmt.Errorf("referrals social_bonus_uses, challenge_ttl_s, and social_verification_dwell_s must be > 0")
+		if r.SocialBonusUses <= 0 || r.SocialBonusMaxGrants <= 0 || r.ChallengeTTLS <= 0 || r.SocialVerificationDwellS <= 0 {
+			return fmt.Errorf("referrals social_bonus_uses, social_bonus_max_grants_per_provider, challenge_ttl_s, and social_verification_dwell_s must be > 0")
 		}
 		if strings.TrimSpace(r.XAPIBearerToken) == "" {
 			return fmt.Errorf("referrals.x_api_bearer_token must be set when social invite bonus is enabled")

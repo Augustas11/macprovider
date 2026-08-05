@@ -495,6 +495,7 @@ func main() {
 		HMACKeys:                cfg.Referrals.HMACKeys,
 		ProviderBaseUses:        cfg.Referrals.ProviderBaseUses,
 		SocialBonusUses:         cfg.Referrals.SocialBonusUses,
+		SocialBonusMaxGrants:    cfg.Referrals.SocialBonusMaxGrants,
 		ChallengeTTL:            time.Duration(cfg.Referrals.ChallengeTTLS) * time.Second,
 		SocialVerificationDwell: time.Duration(cfg.Referrals.SocialVerificationDwellS) * time.Second,
 	}

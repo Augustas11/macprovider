@@ -231,6 +231,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "referral_bootstrap_v1",
         "referral_status_v1",
         "referral_advocacy_v1",
+        "referral_repeatable_advocacy_v1",
         "referral_fragment_links_v1",
         "provider_safety_telemetry_v2",
     ]

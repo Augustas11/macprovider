@@ -115,6 +115,7 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertTrue(capabilities.contains("referral_bootstrap_v1"))
         XCTAssertTrue(capabilities.contains("referral_status_v1"))
         XCTAssertTrue(capabilities.contains("referral_advocacy_v1"))
+        XCTAssertTrue(capabilities.contains("referral_repeatable_advocacy_v1"))
         XCTAssertTrue(capabilities.contains("referral_fragment_links_v1"))
 
         let observation = try XCTUnwrap(body["observation"] as? [String: Any])

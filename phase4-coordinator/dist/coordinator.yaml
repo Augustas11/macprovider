@@ -126,6 +126,7 @@ referrals:
     k1: env:MAL_REFERRAL_HMAC_K1
   provider_base_uses: 1
   social_bonus_uses: 2
+  social_bonus_max_grants_per_provider: 5
   challenge_ttl_s: 900
   social_verification_dwell_s: 1800
   join_base_url: "https://malibu.tech/j"

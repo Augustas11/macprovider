@@ -329,6 +329,9 @@ func (h *AdvocacyHandler) writeStatus(w http.ResponseWriter, status auth.Provide
 		"join_links_enabled":        h.JoinLinksEnabled,
 		"social_bonus_enabled":      h.Policy.EnableSocialBonus,
 	}
+	if h.Policy.EnableSocialBonus {
+		body["social_bonus_grants_remaining"] = status.SocialBonusGrantsRemaining
+	}
 	if status.Code != "" {
 		body["invite_code"] = status.Code
 	}

@@ -70,6 +70,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
     let firstServingSeen: Bool
     let joinLinksEnabled: Bool
     let socialBonusEnabled: Bool
+    let socialBonusGrantsRemaining: Int?
     let inviteCode: String?
     let inviteURL: URL?
     let observedAt: Date
@@ -87,6 +88,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
         firstServingSeen: Bool,
         joinLinksEnabled: Bool,
         socialBonusEnabled: Bool,
+        socialBonusGrantsRemaining: Int?,
         inviteCode: String?,
         inviteURL: URL?,
         observedAt: Date,
@@ -99,6 +101,9 @@ struct ReferralStatusProjection: Equatable, Sendable {
               counts.allSatisfy({ (0...1_000_000).contains($0) }),
               remaining == max(0, baseCapacity + bonusCapacity - redemptions),
               observedAt <= Date().addingTimeInterval(60) else {
+            return nil
+        }
+        if let socialBonusGrantsRemaining, !(0...1_000_000).contains(socialBonusGrantsRemaining) {
             return nil
         }
         if let inviteCode, !Self.isSafeInviteCode(inviteCode) { return nil }
@@ -128,6 +133,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
         self.firstServingSeen = firstServingSeen
         self.joinLinksEnabled = joinLinksEnabled
         self.socialBonusEnabled = socialBonusEnabled
+        self.socialBonusGrantsRemaining = socialBonusGrantsRemaining
         self.inviteCode = inviteCode
         self.inviteURL = inviteURL
         self.observedAt = observedAt
@@ -149,12 +155,28 @@ struct ReferralStatusProjection: Equatable, Sendable {
         return inviteURL
     }
 
+    var socialChallengeInviteURL: URL? {
+        guard firstServingSeen,
+              joinLinksEnabled,
+              socialState != Self.locked,
+              socialState != Self.revoked,
+              let inviteCode,
+              !inviteCode.isEmpty,
+              let inviteURL,
+              Self.isCanonicalInvite(inviteURL, code: inviteCode, joinBaseURL: joinBaseURL) else {
+            return nil
+        }
+        return inviteURL
+    }
+
     var canStartSocialChallenge: Bool {
-        socialBonusEnabled
+        let grantsAvailable = socialBonusGrantsRemaining.map { $0 > 0 } ?? (socialState != Self.matured)
+        return socialBonusEnabled
+            && grantsAvailable
             && configuredBonusCapacity > 0
-            && [Self.eligible, Self.failed].contains(socialState)
+            && [Self.eligible, Self.failed, Self.matured].contains(socialState)
             && pendingChallenge == nil
-            && availableInviteURL != nil
+            && socialChallengeInviteURL != nil
     }
 
     func withPendingChallenge(_ challenge: ReferralPendingChallengeProjection?) -> Self? {
@@ -170,6 +192,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
             firstServingSeen: firstServingSeen,
             joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: socialBonusEnabled,
+            socialBonusGrantsRemaining: socialBonusGrantsRemaining,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
             observedAt: observedAt,
@@ -190,6 +213,7 @@ struct ReferralStatusProjection: Equatable, Sendable {
             firstServingSeen: firstServingSeen,
             joinLinksEnabled: joinLinksEnabled,
             socialBonusEnabled: enabled,
+            socialBonusGrantsRemaining: enabled ? socialBonusGrantsRemaining : nil,
             inviteCode: inviteCode,
             inviteURL: inviteURL,
             observedAt: observedAt,
@@ -233,9 +257,9 @@ struct ReferralStatusProjection: Equatable, Sendable {
 
 enum ReferralPanelPresenter {
     /// Persistent chrome clarifying SPEC-034's two-step earn path: base from
-    /// first verified buyer-serving settlement, optional exactly-once X bonus.
+    /// first verified buyer-serving settlement, then repeatable X bonuses.
     static let pathChrome =
-        "Base unlocks after first paid serve · Optional X post adds bonus invites"
+        "Base unlocks after first paid serve · Each X post can add bonus invites"
 
     static func headline(availability: ReferralAvailability, status: ReferralStatusProjection?) -> String {
         switch availability {
@@ -324,7 +348,10 @@ enum ReferralPanelPresenter {
         let base = "\(status.baseCapacity) base from serving"
         let bonus = "\(status.bonusCapacity) from X bonus"
         if status.remaining > 0, status.availableInviteURL != nil {
-            return "\(base) · \(bonus). Remaining invites stay copyable — X is not required to invite."
+            if status.canStartSocialChallenge {
+                return "\(base) · \(bonus). Copy invites anytime, or share another X post for \(invitePhrase(status.configuredBonusCapacity))."
+            }
+            return "\(base) · \(bonus). Remaining invites stay copyable; X is not required to invite."
         }
         if status.remaining > 0 {
             return "\(base) · \(bonus). Remaining capacity is preserved; invite link unavailable right now."

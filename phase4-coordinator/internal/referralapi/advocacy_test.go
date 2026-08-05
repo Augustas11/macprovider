@@ -61,6 +61,7 @@ func advocacyPolicy() auth.ReferralPolicy {
 		HMACKeys:                map[string]string{"k1": strings.Repeat("s", 32)},
 		ProviderBaseUses:        1,
 		SocialBonusUses:         2,
+		SocialBonusMaxGrants:    5,
 		ChallengeTTL:            15 * time.Minute,
 		SocialVerificationDwell: 30 * time.Minute,
 	}

@@ -47,16 +47,17 @@ var socialAuditTokenPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,47}$`)
 // ProviderReferral is the authoritative provider-invite snapshot. Capacity is
 // redemption-only: no public hold or reservation state is represented here.
 type ProviderReferral struct {
-	Code             string
-	Campaign         string
-	IssuerID         string
-	BaseCapacity     int
-	BonusCapacity    int
-	Redemptions      int
-	Remaining        int
-	SocialState      string
-	FirstServingSeen bool
-	Revoked          bool
+	Code                       string
+	Campaign                   string
+	IssuerID                   string
+	BaseCapacity               int
+	BonusCapacity              int
+	Redemptions                int
+	Remaining                  int
+	SocialState                string
+	SocialBonusGrantsRemaining int
+	FirstServingSeen           bool
+	Revoked                    bool
 }
 
 type SocialChallenge struct {
@@ -135,7 +136,7 @@ func referralSocialSchemaStatements() []string {
 			submitted_at TEXT NOT NULL,
 			pending_since TEXT NOT NULL,
 			granted_at TEXT,
-			failed_at TEXT NOT NULL,
+			failed_at TEXT,
 			archived_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS referral_social_grants (
@@ -325,6 +326,16 @@ SELECT i.issuer_id, i.key_id, i.base_capacity, i.bonus_capacity, q.evidence_at, 
 	if out.Remaining < 0 {
 		out.Remaining = 0
 	}
+	grantCount, err := s.socialGrantCount(ctx, policy.Campaign, providerID)
+	if err != nil {
+		return ProviderReferral{}, err
+	}
+	if policy.EnableSocialBonus {
+		out.SocialBonusGrantsRemaining = policy.SocialBonusMaxGrants - grantCount
+		if out.SocialBonusGrantsRemaining < 0 {
+			out.SocialBonusGrantsRemaining = 0
+		}
+	}
 	out.Code, err = EncodeReferralCode(policy, ReferralTypeProvider, keyID, out.IssuerID)
 	if err != nil {
 		return ProviderReferral{}, err
@@ -347,7 +358,11 @@ SELECT EXISTS(
 		if terminalFailure {
 			out.SocialState = SocialStateFailed
 		} else {
-			out.SocialState = SocialStateEligible
+			if grantCount > 0 {
+				out.SocialState = SocialStateMatured
+			} else {
+				out.SocialState = SocialStateEligible
+			}
 		}
 	case err != nil:
 		return ProviderReferral{}, err
@@ -445,12 +460,19 @@ SELECT i.issuer_id, i.key_id
 		case errors.Is(err, sql.ErrNoRows):
 		case err != nil:
 			return err
-		case grantedAt.Valid || !failedAt.Valid:
+		case !grantedAt.Valid && !failedAt.Valid:
 			return ErrSocialChallenge
 		default:
-			if err := archiveFailedVerificationTx(ctx, conn, providerID, policy.Campaign, now); err != nil {
+			if err := archiveTerminalVerificationTx(ctx, conn, providerID, policy.Campaign, now); err != nil {
 				return err
 			}
+		}
+		grantCount, err := socialGrantCountTx(ctx, conn, policy.Campaign, providerID)
+		if err != nil {
+			return err
+		}
+		if grantCount >= policy.SocialBonusMaxGrants {
+			return ErrSocialChallenge
 		}
 		if _, err := conn.ExecContext(ctx, `
 DELETE FROM referral_social_failures
@@ -477,16 +499,37 @@ VALUES (?, ?, ?, ?, ?, ?)`, digestText, providerID, policy.Campaign, issuerID, t
 	return SocialChallenge{Cleartext: cleartext, ExpiresAt: expiresAt, Code: code}, nil
 }
 
-func archiveFailedVerificationTx(ctx context.Context, conn *sql.Conn, providerID, campaign string, now time.Time) error {
+func (s *Store) socialGrantCount(ctx context.Context, campaign, providerID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM referral_social_grants
+ WHERE campaign = ? AND provider_id = ?
+   AND (bonus_kind = ? OR bonus_kind GLOB ?)`, campaign, providerID, socialGrantKind, socialGrantKind+":*").Scan(&count)
+	return count, err
+}
+
+func socialGrantCountTx(ctx context.Context, conn *sql.Conn, campaign, providerID string) (int, error) {
+	var count int
+	err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM referral_social_grants
+ WHERE campaign = ? AND provider_id = ?
+   AND (bonus_kind = ? OR bonus_kind GLOB ?)`, campaign, providerID, socialGrantKind, socialGrantKind+":*").Scan(&count)
+	return count, err
+}
+
+func archiveTerminalVerificationTx(ctx context.Context, conn *sql.Conn, providerID, campaign string, now time.Time) error {
 	result, err := conn.ExecContext(ctx, `
 INSERT INTO referral_social_verification_history (
     provider_id, campaign, issuer_id, challenge_hash, post_id, author_id, share_url_hash,
     verification_method, submitted_at, pending_since, granted_at, failed_at, archived_at
 )
 SELECT provider_id, campaign, issuer_id, challenge_hash, post_id, author_id, share_url_hash,
-       verification_method, submitted_at, pending_since, granted_at, failed_at, ?
+       verification_method, submitted_at, pending_since, granted_at,
+       COALESCE(failed_at, granted_at, ?), ?
   FROM referral_social_verifications
- WHERE provider_id = ? AND campaign = ? AND failed_at IS NOT NULL`, timeText(now.UTC()), providerID, campaign)
+ WHERE provider_id = ? AND campaign = ? AND (granted_at IS NOT NULL OR failed_at IS NOT NULL)`, timeText(now.UTC()), timeText(now.UTC()), providerID, campaign)
 	if err != nil {
 		return err
 	}
@@ -494,7 +537,7 @@ SELECT provider_id, campaign, issuer_id, challenge_hash, post_id, author_id, sha
 	if err != nil || changed != 1 {
 		return ErrSocialChallenge
 	}
-	result, err = conn.ExecContext(ctx, `DELETE FROM referral_social_verifications WHERE provider_id = ? AND campaign = ? AND failed_at IS NOT NULL`, providerID, campaign)
+	result, err = conn.ExecContext(ctx, `DELETE FROM referral_social_verifications WHERE provider_id = ? AND campaign = ? AND (granted_at IS NOT NULL OR failed_at IS NOT NULL)`, providerID, campaign)
 	if err != nil {
 		return err
 	}
@@ -865,6 +908,25 @@ UPDATE referral_social_verifications SET failed_at = ?, lease_token = NULL, leas
 			return recordSocialAuditTx(ctx, conn, policy.Campaign, claim.providerID, claim.issuerID, "recheck", "terminal", hashSocialSubject(claim.postID), "external_rejection", now)
 		}
 
+		grantCount, err := socialGrantCountTx(ctx, conn, policy.Campaign, claim.providerID)
+		if err != nil {
+			return err
+		}
+		if grantCount >= policy.SocialBonusMaxGrants {
+			result, err := conn.ExecContext(ctx, `
+UPDATE referral_social_verifications SET failed_at = ?, lease_token = NULL, lease_until = NULL
+ WHERE provider_id = ? AND campaign = ? AND issuer_id = ? AND lease_token = ?
+   AND granted_at IS NULL AND failed_at IS NULL`, timeText(now.UTC()), claim.providerID, policy.Campaign, claim.issuerID, claim.leaseToken)
+			if err != nil {
+				return err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil || changed == 0 {
+				return err
+			}
+			return recordSocialAuditTx(ctx, conn, policy.Campaign, claim.providerID, claim.issuerID, "recheck", "terminal", hashSocialSubject(claim.postID), "cap_reached", now)
+		}
+
 		result, err := conn.ExecContext(ctx, `
 INSERT INTO referral_social_grants (campaign, provider_id, bonus_kind, issuer_id, verification_post_hash, amount, granted_at)
 SELECT ?, ?, ?, ?, ?, ?, ?
@@ -878,7 +940,7 @@ SELECT ?, ?, ?, ?, ?, ?, ?
        JOIN referral_issuers i ON i.issuer_id = q.issuer_id
         WHERE q.provider_id = ? AND q.campaign = ? AND q.issuer_id = ? AND i.revoked_at IS NULL
    )
-ON CONFLICT(campaign, provider_id, bonus_kind) DO NOTHING`, policy.Campaign, claim.providerID, socialGrantKind, claim.issuerID, hashSocialSubject(claim.postID), policy.SocialBonusUses, timeText(now.UTC()), claim.providerID, policy.Campaign, claim.issuerID, claim.leaseToken, claim.providerID, policy.Campaign, claim.issuerID)
+ON CONFLICT(campaign, provider_id, bonus_kind) DO NOTHING`, policy.Campaign, claim.providerID, socialGrantKindForPost(claim.postID), claim.issuerID, hashSocialSubject(claim.postID), policy.SocialBonusUses, timeText(now.UTC()), claim.providerID, policy.Campaign, claim.issuerID, claim.leaseToken, claim.providerID, policy.Campaign, claim.issuerID)
 		if err != nil {
 			return err
 		}
@@ -967,6 +1029,10 @@ VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?)`, campaign, providerID, issuerID, ev
 func hashSocialSubject(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return fmt.Sprintf("%x", digest[:])
+}
+
+func socialGrantKindForPost(postID string) string {
+	return socialGrantKind + ":" + hashSocialSubject(postID)
 }
 
 func randomReferralID() (string, error) {

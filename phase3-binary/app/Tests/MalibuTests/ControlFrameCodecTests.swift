@@ -31,6 +31,7 @@ final class ControlFrameCodecTests: XCTestCase {
             firstServingSeen: true,
             joinLinksEnabled: true,
             socialBonusEnabled: true,
+            socialBonusGrantsRemaining: 5,
             inviteCode: "invite-123",
             inviteURL: URL(string: "https://malibu.tech/j#/invite-123"),
             observedAt: observedAt,
