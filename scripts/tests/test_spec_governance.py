@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_spec_governance import validate_repository
+from scripts.check_spec_governance import _commit_mapping_selector_matches_current, _extract_mapping_fragment, validate_repository
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "spec_governance"
@@ -774,6 +774,579 @@ class GovernanceValidatorTests(unittest.TestCase):
             root = Path(directory)
             write_repository(root, base_repository())
             self.assertEqual([], validate_repository(root).errors)
+
+    def test_commit_evidence_allows_unrelated_file_changes_when_selectors_still_resolve(self) -> None:
+        repository = base_repository()
+        repository["authority"]["domains"][0]["requires_signed_journey_result"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            conformance = json.loads(conformance_path.read_text(encoding="utf-8"))
+            requirement = conformance["requirements"][0]
+            requirement["state"] = "conformant"
+            requirement["gap"] = None
+            requirement["evidence"] = [{
+                "artifact": f"commit:{commit}",
+                "source": None,
+                "captured_at": "2026-01-01",
+                "expires_at": "2027-01-01",
+            }]
+            conformance_path.write_text(json.dumps(conformance, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+            (root / "src" / "example.py").write_text(
+                "def example():\n    return True\n\n\ndef unrelated_helper():\n    return False\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual([], validate_repository(root).errors)
+
+    def test_mapping_selector_does_not_resolve_from_comment_only_text(self) -> None:
+        repository = base_repository()
+        repository["files"]["src/example.py"] = "# selector text only: example\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, repository)
+
+            errors = "\n".join(validate_repository(root).errors)
+            self.assertIn("mapping selector 'example' does not resolve in 'src/example.py'", errors)
+
+    def test_go_mapping_selector_does_not_resolve_from_text_anchor_only(self) -> None:
+        cases = {
+            "comment": "// Foo only\n",
+            "call_site": "func caller() {\n\tFoo()\n}\n",
+            "prefix": "func FooBar() {\n\treturn\n}\n",
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                repository = base_repository()
+                repository["files"]["src/example.go"] = source
+                repository["conformance"]["requirements"][0]["implementation"] = ["src/example.go:Foo"]
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_repository(root, repository)
+
+                    errors = "\n".join(validate_repository(root).errors)
+                    self.assertIn("mapping selector 'Foo' does not resolve in 'src/example.go'", errors)
+
+    def test_swift_mapping_selector_does_not_resolve_from_text_anchor_only(self) -> None:
+        cases = {
+            "comment": "// authInitialMessage only\n",
+            "call_site": "func caller() {\n    authInitialMessage()\n}\n",
+            "prefix": "func authInitialMessageV2() -> String {\n    \"new\"\n}\n",
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                repository = base_repository()
+                repository["files"]["src/example.swift"] = source
+                repository["conformance"]["requirements"][0]["implementation"] = ["src/example.swift:authInitialMessage"]
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_repository(root, repository)
+
+                    errors = "\n".join(validate_repository(root).errors)
+                    self.assertIn(
+                        "mapping selector 'authInitialMessage' does not resolve in 'src/example.swift'",
+                        errors,
+                    )
+
+    def test_go_selector_fragment_prefers_declaration_over_comment_or_call_site(self) -> None:
+        text = (
+            "// ServePayoutAddress is mentioned before the handler.\n"
+            "func call() {\n"
+            "\tServePayoutAddress()\n"
+            "}\n\n"
+            "func (s *AddressesService) ServePayoutAddress(w http.ResponseWriter, r *http.Request) {\n"
+            "\treturn\n"
+            "}\n"
+        )
+
+        fragment = _extract_mapping_fragment(text, "ServePayoutAddress", "src/example.go")
+
+        self.assertIsNotNone(fragment)
+        assert fragment is not None
+        self.assertTrue(fragment.startswith("func (s *AddressesService) ServePayoutAddress"), fragment)
+
+    def test_swift_selector_fragment_prefers_exact_declaration_over_prefix_or_call_site(self) -> None:
+        text = (
+            "public enum PayoutAddressClientError: Error {}\n"
+            "func caller() {\n"
+            "    let initialMessage = await authInitialMessage(attempt: attempt)\n"
+            "}\n\n"
+            "public struct PayoutAddressClient {\n"
+            "    let baseURL: URL\n"
+            "}\n\n"
+            "func authInitialMessage(attempt: Int) async -> String {\n"
+            "    \"ok\"\n"
+            "}\n"
+        )
+
+        client = _extract_mapping_fragment(text, "PayoutAddressClient", "src/example.swift")
+        auth = _extract_mapping_fragment(text, "authInitialMessage", "src/example.swift")
+
+        self.assertIsNotNone(client)
+        self.assertIsNotNone(auth)
+        assert client is not None
+        assert auth is not None
+        self.assertTrue(client.startswith("public struct PayoutAddressClient"), client)
+        self.assertTrue(auth.startswith("func authInitialMessage"), auth)
+
+    def test_selector_fragment_rejects_prefix_declarations(self) -> None:
+        go_text = (
+            "func FooBar() {\n"
+            "\treturn\n"
+            "}\n\n"
+            "func Foo() {\n"
+            "\treturn\n"
+            "}\n"
+        )
+        swift_text = (
+            "func authInitialMessageV2() -> String {\n"
+            "    \"new\"\n"
+            "}\n\n"
+            "func authInitialMessage() -> String {\n"
+            "    \"old\"\n"
+            "}\n"
+        )
+
+        go_fragment = _extract_mapping_fragment(go_text, "Foo", "src/example.go")
+        swift_fragment = _extract_mapping_fragment(swift_text, "authInitialMessage", "src/example.swift")
+
+        self.assertIsNotNone(go_fragment)
+        self.assertIsNotNone(swift_fragment)
+        assert go_fragment is not None
+        assert swift_fragment is not None
+        self.assertTrue(go_fragment.startswith("func Foo()"), go_fragment)
+        self.assertTrue(swift_fragment.startswith("func authInitialMessage()"), swift_fragment)
+
+    def test_selector_fragment_does_not_fall_back_to_prefix_when_exact_declaration_is_absent(self) -> None:
+        go_text = "func FooBar() {\n\treturn\n}\n"
+        swift_text = "func authInitialMessageV2() -> String {\n    \"new\"\n}\n"
+
+        self.assertIsNone(_extract_mapping_fragment(go_text, "Foo", "src/example.go"))
+        self.assertIsNone(_extract_mapping_fragment(swift_text, "authInitialMessage", "src/example.swift"))
+
+    def test_selector_fragment_rejects_local_go_and_swift_bindings(self) -> None:
+        go_text = "func caller() {\n\tFoo = 1\n}\n"
+        swift_text = "func caller() {\n    let authInitialMessage = \"local\"\n}\n"
+
+        self.assertIsNone(_extract_mapping_fragment(go_text, "Foo", "src/example.go"))
+        self.assertIsNone(_extract_mapping_fragment(swift_text, "authInitialMessage", "src/example.swift"))
+
+    def test_selector_fragment_rejects_unparseable_go_and_swift_selector_text(self) -> None:
+        go_text = "func caller() {\n\tFoo()\n}\n"
+        swift_text = "func caller() {\n    authInitialMessage()\n}\n"
+
+        self.assertIsNone(_extract_mapping_fragment(go_text, "Foo()", "src/example.go"))
+        self.assertIsNone(_extract_mapping_fragment(swift_text, "authInitialMessage()", "src/example.swift"))
+
+    def test_go_selector_fragment_resolves_struct_field(self) -> None:
+        go_text = "type Provider struct {\n\tWeightsManifestSHA256 string\n}\n"
+
+        fragment = _extract_mapping_fragment(go_text, "WeightsManifestSHA256 string", "src/example.go")
+
+        self.assertEqual("\tWeightsManifestSHA256 string", fragment)
+
+    def test_go_selector_fragment_resolves_const_group_item(self) -> None:
+        go_text = (
+            "const (\n\tSnapshotManifestV1 = \"macprovider.snapshot-manifest.v1\"\n)\n\n"
+            "var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)\n"
+        )
+
+        fragment = _extract_mapping_fragment(go_text, "SnapshotManifestV1", "src/example.go")
+
+        self.assertEqual("SnapshotManifestV1 = \"macprovider.snapshot-manifest.v1\"", fragment.lstrip() if fragment else fragment)
+
+    def test_swift_selector_fragment_includes_multiline_initializer(self) -> None:
+        swift_text = (
+            "final class RouterHandler {\n"
+            "    static let localStatusCapabilities = [\n"
+            "        \"buyer_serving_authority_v1\",\n"
+            "        \"referral_fragment_links_v1\",\n"
+            "    ]\n"
+            "}\n"
+        )
+
+        fragment = _extract_mapping_fragment(swift_text, "localStatusCapabilities", "src/example.swift")
+
+        self.assertIsNotNone(fragment)
+        assert fragment is not None
+        self.assertIn("\"referral_fragment_links_v1\"", fragment)
+
+    def test_selector_fragment_rejects_inactive_go_and_swift_declarations(self) -> None:
+        go_comment = "/*\nfunc Foo() {\n\treturn\n}\n*/\n"
+        go_raw_string = "var doc = `\nfunc Foo() {\n\treturn\n}\n`\n"
+        swift_comment = "/*\nfunc authInitialMessage() -> String {\n    \"old\"\n}\n*/\n"
+        swift_inactive = "#if false\nfunc authInitialMessage() -> String {\n    \"old\"\n}\n#endif\n"
+        swift_multiline_string = 'let doc = """\nfunc authInitialMessage() -> String {\n    "old"\n}\n"""\n'
+
+        self.assertIsNone(_extract_mapping_fragment(go_comment, "Foo", "src/example.go"))
+        self.assertIsNone(_extract_mapping_fragment(go_raw_string, "Foo", "src/example.go"))
+        self.assertIsNone(_extract_mapping_fragment(swift_comment, "authInitialMessage", "src/example.swift"))
+        self.assertIsNone(_extract_mapping_fragment(swift_inactive, "authInitialMessage", "src/example.swift"))
+        self.assertIsNone(_extract_mapping_fragment(swift_multiline_string, "authInitialMessage", "src/example.swift"))
+
+    def test_selector_fragment_rejects_duplicate_go_or_swift_declarations(self) -> None:
+        go_text = "func Foo() {\n\treturn\n}\n\nfunc Foo() {\n\treturn\n}\n"
+        swift_text = "func authInitialMessage() -> String {\n    \"one\"\n}\n\nfunc authInitialMessage() -> String {\n    \"two\"\n}\n"
+
+        self.assertIsNone(_extract_mapping_fragment(go_text, "Foo", "src/example.go"))
+        self.assertIsNone(_extract_mapping_fragment(swift_text, "authInitialMessage", "src/example.swift"))
+
+    def test_selector_fragment_rejects_duplicate_python_declarations(self) -> None:
+        python_text = "def example():\n    return 'one'\n\n\ndef example():\n    return 'two'\n"
+
+        self.assertIsNone(_extract_mapping_fragment(python_text, "example", "src/example.py"))
+
+    def test_explicit_swift_declaration_selector_disambiguates_overloads(self) -> None:
+        swift_text = (
+            "func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker) throws {\n"
+            "    try write()\n"
+            "}\n\n"
+            "func writeSuccessSentinel(binaryURL: URL, updateID: String, targetVersion: String) throws {\n"
+            "    try write()\n"
+            "}\n"
+        )
+
+        fragment = _extract_mapping_fragment(
+            swift_text,
+            "func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker)",
+            "src/example.swift",
+        )
+
+        self.assertIsNotNone(fragment)
+        assert fragment is not None
+        self.assertIn("marker: AutoUpdatePendingMarker", fragment)
+        self.assertNotIn("targetVersion", fragment)
+
+    def test_commit_mapping_selector_rejects_inactive_declaration_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            go_path = root / "src" / "example.go"
+            go_path.write_text("func Foo() {\n\treturn\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.go"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "go fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            go_path.write_text(
+                "/*\nfunc Foo() {\n\treturn\n}\n*/\n\nfunc Foo() {\n\tpanic(\"changed\")\n}\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "src/example.go:Foo"))
+
+    def test_commit_mapping_selector_rejects_go_build_constraint_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            go_path = root / "src" / "example.go"
+            go_path.write_text("package example\n\nfunc Foo() {\n\treturn\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.go"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "go fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            go_path.write_text("//go:build ignore\n\npackage example\n\nfunc Foo() {\n\treturn\n}\n", encoding="utf-8")
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "src/example.go:Foo"))
+
+    def test_commit_mapping_selector_rejects_inactive_swift_compilation_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            swift_path = root / "src" / "example.swift"
+            swift_path.write_text("func authInitialMessage() -> String {\n    \"old\"\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.swift"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "swift fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            swift_path.write_text(
+                "#if false\nfunc authInitialMessage() -> String {\n    \"old\"\n}\n#endif\n\n"
+                "func authInitialMessage() -> String {\n    \"new\"\n}\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(
+                _commit_mapping_selector_matches_current(root, commit, "src/example.swift:authInitialMessage")
+            )
+
+    def test_commit_mapping_selector_rejects_nested_inactive_swift_compilation_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            swift_path = root / "src" / "example.swift"
+            swift_path.write_text("func authInitialMessage() -> String {\n    \"old\"\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.swift"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "swift fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            swift_path.write_text(
+                "#if false\n"
+                "#if os(macOS)\n"
+                "#endif\n"
+                "func authInitialMessage() -> String {\n    \"old\"\n}\n"
+                "#endif\n\n"
+                "func authInitialMessage() -> String {\n    \"new\"\n}\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(
+                _commit_mapping_selector_matches_current(root, commit, "src/example.swift:authInitialMessage")
+            )
+
+    def test_commit_mapping_selector_rejects_swift_conditional_wrapper_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            swift_path = root / "src" / "example.swift"
+            swift_path.write_text("func authInitialMessage() -> String {\n    \"old\"\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.swift"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "swift fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            swift_path.write_text(
+                "#if SOME_UNDECLARED_FLAG\n"
+                "func authInitialMessage() -> String {\n    \"old\"\n}\n"
+                "#endif\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(
+                _commit_mapping_selector_matches_current(root, commit, "src/example.swift:authInitialMessage")
+            )
+
+    def test_commit_mapping_selector_rejects_multiline_initializer_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            swift_path = root / "src" / "example.swift"
+            swift_path.write_text(
+                "final class RouterHandler {\n"
+                "    static let localStatusCapabilities = [\n"
+                "        \"buyer_serving_authority_v1\",\n"
+                "        \"referral_fragment_links_v1\",\n"
+                "    ]\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "src/example.swift"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "swift fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            swift_path.write_text(
+                "final class RouterHandler {\n"
+                "    static let localStatusCapabilities = [\n"
+                "        \"buyer_serving_authority_v1\",\n"
+                "        \"referral_fragment_links_v2\",\n"
+                "    ]\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(
+                _commit_mapping_selector_matches_current(root, commit, "src/example.swift:localStatusCapabilities")
+            )
+
+    def test_commit_mapping_selector_rejects_shell_function_body_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            shell_path = root / "src" / "example.sh"
+            shell_path.write_text("target() {\n    echo safe\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.sh"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "shell fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            shell_path.write_text("target() {\n    echo evil\n}\n", encoding="utf-8")
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "src/example.sh:target"))
+
+    def test_commit_mapping_selector_rejects_shell_body_drift_after_comment_brace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            shell_path = root / "src" / "example.sh"
+            shell_path.write_text("target() {\n    # }\n    echo safe\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.sh"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "shell fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            shell_path.write_text("target() {\n    # }\n    echo evil\n}\n", encoding="utf-8")
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "src/example.sh:target"))
+
+    def test_commit_mapping_selector_rejects_shell_body_drift_after_heredoc_brace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            shell_path = root / "src" / "example.sh"
+            shell_path.write_text(
+                "target() {\n"
+                "    cat <<EOF\n"
+                "}\n"
+                "EOF\n"
+                "    echo safe\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "src/example.sh"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "shell fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            shell_path.write_text(
+                "target() {\n"
+                "    cat <<EOF\n"
+                "}\n"
+                "EOF\n"
+                "    echo evil\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "src/example.sh:target"))
+
+    def test_commit_mapping_selector_rejects_duplicate_shell_function_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            shell_path = root / "src" / "example.sh"
+            shell_path.write_text("target() {\n    echo safe\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "src/example.sh"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "shell fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            shell_path.write_text("target() {\n    echo safe\n}\n\ntarget() {\n    echo evil\n}\n", encoding="utf-8")
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "src/example.sh:target"))
+
+    def test_commit_mapping_selector_rejects_embedded_python_body_drift_in_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            shell_path = root / "src" / "example.sh"
+            shell_path.write_text(
+                "#!/usr/bin/env bash\n"
+                "python3 <<'PY'\n"
+                "def fence_reload_helpers():\n"
+                "    return 'safe'\n"
+                "PY\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "src/example.sh"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "shell fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            shell_path.write_text(
+                "#!/usr/bin/env bash\n"
+                "python3 <<'PY'\n"
+                "def fence_reload_helpers():\n"
+                "    return 'evil'\n"
+                "PY\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(
+                _commit_mapping_selector_matches_current(root, commit, "src/example.sh:def fence_reload_helpers")
+            )
+
+    def test_commit_mapping_selector_rejects_inert_embedded_python_heredoc_forgery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            shell_path = root / "src" / "example.sh"
+            shell_path.write_text(
+                "#!/usr/bin/env bash\n"
+                "python3 <<'PY'\n"
+                "def fence_reload_helpers():\n"
+                "    return 'safe'\n"
+                "print(fence_reload_helpers())\n"
+                "PY\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "src/example.sh"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "shell fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            shell_path.write_text(
+                "#!/usr/bin/env bash\n"
+                ": <<'PY'\n"
+                "def fence_reload_helpers():\n"
+                "    return 'safe'\n"
+                "PY\n"
+                "python3 <<'PY'\n"
+                "def fence_reload_helpers_v2():\n"
+                "    return 'evil'\n"
+                "print(fence_reload_helpers_v2())\n"
+                "PY\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(
+                _commit_mapping_selector_matches_current(root, commit, "src/example.sh:def fence_reload_helpers")
+            )
+
+    def test_embedded_python_selector_resolves_from_continued_python_heredoc(self) -> None:
+        shell_text = (
+            "validated=\"$(python3 - \"$INSTALL_DIR\" \\\n"
+            "  \"$HOME\" <<'PY'\n"
+            "def fence_reload_helpers():\n"
+            "    return 'safe'\n"
+            "PY\n"
+            ")\"\n"
+        )
+
+        fragment = _extract_mapping_fragment(shell_text, "def fence_reload_helpers", "src/example.sh")
+
+        self.assertEqual("def fence_reload_helpers():\n    return 'safe'", fragment)
+
+    def test_embedded_python_selector_ignores_python_word_in_non_python_heredoc_command(self) -> None:
+        shell_text = (
+            "echo python3 <<'PY'\n"
+            "def fence_reload_helpers():\n"
+            "    return 'safe'\n"
+            "PY\n"
+        )
+
+        self.assertIsNone(_extract_mapping_fragment(shell_text, "def fence_reload_helpers", "src/example.sh"))
+
+    def test_embedded_python_selector_resolves_from_generated_shell_heredoc(self) -> None:
+        shell_text = (
+            "cat > \"$WATCHDOG_PATH\" <<'WATCHDOG_EOF'\n"
+            "#!/usr/bin/env bash\n"
+            "python3 <<'PY'\n"
+            "def fence_reload_helpers():\n"
+            "    return 'safe'\n"
+            "PY\n"
+            "WATCHDOG_EOF\n"
+        )
+
+        fragment = _extract_mapping_fragment(shell_text, "def fence_reload_helpers", "src/example.sh")
+
+        self.assertEqual("def fence_reload_helpers():\n    return 'safe'", fragment)
+
+    def test_embedded_python_selector_ignores_printf_stdin_heredoc(self) -> None:
+        shell_text = (
+            "printf '' > \"$WATCHDOG_PATH\" <<'WATCHDOG_EOF'\n"
+            "#!/usr/bin/env bash\n"
+            "python3 <<'PY'\n"
+            "def fence_reload_helpers():\n"
+            "    return 'safe'\n"
+            "PY\n"
+            "WATCHDOG_EOF\n"
+        )
+
+        self.assertIsNone(_extract_mapping_fragment(shell_text, "def fence_reload_helpers", "src/example.sh"))
+
+    def test_embedded_python_selector_ignores_generated_shell_sink_heredoc(self) -> None:
+        shell_text = (
+            "cat > /dev/null <<'WATCHDOG_EOF'\n"
+            "#!/usr/bin/env bash\n"
+            "python3 <<'PY'\n"
+            "def fence_reload_helpers():\n"
+            "    return 'safe'\n"
+            "PY\n"
+            "WATCHDOG_EOF\n"
+        )
+
+        self.assertIsNone(_extract_mapping_fragment(shell_text, "def fence_reload_helpers", "src/example.sh"))
+
+    def test_commit_mapping_selector_rejects_current_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            outside = root.parent / "outside.py"
+            outside.write_text("def example():\n    return True\n", encoding="utf-8")
+
+            self.assertFalse(_commit_mapping_selector_matches_current(root, commit, "../outside.py:example"))
 
     def test_sensitive_conformant_with_signed_journey_result_passes(self) -> None:
         repository = base_repository()

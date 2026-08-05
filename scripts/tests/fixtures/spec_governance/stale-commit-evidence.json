@@ -1,1 +1,1 @@
-{"mutation":{"operation":"stale_commit_evidence"},"expected":"does not match current mapped file 'src/example.py'"}
+{"mutation":{"operation":"stale_commit_evidence"},"expected":"does not match current mapped selector fragment 'example' in 'src/example.py'"}

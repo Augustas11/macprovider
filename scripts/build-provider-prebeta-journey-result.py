@@ -150,9 +150,10 @@ def parse_requirement_ids(raw: str | None, evidence: dict[str, Any]) -> list[str
     if raw is None:
         return evidence_ids
     input_ids = parse_requirement_id_values(raw, "--requirement-ids")
-    if input_ids != evidence_ids:
-        die("--requirement-ids must exactly match evidence.requirement_ids")
-    return evidence_ids
+    overclaimed = [item for item in input_ids if item not in evidence_ids]
+    if overclaimed:
+        die(f"--requirement-ids must be covered by evidence.requirement_ids: {', '.join(overclaimed)}")
+    return input_ids
 
 
 def load_mapped_provider_requirements(root: Path) -> set[str]:
