@@ -1,0 +1,135 @@
+{
+  "schema_version": "macprovider.journey-evidence.partial.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "requirement_ids": [
+    "SPEC-010-R004",
+    "SPEC-010-R005",
+    "SPEC-010-R006",
+    "SPEC-023-R001",
+    "SPEC-023-R002",
+    "SPEC-032-R001",
+    "SPEC-032-R002",
+    "SPEC-032-R003",
+    "SPEC-033-R001",
+    "SPEC-034-R001"
+  ],
+  "capture": {
+    "captured_at": "2026-08-05T13:40:47Z",
+    "captured_by": "provider-prebeta-operator",
+    "repository_commit": "cb933ed93aad1642aa01686b01b20f86c3647536",
+    "artifact_scope": "partial-physical-evidence",
+    "status": "blocked-before-signed-conformance-promotion",
+    "blocking_verdict": "The fresh Apple M4 Pro provider completed authenticated hardware-profile submission, dual-control hardware-trust approval, and verifier acceptance, but it disconnected before the trust grant and was not present in the live route-eligible pool after approval. The provider-prebeta signed journey-result gate must not promote this run because the required fresh-provider routing and buyer-smoke steps are absent.",
+    "conformance_promotion": "not-promoted; no specs/CONFORMANCE.json row is updated from this partial artifact.",
+    "redaction": {
+      "provider_ids": "stable sha256 fingerprints retained; raw provider IDs omitted",
+      "hardware_identity_hashes": "stable sha256 fingerprints retained; raw hardware identity hashes omitted",
+      "operator_tokens": "omitted",
+      "operator_identity": "stable sha256 fingerprints retained where needed",
+      "hostnames": "omitted",
+      "lan_ips": "omitted",
+      "secrets": "omitted"
+    }
+  },
+  "coordinator": {
+    "role": "Pearl production coordinator",
+    "captured_at": "2026-08-05T13:40:47Z",
+    "health": {
+      "coordinator_version": "v1.8.87",
+      "provider_pool_size": 3,
+      "provider_pool_ready": 3,
+      "operator_port": "127.0.0.1:8444"
+    },
+    "poolz": {
+      "http_status": 200,
+      "pool_count": 3,
+      "fresh_provider_present": false,
+      "fresh_provider_sha256": "18cfc1cf6279d8f8020e772399f5e57efa03ae996132f6464058525d453e9fd1",
+      "route_eligible_rows": [
+        {
+          "provider_id_sha256": "0994cb6a985ada2f30574ac849de3250481e7975dedb532215ffe0282d3f861d",
+          "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+          "state": "ready",
+          "routing_eligible": true,
+          "auth_state": "bearer_validated",
+          "binary_version": "1.8.69",
+          "hash_status": "hash_verified",
+          "encrypted_leg": true,
+          "slots_free": 1
+        },
+        {
+          "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+          "model": "mlx-community/Qwen3-8B-4bit",
+          "state": "ready",
+          "routing_eligible": true,
+          "auth_state": "bearer_validated",
+          "binary_version": "1.8.82",
+          "hash_status": "hash_verified",
+          "encrypted_leg": true,
+          "slots_free": 1
+        },
+        {
+          "provider_id_sha256": "2d812448a57b8b32893191acd78ea6fc4735eba8db8def8993ff708ed2f3a387",
+          "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+          "state": "ready",
+          "routing_eligible": true,
+          "auth_state": "bearer_validated",
+          "binary_version": "1.8.82",
+          "hash_status": "hash_verified",
+          "encrypted_leg": true,
+          "slots_free": 1
+        }
+      ]
+    }
+  },
+  "fresh_provider": {
+    "provider_id_sha256": "18cfc1cf6279d8f8020e772399f5e57efa03ae996132f6464058525d453e9fd1",
+    "hardware": {
+      "chip": "Apple M4 Pro",
+      "chip_normalized": "apple m4 pro",
+      "unified_memory_gb": 24,
+      "macos_version": "Version 15.7.7 (Build 24G720)"
+    },
+    "provider_binary": {
+      "version": "1.8.82",
+      "profile_source": "cli_hello"
+    },
+    "hardware_profile": {
+      "verified": true,
+      "last_reported_at": "2026-08-05T06:47:33Z"
+    },
+    "hardware_verifier": {
+      "job_id": 22,
+      "source": "autotune",
+      "status": "verified",
+      "decision_reason": "hardware-verifier.v2:verified_trusted_hardware",
+      "evidence_sha256": "a1fc649af32a003caadc38bbfa54265a189a55c207f4e871fb6f8e399f523d97",
+      "submitted_at": "2026-08-05T06:48:59.207448Z",
+      "trusted_at": "2026-08-05T13:03:55.156236Z",
+      "trust_source": "operator_api",
+      "trusted_by_sha256": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973",
+      "hardware_identity_hash_sha256": "b88fef61ca07e3562cb4c4598d15ed609880184055b18b93df117bd43bf338a2"
+    },
+    "coordinator_events": {
+      "count": 9,
+      "last_auth_accepted_at": "2026-08-05T06:54:24.213965Z",
+      "last_disconnect_at": "2026-08-05T06:55:46.398623Z",
+      "last_disconnect_reason": "provider_websocket_disconnected",
+      "post_trust_ready_event_observed": false,
+      "post_trust_poolz_row_observed": false
+    }
+  },
+  "journey_gate_result": {
+    "provider_registration_admission": "partial-pass: authenticated coordinator sessions existed before trust approval",
+    "hardware_evidence_verifier": "pass: verifier accepted trusted Apple M4 Pro hardware evidence",
+    "provider_runtime_routing": "fail: provider absent from live /poolz after trust approval",
+    "buyer_serving_smoke": "not-run: would not prove fresh-provider admission while the provider is absent from /poolz",
+    "signed_journey_result_eligible": false,
+    "ledger_update_allowed": false
+  },
+  "next_required_capture": [
+    "Restart or reconnect the same fresh provider identity and confirm it appears in /poolz with state=ready, routing_eligible=true, auth_state=bearer_validated, encrypted_leg=true, and hash_status=hash_verified.",
+    "Run the minimal buyer smoke through the public buyer path only after /poolz shows the same fresh provider identity as route-eligible.",
+    "Build and promote a signed provider-prebeta journey-result only after the redacted pass artifact validates under .github/workflows/promote-signed-provider-prebeta-journey.yml."
+  ]
+}
