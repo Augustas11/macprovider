@@ -1856,6 +1856,51 @@ func TestModelKnownPersistsInLifetimeAccumulator(t *testing.T) {
 	}
 }
 
+// TestModelKnownAcceptsCatalogKeyAlias pins issue #900: a buyer
+// catalog / rate-card key must be ModelKnown when a provider has
+// advertised the equivalent served HuggingFace id. Without this, the
+// buyer port 404s on openai/gpt-oss-20b while the HF id routes fine.
+func TestModelKnownAcceptsCatalogKeyAlias(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	const hfID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
+	const catalogKey = "openai/gpt-oss-20b"
+
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          hfID,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	if !registry.ModelKnown(hfID) {
+		t.Fatalf("ModelKnown(%q) = false for served HF id", hfID)
+	}
+	if !registry.ModelKnown(catalogKey) {
+		t.Fatalf("ModelKnown(%q) = false; catalog key must alias served HF id (#900)", catalogKey)
+	}
+	if registry.ModelKnown("openai/gpt-oss-120b") {
+		t.Fatal("ModelKnown(openai/gpt-oss-120b) = true; unrelated catalog key must stay unknown")
+	}
+	if registry.ModelKnown("qwen/gpt-oss-20b") {
+		t.Fatal("ModelKnown(qwen/gpt-oss-20b) = true; foreign namespace must not spoof openai catalog key")
+	}
+
+	// Lifetime path: after disconnect, catalog key still known → 503 not 404.
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	if !registry.ModelKnown(catalogKey) {
+		t.Fatalf("ModelKnown(%q) = false after disconnect; catalog-key lifetime alias regressed", catalogKey)
+	}
+}
+
 // TestModelKnownUnionsDeclaredSupportedModels pins SPEC-010 v1.5
 // R-3.3.4: the seen-model index is the UNION of a provider's served
 // ModelID and every entry in its SupportedModels, so ModelKnown()

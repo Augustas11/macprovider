@@ -8,9 +8,54 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
+
+func TestValidatePinnedProviderAcceptsCatalogKeyAlias(t *testing.T) {
+	const hfID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
+	const catalogKey = "openai/gpt-oss-20b"
+	p := pool.Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          hfID,
+		State:            pool.StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		MaxContextTokens: 20000,
+	}
+	if _, routeErr := validatePinnedProvider(p, catalogKey, 10, "Pinned provider not available"); routeErr != nil {
+		t.Fatalf("catalog-key pin rejected: status=%d code=%s msg=%s", routeErr.status, routeErr.code, routeErr.message)
+	}
+	if _, routeErr := validatePinnedProvider(p, hfID, 10, "Pinned provider not available"); routeErr != nil {
+		t.Fatalf("HF-id pin rejected: status=%d code=%s msg=%s", routeErr.status, routeErr.code, routeErr.message)
+	}
+	if _, routeErr := validatePinnedProvider(p, "qwen/gpt-oss-20b", 10, "Pinned provider not available"); routeErr == nil {
+		t.Fatal("foreign-namespace spoof must not satisfy pinned provider model match")
+	}
+	if _, routeErr := validatePinnedProvider(p, "openai/gpt-oss-120b", 10, "Pinned provider not available"); routeErr == nil {
+		t.Fatal("unrelated catalog key must not satisfy pinned provider model match")
+	}
+}
+
+func TestProviderMatchesRequestClassMemberCatalogKeyAlias(t *testing.T) {
+	s := &Server{}
+	class := &config.ModelClassConfig{
+		Objective: "cheap",
+		Members:   []string{"openai/gpt-oss-20b"},
+	}
+	p := pool.Provider{ModelID: "mlx-community/gpt-oss-20b-MXFP4-Q8"}
+	if !s.providerMatchesRequest(p, "fast-class", class) {
+		t.Fatal("class member catalog key must match served HF id")
+	}
+	if s.providerMatchesRequest(p, "fast-class", &config.ModelClassConfig{
+		Objective: "cheap",
+		Members:   []string{"qwen/gpt-oss-20b"},
+	}) {
+		t.Fatal("foreign-namespace class member must not match openai-served HF id")
+	}
+}
 
 // TestNoPriorDispatchResponseWriterMarks pins the coordinator half of the
 // item-18 fix: the central noPriorDispatchResponseWriter stamps the POSITIVE

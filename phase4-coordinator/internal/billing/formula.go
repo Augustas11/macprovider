@@ -77,20 +77,71 @@ func NormalizeModelKey(model string) string {
 	switch {
 	case namespace == "meta-llama" && strings.HasPrefix(key, "llama-"):
 		return "meta-llama/" + key
-	case strings.HasPrefix(key, "meta-llama-"):
+	// Magic-prefix collapses are namespace-scoped: only the empty /
+	// mlx-community / canonical-vendor namespaces may rewrite into the
+	// catalog key. Other known namespaces (qwen/, google/, …) must not
+	// spoof openai/gpt-oss-20b (or meta-llama / nemotron) via body
+	// prefix alone — that became load-bearing for routing in #900.
+	case servedAliasNamespace(namespace, "meta-llama") && strings.HasPrefix(key, "meta-llama-"):
 		return "meta-llama/" + strings.TrimPrefix(key, "meta-")
-	case strings.HasPrefix(key, "nvidia-nemotron-"):
+	case servedAliasNamespace(namespace, "nvidia") && strings.HasPrefix(key, "nvidia-nemotron-"):
 		return strings.TrimPrefix(key, "nvidia-")
-	case strings.HasPrefix(key, "gpt-oss-"):
+	case servedAliasNamespace(namespace, "openai") && strings.HasPrefix(key, "gpt-oss-"):
 		return "openai/" + key
 	default:
 		return key
 	}
 }
 
+// ModelsEquivalent reports whether two buyer/provider model identifiers
+// refer to the same rate-card / catalog key after NormalizeModelKey.
+// Routing uses this so catalog keys (e.g. openai/gpt-oss-20b) match the
+// served HuggingFace ids (e.g. mlx-community/gpt-oss-20b-MXFP4-Q8)
+// without registering duplicate provider identities (issue #900).
+func ModelsEquivalent(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	na, nb := NormalizeModelKey(a), NormalizeModelKey(b)
+	if na == "" || nb == "" {
+		return false
+	}
+	return na == nb
+}
+
+// MatchesNormalizedKey reports whether model aligns with an already-
+// computed NormalizeModelKey(query). Used by ModelKnown to avoid
+// re-normalizing the buyer-supplied query on every seen-model scan.
+func MatchesNormalizedKey(model, normalizedQuery string) bool {
+	if model == "" || normalizedQuery == "" {
+		return false
+	}
+	if strings.EqualFold(model, normalizedQuery) {
+		return true
+	}
+	got := NormalizeModelKey(model)
+	return got != "" && got == normalizedQuery
+}
+
 func knownModelNamespace(namespace string) bool {
 	switch namespace {
 	case "mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen":
+		return true
+	default:
+		return false
+	}
+}
+
+// servedAliasNamespace is true when a magic-prefix rewrite may collapse
+// into canonicalVendor's catalog key. Empty (no repo prefix) and
+// mlx-community (typical served HF id) are the only non-canonical
+// sources allowed; foreign known namespaces cannot spoof the alias.
+func servedAliasNamespace(namespace, canonicalVendor string) bool {
+	switch namespace {
+	case "", "mlx-community", canonicalVendor:
 		return true
 	default:
 		return false

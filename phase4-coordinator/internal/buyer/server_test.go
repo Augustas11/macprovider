@@ -1616,6 +1616,55 @@ func TestChatCompletionsRoutesNonStreamingRequest(t *testing.T) {
 	}
 }
 
+// TestChatCompletionsRoutesCatalogKeyToHFModelID pins issue #900: a
+// buyer request using the rate-card / catalog key must route to the
+// provider serving the equivalent HuggingFace model id, and the
+// upstream dispatch body must carry the provider's ModelID.
+func TestChatCompletionsRoutesCatalogKeyToHFModelID(t *testing.T) {
+	const hfID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
+	const catalogKey = "openai/gpt-oss-20b"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream request json: %v", err)
+		}
+		if req["model"] != hfID {
+			t.Fatalf("upstream model = %v, want rewritten provider ModelID %q", req["model"], hfID)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-oss","object":"chat.completion","created":1716768000,"model":"` + hfID + `","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "session-1", hfID, pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	catalogRR := postChat(t, server, []byte(`{"model":"`+catalogKey+`","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+	if catalogRR.Code != http.StatusOK {
+		t.Fatalf("catalog-key status = %d, body=%s", catalogRR.Code, catalogRR.Body.String())
+	}
+	if catalogRR.Header().Get("X-MacProvider-Provider") != "p1" {
+		t.Fatalf("catalog-key provider header = %q", catalogRR.Header().Get("X-MacProvider-Provider"))
+	}
+
+	hfRR := postChat(t, server, []byte(`{"model":"`+hfID+`","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+	if hfRR.Code != http.StatusOK {
+		t.Fatalf("HF-id status = %d, body=%s", hfRR.Code, hfRR.Body.String())
+	}
+
+	pinnedRR := postChat(t, server, []byte(`{"model":"`+catalogKey+`","messages":[{"role":"user","content":"hello"}],"stream":false}`), http.Header{
+		"X-MacProvider-Provider": []string{"p1"},
+	})
+	if pinnedRR.Code != http.StatusOK {
+		t.Fatalf("pinned catalog-key status = %d, body=%s", pinnedRR.Code, pinnedRR.Body.String())
+	}
+	if pinnedRR.Header().Get("X-MacProvider-Provider") != "p1" {
+		t.Fatalf("pinned catalog-key provider header = %q", pinnedRR.Header().Get("X-MacProvider-Provider"))
+	}
+}
+
 func TestHTTPForwardingStripsReceiptFromProviderWithoutPublishedReceiptKey(t *testing.T) {
 	const spoofedReceipt = "spoofed.receipt"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
