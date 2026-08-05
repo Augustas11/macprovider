@@ -28,6 +28,7 @@ from scripts.tests.test_spec_governance import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SIGNER = REPO_ROOT / "scripts" / "sign-journey-result.py"
 PROMOTER = REPO_ROOT / "scripts" / "promote-signed-journey-result.py"
+PREFLIGHT = REPO_ROOT / "scripts" / "preflight-signed-journey-promotion.py"
 
 
 def generate_acceptance_key(root: Path) -> str:
@@ -574,6 +575,60 @@ class JourneyResultToolsTests(unittest.TestCase):
             self.assertNotEqual(0, completed.returncode)
             self.assertIn("duplicate JSON object key", completed.stderr)
             self.assertEqual(malformed, conformance_path.read_text(encoding="utf-8"))
+
+    def test_preflight_rejects_stale_selector_without_signing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            (root / "src" / "example.py").write_text("def example():\n    return False\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "change mapped selector"], cwd=root, check=True)
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("promotion preflight rejected", completed.stderr)
+            self.assertIn("does not match current mapped selector fragment 'example'", completed.stderr)
+
+    def test_preflight_accepts_fresh_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, base_repository())
+            source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(PREFLIGHT),
+                    "--root",
+                    str(root),
+                    "--source-sha",
+                    source_sha,
+                    "--requirement-ids",
+                    "SPEC-001-R001",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertIn("match current selectors", completed.stdout)
 
 
 if __name__ == "__main__":

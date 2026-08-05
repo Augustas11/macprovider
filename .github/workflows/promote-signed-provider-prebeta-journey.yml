@@ -94,6 +94,18 @@ jobs:
             --output "$PAYLOAD" \
             "$REDACTED"
 
+      - name: Preflight selector freshness before signing
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 scripts/preflight-signed-journey-promotion.py \
+            --source-sha "$SOURCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --journey-id JOURNEY-PROVIDER-PREBETA-ADMISSION
+
       - name: Verify protected environment and repository posture
         shell: bash
         env:
