@@ -1,0 +1,230 @@
+name: Build signed payout journey promotion artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact origin/main commit SHA to capture and promote"
+        required: true
+        type: string
+      promotion_confirmed:
+        description: "Confirm SPEC-016-R002 signed evidence promotion artifact should be built"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-payout-journey-${{ github.event.inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Capture, sign, validate, and export SPEC-016-R002 promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" == "$GITHUB_SHA" ]] || { echo "::error::source SHA must equal the reviewed workflow commit" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$SOURCE_SHA_INPUT" ]] || { echo "::error::source SHA is no longer origin/main" >&2; exit 1; }
+          short_sha="${SOURCE_SHA_INPUT:0:12}"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: Capture payout journey payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd phase4-coordinator
+            MACPROVIDER_CAPTURE_PAYOUT_JOURNEY=1 \
+              go test ./internal/payout -run TestPayoutAddressRegistrationJourneyEvidence -count=1 -v
+          )
+
+      - name: Bind generated artifact paths
+        id: generated
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path("journeys/evidence")
+          payloads = sorted(root.glob("spec016-r002-payout-address-*.journey-result.unsigned.json"))
+          if len(payloads) != 1:
+              raise SystemExit(f"expected exactly one unsigned payload, found {len(payloads)}")
+          payload = payloads[0]
+          prefix = payload.name.removesuffix(".journey-result.unsigned.json")
+          redacted = root / f"{prefix}.redacted.json"
+          candidate = root / f"{prefix}.candidate.json"
+          envelope = root / f"{prefix}.journey-result.signed.json"
+          for path in (redacted, candidate):
+              if not path.is_file():
+                  raise SystemExit(f"missing generated artifact: {path}")
+          with open(sys.argv[1], "a", encoding="ascii") as output:
+              output.write(f"payload={payload.as_posix()}\n")
+              output.write(f"redacted={redacted.as_posix()}\n")
+              output.write(f"candidate={candidate.as_posix()}\n")
+              output.write(f"envelope={envelope.as_posix()}\n")
+              output.write(f"prefix={prefix}\n")
+          PY
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.generated.outputs.payload }}
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/promote-signed-payout-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/promote-signed-journey-result.py \
+            --base-ref origin/main \
+            SPEC-016-R002 \
+            "$ENVELOPE"
+
+      - name: Drop non-promotable intermediates
+        shell: bash
+        env:
+          PAYLOAD: ${{ steps.generated.outputs.payload }}
+          CANDIDATE: ${{ steps.generated.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          python3 - "$PAYLOAD" "$CANDIDATE" <<'PY'
+          import pathlib
+          import sys
+
+          for value in sys.argv[1:]:
+              path = pathlib.Path(value)
+              if path.suffix != ".json" or "journeys/evidence/" not in path.as_posix():
+                  raise SystemExit(f"refusing to remove unexpected path: {path}")
+              path.unlink()
+          PY
+
+      - name: Verify promoted ledger and committed artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.generated.outputs.redacted }}
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          conformance = json.loads(pathlib.Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
+          matches = [
+              item for item in conformance.get("requirements", [])
+              if isinstance(item, dict) and item.get("requirement_id") == "SPEC-016-R002"
+          ]
+          if len(matches) != 1:
+              raise SystemExit("SPEC-016-R002 must exist exactly once")
+          requirement = matches[0]
+          if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+              raise SystemExit("SPEC-016-R002 was not promoted to conformant")
+          evidence = requirement.get("evidence")
+          if not isinstance(evidence, list) or not any(item.get("source") == envelope for item in evidence if isinstance(item, dict)):
+              raise SystemExit("SPEC-016-R002 evidence does not reference the signed envelope")
+          for path in pathlib.Path("journeys/evidence").glob("spec016-r002-payout-address-*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-promotable intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          REDACTED: ${{ steps.generated.outputs.redacted }}
+          ENVELOPE: ${{ steps.generated.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-payout-journey-promotion"
+          mkdir -p "$export_dir/journeys/evidence" "$export_dir/specs"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          cp specs/CONFORMANCE.json "$export_dir/specs/CONFORMANCE.json"
+          python3 - "$export_dir/promotion-manifest.json" "$SOURCE_SHA" "$REDACTED" "$ENVELOPE" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          output, source_sha, redacted, envelope = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-payout-journey-promotion.v1",
+              "source_sha": source_sha,
+              "requirement_id": "SPEC-016-R002",
+              "journey_id": "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "conformance_sha256": hashlib.sha256((root / "specs/CONFORMANCE.json").read_bytes()).hexdigest(),
+              "workflow_run_id": __import__("os").environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": __import__("os").environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signed-payout-journey-promotion-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-payout-journey-promotion/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
