@@ -116,8 +116,8 @@ if '"cli_version": "1.8.40"' in text:
 if text.count("scripts/validate-malibu-release-cli-inputs.sh") != 2:
     raise SystemExit("candidate and publication paths must both validate exact CLI inputs")
 for policy in (
-    "--allow-previous-stable=1.8.81",
-    "--staged-candidate=1.8.82",
+    "--allow-previous-stable=1.8.82",
+    "--staged-candidate=1.8.88",
 ):
     if text.count(policy) != 2:
         raise SystemExit(f"candidate and publication paths must bind staged coordinator policy: {policy}")
@@ -135,8 +135,8 @@ valid_cli_version="$(
     "$root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 )"
 valid_cli_tag="v$valid_cli_version"
-staged_coordinator_policy="--allow-previous-stable=1.8.81"
-staged_candidate_policy="--staged-candidate=1.8.82"
+staged_coordinator_policy="--allow-previous-stable=1.8.82"
+staged_candidate_policy="--staged-candidate=1.8.88"
 
 "$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" \
   "$staged_coordinator_policy" "$staged_candidate_policy" >/dev/null

@@ -477,7 +477,7 @@ jobs:
             --trusted-keys "$accepted/trusted-keys.json" \
             --coordinator-url https://coordinator.streamvc.live \
             --openssl "$OPENSSL_BIN" \
-            --expected-previous-recommendation 1.8.81 \
+            --expected-previous-recommendation 1.8.82 \
             --publication-phase pre-publication
           echo "::endgroup::"
           # Repository rules and the production-release environment serialize
