@@ -1448,9 +1448,12 @@ func (r *Registry) recordCanaryResult(providerID, assignedID string, passed bool
 	return result
 }
 
-// providerServesActiveModel reports whether p's ACTIVE loaded model is modelID,
-// using the same case-folded comparison as buyer routing (`modelIDEqual` →
-// `strings.EqualFold`, buyer/server.go). It deliberately does NOT consult
+// providerServesActiveModel reports whether p's ACTIVE loaded model is modelID
+// under exact case-folded identity. Unlike buyer routing's modelIDEqual
+// (billing.ModelsEquivalent after #900), this stays EqualFold-only: canary
+// sole-provider floor and redundancy telemetry compare provider-to-provider
+// served ModelIDs (HF form), and deliberately treat quantization / catalog
+// aliases as distinct so the floor stays conservative. It does NOT consult
 // `SupportedModels`: a declared-but-cold model is buyer-unroutable (SPEC-031 §9 /
 // SPEC-010 R-3.3.4 — "known but temporarily unavailable", it 503s), so counting
 // it as live capacity would let a peer serving a different model falsely lift the
@@ -2222,6 +2225,10 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// to the same catalog identity as a seen or live HF model id
 	// (openai/gpt-oss-20b ↔ mlx-community/gpt-oss-20b-MXFP4-Q8).
 	canonical := strings.ToLower(modelID)
+	// Hoist query normalization once; fallback scans only normalize
+	// stored ids (issue #900 audit: avoid re-allocating on the buyer
+	// string inside every EqualFold-miss iteration under RLock).
+	normalizedQuery := billing.NormalizeModelKey(modelID)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if _, ok := r.seenModelsLifetime[canonical]; ok {
@@ -2232,7 +2239,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// pays the cost on the never-recorded path (i.e., the 404
 	// candidate). Catalog-key equivalence uses the same bound.
 	for stored := range r.seenModelsLifetime {
-		if billing.ModelsEquivalent(stored, modelID) {
+		if modelKnownMatch(stored, modelID, normalizedQuery) {
 			return true
 		}
 	}
@@ -2244,7 +2251,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	//
 	// 1. Live providers' current ModelID field.
 	for _, p := range r.providers {
-		if billing.ModelsEquivalent(p.ModelID, modelID) {
+		if modelKnownMatch(p.ModelID, modelID, normalizedQuery) {
 			return true
 		}
 	}
@@ -2262,7 +2269,7 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	// unconditional guarantee while the declaring provider is live.
 	for _, p := range r.providers {
 		for _, supported := range p.SupportedModels {
-			if billing.ModelsEquivalent(supported, modelID) {
+			if modelKnownMatch(supported, modelID, normalizedQuery) {
 				return true
 			}
 		}
@@ -2278,12 +2285,19 @@ func (r *Registry) ModelKnown(modelID string) bool {
 			return true
 		}
 		for stored := range set {
-			if billing.ModelsEquivalent(stored, modelID) {
+			if modelKnownMatch(stored, modelID, normalizedQuery) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func modelKnownMatch(stored, modelID, normalizedQuery string) bool {
+	if strings.EqualFold(stored, modelID) {
+		return true
+	}
+	return billing.MatchesNormalizedKey(stored, normalizedQuery)
 }
 
 type StateUpdate struct {

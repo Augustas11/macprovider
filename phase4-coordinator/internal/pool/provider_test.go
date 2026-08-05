@@ -1888,6 +1888,9 @@ func TestModelKnownAcceptsCatalogKeyAlias(t *testing.T) {
 	if registry.ModelKnown("openai/gpt-oss-120b") {
 		t.Fatal("ModelKnown(openai/gpt-oss-120b) = true; unrelated catalog key must stay unknown")
 	}
+	if registry.ModelKnown("qwen/gpt-oss-20b") {
+		t.Fatal("ModelKnown(qwen/gpt-oss-20b) = true; foreign namespace must not spoof openai catalog key")
+	}
 
 	// Lifetime path: after disconnect, catalog key still known → 503 not 404.
 	if !registry.RemoveIfSession("p1", "s1") {

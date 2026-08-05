@@ -90,7 +90,14 @@ func TestModelsEquivalent_CatalogKeyMatchesServedHFID(t *testing.T) {
 		{"openai/gpt-oss-20b", "mlx-community/Qwen3-32B-4bit", false},
 		{"", "openai/gpt-oss-20b", false},
 		{"openai/gpt-oss-20b", "", false},
+		{"", "", false},
 		{"qwen3-32b", "mlx-community/Qwen3-32B-4bit", true},
+		// Foreign known namespaces must not spoof catalog vendors (#900 audit).
+		{"qwen/gpt-oss-20b", "openai/gpt-oss-20b", false},
+		{"google/gpt-oss-20b", "openai/gpt-oss-20b", false},
+		{"qwen/meta-llama-3.1-8b-instruct-4bit", "meta-llama/Llama-3.1-8B-Instruct-4bit", false},
+		{"qwen/nvidia-nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-30b-a3b", false},
+		{"openai/nvidia-nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-30b-a3b", false},
 	}
 	for _, tc := range cases {
 		if got := ModelsEquivalent(tc.a, tc.b); got != tc.want {

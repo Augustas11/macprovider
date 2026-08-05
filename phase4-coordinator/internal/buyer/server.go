@@ -1728,7 +1728,11 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 	modelProviders := make([]pool.Provider, 0)
 	catalogUnavailable := false
 	for _, p := range providers {
-		if !hasAvailableSlot(p) || !modelIDEqual(p.ModelID, entry.ID) {
+		// Hash-verification buckets are per served binary (literal ModelID),
+		// not per catalog-key billing equivalence. modelIDEqual/#900 aliases
+		// must not cross-contaminate /v1/models Pillar-A status across
+		// distinct HF ids that share a rate-card key.
+		if !hasAvailableSlot(p) || !strings.EqualFold(p.ModelID, entry.ID) {
 			continue
 		}
 		status := s.effectiveHashStatus(p, cfg)
