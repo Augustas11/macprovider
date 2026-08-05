@@ -88,6 +88,21 @@ func NormalizeModelKey(model string) string {
 	}
 }
 
+// ModelsEquivalent reports whether two buyer/provider model identifiers
+// refer to the same rate-card / catalog key after NormalizeModelKey.
+// Routing uses this so catalog keys (e.g. openai/gpt-oss-20b) match the
+// served HuggingFace ids (e.g. mlx-community/gpt-oss-20b-MXFP4-Q8)
+// without registering duplicate provider identities (issue #900).
+func ModelsEquivalent(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	return NormalizeModelKey(a) == NormalizeModelKey(b)
+}
+
 func knownModelNamespace(namespace string) bool {
 	switch namespace {
 	case "mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen":

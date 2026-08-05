@@ -78,6 +78,27 @@ func TestRateFor_FallsBackToDefault(t *testing.T) {
 	}
 }
 
+func TestModelsEquivalent_CatalogKeyMatchesServedHFID(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"openai/gpt-oss-20b", "mlx-community/gpt-oss-20b-MXFP4-Q8", true},
+		{"mlx-community/gpt-oss-20b-MXFP4-Q8", "openai/gpt-oss-20b", true},
+		{"OPENAI/GPT-OSS-20B", "mlx-community/gpt-oss-20b-MXFP4-Q8", true},
+		{"openai/gpt-oss-20b", "openai/gpt-oss-20b", true},
+		{"openai/gpt-oss-20b", "mlx-community/Qwen3-32B-4bit", false},
+		{"", "openai/gpt-oss-20b", false},
+		{"openai/gpt-oss-20b", "", false},
+		{"qwen3-32b", "mlx-community/Qwen3-32B-4bit", true},
+	}
+	for _, tc := range cases {
+		if got := ModelsEquivalent(tc.a, tc.b); got != tc.want {
+			t.Fatalf("ModelsEquivalent(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
 func TestRateFor_UnknownNamespaceDoesNotNormalizeToKnownModel(t *testing.T) {
 	rateA := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
 	rateD := RateCardEntry{PromptCreditsPerMtok: 300, CompletionCreditsPerMtok: 400}
