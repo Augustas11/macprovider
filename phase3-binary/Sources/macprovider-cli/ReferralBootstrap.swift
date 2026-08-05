@@ -261,6 +261,16 @@ struct ReferralBootstrapJournal: Sendable {
             .appendingPathComponent("referral-attempt-v1.json", isDirectory: false)
     }
 
+    static func replacementJournal(
+        providerID: String,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> ReferralBootstrapJournal {
+        ReferralBootstrapJournal(
+            url: home.appendingPathComponent(".config/macprovider/onboarding", isDirectory: true)
+                .appendingPathComponent("referral-attempt-v1.replacement-\(providerID).json", isDirectory: false)
+        )
+    }
+
     func prepare(
         providerID: String,
         receiptPublicKey: String,

@@ -21,6 +21,9 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
     @Option(help: "Owner-only referral-code file used only for first credential bootstrap.")
     var referralCodeFile: String?
 
+    @Flag(help: "Use a replacement-scoped referral journal for an explicit fresh-provider replacement.")
+    var replaceReferralJournal = false
+
     func run() async throws {
         do {
             try await runBootstrap()
@@ -56,7 +59,10 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
                         store: receiptKeyStore
                     ),
                     input: referralInput,
-                    journal: ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
+                    journal: try Self.referralJournal(
+                        providerID: providerID,
+                        replacingIncumbentProvider: replaceReferralJournal
+                    )
                 )
             }
             return
@@ -70,7 +76,10 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
                         store: receiptKeyStore
                     ),
                     input: referralInput,
-                    journal: ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
+                    journal: try Self.referralJournal(
+                        providerID: providerID,
+                        replacingIncumbentProvider: replaceReferralJournal
+                    )
                 )
             }
             return
@@ -104,8 +113,11 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             candidate: currentReceiptKey
         )
         let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
-        let referralJournal = referralInput.map { _ in
-            ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
+        let referralJournal = try referralInput.map { _ in
+            try Self.referralJournal(
+                providerID: providerID,
+                replacingIncumbentProvider: replaceReferralJournal
+            )
         }
         let referralAttempt: ReferralBootstrapAttempt?
         if let referralInput, let referralJournal {
@@ -222,6 +234,19 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         return providerID.dropFirst(prefix.count).utf8.allSatisfy { byte in
             (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
         }
+    }
+
+    static func referralJournal(
+        providerID: String,
+        replacingIncumbentProvider: Bool
+    ) throws -> ReferralBootstrapJournal {
+        if replacingIncumbentProvider {
+            guard isCredentialBootstrapPrincipal(providerID) else {
+                throw ValidationError("--replace-referral-journal requires a fresh mp-* provider_id")
+            }
+            return ReferralBootstrapJournal.replacementJournal(providerID: providerID)
+        }
+        return ReferralBootstrapJournal(url: ReferralBootstrapJournal.defaultURL())
     }
 
     private static func hasToken(_ value: String?) -> Bool {

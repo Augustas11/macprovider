@@ -48,6 +48,34 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testReferralOnHealthyIncumbentDoesNotReplaceWithoutConfirmation() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
+        let controller = freshController(harness)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertFalse(harness.installedReplacingIncumbentProvider)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testConfirmedReferralOnHealthyIncumbentRunsFreshReplacementInstall() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
+        let controller = freshController(harness, replacementConfirmed: true)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNotNil(harness.installedReferralCode)
+        XCTAssertTrue(harness.installedReplacingIncumbentProvider)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
     func testUnhealthyRestartSafeIncumbentRunsInstallerWithoutReferral() async {
         let harness = Harness()
         harness.restartSafeIncumbentPresent = true
@@ -57,6 +85,33 @@ final class LaunchProviderControllerTests: XCTestCase {
 
         XCTAssertEqual(harness.cliInstallRuns, 1)
         XCTAssertNil(harness.installedReferralCode)
+        XCTAssertFalse(harness.installedReplacingIncumbentProvider)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testReferralOnRestartSafeIncumbentDoesNotReplaceWithoutConfirmation() async {
+        let harness = Harness()
+        harness.restartSafeIncumbentPresent = true
+        let controller = freshController(harness)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertFalse(harness.installedReplacingIncumbentProvider)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testConfirmedReferralOnRestartSafeIncumbentRunsFreshReplacementInstall() async {
+        let harness = Harness()
+        harness.restartSafeIncumbentPresent = true
+        let controller = freshController(harness, replacementConfirmed: true)
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNotNil(harness.installedReferralCode)
+        XCTAssertTrue(harness.installedReplacingIncumbentProvider)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
@@ -141,6 +196,30 @@ final class LaunchProviderControllerTests: XCTestCase {
         await controller.launch()
 
         XCTAssertEqual(harness.cliInstallRuns, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "referral")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, CLIInstallRunner.Error.ReferralFailure.required.message)
+        } else {
+            XCTFail("expected required referral correction state")
+        }
+    }
+
+    func testConfirmedReplacementRequiresReferralBeforeAttachingIncumbent() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
+        let controller = LaunchProviderController(
+            replacementConfirmed: true,
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
         if case let .failed(stage, retryable, message) = controller.stage {
             XCTAssertEqual(stage, "referral")
             XCTAssertTrue(retryable)
@@ -260,6 +339,21 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.loginItemRegistrations, 1)
         XCTAssertEqual(harness.startAgentRuns, 1)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testConfirmedReplacementDoesNotAutoRefreshIntoIncumbent() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
+        let controller = freshController(harness, replacementConfirmed: true)
+
+        await controller.refreshFromExistingInstall()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        XCTAssertEqual(controller.stage, .idle)
     }
 
     func testPermanentImportFailureDoesNotWaitForProviderStart() async {
@@ -401,8 +495,14 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
-    private func freshController(_ harness: Harness) -> LaunchProviderController {
-        let controller = LaunchProviderController(dependencies: harness.dependencies())
+    private func freshController(
+        _ harness: Harness,
+        replacementConfirmed: Bool = false
+    ) -> LaunchProviderController {
+        let controller = LaunchProviderController(
+            replacementConfirmed: replacementConfirmed,
+            dependencies: harness.dependencies()
+        )
         controller.referralInput = "MAL1-S-key_1-issuer_1-" + String(repeating: "A", count: 26)
         return controller
     }
@@ -428,6 +528,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
         var emittedInstallLogLines: [String] = ["install.sh finished"]
         var installedReferralCode: String?
+        var installedReplacingIncumbentProvider = false
 
         func dependencies() -> LaunchProviderController.Dependencies {
             LaunchProviderController.Dependencies(
@@ -439,9 +540,10 @@ final class LaunchProviderControllerTests: XCTestCase {
                 registerLoginItem: {
                     self.loginItemRegistrations += 1
                 },
-                runCLIInstall: { referralCode, onLogLine in
+                runCLIInstall: { referralCode, replacingIncumbentProvider, onLogLine in
                     self.cliInstallRuns += 1
                     self.installedReferralCode = referralCode
+                    self.installedReplacingIncumbentProvider = replacingIncumbentProvider
                     if let error = self.cliInstallError { throw error }
                     self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
                     for line in self.emittedInstallLogLines {

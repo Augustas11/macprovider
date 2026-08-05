@@ -127,8 +127,31 @@ final class ReferralOnboardingTests: XCTestCase {
         )
 
         XCTAssertEqual(environment["MACPROVIDER_REFERRAL_CODE_FILE"], referralURL.path)
+        XCTAssertNil(environment["MACPROVIDER_REFERRAL_REPLACE_INCUMBENT"])
         XCTAssertNil(environment["MACPROVIDER_REFERRAL_CODE"])
         XCTAssertFalse(environment.values.contains(validCode))
+    }
+
+    func testInstallerEnvironmentPassesReplacementIntentOnlyWithReferralFile() throws {
+        let referralURL = URL(fileURLWithPath: "/tmp/referral-secret")
+        let replacementEnvironment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: [:],
+            installPort: nil,
+            pinnedVersion: nil,
+            referralCodeFile: referralURL,
+            replacingIncumbentProvider: true
+        )
+        XCTAssertEqual(replacementEnvironment["MACPROVIDER_REFERRAL_CODE_FILE"], referralURL.path)
+        XCTAssertEqual(replacementEnvironment["MACPROVIDER_REFERRAL_REPLACE_INCUMBENT"], "1")
+
+        let noReferralEnvironment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: [:],
+            installPort: nil,
+            pinnedVersion: nil,
+            referralCodeFile: nil,
+            replacingIncumbentProvider: true
+        )
+        XCTAssertNil(noReferralEnvironment["MACPROVIDER_REFERRAL_REPLACE_INCUMBENT"])
     }
 
     func testBundledInstallerEnablesReceiptsOnlyForFreshReferralBootstrap() throws {

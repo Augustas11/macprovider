@@ -154,6 +154,28 @@ final class BootstrapAuthCommandTests: XCTestCase {
         }
     }
 
+    func testReplacementReferralJournalIsProviderScopedAndPreservesDefaultJournal() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let home = directory.appendingPathComponent("home", isDirectory: true)
+        let providerID = "mp-0123456789abcdef0123456789abcdef"
+        let defaultURL = ReferralBootstrapJournal.defaultURL(home: home)
+        let replacementURL = ReferralBootstrapJournal.replacementJournal(providerID: providerID, home: home).url
+
+        XCTAssertNotEqual(replacementURL, defaultURL)
+        XCTAssertTrue(replacementURL.lastPathComponent.contains(providerID))
+        XCTAssertTrue(try BootstrapAuthCommand.referralJournal(
+            providerID: providerID,
+            replacingIncumbentProvider: true
+        ).url.lastPathComponent.contains(providerID))
+        XCTAssertThrowsError(try BootstrapAuthCommand.referralJournal(
+            providerID: "office-mac",
+            replacingIncumbentProvider: true
+        )) { error in
+            XCTAssertTrue("\(error)".contains("--replace-referral-journal"))
+        }
+    }
+
     func testReferralJournalTerminalCorrectionAndCommittedCleanup() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -6,8 +6,16 @@ import SwiftUI
 
 @MainActor
 enum OnboardingWindow {
-    static func make(agent: MalibuAgent, onDone: @escaping () -> Void) -> NSWindow {
-        let root = OnboardingRootView(agent: agent, onDone: onDone)
+    static func make(
+        agent: MalibuAgent,
+        replacementConfirmed: Bool = false,
+        onDone: @escaping () -> Void
+    ) -> NSWindow {
+        let root = OnboardingRootView(
+            agent: agent,
+            replacementConfirmed: replacementConfirmed,
+            onDone: onDone
+        )
         let hosting = NSHostingController(rootView: root)
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable]
@@ -47,10 +55,15 @@ private struct OnboardingRootView: View {
     let onDone: () -> Void
     @StateObject private var controller: LaunchProviderController
 
-    init(agent: MalibuAgent, onDone: @escaping () -> Void) {
+    init(agent: MalibuAgent, replacementConfirmed: Bool, onDone: @escaping () -> Void) {
         self.agent = agent
         self.onDone = onDone
-        _controller = StateObject(wrappedValue: LaunchProviderController(agent: agent))
+        _controller = StateObject(
+            wrappedValue: LaunchProviderController(
+                agent: agent,
+                replacementConfirmed: replacementConfirmed
+            )
+        )
     }
 
     var body: some View {

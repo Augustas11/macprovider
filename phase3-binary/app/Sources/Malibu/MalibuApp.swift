@@ -118,9 +118,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // in-App via LaunchProviderController (SPEC-026 §7.2, follow-up impl
     // in this same PR).
 
-    private func presentOnboarding() {
+    private func presentOnboarding(replacementConfirmed: Bool = false) {
         if onboardingWindow == nil {
-            onboardingWindow = OnboardingWindow.make(agent: agent) { [weak self] in
+            onboardingWindow = OnboardingWindow.make(
+                agent: agent,
+                replacementConfirmed: replacementConfirmed
+            ) { [weak self] in
                 self?.onboardingWindow?.close()
                 self?.onboardingWindow = nil
             }
@@ -134,12 +137,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         await handleStartupRoute(route)
     }
 
-    private func handleStartupRoute(_ route: StartupRoute) async {
+    private func handleStartupRoute(
+        _ route: StartupRoute,
+        replacementConfirmed: Bool = false
+    ) async {
         switch route {
         case .startAgent:
             await agent.start()
         case .showOnboarding:
-            presentOnboarding()
+            presentOnboarding(replacementConfirmed: replacementConfirmed)
         case .quit:
             NSApp.terminate(nil)
         case .showImportDialog:
@@ -149,11 +155,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     continue
                 }
                 do {
-                    let result = try await StartupState.applyMigrationDecision(decision)
+                    let result = try await StartupState.applyMigrationDecision(
+                        decision,
+                        deferStartFreshBackup: decision == .startFresh
+                    )
                     if let backupPath = result.backupPath {
                         presentStartFreshBackup(path: backupPath)
                     }
-                    await handleStartupRoute(result.route)
+                    await handleStartupRoute(
+                        result.route,
+                        replacementConfirmed: decision == .startFresh
+                    )
                     return
                 } catch {
                     guard presentMigrationError(error) else {
@@ -306,7 +318,7 @@ enum MigrationDialogCopy {
     static let message = """
     Malibu found an existing provider on this Mac. Use Existing Provider keeps the same provider identity, payment history, saved access, and local model setup.
 
-    Start Fresh moves the old setup to a backup and creates a new provider. The new provider will not reuse the previous identity, payment history, saved access, or local model setup unless you restore the backup.
+    Start Fresh creates a new provider. The new provider will not reuse the previous identity, payment history, saved access, or local model setup unless you restore the old setup.
     """
     static let useExistingButton = "Use Existing Provider"
     static let startFreshButton = "Start Fresh"
@@ -328,9 +340,9 @@ enum StartFreshBackupCopy {
 enum StartFreshConfirmationCopy {
     static let title = "Create a new provider instead?"
     static let message = """
-    This moves the existing setup to a reversible backup before Malibu creates a new provider.
+    Malibu will keep the existing setup unchanged until the new provider is ready.
 
-    The new provider will have a different identity and will not include the previous payment history, saved access, or local model setup unless you restore the backup.
+    The new provider will have a different identity and will not include the previous payment history, saved access, or local model setup unless you restore the old setup.
     """
     static let cancelButton = "Keep Existing Provider"
     static let startFreshButton = "Create New Provider"

@@ -17,7 +17,10 @@ set -euo pipefail
 REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
 FRESH_REFERRAL_BOOTSTRAP=0
+REFERRAL_REPLACE_INCUMBENT="${MACPROVIDER_REFERRAL_REPLACE_INCUMBENT:-0}"
+REFERRAL_BOOTSTRAP_COMPLETED=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
+unset MACPROVIDER_REFERRAL_REPLACE_INCUMBENT
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
@@ -30,6 +33,8 @@ BINARY_PATH="$BIN_DIR/macprovider-cli"
 CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
+REPLACEMENT_CANDIDATE_DIR="$CONFIG_DIR/replacement-candidate"
+REPLACEMENT_CANDIDATE_PROVIDER_ID_PATH="$REPLACEMENT_CANDIDATE_DIR/provider_id"
 RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
 INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
 PROVIDER_MUTATION_ROOT="$HOME/.local/share/macprovider/autoupdate"
@@ -421,6 +426,12 @@ Environment overrides:
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider
                                  launchd service but skip the watchdog
+  MACPROVIDER_REFERRAL_REPLACE_INCUMBENT=1
+                                 explicit Malibu fresh-provider replacement:
+                                 redeem the invite against a new provider
+                                 identity; incumbent files and config remain
+                                 unchanged until cutover, and rollback restores
+                                 them if replacement admission fails
   MACPROVIDER_EMERGENCY_ROLLBACK=1
                                  operator-only signed rollback to an explicit
                                  MACPROVIDER_VERSION; commits only through an
@@ -1237,6 +1248,7 @@ write_install_recovery_artifacts() {
     printf 'REC_WATCHDOG_WAS_ACTIVE=%q\n' "$INSTALL_TX_WATCHDOG_WAS_ACTIVE"
     printf 'REC_WATCHDOG_WAS_DISABLED=%q\n' "$INSTALL_TX_WATCHDOG_WAS_DISABLED"
     printf 'REC_BINARY_KIND=%q\n' "$INSTALL_TX_BINARY_KIND"
+    printf 'REC_REFERRAL_REPLACE_INCUMBENT=%q\n' "$REFERRAL_REPLACE_INCUMBENT"
   } > "$state_path" || return 1
 
   cat > "$recovery_script" <<'RECOVERY_SCRIPT'
@@ -3274,8 +3286,12 @@ swap_restore binary-path "$REC_BINARY_PATH" "$BINARY_CANDIDATE" "$REC_HAD_BINARY
 swap_restore config.yaml "$REC_CONFIG_PATH" "$CONFIG_CANDIDATE" "$REC_HAD_CONFIG" || recovery_failed "could not restore the previous config"
 swap_restore provider_id "$REC_PROVIDER_ID_PATH" "$PROVIDER_ID_CANDIDATE" "$REC_HAD_PROVIDER_ID" || recovery_failed "could not restore the previous provider id"
 swap_restore last-recommendation.json "$REC_RECOMMENDATION_PATH" "$RECOMMENDATION_CANDIDATE" "$REC_HAD_RECOMMENDATION" || recovery_failed "could not restore the previous recommendation"
-preserve_failed_bootstrap_identity "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
-  || recovery_failed "could not preserve the installer bootstrap identity through rollback"
+if [ "${REC_REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && { [ "$REC_HAD_CONFIG" -eq 1 ] || [ "$REC_HAD_PROVIDER_ID" -eq 1 ]; }; then
+  recovery_log "Fresh provider replacement failed; preserving restored incumbent identity instead of the failed replacement identity."
+else
+  preserve_failed_bootstrap_identity "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
+    || recovery_failed "could not preserve the installer bootstrap identity through rollback"
+fi
 swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST" || recovery_failed "could not restore the previous launchd plist"
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
@@ -4002,6 +4018,9 @@ commit_install_transaction() {
     INSTALL_TX_ACTIVE=0
     disarm_install_recovery_agent \
       || die 70 "new install committed but interrupted-install recovery could not be disarmed"
+    if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && ! retire_replacement_candidate_provider_id; then
+      log "WARNING: install committed but replacement candidate retry marker could not be removed: $REPLACEMENT_CANDIDATE_DIR"
+    fi
     if ! rm -rf "$retired_recovery"; then
       log "WARNING: install committed but retired recovery data could not be removed: $retired_recovery"
     fi
@@ -4009,6 +4028,9 @@ commit_install_transaction() {
   fi
   INSTALL_TX_COMMITTED=1
   INSTALL_TX_ACTIVE=0
+  if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && ! retire_replacement_candidate_provider_id; then
+    log "WARNING: install committed but replacement candidate retry marker could not be removed: $REPLACEMENT_CANDIDATE_DIR"
+  fi
 }
 
 run() {
@@ -4124,7 +4146,16 @@ PY
 prepare_fresh_referral_code() {
   [ "$DRY_RUN" -eq 0 ] || return 0
   [ "$EMERGENCY_ROLLBACK" != "1" ] || return 0
-  restart_safe_incumbent_present && return 0
+  case "$REFERRAL_REPLACE_INCUMBENT" in
+    0|1) ;;
+    *) die 7 "MACPROVIDER_REFERRAL_REPLACE_INCUMBENT must be 0 or 1" ;;
+  esac
+  if restart_safe_incumbent_present; then
+    if [ "$REFERRAL_REPLACE_INCUMBENT" != "1" ]; then
+      return 0
+    fi
+    log "Fresh provider replacement requested; incumbent files and config stay unchanged until replacement cutover."
+  fi
   if [ -n "$REFERRAL_CODE_SOURCE_FILE" ]; then
     validate_supplied_referral_code_file
     FRESH_REFERRAL_BOOTSTRAP=1
@@ -4743,7 +4774,97 @@ choose_model() {
   esac
 }
 
+generate_fresh_provider_id() {
+  random_suffix="$(openssl rand -hex 16)" \
+    || die 7 "could not generate a high-entropy provider auth principal"
+  case "$random_suffix" in
+    *[!0-9a-f]*|'') die 7 "unexpected provider auth principal encoding" ;;
+  esac
+  [ "${#random_suffix}" -eq 32 ] || die 7 "unexpected provider auth principal length"
+  printf "mp-%s" "$random_suffix"
+}
+
+read_replacement_candidate_provider_id() {
+  [ -f "${REPLACEMENT_CANDIDATE_PROVIDER_ID_PATH:-}" ] || return 1
+  [ ! -L "$REPLACEMENT_CANDIDATE_PROVIDER_ID_PATH" ] \
+    || die 7 "stored replacement candidate provider_id must not be a symlink"
+  candidate="$(cat "$REPLACEMENT_CANDIDATE_PROVIDER_ID_PATH")" \
+    || die 7 "could not read stored replacement candidate provider_id"
+  case "$candidate" in
+    mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) die 7 "stored replacement candidate provider_id is invalid" ;;
+  esac
+  printf "%s" "$candidate"
+}
+
+persist_replacement_candidate_provider_id() {
+  [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] || return 0
+  [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ] || return 0
+  [ -n "${provider_id:-}" ] || die 7 "replacement candidate provider_id was not selected"
+  case "$provider_id" in
+    mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) die 7 "replacement candidate provider_id is invalid" ;;
+  esac
+  python3 - "$REPLACEMENT_CANDIDATE_DIR" "$REPLACEMENT_CANDIDATE_PROVIDER_ID_PATH" "$provider_id" <<'PY' \
+    || die 70 "could not persist replacement candidate provider identity for retry"
+import os
+import stat
+import sys
+import tempfile
+
+directory, output, provider_id = sys.argv[1:]
+os.makedirs(directory, mode=0o700, exist_ok=True)
+dir_info = os.stat(directory, follow_symlinks=False)
+if not stat.S_ISDIR(dir_info.st_mode) or dir_info.st_uid != os.getuid() or stat.S_IMODE(dir_info.st_mode) != 0o700:
+    raise SystemExit(70)
+fd, temporary = tempfile.mkstemp(prefix=".provider_id.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(provider_id)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, output)
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+retire_replacement_candidate_provider_id() {
+  [ -n "${REPLACEMENT_CANDIDATE_DIR:-}" ] || return 0
+  [ -e "$REPLACEMENT_CANDIDATE_DIR" ] || return 0
+  rm -rf "$REPLACEMENT_CANDIDATE_DIR" \
+    || return 1
+}
+
 choose_provider_id() {
+  if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ]; then
+    if [ -f "${REPLACEMENT_CANDIDATE_PROVIDER_ID_PATH:-}" ]; then
+      replacement_candidate="$(read_replacement_candidate_provider_id)"
+      live_provider_id_file="$(cat "$PROVIDER_ID_PATH" 2>/dev/null || true)"
+      live_config_provider_id="$(read_config_provider_id || true)"
+      if [ "$replacement_candidate" = "$live_provider_id_file" ] || [ "$replacement_candidate" = "$live_config_provider_id" ]; then
+        log "Discarding committed replacement candidate retry marker for active provider_id."
+        retire_replacement_candidate_provider_id \
+          || log "WARNING: committed replacement candidate retry marker could not be removed: $REPLACEMENT_CANDIDATE_DIR"
+        generate_fresh_provider_id
+        return
+      fi
+      printf "%s" "$replacement_candidate"
+      return
+    fi
+    generate_fresh_provider_id
+    return
+  fi
+
   if [ -f "$PROVIDER_ID_PATH" ]; then
     saved="$(cat "$PROVIDER_ID_PATH")"
     if [ -n "$saved" ]; then
@@ -4758,13 +4879,7 @@ choose_provider_id() {
     return
   fi
 
-  random_suffix="$(openssl rand -hex 16)" \
-    || die 7 "could not generate a high-entropy provider auth principal"
-  case "$random_suffix" in
-    *[!0-9a-f]*|'') die 7 "unexpected provider auth principal encoding" ;;
-  esac
-  [ "${#random_suffix}" -eq 32 ] || die 7 "unexpected provider auth principal length"
-  printf "mp-%s" "$random_suffix"
+  generate_fresh_provider_id
 }
 
 is_bootstrap_principal() {
@@ -5462,6 +5577,12 @@ prepare_staged_config() {
   [ -n "$staging_dir" ] || die 5 "release payload must be staged before config preparation"
   STAGED_CONFIG_PATH="$staging_dir/config.yaml"
   STAGED_PROVIDER_ID_PATH="$staging_dir/provider_id"
+  if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ]; then
+    log "Staging a fresh provider identity; incumbent config and CLI credential stay untouched until replacement cutover."
+    CONFIG_PATH="$STAGED_CONFIG_PATH"
+    PROVIDER_ID_PATH="$STAGED_PROVIDER_ID_PATH"
+    return
+  fi
   if [ -f "$LIVE_CONFIG_PATH" ]; then
     cp "$LIVE_CONFIG_PATH" "$STAGED_CONFIG_PATH" || die 5 "failed to stage existing provider config"
     chmod 600 "$STAGED_CONFIG_PATH" 2>/dev/null || true
@@ -5687,6 +5808,10 @@ publish_bootstrap_identity_for_rollback() {
     || return 0
   [ -z "$(read_config_provider_token_line || true)" ] \
     || die 70 "refusing to publish a bootstrap identity from a config that still contains a provider bearer"
+  if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ] && [ "${CUTOVER_STARTED:-0}" -eq 0 ]; then
+    log "Fresh provider replacement preflight redeemed the invite without publishing candidate identity over the incumbent config."
+    return 0
+  fi
   # Publish only the tokenless provider principal. The CLI keeps the bearer in
   # Keychain. Recovery moves this config aside and preserves its high-entropy
   # principal, so an interrupted referral request retries against the same
@@ -5711,6 +5836,7 @@ publish_bootstrap_identity_for_rollback() {
 }
 
 ensure_provider_credentials() {
+  local attempted_referral_bootstrap=0
   credential_already_present=0
   if [ -n "$(read_config_provider_token_line || true)" ]; then
     run_macprovider_cli_with_amfi_retry credentials import --config "$CONFIG_PATH" \
@@ -5749,7 +5875,11 @@ ensure_provider_credentials() {
     || die 70 "could not protect durable CLI onboarding state"
   bootstrap_auth_args=(bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH")
   if [ -n "${REFERRAL_CODE_SOURCE_FILE:-}" ]; then
+    attempted_referral_bootstrap=1
     bootstrap_auth_args+=(--referral-code-file "$REFERRAL_CODE_SOURCE_FILE")
+    if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ]; then
+      bootstrap_auth_args+=(--replace-referral-journal)
+    fi
     # The journal and Keychain credential are bound to this provider ID. Make
     # the tokenless identity rollback-durable before the request can redeem the
     # referral and persist a bearer, including abrupt response-loss exits.
@@ -5771,11 +5901,26 @@ ensure_provider_credentials() {
   esac
   run_macprovider_cli_with_amfi_retry credentials verify --config "$CONFIG_PATH" \
     || die 6 "provider credential bootstrap completed without restart-safe CLI custody"
+  if [ "$attempted_referral_bootstrap" -eq 1 ]; then
+    REFERRAL_BOOTSTRAP_COMPLETED=1
+    REFERRAL_CODE_SOURCE_FILE=""
+    CREATED_REFERRAL_CODE_SOURCE_FILE=0
+    return 0
+  fi
   if [ -z "${REFERRAL_CODE_SOURCE_FILE:-}" ]; then
     # Non-referral bootstrap cannot redeem admission before it returns, so keep
     # the existing post-success publication boundary.
     publish_bootstrap_identity_for_rollback
   fi
+}
+
+ensure_replacement_referral_preflight_before_cutover() {
+  [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] || return 0
+  [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ] || return 0
+  persist_replacement_candidate_provider_id
+  [ "${REFERRAL_BOOTSTRAP_COMPLETED:-0}" -eq 0 ] || return 0
+  log "Validating the fresh-provider invite before stopping the incumbent provider."
+  ensure_provider_credentials
 }
 
 submit_required_hardware_evidence() {
@@ -5902,6 +6047,10 @@ own_macprovider_cli_holds_live_port() {
 
 prefetch_upgrade_autotune_model() {
   upgrade_candidate_model_id="${AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID:-}"
+  if [ "${REFERRAL_REPLACE_INCUMBENT:-0}" = "1" ] && [ "${FRESH_REFERRAL_BOOTSTRAP:-0}" -eq 1 ]; then
+    log "Fresh provider replacement requested; skipping incumbent-model prefetch and running full fresh recommendation."
+    return 0
+  fi
   [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 0
   if [ -z "$upgrade_candidate_model_id" ]; then
     # The prior install carries no signed-catalog model identity, so it was
@@ -8606,6 +8755,7 @@ main() {
   LIFECYCLE_STAGED_CLI_TRUSTED=1
   prepare_staged_config
   enable_fresh_referral_receipts
+  ensure_replacement_referral_preflight_before_cutover
   if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
     [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] \
       || die 7 "emergency rollback requires an existing provider installation to restore"
@@ -8625,7 +8775,9 @@ main() {
     log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
     if ! use_fresh_recommendation_if_available; then
       if [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ]; then
-        AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="$(read_config_catalog_model_id || true)"
+        if [ "$REFERRAL_REPLACE_INCUMBENT" != "1" ]; then
+          AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID="$(read_config_catalog_model_id || true)"
+        fi
       fi
       write_config "$model" "$provider_id" "$coordinator_url"
       AUTOTUNE_RECOMMENDATION_REQUIRED=1

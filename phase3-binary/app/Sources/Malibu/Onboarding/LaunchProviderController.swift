@@ -29,6 +29,7 @@ final class LaunchProviderController: ObservableObject {
     @Published private(set) var referralAvailabilityChecked = false
 
     private var installProgressTask: Task<Void, Never>?
+    private let replacementConfirmed: Bool
     private let dependencies: Dependencies
 
     struct Dependencies {
@@ -38,6 +39,7 @@ final class LaunchProviderController: ObservableObject {
         var registerLoginItem: @MainActor () async throws -> Void
         var runCLIInstall: @MainActor (
             String?,
+            Bool,
             @escaping @Sendable @MainActor (String) -> Void
         ) async throws -> Void
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
@@ -58,8 +60,12 @@ final class LaunchProviderController: ObservableObject {
                     await LaunchProviderController.referralInputAvailableForCurrentInstall()
                 },
                 registerLoginItem: { try AppLoginItem.register() },
-                runCLIInstall: { referralCode, onLogLine in
-                    try await CLIInstallRunner.run(referralCode: referralCode, onLogLine: onLogLine)
+                runCLIInstall: { referralCode, replacingIncumbentProvider, onLogLine in
+                    try await CLIInstallRunner.run(
+                        referralCode: referralCode,
+                        replacingIncumbentProvider: replacingIncumbentProvider,
+                        onLogLine: onLogLine
+                    )
                 },
                 importCLIConfigAfterInstall: {
                     try await ProviderConfig.importExistingCLIConfig()
@@ -86,21 +92,16 @@ final class LaunchProviderController: ObservableObject {
         }
     }
 
-    init(agent: MalibuAgent? = nil, dependencies: Dependencies? = nil) {
+    init(
+        agent: MalibuAgent? = nil,
+        replacementConfirmed: Bool = false,
+        dependencies: Dependencies? = nil
+    ) {
+        self.replacementConfirmed = replacementConfirmed
         self.dependencies = dependencies ?? .live(agent: agent)
     }
 
     func launch() async {
-        if await dependencies.localInstallSucceeded() {
-            await finalizeExistingInstall(
-                logLine: "Background provider is already running locally. Connecting Malibu to it."
-            )
-            return
-        }
-        if await dependencies.restartSafeIncumbentPresent() {
-            await launchViaCLIInstall(referralCode: nil)
-            return
-        }
         let referralCode: String?
         do {
             referralCode = try ReferralOnboardingInput.normalize(referralInput)
@@ -108,7 +109,38 @@ final class LaunchProviderController: ObservableObject {
             stage = .failed(stage: "referral", retryable: true, message: error.localizedDescription)
             return
         }
-        guard let referralCode else {
+
+        if let referralCode {
+            if !(await dependencies.referralInputAvailable()) {
+                stage = .failed(
+                    stage: "referral",
+                    retryable: true,
+                    message: "Invite entry is unavailable with the currently installed provider software. Update Malibu and provider software, then retry."
+                )
+                return
+            }
+            if replacementConfirmed {
+                await launchViaCLIInstall(
+                    referralCode: referralCode,
+                    replacingIncumbentProvider: true
+                )
+                return
+            }
+            if await dependencies.localInstallSucceeded() {
+                await finalizeExistingInstall(
+                    logLine: "Background provider is already running locally. Connecting Malibu to it."
+                )
+                return
+            }
+            if await dependencies.restartSafeIncumbentPresent() {
+                await launchViaCLIInstall(referralCode: nil, replacingIncumbentProvider: false)
+                return
+            }
+            await launchViaCLIInstall(referralCode: referralCode, replacingIncumbentProvider: false)
+            return
+        }
+
+        if replacementConfirmed {
             stage = .failed(
                 stage: "referral",
                 retryable: true,
@@ -116,15 +148,22 @@ final class LaunchProviderController: ObservableObject {
             )
             return
         }
-        if !(await dependencies.referralInputAvailable()) {
-            stage = .failed(
-                stage: "referral",
-                retryable: true,
-                message: "Invite entry is unavailable with the currently installed provider software. Update Malibu and provider software, then retry."
+
+        if await dependencies.localInstallSucceeded() {
+            await finalizeExistingInstall(
+                logLine: "Background provider is already running locally. Connecting Malibu to it."
             )
             return
         }
-        await launchViaCLIInstall(referralCode: referralCode)
+        if await dependencies.restartSafeIncumbentPresent() {
+            await launchViaCLIInstall(referralCode: nil, replacingIncumbentProvider: false)
+            return
+        }
+        stage = .failed(
+            stage: "referral",
+            retryable: true,
+            message: CLIInstallRunner.Error.ReferralFailure.required.message
+        )
     }
 
     func refreshReferralInputAvailability() async {
@@ -146,6 +185,7 @@ final class LaunchProviderController: ObservableObject {
     }
 
     func refreshFromExistingInstall() async {
+        guard !replacementConfirmed else { return }
         switch stage {
         case .idle, .failed(stage: "cliInstall", _, _), .failed(stage: "identityImport", _, _):
             break
@@ -156,13 +196,13 @@ final class LaunchProviderController: ObservableObject {
         await finalizeExistingInstall(logLine: "Background provider is already running locally.")
     }
 
-    private func launchViaCLIInstall(referralCode: String?) async {
+    private func launchViaCLIInstall(referralCode: String?, replacingIncumbentProvider: Bool) async {
         beginInstallProgressWatch()
         defer { endInstallProgressWatch() }
         do {
             stage = .runningCLIInstall
             installLogLines = []
-            try await dependencies.runCLIInstall(referralCode) { [weak self] line in
+            try await dependencies.runCLIInstall(referralCode, replacingIncumbentProvider) { [weak self] line in
                 guard let self else { return }
                 self.installLogLines.append(LogTailBuffer.redacted(line))
                 if self.installLogLines.count > 200 {
@@ -487,6 +527,7 @@ struct StartupState: Equatable {
         _ decision: MigrationDecision,
         paths: ProviderPaths = .current,
         now: Date = Date(),
+        deferStartFreshBackup: Bool = false,
         importCredentialIntoCLI: (@Sendable (URL) async throws -> Void)? = nil
     ) async throws -> MigrationResult {
         switch decision {
@@ -502,6 +543,9 @@ struct StartupState: Equatable {
             let state = await StartupState.detect(paths: paths)
             return MigrationResult(route: state.route(), backupPath: nil)
         case .startFresh:
+            if deferStartFreshBackup {
+                return MigrationResult(route: .showOnboarding, backupPath: nil)
+            }
             let backup = try ProviderConfig.startFreshMovingCLIConfigAside(now: now, paths: paths)
             return MigrationResult(route: .showOnboarding, backupPath: backup?.path)
         case .cancel:

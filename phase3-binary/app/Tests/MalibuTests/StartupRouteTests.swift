@@ -85,6 +85,28 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
+    func testConfirmedReplacementDefersConfigBackupToInstallerTransaction() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        let result = try await StartupState.applyMigrationDecision(
+            .startFresh,
+            paths: paths,
+            deferStartFreshBackup: true
+        )
+
+        XCTAssertEqual(result.route, .showOnboarding)
+        XCTAssertNil(result.backupPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertEqual(
+            try String(contentsOf: paths.configFile),
+            "provider_id: p_old\nprovider_token: old-token\n"
+        )
+    }
+
     func testMigrationCancelTouchesNoFiles() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()
@@ -109,8 +131,8 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertTrue(MigrationDialogCopy.message.contains("payment history"))
         XCTAssertTrue(MigrationDialogCopy.message.contains("saved access"))
         XCTAssertTrue(MigrationDialogCopy.message.contains("local model setup"))
-        XCTAssertTrue(MigrationDialogCopy.message.contains("moves the old setup to a backup"))
         XCTAssertTrue(MigrationDialogCopy.message.contains("creates a new provider"))
+        XCTAssertTrue(MigrationDialogCopy.message.contains("restore the old setup"))
 
         let publicDialog = [
             MigrationDialogCopy.title,
@@ -151,7 +173,7 @@ final class StartupRouteTests: XCTestCase {
             StartFreshConfirmationCopy.cancelButton,
             StartFreshConfirmationCopy.startFreshButton,
         ].joined(separator: "\n").lowercased()
-        XCTAssertTrue(copy.contains("reversible backup"), copy)
+        XCTAssertTrue(copy.contains("unchanged until the new provider is ready"), copy)
         XCTAssertTrue(copy.contains("different identity"), copy)
         XCTAssertTrue(copy.contains("payment history"), copy)
         XCTAssertTrue(copy.contains("saved access"), copy)
