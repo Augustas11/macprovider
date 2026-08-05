@@ -39,6 +39,20 @@ SPEC016_PAYOUT_SPEC_ID = "SPEC-016"
 SPEC016_PAYOUT_REQUIREMENT_ID = "SPEC-016-R002"
 SPEC016_PAYOUT_EXECUTION_MODE = "candidate-derived-handler-only-conformance-harness"
 SPEC016_PAYOUT_STEP_IDS = {f"step-{index:02d}" for index in range(1, 12)}
+PROVIDER_PREBETA_JOURNEY_ID = "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+PROVIDER_PREBETA_EXECUTION_MODE = "physical-provider-prebeta-admission"
+PROVIDER_PREBETA_ARTIFACT_ID = "redacted-provider-prebeta-admission"
+PROVIDER_PREBETA_EVIDENCE_SCHEMA = "macprovider.provider-prebeta-admission-evidence.v1"
+PROVIDER_PREBETA_STEP_IDS = {
+    "step-01-private-prebeta-authorization",
+    "step-02-install-launch-identity",
+    "step-03-provider-registration-admission",
+    "step-04-catalog-autotune-readiness",
+    "step-05-hardware-evidence-verifier",
+    "step-06-provider-runtime-routing",
+    "step-07-buyer-serving-smoke",
+    "step-08-redaction-and-correlation",
+}
 TRUSTED_OPENSSL_CANDIDATES = (
     "/usr/bin/openssl",
     "/opt/homebrew/opt/openssl@3/bin/openssl",
@@ -514,6 +528,92 @@ def _validate_spec016_payout_artifact(root: Path, artifact: dict[str, Any], loca
         result.error(f"{location}.source", "SPEC-016 payout journey-result cannot promote candidate-only artifact content")
 
 
+def _validate_provider_prebeta_artifact(
+    root: Path,
+    artifact: dict[str, Any],
+    signed: dict[str, Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if artifact.get("id") != PROVIDER_PREBETA_ARTIFACT_ID:
+        result.error(f"{location}.id", f"must equal {PROVIDER_PREBETA_ARTIFACT_ID!r}")
+    source = artifact.get("source")
+    if not isinstance(source, str):
+        return
+    if not source.startswith("journeys/evidence/provider-prebeta-admission-") or not source.endswith(".redacted.json"):
+        result.error(f"{location}.source", "provider-prebeta journey-result artifact must be a provider-prebeta redacted evidence file")
+        return
+    artifact_path = _repository_path(root, source, f"{location}.source", result)
+    if artifact_path is None:
+        return
+    payload = _load_json(artifact_path, ValidationResult())
+    if not isinstance(payload, dict):
+        result.error(f"{location}.source", "provider-prebeta redacted evidence must be a JSON object")
+        return
+    if payload.get("schema_version") != PROVIDER_PREBETA_EVIDENCE_SCHEMA:
+        result.error(f"{location}.source.schema_version", f"must equal {PROVIDER_PREBETA_EVIDENCE_SCHEMA!r}")
+    if payload.get("journey_id") != PROVIDER_PREBETA_JOURNEY_ID:
+        result.error(f"{location}.source.journey_id", f"must equal {PROVIDER_PREBETA_JOURNEY_ID!r}")
+    payload_requirement_ids = _string_list(payload.get("requirement_ids"), f"{location}.source.requirement_ids", result, REQUIREMENT_ID_RE)
+    if payload_requirement_ids != signed.get("requirement_ids"):
+        result.error(f"{location}.source.requirement_ids", "must exactly match signed.requirement_ids")
+    repository = payload.get("repository")
+    signed_repository = signed.get("repository")
+    if _expect_object(repository, f"{location}.source.repository", result) and isinstance(signed_repository, dict):
+        _expect_keys(repository, {"name", "commit"}, {"name", "commit"}, f"{location}.source.repository", result)
+        if repository.get("name") != signed_repository.get("name"):
+            result.error(f"{location}.source.repository.name", "must match signed.repository.name")
+        if repository.get("commit") != signed_repository.get("commit"):
+            result.error(f"{location}.source.repository.commit", "must match signed.repository.commit")
+    if payload.get("captured_at") != signed.get("captured_at"):
+        result.error(f"{location}.source.captured_at", "must match signed.captured_at")
+    if payload.get("expires_at") != signed.get("expires_at"):
+        result.error(f"{location}.source.expires_at", "must match signed.expires_at")
+
+
+def _validate_provider_prebeta_journey_result(
+    root: Path,
+    signed: dict[str, Any],
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != PROVIDER_PREBETA_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {PROVIDER_PREBETA_JOURNEY_ID!r}")
+    if journeys != [PROVIDER_PREBETA_JOURNEY_ID]:
+        result.error(location, f"provider-prebeta requirement journeys must equal [{PROVIDER_PREBETA_JOURNEY_ID!r}]")
+    if signed.get("execution_mode") != PROVIDER_PREBETA_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {PROVIDER_PREBETA_EXECUTION_MODE!r}")
+
+    observed_step_ids: set[str] = set()
+    valid_step_count = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            continue
+        valid_step_count += 1
+        step_id = step["id"]
+        if step_id in observed_step_ids:
+            result.error(f"{location}.signed.steps[{index}].id", f"duplicate provider-prebeta physical step {step_id!r}")
+        observed_step_ids.add(step_id)
+    missing_steps = PROVIDER_PREBETA_STEP_IDS - observed_step_ids
+    unexpected_steps = observed_step_ids - PROVIDER_PREBETA_STEP_IDS
+    if missing_steps:
+        result.error(f"{location}.signed.steps", f"missing provider-prebeta physical steps: {sorted(missing_steps)}")
+    if unexpected_steps:
+        result.error(f"{location}.signed.steps", f"unexpected provider-prebeta physical steps: {sorted(unexpected_steps)}")
+    if valid_step_count != len(PROVIDER_PREBETA_STEP_IDS):
+        result.error(f"{location}.signed.steps", f"must contain exactly {len(PROVIDER_PREBETA_STEP_IDS)} provider-prebeta physical steps")
+
+    valid_artifacts = [artifact for artifact in artifacts if isinstance(artifact, dict)]
+    if len(valid_artifacts) != 1:
+        result.error(f"{location}.signed.artifacts", "provider-prebeta journey-result must contain exactly one redacted evidence artifact")
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict):
+            _validate_provider_prebeta_artifact(root, artifact, signed, f"{location}.signed.artifacts[{index}]", result)
+
+
 def _validate_spec016_payout_journey_result(
     root: Path,
     signed: dict[str, Any],
@@ -922,6 +1022,8 @@ def _validate_signed_journey_result(
         if requirement_id != SPEC016_PAYOUT_REQUIREMENT_ID:
             result.error(f"{location}.signed.requirement_ids", f"SPEC-016 payout journey-result may only promote {SPEC016_PAYOUT_REQUIREMENT_ID}")
         _validate_spec016_payout_journey_result(root, signed, source, journeys, artifact_records, steps, location, result)
+    if journey_id == PROVIDER_PREBETA_JOURNEY_ID:
+        _validate_provider_prebeta_journey_result(root, signed, [item for item in journeys if isinstance(item, str)], artifact_records, steps, location, result)
 
     return len(result.errors) == before
 
