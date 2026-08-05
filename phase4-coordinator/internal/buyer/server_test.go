@@ -1653,6 +1653,16 @@ func TestChatCompletionsRoutesCatalogKeyToHFModelID(t *testing.T) {
 	if hfRR.Code != http.StatusOK {
 		t.Fatalf("HF-id status = %d, body=%s", hfRR.Code, hfRR.Body.String())
 	}
+
+	pinnedRR := postChat(t, server, []byte(`{"model":"`+catalogKey+`","messages":[{"role":"user","content":"hello"}],"stream":false}`), http.Header{
+		"X-MacProvider-Provider": []string{"p1"},
+	})
+	if pinnedRR.Code != http.StatusOK {
+		t.Fatalf("pinned catalog-key status = %d, body=%s", pinnedRR.Code, pinnedRR.Body.String())
+	}
+	if pinnedRR.Header().Get("X-MacProvider-Provider") != "p1" {
+		t.Fatalf("pinned catalog-key provider header = %q", pinnedRR.Header().Get("X-MacProvider-Provider"))
+	}
 }
 
 func TestHTTPForwardingStripsReceiptFromProviderWithoutPublishedReceiptKey(t *testing.T) {
