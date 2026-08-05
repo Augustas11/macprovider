@@ -1298,7 +1298,7 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
-        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) applyHeartbeatLocked"
+        "phase4-coordinator/internal/pool/provider.go:type HeartbeatUpdate"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
