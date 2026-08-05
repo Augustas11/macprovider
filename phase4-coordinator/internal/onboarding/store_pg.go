@@ -151,6 +151,9 @@ func (s *PGStore) Smoke(ctx context.Context) error {
 	if _, err := s.db.ExecContext(timeout, `SELECT id, status, decision_reason, evidence_sha256 FROM hardware_verification_jobs LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke hardware_verification_jobs read: %w", err)
 	}
+	if _, err := s.db.ExecContext(timeout, `SELECT chip_normalized FROM chip_hardware_profiles LIMIT 0`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke chip_hardware_profiles read: %w", err)
+	}
 	// FIX 7 (round-8, issue #582): exercise the FULL LatestVerified admission join
 	// shape, including the EXISTS on hardware_verification_trust that the round-6
 	// live-trust re-check added (internal/autotune/evidence_pg.go). Without the trust
@@ -743,6 +746,7 @@ type WaitingTrustJob struct {
 	UnifiedMemoryGB      int
 	HardwareIdentityHash string
 	DecisionReason       string
+	ChipProfilePresent   bool
 	SubmittedAt          time.Time
 }
 
@@ -860,12 +864,19 @@ func (s *PGStore) ListWaitingTrustJobs(ctx context.Context, afterID int64, limit
 		afterID = 0
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, provider_id, chip, chip_normalized, unified_memory_gb,
-       COALESCE(evidence #>> '{hardware,hardware_identity_hash}', ''), decision_reason, submitted_at
-  FROM hardware_verification_jobs
- WHERE status = 'waiting_trust'
-   AND id > $1
- ORDER BY id ASC
+SELECT j.id, j.provider_id, j.chip, j.chip_normalized, j.unified_memory_gb,
+       COALESCE(j.evidence #>> '{hardware,hardware_identity_hash}', ''),
+       j.decision_reason,
+       EXISTS (
+         SELECT 1
+           FROM chip_hardware_profiles ch
+          WHERE ch.chip_normalized = j.chip_normalized
+       ) AS chip_profile_present,
+       j.submitted_at
+  FROM hardware_verification_jobs j
+ WHERE j.status = 'waiting_trust'
+   AND j.id > $1
+ ORDER BY j.id ASC
  LIMIT $2`, afterID, limit)
 	if err != nil {
 		return nil, err
@@ -882,6 +893,7 @@ SELECT id, provider_id, chip, chip_normalized, unified_memory_gb,
 			&job.UnifiedMemoryGB,
 			&job.HardwareIdentityHash,
 			&job.DecisionReason,
+			&job.ChipProfilePresent,
 			&job.SubmittedAt,
 		); err != nil {
 			return nil, err

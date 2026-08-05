@@ -40,6 +40,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{17, "autotune_current_hardware_gate_grants"},
 		{18, "apptrack_register_attempts"},
 		{19, "hardware_trust_operator_approval"},
+		{20, "waiting_trust_chip_profile_projection"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -76,7 +77,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants, hardwareTrustApproval, waitingTrustChipProfileProjection string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -103,10 +104,15 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			autotuneCurrentHardwareGateGrants = m.SQL
 		case "hardware_trust_operator_approval":
 			hardwareTrustApproval = m.SQL
+		case "waiting_trust_chip_profile_projection":
+			waitingTrustChipProfileProjection = m.SQL
 		}
 	}
 	if schema == "" {
 		t.Fatal("stats_tables migration body is empty")
+	}
+	if waitingTrustChipProfileProjection == "" {
+		t.Fatal("waiting_trust_chip_profile_projection migration body is empty")
 	}
 	// The forbidden-substring checks must scan code, not
 	// comments. The migration's prose comments document v0.1.7
@@ -592,6 +598,37 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	// hardware_verification_trust (asserted positively above) so the LatestVerified
 	// admission gate can re-check live trust. The anti-fraud boundary is the WRITE
 	// grants only (mustNotContain above), never the read.
+	waitingTrustChipProfileProjectionCode := stripSQLComments(waitingTrustChipProfileProjection)
+	mustContain(t, waitingTrustChipProfileProjectionCode,
+		"GRANT SELECT (chip_normalized) ON chip_hardware_profiles TO provider_onboarding",
+		"waiting-trust projection can evaluate chip-profile presence with a column-limited runtime-role grant")
+	mustNotContain(t, waitingTrustChipProfileProjectionCode,
+		"GRANT SELECT ON chip_hardware_profiles TO provider_onboarding",
+		"provider_onboarding must not receive table-wide chip profile read")
+	mustNotContain(t, waitingTrustChipProfileProjectionCode,
+		"INSERT, UPDATE ON chip_hardware_profiles TO provider_onboarding",
+		"provider_onboarding must not receive chip profile writes")
+	mustNotContain(t, waitingTrustChipProfileProjectionCode,
+		"GRANT INSERT ON chip_hardware_profiles TO provider_onboarding",
+		"provider_onboarding must not receive chip profile inserts")
+	mustNotContain(t, waitingTrustChipProfileProjectionCode,
+		"GRANT UPDATE ON chip_hardware_profiles TO provider_onboarding",
+		"provider_onboarding must not receive chip profile updates")
+	waitingTrustChipProfileProjectionDown, err := os.ReadFile("020_waiting_trust_chip_profile_projection.down.sql")
+	if err != nil {
+		t.Fatalf("read waiting-trust chip-profile projection rollback artifact: %v", err)
+	}
+	waitingTrustChipProfileProjectionDownSQL := string(waitingTrustChipProfileProjectionDown)
+	for _, needle := range []string{
+		"\\set ON_ERROR_STOP on",
+		"BEGIN;",
+		"REVOKE SELECT (chip_normalized) ON chip_hardware_profiles FROM provider_onboarding",
+		"DELETE FROM schema_migrations_spec017 WHERE version = 20;",
+		"COMMIT;",
+	} {
+		mustContain(t, waitingTrustChipProfileProjectionDownSQL, needle, "waiting-trust chip-profile projection rollback artifact")
+	}
+
 	hardwareTrustApprovalDown, err := os.ReadFile("019_hardware_trust_operator_approval.down.sql")
 	if err != nil {
 		t.Fatalf("read hardware trust approval rollback artifact: %v", err)
