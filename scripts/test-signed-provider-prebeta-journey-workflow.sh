@@ -33,6 +33,11 @@ required_workflow = [
     'git cat-file -e "${SOURCE_SHA_INPUT}^{commit}"',
     'git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA"',
     "evidence_sha=%s",
+    "requirement_slug=",
+    "tr '[:upper:]' '[:lower:]'",
+    "tr ',' '-'",
+    'envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.${requirement_slug}.journey-result.signed.json"',
+    'payload="$RUNNER_TEMP/provider-prebeta-journey-result-${requirement_slug}.unsigned.json"',
     "scripts/build-provider-prebeta-journey-result.py",
     '--evidence-sha "$EVIDENCE_SHA"',
     "scripts/verify-github-release-posture.sh",
@@ -43,6 +48,7 @@ required_workflow = [
     "scripts/check_spec_governance.py --base-ref origin/main",
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "retention-days: 1",
+    "signed-provider-prebeta-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}",
     "macprovider.signed-provider-prebeta-journey-promotion.v1",
     "JOURNEY-PROVIDER-PREBETA-ADMISSION",
 ]
@@ -63,6 +69,8 @@ if "cp \"$REDACTED\"" not in workflow or "cp \"$ENVELOPE\"" not in workflow or "
     raise SystemExit("workflow must export only the redacted evidence, signed envelope, and ledger")
 if "journey-result.unsigned.json" not in workflow:
     raise SystemExit("workflow must name the unsigned payload as non-committed runner-temp state")
+if 'envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"' in workflow:
+    raise SystemExit("workflow must not reuse one signed envelope path for every provider-prebeta requirement subset")
 if "pathlib.Path(\"journeys/evidence\").glob" not in workflow:
     raise SystemExit("workflow must check that non-promotable intermediates are absent")
 posture_index = workflow.find("scripts/verify-github-release-posture.sh")
