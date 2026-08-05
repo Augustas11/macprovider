@@ -3002,11 +3002,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
 					markProviderDone()
-					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
+					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
 				markProviderDone()
 				writeWSEndError(w, end)
-				attempt := requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
+				attempt := requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
 					attempt.FaultFlag = billing.FaultBreakerQualifying
 				}
@@ -3285,10 +3285,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
 					markProviderDone()
-					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
+					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: end.Status}
 				}
 				markProviderDone()
-				return wsForwardFailed, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
+				return wsForwardFailed, requestLogAttempt{Status: status, Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
 			markProviderDone()
 			commit()
@@ -3353,7 +3353,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if toolFinal.toolOpened && s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
-				attempt.Error = endErrorMessage(end)
+				attempt.Error = requestLogEndErrorMessage(end)
 				attempt.ErrorCode = spec001EndStatus(end.Status)
 				attempt.FaultFlag = billing.FaultBreakerQualifying
 				attempt.SettlementOutput = settlementTracker.outputAt(terminalStateFromAttempt(http.StatusOK, attempt.Error, attempt.ErrorCode), terminalTS)
@@ -3487,7 +3487,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
-				return wsForwardFailed, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+				return wsForwardFailed, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if !toolFinal.finalCloseOK() {
 				if s.streamingDowngrade != nil {
@@ -7126,6 +7126,18 @@ func endErrorMessage(end providerws.InferenceResponseEnd) string {
 		return end.Status
 	}
 	return "Provider failed during inference"
+}
+
+func requestLogEndErrorMessage(end providerws.InferenceResponseEnd) string {
+	status := endErrorMessage(end)
+	detail := sanitizeRequestLogText(end.Error)
+	if detail == "" {
+		return status
+	}
+	if status == "" || status == "Provider failed during inference" {
+		return detail
+	}
+	return status + ": " + detail
 }
 
 func requestIDForBuyerRequest() string {
