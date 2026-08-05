@@ -1110,6 +1110,380 @@ func TestRecoverLedger_QuarantinesExistingSplitMismatch(t *testing.T) {
 	}
 }
 
+func TestRecoverLedger_ExistingCreditUsesPersistedRateContract(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard["meta-llama/llama-3.2-3b-instruct"] = RateCardEntry{
+		PromptCreditsPerMtok:     13500,
+		CompletionCreditsPerMtok: 27000,
+	}
+	ts := time.Date(2026, 8, 5, 5, 11, 0, 0, time.UTC)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := int64(40), int64(34)
+	model := "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "historical-rate-contract",
+		AccountID:          "buyer-a",
+		Model:              model,
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      model,
+		Status:                     row.Status,
+		Stream:                     row.Stream,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  RateCardEntry{PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000},
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT gross_credits FROM ledger_request_credits WHERE request_id = ?`, row.RequestID); got != 54 {
+		t.Fatalf("gross_credits=%d want production-shaped default-rate amount 54", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0`, row.RequestID); got != 1 {
+		t.Fatalf("pre-recovery active rows=%d want 1", got)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "nightly_reconcile"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0 AND quarantine_reason IS NULL`, row.RequestID); got != 1 {
+		t.Fatalf("active rows after recovery=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT gross_credits FROM ledger_request_credits WHERE request_id = ?`, row.RequestID); got != 54 {
+		t.Fatalf("post-recovery gross_credits=%d want persisted-contract amount 54", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesUnknownPersistedRateContract(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, completion := int64(40), int64(34)
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "unknown-rate-contract",
+		AccountID:          "buyer-a",
+		Model:              "model-a",
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      row.Model,
+		Status:                     row.Status,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  RateFor(cfg.RateCard, row.Model),
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	tamperedRate := RateCardEntry{PromptCreditsPerMtok: 777777, CompletionCreditsPerMtok: 888888}
+	tampered := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone, tamperedRate, input.MultiplierPPM, input.ProviderShareBps)
+	requestCreditID := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id = ?`, row.RequestID)
+	if _, err := store.db.Exec(`
+	UPDATE ledger_request_credits
+	   SET prompt_rate_per_mtok = ?,
+	       completion_rate_per_mtok = ?,
+	       gross_credits = ?,
+	       provider_credits = ?
+	 WHERE id = ?`,
+		tamperedRate.PromptCreditsPerMtok,
+		tamperedRate.CompletionCreditsPerMtok,
+		tampered.GrossCredits,
+		tampered.ProviderCredits,
+		requestCreditID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_operator_credits SET gross_credits = ?, operator_credits = ? WHERE request_credit_id = ?`,
+		tampered.GrossCredits, tampered.OperatorCredits, requestCreditID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "nightly_reconcile"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`, row.RequestID); got != 1 {
+		t.Fatalf("quarantined rows after recovery=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT reconciliation_delta_credits FROM ledger_reconciliation_runs ORDER BY id DESC LIMIT 1`); got == 0 {
+		t.Fatal("reconciliation_delta_credits=0 want nonzero snapshot-authoritative delta for unknown-rate tamper")
+	}
+}
+
+func TestRecoverLedger_QuarantinesPersistedMultiplierShareDrift(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, completion := int64(40), int64(34)
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "historical-multiplier-share-contract",
+		AccountID:          "buyer-a",
+		Model:              "model-a",
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      row.Model,
+		Status:                     row.Status,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  RateFor(cfg.RateCard, row.Model),
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+
+	historicalMultiplier, historicalShare := int64(1500000), int64(8000)
+	replayed := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone, input.RateEntry, historicalMultiplier, historicalShare)
+	requestCreditID := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id = ?`, row.RequestID)
+	if _, err := store.db.Exec(`
+	UPDATE ledger_request_credits
+	   SET global_multiplier_ppm = ?,
+	       provider_share_bps = ?,
+	       gross_credits = ?,
+	       provider_credits = ?
+	 WHERE id = ?`,
+		historicalMultiplier,
+		historicalShare,
+		replayed.GrossCredits,
+		replayed.ProviderCredits,
+		requestCreditID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+	UPDATE ledger_operator_credits
+	   SET gross_credits = ?,
+	       operator_share_bps = ?,
+	       operator_credits = ?
+	 WHERE request_credit_id = ?`,
+		replayed.GrossCredits,
+		10000-historicalShare,
+		replayed.OperatorCredits,
+		requestCreditID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "nightly_reconcile"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`, row.RequestID); got != 1 {
+		t.Fatalf("quarantined rows after recovery=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesPostCutoffDefaultRateTamper(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard["llama-3.2-3b-instruct"] = RateCardEntry{
+		PromptCreditsPerMtok:     13500,
+		CompletionCreditsPerMtok: 27000,
+	}
+	ts := recoveryLegacyDefaultRateCutoffUTC.Add(time.Minute)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := int64(40), int64(34)
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "post-cutoff-default-rate-tamper",
+		AccountID:          "buyer-a",
+		Model:              "mlx-community/Llama-3.2-3B-Instruct-4bit",
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      row.Model,
+		Status:                     row.Status,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  RateFor(cfg.RateCard, row.Model),
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	defaultRate := cfg.RateCard["default"]
+	tampered := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone, defaultRate, input.MultiplierPPM, input.ProviderShareBps)
+	requestCreditID := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id = ?`, row.RequestID)
+	if _, err := store.db.Exec(`
+	UPDATE ledger_request_credits
+	   SET prompt_rate_per_mtok = ?,
+	       completion_rate_per_mtok = ?,
+	       gross_credits = ?,
+	       provider_credits = ?
+	 WHERE id = ?`,
+		defaultRate.PromptCreditsPerMtok,
+		defaultRate.CompletionCreditsPerMtok,
+		tampered.GrossCredits,
+		tampered.ProviderCredits,
+		requestCreditID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_operator_credits SET gross_credits = ?, operator_credits = ? WHERE request_credit_id = ?`,
+		tampered.GrossCredits, tampered.OperatorCredits, requestCreditID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "nightly_reconcile"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`, row.RequestID); got != 1 {
+		t.Fatalf("quarantined rows after recovery=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesPreCutoffNormalizedDefaultRateTamper(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard["llama-3.2-3b-instruct"] = RateCardEntry{
+		PromptCreditsPerMtok:     13500,
+		CompletionCreditsPerMtok: 27000,
+	}
+	ts := recoveryLegacyDefaultRateCutoffUTC.Add(-time.Minute)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := int64(40), int64(34)
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "pre-cutoff-normalized-default-rate-tamper",
+		AccountID:          "buyer-a",
+		Model:              "mlx-community/Llama-3.2-3B-Instruct-4bit",
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      row.Model,
+		Status:                     row.Status,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  RateFor(cfg.RateCard, row.Model),
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	defaultRate := cfg.RateCard["default"]
+	tampered := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone, defaultRate, input.MultiplierPPM, input.ProviderShareBps)
+	requestCreditID := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id = ?`, row.RequestID)
+	if _, err := store.db.Exec(`
+	UPDATE ledger_request_credits
+	   SET prompt_rate_per_mtok = ?,
+	       completion_rate_per_mtok = ?,
+	       gross_credits = ?,
+	       provider_credits = ?
+	 WHERE id = ?`,
+		defaultRate.PromptCreditsPerMtok,
+		defaultRate.CompletionCreditsPerMtok,
+		tampered.GrossCredits,
+		tampered.ProviderCredits,
+		requestCreditID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_operator_credits SET gross_credits = ?, operator_credits = ? WHERE request_credit_id = ?`,
+		tampered.GrossCredits, tampered.OperatorCredits, requestCreditID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "nightly_reconcile"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`, row.RequestID); got != 1 {
+		t.Fatalf("quarantined rows after recovery=%d want 1", got)
+	}
+}
+
 func TestRecoverLedger_QuarantinesExistingContractMismatch(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
