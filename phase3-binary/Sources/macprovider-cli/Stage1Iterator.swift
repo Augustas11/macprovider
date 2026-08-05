@@ -592,7 +592,10 @@ struct Stage1Prober: Stage1Probing {
             )
         }
 
-        // v1.7.7 Track A3: prewarm the subprocess before measuring TTFT.
+        // Issue #901 / v1.7.7 Track A3: prewarm the subprocess before
+        // measuring TTFT. The discard request is deliberately outside the
+        // sample arrays below, so ttftMS records warm serving latency rather
+        // than the first request's cold-start/JIT/prefill latency.
         // Pre-v1.7.7 the first (and only, since stage1Replicates=1) probeOnce
         // paid model-load + full 3200-token prefill wall-clock, producing
         // ttftMS in the 30-90s range on M-Base while catalog max_4k_ttft_ms
