@@ -392,6 +392,7 @@ func (b *billingRecorder) recordRow(
 			StickyMissReason:           b.state.stickyMissReason,
 			ConfigSnapshotID:           billingSnapshotID,
 			RateEntry:                  billing.RateFor(billingCfg.RateCard, row.Model),
+			RateCard:                   billingCfg.RateCard,
 			MultiplierPPM:              billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
 			ProviderShareBps:           billing.ParseShareBps(billingCfg.ProviderShare),
 			SettlementAccountScopeHash: billing.SettlementAccountScopeHash(accountScope),
