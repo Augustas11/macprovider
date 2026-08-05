@@ -115,7 +115,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 						in.EstimatedCompTokens,
 						usageFor(in.ErrorCode, in.EstimatedCompTokens),
 						in.FaultFlag,
-						in.RateEntry,
+						hotPathRateEntry(in),
 						in.MultiplierPPM,
 						in.ProviderShareBps,
 					)
@@ -158,7 +158,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 				in.EstimatedCompTokens,
 				usageFor(in.ErrorCode, in.EstimatedCompTokens),
 				in.FaultFlag,
-				in.RateEntry,
+				hotPathRateEntry(in),
 				in.MultiplierPPM,
 				in.ProviderShareBps,
 			)
@@ -179,7 +179,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 			in.EstimatedCompTokens,
 			usageFor(in.ErrorCode, in.EstimatedCompTokens),
 			in.FaultFlag,
-			in.RateEntry,
+			hotPathRateEntry(in),
 			in.MultiplierPPM,
 			in.ProviderShareBps,
 		)
@@ -209,6 +209,13 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		}
 		return nil
 	})
+}
+
+func hotPathRateEntry(in HotPathInput) RateCardEntry {
+	if in.RateCard != nil {
+		return RateFor(in.RateCard, in.Model)
+	}
+	return in.RateEntry
 }
 
 func normalizeCachedPromptTokens(in *HotPathInput) string {

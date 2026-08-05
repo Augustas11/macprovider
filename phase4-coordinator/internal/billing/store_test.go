@@ -306,6 +306,77 @@ SELECT prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens, gr
 	}
 }
 
+func TestWriteHotPath_UsesFullRateCardForServedAlias(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard = map[string]RateCardEntry{
+		"qwen3-8b": {
+			PromptCreditsPerMtok:     13500,
+			CompletionCreditsPerMtok: 27000,
+		},
+		"default": {
+			PromptCreditsPerMtok:     500000,
+			CompletionCreditsPerMtok: 1000000,
+		},
+	}
+	ts := recoveryLegacyDefaultRateCutoffUTC.Add(time.Hour)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion := int64(12), int64(8)
+	row := requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          "hotpath-served-alias-rate-card",
+		AccountID:          "buyer-a",
+		Model:              "mlx-community/Qwen3-8B-4bit",
+		ProviderAssignedID: "assigned-a",
+		PromptTokens:       &prompt,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID:                  row.RequestID,
+		AttemptN:                   0,
+		ProviderAssignedID:         row.ProviderAssignedID,
+		ProviderID:                 "provider-a",
+		Model:                      row.Model,
+		Status:                     row.Status,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  cfg.RateCard["default"],
+		RateCard:                   cfg.RateCard,
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(AccountScopeForSettlement(row.AccountID)),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	var promptRate, completionRate int64
+	if err := store.db.QueryRow(`
+SELECT prompt_rate_per_mtok, completion_rate_per_mtok
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 0`, row.RequestID).Scan(&promptRate, &completionRate); err != nil {
+		t.Fatal(err)
+	}
+	if promptRate != 13500 || completionRate != 27000 {
+		t.Fatalf("stored rates=%d/%d want normalized qwen3-8b 13500/27000", promptRate, completionRate)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1`, row.RequestID); got != 0 {
+		t.Fatalf("quarantined rows after recovery=%d want 0", got)
+	}
+}
+
 func TestRunSettlementUsesNanosecondOrderedTimestampText(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
