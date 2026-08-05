@@ -103,14 +103,18 @@ class FakeProductionResponse:
 
 
 class FakeProductionConnection:
+    instances = []
+
     def __init__(self, host, timeout):
         self.host = host
         self.timeout = timeout
         self.sock = None
         self.closed = False
+        self.__class__.instances.append(self)
 
     def request(self, method, target, headers):
         self.target = target
+        self.headers = headers
 
     def getresponse(self):
         return FakeProductionResponse()
@@ -258,6 +262,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(len(client.responses["https://example.test"]), 1)
 
     def test_production_adapter_uses_bounded_resolver_and_request_path(self):
+        FakeProductionConnection.instances = []
         with patch.object(engine.http.client, "HTTPSConnection", FakeProductionConnection):
             client = engine.UrllibHTTPClient(resolver=lambda timeout: ["127.0.0.1", "127.0.0.2"])
             response = client.get("https://openrouter.ai/api/v1/models", 1)
@@ -266,6 +271,18 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(response.body, b'{"data": []}')
         self.assertEqual(second_response.status, 200)
         self.assertEqual(client._next_address_index, 2)
+        self.assertNotIn("Authorization", FakeProductionConnection.instances[0].headers)
+
+    def test_production_adapter_sends_bearer_auth_only_when_configured(self):
+        FakeProductionConnection.instances = []
+        with patch.dict(engine.os.environ, {"OPENROUTER_API_KEY": "unit-test-token"}, clear=True):
+            with patch.object(engine.http.client, "HTTPSConnection", FakeProductionConnection):
+                client = engine.UrllibHTTPClient(resolver=lambda timeout: ["127.0.0.1"])
+                client.get("https://openrouter.ai/api/v1/models", 1)
+        self.assertEqual(
+            FakeProductionConnection.instances[0].headers["Authorization"],
+            "Bearer unit-test-token",
+        )
 
     def test_deadlines_and_invalid_timeouts_fail_closed(self):
         client = FakeHTTPClient({"https://example.test": [engine.HTTPResponse(200, b'{"data": []}', {})]})

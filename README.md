@@ -176,8 +176,11 @@ python3 scripts/openrouter_pricing_engine.py compute \
   --output-dir /var/tmp/openrouter-pricing
 ```
 
-The fetch command uses the rankings endpoint, model catalog, and each selected
-model's documented endpoints response. Production proposals require a complete
+The fetch command uses an explicitly unstable, undocumented frontend rankings
+endpoint for demand, plus the documented model catalog and each selected model's
+documented endpoints response. If the rankings dependency changes, fetch fails
+closed without a snapshot; operators must review and update the adapter rather
+than infer a fallback. Production proposals require a complete
 top-100 snapshot; `--top-n` below 100 is useful only for fetch-only diagnostics.
 It retries transient errors with bounded backoff, honors `Retry-After` for
 429s, and fails closed without writing a snapshot on a timeout, schema change,

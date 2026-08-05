@@ -83,10 +83,16 @@ class HTTPResponse:
 
 
 class UrllibHTTPClient:
-    """Small production adapter; tests provide an in-memory HTTP client."""
+    """Small production adapter; tests provide an in-memory HTTP client.
 
-    def __init__(self, resolver: Callable[[float], list[str]] | None = None):
+    ``OPENROUTER_API_KEY`` is optional so the tool can use an operator's
+    configured OpenRouter credential without ever placing that credential in
+    command-line arguments, artifacts, or error messages.
+    """
+
+    def __init__(self, resolver: Callable[[float], list[str]] | None = None, api_key: str | None = None):
         self._resolver = resolver or resolve_openrouter_addresses
+        self._api_key = os.environ.get("OPENROUTER_API_KEY") if api_key is None else api_key
         self._resolved_addresses: list[str] | None = None
         self._next_address_index = 0
 
@@ -129,7 +135,10 @@ class UrllibHTTPClient:
         watchdog.start()
         try:
             target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-            connection.request("GET", target, headers={"Accept": "application/json", "User-Agent": TOOL_VERSION})
+            headers = {"Accept": "application/json", "User-Agent": TOOL_VERSION}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+            connection.request("GET", target, headers=headers)
             response = connection.getresponse()
             if timed_out.is_set():
                 raise FetchError(f"wall-clock request deadline exceeded after {timeout_seconds} seconds")

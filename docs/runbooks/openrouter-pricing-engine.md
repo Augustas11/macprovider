@@ -24,16 +24,35 @@ python3 scripts/openrouter_pricing_engine.py compute \
 
 The commands are noninteractive and have useful exit codes, so an operator can
 schedule `fetch` and then `compute` externally. Do not schedule an apply step:
-there is intentionally no one in this tool.
+there is intentionally no apply mode in this tool.
 
 ## Sources and normalization
 
-The fetcher uses these public OpenRouter APIs:
+The fetcher uses one **undocumented frontend dependency** for demand and two
+documented OpenRouter API endpoints for catalog and pricing:
 
-- demand: `https://openrouter.ai/api/frontend/v1/rankings/models`;
-- catalog/schema cross-check: `https://openrouter.ai/api/v1/models`;
-- cheapest active provider price:
+- demand (unstable frontend dependency):
+  `https://openrouter.ai/api/frontend/v1/rankings/models`;
+- catalog/schema cross-check (documented): `https://openrouter.ai/api/v1/models`;
+- cheapest active provider price (documented):
   `https://openrouter.ai/api/v1/models/{model-id}/endpoints`.
+
+The rankings endpoint is not presented as a stable public API contract. If it
+becomes unavailable or its schema changes, `fetch` fails closed and emits no
+snapshot. The operator must stop the scheduled run, inspect and review the
+upstream change, then update this adapter or move to a documented demand source.
+The tool must not infer demand from catalog/pricing data or publish a guessed
+fallback snapshot.
+
+## Authentication
+
+Set `OPENROUTER_API_KEY` in the environment before running `fetch` to send the
+documented `Authorization: Bearer <token>` header to OpenRouter. An environment
+variable keeps the credential out of shell history, command-line process
+arguments, snapshots, proposals, and error output. It is optional for
+compatibility with currently unauthenticated responses, but operators should
+configure it for reliable product use. If unauthenticated access stops working,
+set the variable and rerun; a failed request still publishes nothing.
 
 Ranking records are aggregated by `model_permaslug`, sorted by completion-token
 volume, and reduced to the requested number of distinct models. Only the latest
@@ -131,8 +150,8 @@ The source envelopes and fields used by normalization have explicit allowlists.
 An unexpected field, required-field change, or type change fails closed rather
 than being ignored or guessed.
 
-`--timeout-seconds` is a finite, 1â€“60 second socket and wall-clock deadline
-for each request. `--generation-timeout-seconds` is a finite 1â€“3600 second
+`--timeout-seconds` is a finite, 1-60 second socket and wall-clock deadline
+for each request. `--generation-timeout-seconds` is a finite 1-3600 second
 deadline for the full fetch, including endpoint calls and retry backoff. A
 `Retry-After` value is parsed in either seconds or HTTP-date form and is never
 shortened: if waiting would pass the generation deadline, the run fails closed.
