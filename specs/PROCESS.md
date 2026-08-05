@@ -85,9 +85,13 @@ insufficient, a conformance state, and evidence. Allowed states are
 
 - `conformant` requires implementation mapping, a test or journey, reachable
   commit evidence for the code mappings, and current evidence with an expiry
-  date. Every mapped source and test file must still match that evidence
-  commit; a later file change invalidates the evidence even when its selector
-  text remains present.
+  date. Every mapped source and test selector fragment must match between the
+  evidence commit and the current tree. A later unrelated edit in the same file
+  does not invalidate evidence by itself, but selector body drift or removal
+  does.
+- A signed journey-result may promote a subset of requirement IDs covered by a
+  redacted physical evidence artifact. The signed IDs must all be present in
+  the source artifact; uncovered IDs are overclaims and fail validation.
 - `pending`, `blocked`, and `nonconformant` require an arbitration verdict,
   owner, and issue.
 - `not-applicable` requires a recorded rationale and owner.

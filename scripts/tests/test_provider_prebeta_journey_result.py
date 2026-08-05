@@ -175,6 +175,39 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256((root / EVIDENCE_SOURCE).read_bytes()).hexdigest(), artifact["sha256"])
         self.assertEqual("step-07-buyer-serving-smoke", payload["steps"][6]["id"])
 
+    def test_builder_allows_requirement_subset_covered_by_evidence(self) -> None:
+        def evidence_covers_two_requirements(evidence: dict) -> None:
+            evidence["requirement_ids"] = ["SPEC-010-R001", "SPEC-010-R002"]
+
+        directory, root, source_commit, evidence_commit = self.make_repo(evidence_covers_two_requirements)
+        self.addCleanup(directory.cleanup)
+        output = root / "payload.json"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--requirement-ids",
+                "SPEC-010-R001",
+                "--output",
+                str(output),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(["SPEC-010-R001"], payload["requirement_ids"])
+
     def test_signed_provider_prebeta_payload_passes_canonical_validator(self) -> None:
         directory, root, source_commit, evidence_commit = self.make_repo()
         self.addCleanup(directory.cleanup)
@@ -315,7 +348,156 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
                 result,
             )
         )
-        self.assertTrue(any("must exactly match signed.requirement_ids" in error for error in result.errors), result.errors)
+        self.assertTrue(any("must cover every signed requirement ID" in error for error in result.errors), result.errors)
+
+    def test_canonical_validator_rejects_signed_pass_when_source_artifact_failed(self) -> None:
+        directory, root, source_commit, evidence_commit = self.make_repo()
+        self.addCleanup(directory.cleanup)
+        private_key = generate_acceptance_key(root)
+        trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+        payload_path = root / "payload.json"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(BUILDER),
+                "--root",
+                str(root),
+                "--source-sha",
+                source_commit,
+                "--evidence-sha",
+                evidence_commit,
+                "--output",
+                str(payload_path),
+                EVIDENCE_SOURCE,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        evidence_path = root / EVIDENCE_SOURCE
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["result"]["status"] = "fail"
+        evidence["steps"][6]["status"] = "fail"
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        payload["artifacts"][0]["sha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        payload_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        envelope = root / "journeys" / "evidence" / "provider-prebeta-admission-demo.journey-result.signed.json"
+        env = os.environ.copy()
+        env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            raise unittest.SkipTest("openssl is required")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SIGNER),
+                "--root",
+                str(root),
+                "--input",
+                str(payload_path),
+                "--output",
+                str(envelope.relative_to(root)),
+                "--verified-at",
+                "2026-08-05T06:05:00Z",
+                "--openssl-bin",
+                openssl,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        result = ValidationResult()
+        self.assertFalse(
+            _validate_signed_journey_result(
+                root,
+                str(envelope.relative_to(root)),
+                "SPEC-010-R001",
+                ["JOURNEY-PROVIDER-PREBETA-ADMISSION"],
+                {source_commit},
+                trusted_hash,
+                openssl,
+                "provider-prebeta",
+                result,
+            )
+        )
+        self.assertTrue(any("source.result.status" in error for error in result.errors), result.errors)
+        self.assertTrue(any("source.steps" in error for error in result.errors), result.errors)
+
+    def test_canonical_validator_rejects_false_extra_source_redaction_flag(self) -> None:
+        def extra_redaction_failed(evidence: dict) -> None:
+            evidence["redaction"]["private_keys_redacted"] = False
+
+        directory, root, source_commit, evidence_commit = self.make_repo(extra_redaction_failed)
+        self.addCleanup(directory.cleanup)
+        private_key = generate_acceptance_key(root)
+        trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+        payload = dict(base_evidence(source_commit))
+        payload.update({
+            "schema_version": "macprovider.journey-result.v1",
+            "artifacts": [
+                {
+                    "id": "redacted-provider-prebeta-admission",
+                    "sha256": hashlib.sha256((root / EVIDENCE_SOURCE).read_bytes()).hexdigest(),
+                    "source": EVIDENCE_SOURCE,
+                }
+            ],
+            "execution_mode": "physical-provider-prebeta-admission",
+        })
+        payload["redaction"] = {
+            "secrets_redacted": True,
+            "operator_identity_redacted": True,
+            "local_account_names_redacted": True,
+        }
+        payload_path = root / "payload.json"
+        payload_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        envelope = root / "journeys" / "evidence" / "provider-prebeta-admission-demo.journey-result.signed.json"
+        env = os.environ.copy()
+        env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+        openssl = shutil.which("openssl")
+        if openssl is None:
+            raise unittest.SkipTest("openssl is required")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SIGNER),
+                "--root",
+                str(root),
+                "--input",
+                str(payload_path),
+                "--output",
+                str(envelope.relative_to(root)),
+                "--verified-at",
+                "2026-08-05T06:05:00Z",
+                "--openssl-bin",
+                openssl,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+        result = ValidationResult()
+        self.assertFalse(
+            _validate_signed_journey_result(
+                root,
+                str(envelope.relative_to(root)),
+                "SPEC-010-R001",
+                ["JOURNEY-PROVIDER-PREBETA-ADMISSION"],
+                {source_commit},
+                trusted_hash,
+                openssl,
+                "provider-prebeta",
+                result,
+            )
+        )
+        self.assertTrue(any("source.redaction.private_keys_redacted" in error for error in result.errors), result.errors)
 
     def test_builder_rejects_unmapped_requirement(self) -> None:
         def claim_unmapped_requirement(evidence: dict) -> None:
@@ -374,7 +556,7 @@ class ProviderPrebetaJourneyResultTests(unittest.TestCase):
         )
 
         self.assertNotEqual(0, completed.returncode)
-        self.assertIn("must exactly match evidence.requirement_ids", completed.stderr)
+        self.assertIn("must be covered by evidence.requirement_ids", completed.stderr)
 
     def test_builder_rejects_source_sha_that_differs_from_evidence_commit(self) -> None:
         directory, root, source_commit, evidence_commit = self.make_repo()

@@ -10,6 +10,7 @@ meaning from rendered prose.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import hashlib
 import json
@@ -43,7 +44,7 @@ PROVIDER_PREBETA_JOURNEY_ID = "JOURNEY-PROVIDER-PREBETA-ADMISSION"
 PROVIDER_PREBETA_EXECUTION_MODE = "physical-provider-prebeta-admission"
 PROVIDER_PREBETA_ARTIFACT_ID = "redacted-provider-prebeta-admission"
 PROVIDER_PREBETA_EVIDENCE_SCHEMA = "macprovider.provider-prebeta-admission-evidence.v1"
-PROVIDER_PREBETA_STEP_IDS = {
+PROVIDER_PREBETA_STEP_ID_ORDER = (
     "step-01-private-prebeta-authorization",
     "step-02-install-launch-identity",
     "step-03-provider-registration-admission",
@@ -52,7 +53,8 @@ PROVIDER_PREBETA_STEP_IDS = {
     "step-06-provider-runtime-routing",
     "step-07-buyer-serving-smoke",
     "step-08-redaction-and-correlation",
-}
+)
+PROVIDER_PREBETA_STEP_IDS = set(PROVIDER_PREBETA_STEP_ID_ORDER)
 TRUSTED_OPENSSL_CANDIDATES = (
     "/usr/bin/openssl",
     "/opt/homebrew/opt/openssl@3/bin/openssl",
@@ -350,7 +352,7 @@ def _validate_mapping_paths(root: Path, mappings: list[str], location: str, resu
             except UnicodeDecodeError as exc:
                 result.error(f"{location}[{index}]", f"mapped file is not UTF-8 text: {exc}")
             else:
-                if selector not in text:
+                if _mapping_selector_resolves(text, selector, file_part) is None:
                     result.error(f"{location}[{index}]", f"mapping selector {selector!r} does not resolve in {file_part!r}")
 
 
@@ -528,6 +530,65 @@ def _validate_spec016_payout_artifact(root: Path, artifact: dict[str, Any], loca
         result.error(f"{location}.source", "SPEC-016 payout journey-result cannot promote candidate-only artifact content")
 
 
+def _provider_prebeta_normalized_redaction(value: Any, location: str, result: ValidationResult) -> dict[str, bool] | None:
+    if not _expect_object(value, location, result):
+        return None
+    required = ("secrets_redacted", "operator_identity_redacted", "local_account_names_redacted")
+    output: dict[str, bool] = {}
+    for key in required:
+        if value.get(key) is not True:
+            result.error(f"{location}.{key}", "must be true")
+        else:
+            output[key] = True
+    for key, item in value.items():
+        if key.endswith("_redacted") and item is not True:
+            result.error(f"{location}.{key}", "must be true")
+    return output
+
+
+def _provider_prebeta_normalized_steps(value: Any, location: str, result: ValidationResult) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        result.error(location, "field 'steps' must be an array")
+        return []
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(value):
+        loc = f"{location}[{index}]"
+        if not _expect_object(item, loc, result):
+            continue
+        step_id = _string(item.get("id"), None, f"{loc}.id", result)
+        if step_id is None:
+            continue
+        if step_id in by_id:
+            result.error(f"{loc}.id", f"duplicate provider-prebeta physical step {step_id!r}")
+            continue
+        if step_id not in PROVIDER_PREBETA_STEP_IDS:
+            result.error(f"{loc}.id", f"unexpected provider-prebeta physical step {step_id!r}")
+        if item.get("status") != "pass":
+            result.error(f"{loc}.status", "must equal 'pass'")
+        assertion = _string(item.get("assertion"), None, f"{loc}.assertion", result)
+        artifacts = item.get("artifacts", [PROVIDER_PREBETA_ARTIFACT_ID])
+        artifact_ids = _string_list(artifacts, f"{loc}.artifacts", result)
+        if artifact_ids != [PROVIDER_PREBETA_ARTIFACT_ID]:
+            result.error(f"{loc}.artifacts", f"must reference {PROVIDER_PREBETA_ARTIFACT_ID!r}")
+        by_id[step_id] = {
+            "id": step_id,
+            "status": "pass",
+            "assertion": assertion,
+            "artifacts": [PROVIDER_PREBETA_ARTIFACT_ID],
+        }
+    missing_steps = PROVIDER_PREBETA_STEP_IDS - by_id.keys()
+    if missing_steps:
+        result.error(location, f"missing provider-prebeta physical steps: {sorted(missing_steps)}")
+    if len(by_id) != len(PROVIDER_PREBETA_STEP_IDS):
+        result.error(location, f"must contain exactly {len(PROVIDER_PREBETA_STEP_IDS)} provider-prebeta physical steps")
+    return [by_id[step_id] for step_id in PROVIDER_PREBETA_STEP_ID_ORDER if step_id in by_id]
+
+
+def _provider_prebeta_compare_signed_source(source_value: Any, signed_value: Any, location: str, result: ValidationResult) -> None:
+    if signed_value != source_value:
+        result.error(location, "must match provider-prebeta redacted evidence source")
+
+
 def _validate_provider_prebeta_artifact(
     root: Path,
     artifact: dict[str, Any],
@@ -555,8 +616,10 @@ def _validate_provider_prebeta_artifact(
     if payload.get("journey_id") != PROVIDER_PREBETA_JOURNEY_ID:
         result.error(f"{location}.source.journey_id", f"must equal {PROVIDER_PREBETA_JOURNEY_ID!r}")
     payload_requirement_ids = _string_list(payload.get("requirement_ids"), f"{location}.source.requirement_ids", result, REQUIREMENT_ID_RE)
-    if payload_requirement_ids != signed.get("requirement_ids"):
-        result.error(f"{location}.source.requirement_ids", "must exactly match signed.requirement_ids")
+    signed_requirement_ids = _string_list(signed.get("requirement_ids"), f"{location}.signed.requirement_ids", result, REQUIREMENT_ID_RE)
+    overclaimed = [item for item in signed_requirement_ids if item not in payload_requirement_ids]
+    if overclaimed:
+        result.error(f"{location}.source.requirement_ids", f"must cover every signed requirement ID: {overclaimed}")
     repository = payload.get("repository")
     signed_repository = signed.get("repository")
     if _expect_object(repository, f"{location}.source.repository", result) and isinstance(signed_repository, dict):
@@ -569,6 +632,27 @@ def _validate_provider_prebeta_artifact(
         result.error(f"{location}.source.captured_at", "must match signed.captured_at")
     if payload.get("expires_at") != signed.get("expires_at"):
         result.error(f"{location}.source.expires_at", "must match signed.expires_at")
+    _provider_prebeta_compare_signed_source(payload.get("run_id"), signed.get("run_id"), f"{location}.source.run_id", result)
+    for field_name in ("operator", "environment", "result"):
+        _provider_prebeta_compare_signed_source(
+            payload.get(field_name),
+            signed.get(field_name),
+            f"{location}.source.{field_name}",
+            result,
+        )
+    source_result = payload.get("result")
+    if _expect_object(source_result, f"{location}.source.result", result) and source_result.get("status") != "pass":
+        result.error(f"{location}.source.result.status", "must equal 'pass'")
+    source_steps = _provider_prebeta_normalized_steps(payload.get("steps"), f"{location}.source.steps", result)
+    signed_steps = _provider_prebeta_normalized_steps(signed.get("steps"), f"{location}.signed.steps", result)
+    _provider_prebeta_compare_signed_source(source_steps, signed_steps, f"{location}.source.steps", result)
+    source_redaction = _provider_prebeta_normalized_redaction(payload.get("redaction"), f"{location}.source.redaction", result)
+    signed_redaction = {
+        "secrets_redacted": signed.get("redaction", {}).get("secrets_redacted") if isinstance(signed.get("redaction"), dict) else None,
+        "operator_identity_redacted": signed.get("redaction", {}).get("operator_identity_redacted") if isinstance(signed.get("redaction"), dict) else None,
+        "local_account_names_redacted": signed.get("redaction", {}).get("local_account_names_redacted") if isinstance(signed.get("redaction"), dict) else None,
+    }
+    _provider_prebeta_compare_signed_source(source_redaction, signed_redaction, f"{location}.source.redaction", result)
 
 
 def _validate_provider_prebeta_journey_result(
@@ -1087,7 +1171,872 @@ def _signed_journey_result_satisfies(
     return False
 
 
-def _commit_file_matches_current(root: Path, commit: str, relative: str) -> bool:
+def _line_bounds(text: str, index: int) -> tuple[int, int]:
+    start = text.rfind("\n", 0, index) + 1
+    end = text.find("\n", index)
+    if end == -1:
+        end = len(text)
+    return start, end
+
+
+def _find_brace_block_end(text: str, open_brace: int) -> int | None:
+    depth = 0
+    index = open_brace
+    in_line_comment = False
+    in_block_comment = False
+    in_string: str | None = None
+    while index < len(text):
+        character = text[index]
+        next_character = text[index + 1] if index + 1 < len(text) else ""
+        if in_line_comment:
+            if character == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+        if in_block_comment:
+            if character == "*" and next_character == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if in_string is not None:
+            if character == "\\" and in_string != "`":
+                index += 2
+                continue
+            if character == in_string:
+                in_string = None
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if character == "/" and next_character == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if character in {'"', "'", "`"}:
+            in_string = character
+            index += 1
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                line_end = text.find("\n", index)
+                return len(text) if line_end == -1 else line_end
+        index += 1
+    return None
+
+
+def _shell_uncommented_line(line: str) -> str:
+    index = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    while index < len(line):
+        character = line[index]
+        if character == "\\" and not in_single:
+            index += 2
+            continue
+        if in_single:
+            if character == "'":
+                in_single = False
+            index += 1
+            continue
+        if in_double:
+            if character == '"':
+                in_double = False
+            elif character == "`":
+                in_backtick = not in_backtick
+            index += 1
+            continue
+        if in_backtick:
+            if character == "`":
+                in_backtick = False
+            index += 1
+            continue
+        if character == "'":
+            in_single = True
+        elif character == '"':
+            in_double = True
+        elif character == "`":
+            in_backtick = True
+        elif character == "#":
+            return line[:index]
+        index += 1
+    return line
+
+
+def _shell_mask_quoted(line: str) -> str:
+    chars = list(line)
+    index = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    while index < len(chars):
+        character = chars[index]
+        if character == "\\" and not in_single:
+            if index + 1 < len(chars):
+                chars[index] = " "
+                chars[index + 1] = " "
+            index += 2
+            continue
+        if in_single:
+            if character == "'":
+                in_single = False
+            chars[index] = " "
+            index += 1
+            continue
+        if in_double:
+            if character == '"':
+                in_double = False
+            chars[index] = " "
+            index += 1
+            continue
+        if in_backtick:
+            if character == "`":
+                in_backtick = False
+            chars[index] = " "
+            index += 1
+            continue
+        if character == "'":
+            in_single = True
+            chars[index] = " "
+        elif character == '"':
+            in_double = True
+            chars[index] = " "
+        elif character == "`":
+            in_backtick = True
+            chars[index] = " "
+        index += 1
+    return "".join(chars)
+
+
+def _shell_heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+    delimiters: list[tuple[str, bool]] = []
+    for match in re.finditer(r"<<(-)?\s*(?:'([^']+)'|\"([^\"]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))", line):
+        delimiters.append((match.group(2) or match.group(3) or match.group(4), bool(match.group(1))))
+    return delimiters
+
+
+def _shell_line_continues(line: str) -> bool:
+    return _shell_uncommented_line(line).rstrip().endswith("\\")
+
+
+def _shell_invokes_python(command: str) -> bool:
+    active = _shell_uncommented_line(command)
+    for segment in re.split(r"(?:^|\$\(|[;|&({])", active):
+        words = re.findall(r"[A-Za-z_][A-Za-z0-9_./=-]*", segment)
+        index = 0
+        while index < len(words) and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+            index += 1
+        if index < len(words) and words[index] in {"exec", "command"}:
+            index += 1
+        if index < len(words) and re.fullmatch(r"(?:python|python3|python3\.[0-9]+)", Path(words[index]).name):
+            return True
+    return False
+
+
+def _shell_materializes_script(command: str) -> bool:
+    active = _shell_uncommented_line(command)
+    if ">" not in active or "<<" not in active:
+        return False
+    targets = [
+        match.group(1) or match.group(2) or match.group(3)
+        for match in re.finditer(r"(?:^|\s)(?:>|>>)\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s<>&;|]+))", active)
+    ]
+    material_targets = [
+        target
+        for target in targets
+        if target not in {"/dev/null", "null"}
+        and (
+            "WATCHDOG_PATH" in target
+            or "watchdog" in target.lower()
+            or target.endswith((".sh", ".bash", ".zsh"))
+        )
+    ]
+    if not material_targets:
+        return False
+    for segment in re.split(r"(?:^|[;|&({])", active):
+        words = re.findall(r"[A-Za-z_][A-Za-z0-9_./=-]*", segment)
+        index = 0
+        while index < len(words) and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[index]):
+            index += 1
+        if index < len(words) and words[index] == "cat":
+            return True
+    return False
+
+
+def _find_shell_brace_block_end(text: str, open_brace: int) -> int | None:
+    line_start = text.rfind("\n", 0, open_brace) + 1
+    cursor = line_start
+    depth = 0
+    heredocs: list[tuple[str, bool]] = []
+    while cursor < len(text):
+        line_end = text.find("\n", cursor)
+        if line_end == -1:
+            line_end = len(text)
+            line = text[cursor:line_end]
+            next_cursor = line_end
+        else:
+            line = text[cursor:line_end]
+            next_cursor = line_end + 1
+        if heredocs:
+            delimiter, strip_tabs = heredocs[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                heredocs.pop(0)
+            cursor = next_cursor
+            continue
+        active_line = _shell_uncommented_line(line)
+        segment_start = max(0, open_brace - cursor) if cursor == line_start else 0
+        segment = active_line[segment_start:]
+        masked_segment = _shell_mask_quoted(segment)
+        for offset, character in enumerate(masked_segment, start=segment_start):
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                if depth == 0:
+                    return line_end
+                if depth < 0:
+                    return None
+        heredocs.extend(_shell_heredoc_delimiters(active_line))
+        cursor = next_cursor
+    return None
+
+
+def _line_before(text: str, index: int) -> str:
+    return text[text.rfind("\n", 0, index) + 1:index].strip()
+
+
+def _block_kind_for_open_brace(text: str, open_brace: int, suffix: str) -> str:
+    line = _line_before(text, open_brace)
+    if suffix == ".swift":
+        modifiers = r"(?:(?:private|public|internal|fileprivate|static|mutating|nonisolated|final|lazy|override|open|required|convenience)\s+)*"
+        if re.match(rf"{modifiers}(?:struct|enum|actor|class|extension)\b", line):
+            return "type"
+        if re.match(rf"{modifiers}(?:func|init)\b", line):
+            return "function"
+    if suffix == ".go":
+        if re.match(r"func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\(", line):
+            return "function"
+        if re.match(r"type\s+[A-Za-z_][A-Za-z0-9_]*\s+(?:struct|interface)\b", line):
+            return "type"
+    return "block"
+
+
+def _block_stack_at(text: str, limit: int, suffix: str) -> list[str]:
+    stack: list[str] = []
+    index = 0
+    in_line_comment = False
+    in_block_comment = False
+    in_string: str | None = None
+    while index < limit:
+        character = text[index]
+        next_character = text[index + 1] if index + 1 < limit else ""
+        if in_line_comment:
+            if character == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+        if in_block_comment:
+            if character == "*" and next_character == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if in_string is not None:
+            if character == "\\" and in_string != "`":
+                index += 2
+                continue
+            if character == in_string:
+                in_string = None
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if character == "/" and next_character == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if character in {'"', "'", "`"}:
+            in_string = character
+            index += 1
+            continue
+        if character == "{":
+            stack.append(_block_kind_for_open_brace(text, index, suffix))
+        elif character == "}" and stack:
+            stack.pop()
+        index += 1
+    return stack
+
+
+def _inactive_line_starts(text: str, suffix: str) -> set[int]:
+    if suffix == ".sh":
+        return set()
+    inactive: set[int] = set()
+    line_start = 0
+    index = 0
+    in_line_comment = False
+    in_block_comment = False
+    in_string: str | None = None
+    swift_inactive_depth = 0
+    while index < len(text):
+        if index == line_start:
+            line_end = text.find("\n", index)
+            if line_end == -1:
+                line_end = len(text)
+            line_text = text[index:line_end].strip()
+            if suffix == ".swift":
+                if swift_inactive_depth:
+                    inactive.add(line_start)
+                    if re.match(r"#if\b", line_text):
+                        swift_inactive_depth += 1
+                    elif re.match(r"#endif\b", line_text):
+                        swift_inactive_depth -= 1
+                elif re.match(r"#if\s+false\b", line_text):
+                    inactive.add(line_start)
+                    swift_inactive_depth = 1
+            if in_block_comment or in_string is not None:
+                inactive.add(line_start)
+        character = text[index]
+        next_character = text[index + 1] if index + 1 < len(text) else ""
+        if in_line_comment:
+            if character == "\n":
+                in_line_comment = False
+                line_start = index + 1
+            index += 1
+            continue
+        if in_block_comment:
+            if character == "*" and next_character == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                if character == "\n":
+                    line_start = index + 1
+                index += 1
+            continue
+        if in_string is not None:
+            if in_string == '"""' and text.startswith('"""', index):
+                in_string = None
+                index += 3
+                continue
+            if character == "\\" and in_string in {'"', "'"}:
+                index += 2
+                continue
+            if in_string != '"""' and character == in_string:
+                in_string = None
+            if character == "\n":
+                line_start = index + 1
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if character == "/" and next_character == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if suffix == ".swift" and text.startswith('"""', index):
+            in_string = '"""'
+            index += 3
+            continue
+        if character in {'"', "'", "`"}:
+            in_string = character
+            index += 1
+            continue
+        if character == "\n":
+            line_start = index + 1
+        index += 1
+    return inactive
+
+
+def _declaration_scope_allows(text: str, cursor: int, suffix: str) -> bool:
+    stack = _block_stack_at(text, cursor, suffix)
+    if suffix == ".go":
+        return not stack or stack == ["type"]
+    if suffix == ".swift":
+        return not stack or stack == ["type"]
+    return True
+
+
+def _declaration_may_have_brace_body(line: str, suffix: str) -> bool:
+    stripped = line.strip()
+    if suffix == ".go":
+        return bool(re.match(r"(?:func|type)\b", stripped))
+    modifiers = r"(?:(?:private|public|internal|fileprivate|static|mutating|nonisolated|final|lazy|override|open|required|convenience)\s+)*"
+    return bool(re.match(rf"{modifiers}(?:func|init|struct|enum|actor|class|extension)\b", stripped))
+
+
+def _find_balanced_initializer_end(text: str, start: int, line_end: int) -> int | None:
+    assignment = text.find("=", start, line_end)
+    if assignment == -1:
+        return None
+    pairs = {"[": "]", "(": ")", "{": "}"}
+    closers = {value: key for key, value in pairs.items()}
+    stack: list[str] = []
+    index = assignment + 1
+    in_line_comment = False
+    in_block_comment = False
+    in_string: str | None = None
+    while index < len(text):
+        character = text[index]
+        next_character = text[index + 1] if index + 1 < len(text) else ""
+        if in_line_comment:
+            if character == "\n":
+                in_line_comment = False
+            index += 1
+            continue
+        if in_block_comment:
+            if character == "*" and next_character == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if in_string is not None:
+            if character == "\\" and in_string != "`":
+                index += 2
+                continue
+            if character == in_string:
+                in_string = None
+            index += 1
+            continue
+        if character == "/" and next_character == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if character == "/" and next_character == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if character in {'"', "'", "`"}:
+            in_string = character
+            index += 1
+            continue
+        if character in pairs:
+            stack.append(character)
+        elif character in closers:
+            if stack and stack[-1] == closers[character]:
+                stack.pop()
+                if not stack:
+                    end = text.find("\n", index)
+                    return len(text) if end == -1 else end
+            elif not stack:
+                return None
+        elif character == "\n" and not stack:
+            return None
+        index += 1
+    return None
+
+
+def _extract_indented_block(text: str, line_start: int, line_end: int) -> str:
+    line = text[line_start:line_end]
+    stripped = line.lstrip(" ")
+    if not stripped.startswith(("def ", "async def ", "class ")):
+        return line.rstrip()
+    indent = len(line) - len(stripped)
+    end = line_end
+    cursor = line_end + 1 if line_end < len(text) else len(text)
+    while cursor < len(text):
+        next_end = text.find("\n", cursor)
+        if next_end == -1:
+            next_end = len(text)
+        next_line = text[cursor:next_end]
+        if next_line.strip():
+            next_indent = len(next_line) - len(next_line.lstrip(" "))
+            if next_indent <= indent:
+                break
+        end = next_end
+        cursor = next_end + 1 if next_end < len(text) else len(text)
+    return text[line_start:end].rstrip()
+
+
+def _python_selector_names(selector: str) -> set[str]:
+    names: set[str] = set()
+    stripped = selector.strip()
+    for prefix in ("async def ", "def ", "class "):
+        if stripped.startswith(prefix):
+            match = re.match(rf"{re.escape(prefix)}([A-Za-z_][A-Za-z0-9_]*)", stripped)
+            if match:
+                names.add(match.group(1))
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
+        names.add(stripped)
+    return names
+
+
+def _python_node_source(lines: list[str], node: ast.AST) -> str | None:
+    start_lineno = getattr(node, "lineno", None)
+    end_lineno = getattr(node, "end_lineno", None)
+    if not isinstance(start_lineno, int) or not isinstance(end_lineno, int):
+        return None
+    decorator_lines = [decorator.lineno for decorator in getattr(node, "decorator_list", [])]
+    if decorator_lines:
+        start_lineno = min(start_lineno, *decorator_lines)
+    return "\n".join(lines[start_lineno - 1:end_lineno]).rstrip()
+
+
+def _python_assigned_names(node: ast.AST) -> set[str]:
+    targets: list[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    elif isinstance(node, ast.AugAssign):
+        targets = [node.target]
+    names: set[str] = set()
+    for target in targets:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+    return names
+
+
+def _extract_embedded_python_mapping_fragments(text: str, selector: str, *, _depth: int = 0) -> list[str]:
+    selector_names = _python_selector_names(selector)
+    if not selector_names:
+        return []
+    stripped_selector = selector.strip()
+    if not stripped_selector.startswith(("def ", "async def ", "class ")):
+        return []
+    python_bodies: list[tuple[int, str]] = []
+    generated_shell_bodies: list[str] = []
+    logical_command_parts: list[str] = []
+    cursor = 0
+    heredocs: list[tuple[str, bool, bool, bool, int, list[str]]] = []
+    while cursor < len(text):
+        line_end = text.find("\n", cursor)
+        if line_end == -1:
+            line_end = len(text)
+        line = text[cursor:line_end]
+        next_cursor = line_end + 1 if line_end < len(text) else len(text)
+        if heredocs:
+            delimiter, strip_tabs, is_python, is_generated_shell, body_start, body_lines = heredocs[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                if is_python:
+                    python_bodies.append((body_start, "\n".join(body_lines)))
+                elif is_generated_shell:
+                    generated_shell_bodies.append("\n".join(body_lines))
+                heredocs.pop(0)
+            else:
+                body_lines.append(line)
+            cursor = next_cursor
+            continue
+        active_line = _shell_uncommented_line(line)
+        command_context = "\n".join([*logical_command_parts, active_line])
+        command_is_python = _shell_invokes_python(active_line) or _shell_invokes_python(command_context)
+        command_is_generated_shell = _shell_materializes_script(active_line) or _shell_materializes_script(command_context)
+        for delimiter, strip_tabs in _shell_heredoc_delimiters(active_line):
+            heredocs.append((delimiter, strip_tabs, command_is_python, command_is_generated_shell, next_cursor, []))
+        if _shell_line_continues(line):
+            logical_command_parts.append(active_line.rstrip()[:-1])
+        else:
+            logical_command_parts = []
+        cursor = next_cursor
+    fragments: list[str] = []
+    for body_start, body in python_bodies:
+        cursor = 0
+        while cursor < len(body):
+            line_end = body.find("\n", cursor)
+            if line_end == -1:
+                line_end = len(body)
+            line = body[cursor:line_end]
+            stripped = line.lstrip(" ")
+            if stripped.startswith(("def ", "async def ", "class ")):
+                match = re.match(r"(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", stripped)
+                if match and match.group(1) in selector_names:
+                    fragments.append(_extract_indented_block(body, cursor, line_end))
+            cursor = line_end + 1
+    if _depth < 3:
+        for shell_body in generated_shell_bodies:
+            fragments.extend(_extract_embedded_python_mapping_fragments(shell_body, selector, _depth=_depth + 1))
+    return fragments
+
+
+def _embedded_python_selector_requires_declaration(selector: str) -> bool:
+    return selector.strip().startswith(("def ", "async def ", "class "))
+
+
+def _extract_python_mapping_fragment(text: str, selector: str) -> str | None:
+    selector_names = _python_selector_names(selector)
+    if not selector_names:
+        return None
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    lines = text.splitlines()
+    fragments: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in selector_names:
+            fragment = _python_node_source(lines, node)
+            if fragment is not None:
+                fragments.append(fragment)
+        if _python_assigned_names(node) & selector_names:
+            fragment = _python_node_source(lines, node)
+            if fragment is not None:
+                fragments.append(fragment)
+    if len(fragments) != 1:
+        return None
+    return fragments[0]
+
+
+def _selector_identifier(selector: str) -> str | None:
+    stripped = selector.strip()
+    for pattern in (
+        r"(?:func|type|var|const)\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)",
+        r"(?:static\s+)?(?:func|let|var|struct|enum|actor|class)\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"([A-Za-z_][A-Za-z0-9_]*)\s+[^=]+",
+    ):
+        match = re.search(pattern, stripped)
+        if match:
+            return match.group(1)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
+        return stripped
+    return None
+
+
+def _go_build_context(text: str) -> str:
+    context: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        line_end = text.find("\n", cursor)
+        if line_end == -1:
+            line_end = len(text)
+        line = text[cursor:line_end]
+        stripped = line.strip()
+        if stripped.startswith("package "):
+            break
+        if stripped.startswith("//go:build ") or stripped.startswith("// +build "):
+            context.append(line.rstrip())
+        cursor = line_end + 1
+    return "\n".join(context)
+
+
+def _swift_conditional_context_at(text: str, limit: int) -> str:
+    inactive_lines = _inactive_line_starts(text, ".swift")
+    stack: list[str] = []
+    cursor = 0
+    while cursor < limit:
+        line_end = text.find("\n", cursor)
+        if line_end == -1 or line_end > limit:
+            line_end = limit
+        line = text[cursor:line_end]
+        stripped = line.strip()
+        if cursor not in inactive_lines and stripped.startswith("#"):
+            if re.match(r"#if\b", stripped):
+                stack.append(line.rstrip())
+            elif re.match(r"#(?:elseif|else)\b", stripped):
+                if stack:
+                    stack[-1] = line.rstrip()
+            elif re.match(r"#endif\b", stripped):
+                if stack:
+                    stack.pop()
+        if line_end >= limit or line_end == len(text):
+            break
+        cursor = line_end + 1
+    return "\n".join(stack)
+
+
+def _declaration_build_context(text: str, cursor: int, suffix: str) -> str:
+    if suffix == ".go":
+        return _go_build_context(text)
+    if suffix == ".swift":
+        return _swift_conditional_context_at(text, cursor)
+    return ""
+
+
+def _fragment_with_context(context: str, fragment: str) -> str:
+    if not context:
+        return fragment
+    return f"{context}\n{fragment}"
+
+
+def _go_declaration_line_matches(line: str, selector: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith(("//", "/*", "*")):
+        return False
+    selector_stripped = selector.strip()
+    if re.match(r"(?:func|type|var|const)\s+", selector_stripped):
+        return re.sub(r"\s+", " ", stripped).startswith(re.sub(r"\s+", " ", selector_stripped))
+    identifier = _selector_identifier(selector)
+    if identifier is None:
+        return False
+    escaped = re.escape(identifier)
+    return any(
+        re.match(pattern, stripped)
+        for pattern in (
+            rf"func\s+(?:\([^)]*\)\s*)?{escaped}\b\s*\(",
+            rf"type\s+{escaped}\b",
+            rf"(?:var|const)\s+{escaped}\b",
+            rf"{escaped}\b\s*=",
+            rf"{escaped}\b\s+[^=]+$",
+        )
+    )
+
+
+def _swift_declaration_line_matches(line: str, selector: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith(("//", "/*", "*")):
+        return False
+    selector_stripped = selector.strip()
+    modifiers = r"(?:(?:private|public|internal|fileprivate|static|mutating|nonisolated|final|lazy|override|open|required|convenience)\s+)*"
+    if re.match(rf"{modifiers}(?:func|let|var|struct|enum|actor|class)\s+", selector_stripped):
+        return re.sub(r"\s+", " ", stripped).startswith(re.sub(r"\s+", " ", selector_stripped))
+    identifier = _selector_identifier(selector)
+    if identifier is None:
+        return False
+    escaped = re.escape(identifier)
+    return any(
+        re.match(pattern, stripped)
+        for pattern in (
+            rf"{modifiers}func\s+{escaped}\b\s*\(",
+            rf"{modifiers}(?:let|var)\s+{escaped}\b",
+            rf"{modifiers}(?:struct|enum|actor|class)\s+{escaped}\b",
+        )
+    )
+
+
+def _extract_declaration_fragment(text: str, selector: str, relative: str) -> str | None:
+    suffix = Path(relative).suffix
+    matcher = _go_declaration_line_matches if suffix == ".go" else _swift_declaration_line_matches
+    inactive_lines = _inactive_line_starts(text, suffix)
+    fragments: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        line_end = text.find("\n", cursor)
+        if line_end == -1:
+            line_end = len(text)
+        line = text[cursor:line_end]
+        if cursor not in inactive_lines and matcher(line, selector) and _declaration_scope_allows(text, cursor, suffix):
+            context = _declaration_build_context(text, cursor, suffix)
+            if _declaration_may_have_brace_body(line, suffix):
+                declaration_window_end = min(len(text), line_end + 1024)
+                open_brace = text.find("{", cursor, declaration_window_end)
+                if open_brace != -1:
+                    block_end = _find_brace_block_end(text, open_brace)
+                    if block_end is not None:
+                        fragments.append(_fragment_with_context(context, text[cursor:block_end].rstrip()))
+                        cursor = line_end + 1
+                        continue
+            balanced_end = _find_balanced_initializer_end(text, cursor, line_end)
+            if balanced_end is not None:
+                fragments.append(_fragment_with_context(context, text[cursor:balanced_end].rstrip()))
+            else:
+                fragments.append(_fragment_with_context(context, line.rstrip()))
+        cursor = line_end + 1
+    if len(fragments) != 1:
+        return None
+    return fragments[0]
+
+
+def _shell_selector_name(selector: str) -> str | None:
+    stripped = selector.strip()
+    for pattern in (
+        r"function\s+([A-Za-z_][A-Za-z0-9_]*)",
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)",
+    ):
+        match = re.fullmatch(pattern, stripped)
+        if match:
+            return match.group(1)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
+        return stripped
+    return None
+
+
+def _shell_selector_requires_function(selector: str) -> bool:
+    stripped = selector.strip()
+    return bool(re.fullmatch(r"function\s+[A-Za-z_][A-Za-z0-9_]*", stripped) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)", stripped))
+
+
+def _extract_shell_mapping_fragments(text: str, selector: str) -> list[str]:
+    name = _shell_selector_name(selector)
+    if name is None:
+        return []
+    inactive_lines = _inactive_line_starts(text, ".sh")
+    escaped = re.escape(name)
+    fragments: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        line_end = text.find("\n", cursor)
+        if line_end == -1:
+            line_end = len(text)
+        line = text[cursor:line_end]
+        stripped = line.strip()
+        if (
+            cursor not in inactive_lines
+            and not stripped.startswith("#")
+            and re.match(rf"(?:function\s+{escaped}\b|{escaped}\s*\(\s*\))", stripped)
+        ):
+            open_brace = text.find("{", cursor, min(len(text), line_end + 256))
+            if open_brace == -1:
+                fragments.append(line.rstrip())
+            else:
+                block_end = _find_shell_brace_block_end(text, open_brace)
+                if block_end is not None:
+                    fragments.append(text[cursor:block_end].rstrip())
+        cursor = line_end + 1
+    return fragments
+
+
+def _extract_shell_mapping_fragment(text: str, selector: str) -> str | None:
+    fragments = _extract_shell_mapping_fragments(text, selector)
+    if len(fragments) != 1:
+        return None
+    return fragments[0]
+
+
+def _extract_text_anchor_fragment(text: str, selector: str) -> str | None:
+    index = text.find(selector)
+    if index == -1:
+        return None
+    line_start, line_end = _line_bounds(text, index)
+    return text[line_start:line_end].rstrip()
+
+
+def _extract_mapping_fragment(text: str, selector: str, relative: str) -> str | None:
+    suffix = Path(relative).suffix
+    if suffix == ".py":
+        return _extract_python_mapping_fragment(text, selector)
+    if suffix in {".go", ".swift"}:
+        return _extract_declaration_fragment(text, selector, relative)
+    if suffix == ".sh":
+        function_fragments = _extract_shell_mapping_fragments(text, selector)
+        if len(function_fragments) == 1:
+            return function_fragments[0]
+        if function_fragments or _shell_selector_requires_function(selector):
+            return None
+        embedded_python_fragments = _extract_embedded_python_mapping_fragments(text, selector)
+        if len(embedded_python_fragments) == 1:
+            return embedded_python_fragments[0]
+        if embedded_python_fragments or _embedded_python_selector_requires_declaration(selector):
+            return None
+        return _extract_text_anchor_fragment(text, selector)
+    return _extract_text_anchor_fragment(text, selector)
+
+
+def _mapping_selector_resolves(text: str, selector: str, relative: str) -> str | None:
+    return _extract_mapping_fragment(text, selector, relative)
+
+
+def _commit_mapping_selector_matches_current(root: Path, commit: str, mapping: str) -> bool:
+    relative = _mapping_file(mapping)
+    selector = _mapping_selector(mapping)
+    if not selector:
+        return False
+    try:
+        current_path = (root / relative).resolve()
+        current_path.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
     completed = subprocess.run(
         ["git", "show", f"{commit}:{relative}"],
         cwd=root,
@@ -1097,10 +2046,13 @@ def _commit_file_matches_current(root: Path, commit: str, relative: str) -> bool
     if completed.returncode != 0:
         return False
     try:
-        current = (root / relative).read_bytes()
-    except OSError:
+        committed = completed.stdout.decode("utf-8")
+        current = current_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return False
-    return completed.stdout == current
+    committed_fragment = _extract_mapping_fragment(committed, selector, relative)
+    current_fragment = _extract_mapping_fragment(current, selector, relative)
+    return committed_fragment is not None and committed_fragment == current_fragment
 
 
 def _validate_evidence_list(root: Path, value: Any, location: str, result: ValidationResult) -> None:
@@ -1457,8 +2409,9 @@ def _validate_conformance_schema(root: Path, conformance: Any, result: Validatio
             for commit in commits:
                 for mapping in implementation + tests:
                     mapped_file = _mapping_file(mapping)
-                    if not _commit_file_matches_current(root, commit, mapped_file):
-                        result.error(loc, f"commit evidence {commit} does not match current mapped file {mapped_file!r}")
+                    selector = _mapping_selector(mapping)
+                    if not _commit_mapping_selector_matches_current(root, commit, mapping):
+                        result.error(loc, f"commit evidence {commit} does not match current mapped selector fragment {selector!r} in {mapped_file!r}")
     return [item for item in specs if isinstance(item, dict)], [item for item in requirements if isinstance(item, dict)]
 
 

@@ -1173,7 +1173,7 @@
       "implementation": [
         "phase4-coordinator/internal/requestlog/store.go:Row",
         "phase4-coordinator/internal/buyer/phase_timing.go:requestLogTTFTMs",
-        "phase4-coordinator/internal/buyer/billing_recorder.go:record"
+        "phase4-coordinator/internal/buyer/billing_recorder.go:recordRow"
       ],
       "tests": [
         "phase4-coordinator/internal/requestlog/store_test.go::TestRequestLogMigratesExistingTable",
@@ -1240,7 +1240,7 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let snapshotManifestV1",
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:verifiedModelArtifactSHA256",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:verifiedCatalogArtifactSHA256",
         "phase4-coordinator/internal/modelidentity/identity.go:SnapshotManifestV1"
       ],
       "tests": [
@@ -1290,7 +1290,7 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
-        "phase4-coordinator/internal/pool/provider.go:WeightsManifestSHA256 string"
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) applyHeartbeatLocked"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash",
@@ -1522,11 +1522,11 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:applyValidatedUpdate",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:waitForLocalHealthIfManaged",
-        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:writeSuccessSentinel",
+        "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:func writeSuccessSentinel(binaryURL: URL, marker: AutoUpdatePendingMarker)",
         "phase3-binary/Sources/macprovider-cli/AutoUpdateMarker.swift:readSuccessSentinel",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:localSignedSetRecoveryAllowed",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:commitPendingAutoupdateAfterServingProof",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:runStartupAutoupdateRecovery"
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func runStartupAutoupdateRecovery()"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateTests.swift::testReadinessFailureRollsBackReplacement",
@@ -1569,7 +1569,7 @@
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:waitForStableLocalAutoupdateHealth",
         "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:fenceAuthorizedSelfUpdateReloadJobsAtStartup",
         "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:recoverAdoptedStartupHandoff",
-        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:launchdServiceProcessID",
+        "phase3-binary/Sources/macprovider-cli/ProviderLifecycleLease.swift:static func launchdServiceProcessID",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:fenceProviderReloadLaunchdJobs",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:launchctlServiceLoadedOrThrow",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:providerReloadLaunchAgentData",
@@ -1687,7 +1687,7 @@
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
         "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:static func donorModeApplyWarning",
-        "phase3-binary/dist/install.sh:run_autotune_recommend_apply"
+        "phase3-binary/dist/install.sh:run_autotune_recommend_apply()"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testRecommendationJSONCarriesBenchGateProvenanceAndDrift",
@@ -1829,7 +1829,7 @@
       "implementation": [
         "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
         "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:referral_fragment_links_v1",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:localStatusCapabilities",
         "phase3-binary/app/Sources/Malibu/Agent/AgentSnapshot.swift:hasTrustedReferralBoundary"
       ],
       "tests": [
@@ -1984,7 +1984,7 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func diagnosticStatusPayloadForTest",
-        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func sendDiagnosticStatus",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:private func sendDiagnosticStatus",
         "phase4-coordinator/internal/ws/messages.go:func ParseDiagnosticStatus",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handleDiagnosticStatus",
         "phase4-coordinator/internal/providerevents/store.go:func (s *SQLiteStore) UpsertLastKnown",

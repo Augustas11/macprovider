@@ -70,8 +70,11 @@ in `CONFORMANCE.json` and includes:
 Mappings use `path:symbol` or `path::test_name` and the selector must resolve in
 the named file. A `sha256:` evidence artifact also names its repository-relative
 source file; commit evidence uses `source: null`. Commit evidence remains
-current only while every mapped implementation and test file matches the
-evidence commit.
+current only while every mapped implementation and test selector fragment
+matches between the evidence commit and the current tree.
+For physical journey promotion, one redacted evidence artifact may cover a
+superset of requirements, but the signed journey-result may claim only IDs
+present in that artifact.
 
 ## 5. Open gaps
 
