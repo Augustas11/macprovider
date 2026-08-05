@@ -18,7 +18,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.5.1 | normative | pending | pending: 1 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
-| SPEC-010 | Provider Model Catalog | 1.6 | normative | pending | conformant: 1, pending: 5 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
+| SPEC-010 | Provider Model Catalog | 1.6 | normative | pending | conformant: 2, pending: 4 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | normative | pending | pending corpus migration | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `macprovider-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |

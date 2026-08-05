@@ -1,0 +1,119 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEQCIC52pXGgkc6x/2mOLAbdcqNnzYjPaeEDw4xsmrTiFPPWAiAawJRmwR4hEjWTAGFLZuPhpGplJ2g2Uk5BO9Bm2cdwRw==",
+      "signed_sha256": "3ec88276054560da6c44d76b87874c3af752b26bf2b6078dc680c86f43b6ff17",
+      "verified_at": "2026-08-05T11:01:52Z",
+      "verifier": ".github/workflows/promote-signed-provider-prebeta-journey.yml:30999768639:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+    "requirement_ids": [
+      "SPEC-010-R003"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "6a2278f4f678abcc91361d0d6f008649e63b6fc3"
+    },
+    "captured_at": "2026-07-27T04:23:39Z",
+    "expires_at": "2026-10-27",
+    "operator": {
+      "role": "provider-prebeta-operator",
+      "identity_fingerprint": "ef9f4ceaa6194ca4c6a5c6fb7f91c7cded6bcc0ef87bfe9dce5ed023a5fe216b"
+    },
+    "environment": {
+      "class": "physical-provider-prebeta-admission",
+      "hardware_profile": "apple-silicon-16gb-qwen-redacted",
+      "candidate": "provider-cli:v1.8.61"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-prebeta-admission",
+        "sha256": "02be72ca9a386f52933180d0d5f0d8db3f7814f823f3b45dfd12bcf6bf54d10a",
+        "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "Air5/Qwen provider-prebeta admission subset passed for model identity, coordinator admission, catalog/model evidence, buyer serving smoke, and hardware verifier acceptance. Referral activation, strict-gate variants, and broader payout/billing paths remain outside this artifact."
+    },
+    "steps": [
+      {
+        "id": "step-01-private-prebeta-authorization",
+        "status": "pass",
+        "assertion": "Private-prebeta authorization posture is anchored to the committed Entry 172 activation evidence; no SPEC-034 referral promotion is claimed from this artifact.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-02-install-launch-identity",
+        "status": "pass",
+        "assertion": "The provider installed and launched v1.8.61 from signed release assets, preserved a stable redacted provider identity, and ran launchd service live.streamvc.macprovider.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-03-provider-registration-admission",
+        "status": "pass",
+        "assertion": "Pearl admitted the same redacted provider identity for the Qwen3-8B model, assigned a coordinator session, preserved heartbeat state, and reported ready/routing-eligible.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-04-catalog-autotune-readiness",
+        "status": "pass",
+        "assertion": "The run verified signed catalog and stored recommendation bytes, the selected Qwen3-8B row identity, model hash, weights manifest digest, model-loaded status, and operator-visible installer warnings.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-05-hardware-evidence-verifier",
+        "status": "pass",
+        "assertion": "The provider resubmitted hardware evidence, received dual-control hardware trust approval, and the stats hardware verifier exited successfully with the Air5 provider no longer waiting for trust.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-06-provider-runtime-routing",
+        "status": "pass",
+        "assertion": "Local runtime health, model list, launchd state, encrypted coordinator leg, hash_verified status, coordinator session, and Pearl route eligibility were captured after install.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-07-buyer-serving-smoke",
+        "status": "pass",
+        "assertion": "A buyer smoke request through api.streamvc.live returned HTTP 200 for mlx-community/Qwen3-8B-4bit and Pearl routing selected the same redacted provider as the only matching candidate.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-08-redaction-and-correlation",
+        "status": "pass",
+        "assertion": "The public artifact omits secrets, LAN addresses, local account names, and operator identity while retaining stable hashes for provider, coordinator session, host, and request correlation.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "provider-prebeta-admission-air5-qwen-20260727T042339Z",
+    "execution_mode": "physical-provider-prebeta-admission"
+  }
+}

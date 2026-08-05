@@ -1294,7 +1294,7 @@
     {
       "requirement_id": "SPEC-010-R003",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelArtifactIdentity.swift:static let safetensorsManifestV1",
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:static func modelWeightArtifactManifestHash",
@@ -1307,13 +1307,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 separates weights diagnostics from catalog authority in code and tests. The provider-prebeta admission journey is now mapped as the scoped physical proof path; conformance remains pending until #895 captures the provider catalog/model evidence and #896 supplies the signed journey-result contract required for sensitive promotion."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+          "source": null,
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        },
+        {
+          "artifact": "sha256:7f838018cc946cd780f43ad5d2a0c45cc3b0f9a77612c4a5e6e9cf000d3990ed",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.spec-010-r003.journey-result.signed.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R004",
