@@ -22,6 +22,8 @@ required = [
     "\n  workflow_dispatch:\n",
     "environment: production-release",
     "contents: read",
+    "GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}",
+    'scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904',
     "MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}",
     '[[ "$GITHUB_REF" == refs/heads/main ]]',
     '[[ "$SOURCE_SHA_INPUT" == "$GITHUB_SHA" ]]',
@@ -56,6 +58,10 @@ if "candidate.json" not in workflow or "journey-result.unsigned.json" not in wor
     raise SystemExit("workflow must explicitly detect non-promotable intermediates")
 if "path.unlink()" not in workflow:
     raise SystemExit("workflow must remove non-promotable intermediates before artifact export")
+posture_index = workflow.find("scripts/verify-github-release-posture.sh")
+signing_key_index = workflow.find("MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM")
+if posture_index == -1 or signing_key_index == -1 or posture_index > signing_key_index:
+    raise SystemExit("workflow must verify release posture before importing the acceptance signing key")
 
 lines = workflow.splitlines()
 for index, line in enumerate(lines):

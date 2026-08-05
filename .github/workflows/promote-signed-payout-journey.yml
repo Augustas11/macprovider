@@ -98,6 +98,12 @@ jobs:
               output.write(f"prefix={prefix}\n")
           PY
 
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
       - name: Sign journey-result payload
         shell: bash
         env:
