@@ -63,14 +63,17 @@ jobs:
           [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
           git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
           git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
-          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"
-          payload="$RUNNER_TEMP/provider-prebeta-journey-result.unsigned.json"
+          requirement_slug="$(printf '%s' "$REQUIREMENT_IDS_INPUT" | tr '[:upper:]' '[:lower:]' | tr ',' '-')"
+          [[ "$requirement_slug" =~ ^spec-[0-9]{3}-r[0-9]{3}(-spec-[0-9]{3}-r[0-9]{3})*$ ]] || { echo "::error::invalid requirement slug" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.${requirement_slug}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/provider-prebeta-journey-result-${requirement_slug}.unsigned.json"
           short_sha="${SOURCE_SHA_INPUT:0:12}"
           printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
           printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           printf 'short_sha=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
           printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
           printf 'requirement_ids=%s\n' "$REQUIREMENT_IDS_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'requirement_slug=%s\n' "$requirement_slug" >> "$GITHUB_OUTPUT"
           printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
           printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
 
@@ -187,6 +190,7 @@ jobs:
           REDACTED: ${{ steps.request.outputs.redacted }}
           ENVELOPE: ${{ steps.request.outputs.envelope }}
           REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          REQUIREMENT_SLUG: ${{ steps.request.outputs.requirement_slug }}
         run: |
           set -euo pipefail
           export_dir="$RUNNER_TEMP/signed-provider-prebeta-journey-promotion"
@@ -208,6 +212,7 @@ jobs:
               "source_sha": source_sha,
               "evidence_sha": evidence_sha,
               "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "requirement_slug": os.environ["REQUIREMENT_SLUG"],
               "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
               "redacted_artifact": redacted,
               "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
@@ -223,7 +228,7 @@ jobs:
       - name: Upload signed promotion artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: signed-provider-prebeta-journey-promotion-${{ steps.request.outputs.source_sha }}
+          name: signed-provider-prebeta-journey-promotion-${{ steps.request.outputs.source_sha }}-${{ steps.request.outputs.requirement_slug }}
           path: ${{ runner.temp }}/signed-provider-prebeta-journey-promotion/
           if-no-files-found: error
           include-hidden-files: false
