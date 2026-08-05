@@ -1261,7 +1261,7 @@
     {
       "requirement_id": "SPEC-010-R002",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:authInitialMessage",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:sendHeartbeat",
@@ -1275,13 +1275,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 implements typed admission and heartbeat semantics. The provider-prebeta admission journey is now mapped as the scoped production proof path; conformance remains pending until #895 proves the production coordinator receives and preserves the named identity and #896 supplies the signed journey-result contract required for sensitive promotion."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+          "source": null,
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        },
+        {
+          "artifact": "sha256:288348caef7f3c92f3028cbc34cb92b5697e14d8b85c5f329f4d7145ddb1253a",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-20260727T042339Z.journey-result.signed.json",
+          "captured_at": "2026-07-27",
+          "expires_at": "2026-10-27"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R003",
