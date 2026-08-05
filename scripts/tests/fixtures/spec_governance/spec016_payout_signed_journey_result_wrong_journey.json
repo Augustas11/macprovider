@@ -1,0 +1,6 @@
+{
+  "mutation": {
+    "operation": "spec016_payout_signed_journey_result_wrong_journey"
+  },
+  "expected": "SPEC-016 payout requirement journeys must equal ['JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION']"
+}

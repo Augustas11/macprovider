@@ -1,0 +1,6 @@
+{
+  "mutation": {
+    "operation": "spec016_payout_signed_journey_result_candidate_artifact"
+  },
+  "expected": "SPEC-016 payout journey-result cannot promote candidate-only artifact files"
+}

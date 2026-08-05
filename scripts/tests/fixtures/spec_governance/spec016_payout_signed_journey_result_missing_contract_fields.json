@@ -1,0 +1,6 @@
+{
+  "mutation": {
+    "operation": "spec016_payout_signed_journey_result_missing_contract_fields"
+  },
+  "expected": "SPEC-016-R002.evidence[1].source.signed.spec_id: must equal 'SPEC-016'"
+}

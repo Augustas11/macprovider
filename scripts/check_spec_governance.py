@@ -34,6 +34,11 @@ JOURNEY_RESULT_SIGNING_KEY_ID = "macprovider-acceptance-p256-v1"
 JOURNEY_RESULT_SIGNING_DOMAIN = b"macprovider.journey-result.v1\n"
 JOURNEY_RESULT_PUBLIC_KEY_PATH = "security/acceptance-candidate-signing-public.pem"
 JOURNEY_RESULT_PUBLIC_KEY_SHA256 = "849e9c9bc53db1fb8e28d3b46ab431089b12cb50b398c5317ced682d39bdbd38"
+SPEC016_PAYOUT_JOURNEY_ID = "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+SPEC016_PAYOUT_SPEC_ID = "SPEC-016"
+SPEC016_PAYOUT_REQUIREMENT_ID = "SPEC-016-R002"
+SPEC016_PAYOUT_EXECUTION_MODE = "candidate-derived-handler-only-conformance-harness"
+SPEC016_PAYOUT_STEP_IDS = {f"step-{index:02d}" for index in range(1, 12)}
 TRUSTED_OPENSSL_CANDIDATES = (
     "/usr/bin/openssl",
     "/opt/homebrew/opt/openssl@3/bin/openssl",
@@ -204,6 +209,13 @@ def _string(value: Any, pattern: re.Pattern[str] | None, location: str, result: 
         result.error(location, f"invalid value {value!r}")
         return None
     return value
+
+
+def _bool_value(value: Any, location: str, result: ValidationResult) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    result.error(location, "must be a boolean")
+    return None
 
 
 def _nullable_string(value: Any, pattern: re.Pattern[str], location: str, result: ValidationResult) -> str | None:
@@ -475,6 +487,224 @@ def _verify_journey_result_signature(
     return True
 
 
+def _require_false(mapping: dict[str, Any], field: str, location: str, result: ValidationResult) -> None:
+    value = _bool_value(mapping.get(field), f"{location}.{field}", result)
+    if value is not None and value is not False:
+        result.error(f"{location}.{field}", "must be false for SPEC-016 contract-only payout evidence")
+
+
+def _require_sha_field(mapping: dict[str, Any], field: str, location: str, result: ValidationResult) -> None:
+    _string(mapping.get(field), SHA256_HEX_RE, f"{location}.{field}", result)
+
+
+def _validate_spec016_payout_artifact(root: Path, artifact: dict[str, Any], location: str, result: ValidationResult) -> None:
+    source = artifact.get("source")
+    if not isinstance(source, str):
+        return
+    if source.endswith(".candidate.json"):
+        result.error(f"{location}.source", "SPEC-016 payout journey-result cannot promote candidate-only artifact files")
+        return
+    artifact_path = _repository_path(root, source, f"{location}.source", result)
+    if artifact_path is None:
+        return
+    payload = _load_json(artifact_path, ValidationResult())
+    if not isinstance(payload, dict):
+        return
+    if payload.get("schema_version") == "macprovider.journey-result-candidate.v1" or payload.get("promotion_ready") is False:
+        result.error(f"{location}.source", "SPEC-016 payout journey-result cannot promote candidate-only artifact content")
+
+
+def _validate_spec016_payout_journey_result(
+    root: Path,
+    signed: dict[str, Any],
+    source: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    if signed.get("journey_id") != SPEC016_PAYOUT_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {SPEC016_PAYOUT_JOURNEY_ID!r}")
+    if journeys != [SPEC016_PAYOUT_JOURNEY_ID]:
+        result.error(location, f"SPEC-016 payout requirement journeys must equal [{SPEC016_PAYOUT_JOURNEY_ID!r}]")
+    if signed.get("spec_id") != SPEC016_PAYOUT_SPEC_ID:
+        result.error(f"{location}.signed.spec_id", f"must equal {SPEC016_PAYOUT_SPEC_ID!r}")
+    if signed.get("requirement_ids") != [SPEC016_PAYOUT_REQUIREMENT_ID]:
+        result.error(f"{location}.signed.requirement_ids", f"must equal [{SPEC016_PAYOUT_REQUIREMENT_ID!r}]")
+    if source.endswith(".candidate.json"):
+        result.error(location, "SPEC-016 payout journey-result cannot promote candidate-only artifact files")
+    _string(signed.get("run_id"), re.compile(r"^spec016-r002-payout-address-[A-Za-z0-9_.:-]+$"), f"{location}.signed.run_id", result)
+    if signed.get("execution_mode") != SPEC016_PAYOUT_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {SPEC016_PAYOUT_EXECUTION_MODE!r}")
+
+    harness = signed.get("harness")
+    if _expect_object(harness, f"{location}.signed.harness", result):
+        allowed_harness = {
+            "id",
+            "version",
+            "execution_mode",
+            "isolated_sqlite",
+            "real_provider_token_check",
+            "real_pause_validation",
+            "controlled_dependencies",
+            "production_runner_built",
+            "external_rpc_client_built",
+            "settlement_signer_built",
+            "release_promotion_attempted",
+        }
+        _expect_keys(harness, allowed_harness, allowed_harness, f"{location}.signed.harness", result)
+        _string(harness.get("id"), None, f"{location}.signed.harness.id", result)
+        _string(harness.get("version"), None, f"{location}.signed.harness.version", result)
+        if harness.get("execution_mode") != SPEC016_PAYOUT_EXECUTION_MODE:
+            result.error(f"{location}.signed.harness.execution_mode", f"must equal {SPEC016_PAYOUT_EXECUTION_MODE!r}")
+        for field_name in (
+            "isolated_sqlite",
+            "real_provider_token_check",
+            "real_pause_validation",
+            "controlled_dependencies",
+        ):
+            value = _bool_value(harness.get(field_name), f"{location}.signed.harness.{field_name}", result)
+            if value is not None and value is not True:
+                result.error(f"{location}.signed.harness.{field_name}", "must be true")
+        for field_name in (
+            "production_runner_built",
+            "external_rpc_client_built",
+            "settlement_signer_built",
+            "release_promotion_attempted",
+        ):
+            _require_false(harness, field_name, f"{location}.signed.harness", result)
+
+    config_before = signed.get("config_before")
+    if _expect_object(config_before, f"{location}.signed.config_before", result):
+        required_config_before = {"payout_enabled", "runner_started", "external_rpc_started", "settlement_signer_started"}
+        _expect_keys(config_before, required_config_before, required_config_before, f"{location}.signed.config_before", result)
+        for field_name in sorted(required_config_before):
+            _require_false(config_before, field_name, f"{location}.signed.config_before", result)
+
+    config_after = signed.get("config_after")
+    if _expect_object(config_after, f"{location}.signed.config_after", result):
+        required_config_after = {
+            "payout_enabled",
+            "runner_started",
+            "external_rpc_started",
+            "settlement_signer_started",
+            "settlement_attempted",
+            "production_side_effects",
+        }
+        _expect_keys(config_after, required_config_after, required_config_after, f"{location}.signed.config_after", result)
+        for field_name in sorted(required_config_after):
+            _require_false(config_after, field_name, f"{location}.signed.config_after", result)
+
+    restoration = signed.get("restoration")
+    if _expect_object(restoration, f"{location}.signed.restoration", result):
+        _expect_keys(restoration, {"result"}, {"result"}, f"{location}.signed.restoration", result)
+        _string(restoration.get("result"), None, f"{location}.signed.restoration.result", result)
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        required_observations = {
+            "provider_id_sha256",
+            "hot_wallet_sha256",
+            "first_address_sha256",
+            "eip712_digest_sha256",
+            "raw_signature_redacted",
+            "provider_token_redacted",
+            "private_keys_redacted",
+        }
+        allowed_observations = required_observations | {"rotated_address_sha256", "cooling_off_hours"}
+        _expect_keys(observations, required_observations, allowed_observations, f"{location}.signed.observations", result)
+        for field_name in ("provider_id_sha256", "hot_wallet_sha256", "first_address_sha256", "eip712_digest_sha256"):
+            _require_sha_field(observations, field_name, f"{location}.signed.observations", result)
+        if "rotated_address_sha256" in observations:
+            _require_sha_field(observations, "rotated_address_sha256", f"{location}.signed.observations", result)
+        if "cooling_off_hours" in observations and not isinstance(observations.get("cooling_off_hours"), int):
+            result.error(f"{location}.signed.observations.cooling_off_hours", "must be an integer")
+        for field_name in ("raw_signature_redacted", "provider_token_redacted", "private_keys_redacted"):
+            value = _bool_value(observations.get(field_name), f"{location}.signed.observations.{field_name}", result)
+            if value is not None and value is not True:
+                result.error(f"{location}.signed.observations.{field_name}", "must be true")
+
+    eip712 = signed.get("eip712")
+    if _expect_object(eip712, f"{location}.signed.eip712", result):
+        required_eip712 = {
+            "typed_data_artifact_sha256",
+            "digest_sha256",
+            "signer_address_sha256",
+            "verifier",
+            "verification_result",
+            "raw_signature_access_controlled",
+        }
+        _expect_keys(eip712, required_eip712, required_eip712, f"{location}.signed.eip712", result)
+        for field_name in ("typed_data_artifact_sha256", "digest_sha256", "signer_address_sha256"):
+            _require_sha_field(eip712, field_name, f"{location}.signed.eip712", result)
+        _string(eip712.get("verifier"), None, f"{location}.signed.eip712.verifier", result)
+        if eip712.get("verification_result") != "pass":
+            result.error(f"{location}.signed.eip712.verification_result", "must equal 'pass'")
+        value = _bool_value(eip712.get("raw_signature_access_controlled"), f"{location}.signed.eip712.raw_signature_access_controlled", result)
+        if value is not None and value is not True:
+            result.error(f"{location}.signed.eip712.raw_signature_access_controlled", "must be true")
+
+    candidate = signed.get("candidate")
+    if _expect_object(candidate, f"{location}.signed.candidate", result):
+        allowed_candidate = {
+            "coordinator_sha256",
+            "malibu_sha256",
+            "addresses_go_sha256",
+            "eip712_go_sha256",
+            "attempts_go_sha256",
+            "payout_address_client_sha256",
+            "payout_wallet_flow_sha256",
+            "payout_signer_resource_sha256",
+        }
+        _expect_keys(candidate, {"payout_address_client_sha256"}, allowed_candidate, f"{location}.signed.candidate", result)
+        coordinator_hash_fields = ("addresses_go_sha256", "eip712_go_sha256", "attempts_go_sha256")
+        if "coordinator_sha256" in candidate:
+            _require_sha_field(candidate, "coordinator_sha256", f"{location}.signed.candidate", result)
+        else:
+            for field_name in coordinator_hash_fields:
+                _require_sha_field(candidate, field_name, f"{location}.signed.candidate", result)
+        _require_sha_field(candidate, "payout_address_client_sha256", f"{location}.signed.candidate", result)
+        if "malibu_sha256" in candidate:
+            _require_sha_field(candidate, "malibu_sha256", f"{location}.signed.candidate", result)
+        else:
+            _require_sha_field(candidate, "payout_wallet_flow_sha256", f"{location}.signed.candidate", result)
+            _require_sha_field(candidate, "payout_signer_resource_sha256", f"{location}.signed.candidate", result)
+
+    signer = signed.get("signer")
+    if _expect_object(signer, f"{location}.signed.signer", result):
+        required_signer = {"key_id", "identity_fingerprint", "trust_root_sha256", "verification_result"}
+        _expect_keys(signer, required_signer, required_signer, f"{location}.signed.signer", result)
+        _string(signer.get("key_id"), None, f"{location}.signed.signer.key_id", result)
+        _require_sha_field(signer, "identity_fingerprint", f"{location}.signed.signer", result)
+        _require_sha_field(signer, "trust_root_sha256", f"{location}.signed.signer", result)
+        if signer.get("verification_result") != "pass":
+            result.error(f"{location}.signed.signer.verification_result", "must equal 'pass'")
+
+    observed_step_ids: set[str] = set()
+    valid_step_count = 0
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            continue
+        valid_step_count += 1
+        step_id = step["id"]
+        if step_id in observed_step_ids:
+            result.error(f"{location}.signed.steps[{index}].id", f"duplicate SPEC-016 payout physical step {step_id!r}")
+        observed_step_ids.add(step_id)
+    missing_steps = SPEC016_PAYOUT_STEP_IDS - observed_step_ids
+    unexpected_steps = observed_step_ids - SPEC016_PAYOUT_STEP_IDS
+    if missing_steps:
+        result.error(f"{location}.signed.steps", f"missing SPEC-016 payout physical steps: {sorted(missing_steps)}")
+    if unexpected_steps:
+        result.error(f"{location}.signed.steps", f"unexpected SPEC-016 payout physical steps: {sorted(unexpected_steps)}")
+    if valid_step_count != len(SPEC016_PAYOUT_STEP_IDS):
+        result.error(f"{location}.signed.steps", f"must contain exactly {len(SPEC016_PAYOUT_STEP_IDS)} SPEC-016 payout physical steps")
+
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict):
+            _validate_spec016_payout_artifact(root, artifact, f"{location}.signed.artifacts[{index}]", result)
+
+
 def _validate_signed_journey_result(
     root: Path,
     source: str,
@@ -559,6 +789,17 @@ def _validate_signed_journey_result(
             "result",
             "steps",
             "redaction",
+            "spec_id",
+            "run_id",
+            "execution_mode",
+            "harness",
+            "config_before",
+            "config_after",
+            "restoration",
+            "observations",
+            "eip712",
+            "candidate",
+            "signer",
         },
         f"{location}.signed",
         result,
@@ -607,13 +848,13 @@ def _validate_signed_journey_result(
             result.error(f"{location}.signed.repository.commit", "must match this requirement's commit evidence")
 
     artifact_ids: set[str] = set()
-    artifacts = signed.get("artifacts")
-    if not isinstance(artifacts, list):
+    artifact_records = signed.get("artifacts")
+    if not isinstance(artifact_records, list):
         result.error(f"{location}.signed.artifacts", "field 'artifacts' must be an array")
-        artifacts = []
-    if not artifacts:
+        artifact_records = []
+    if not artifact_records:
         result.error(f"{location}.signed.artifacts", "must contain at least one hash-bound artifact")
-    for index, artifact in enumerate(artifacts):
+    for index, artifact in enumerate(artifact_records):
         loc = f"{location}.signed.artifacts[{index}]"
         if not _expect_object(artifact, loc, result):
             continue
@@ -660,10 +901,10 @@ def _validate_signed_journey_result(
         _string(step.get("id"), None, f"{loc}.id", result)
         if step.get("status") != "pass":
             result.error(f"{loc}.status", "must equal 'pass'")
-        artifacts = _string_list(step.get("artifacts"), f"{loc}.artifacts", result)
-        if not artifacts:
+        step_artifacts = _string_list(step.get("artifacts"), f"{loc}.artifacts", result)
+        if not step_artifacts:
             result.error(f"{loc}.artifacts", "must contain at least one artifact reference")
-        for artifact_id in artifacts:
+        for artifact_id in step_artifacts:
             if artifact_ids and artifact_id not in artifact_ids:
                 result.error(f"{loc}.artifacts", f"unknown artifact reference {artifact_id!r}")
         if "assertion" in step:
@@ -676,6 +917,11 @@ def _validate_signed_journey_result(
         for field_name in sorted(required_redactions):
             if redaction.get(field_name) is not True:
                 result.error(f"{location}.signed.redaction.{field_name}", "must be true")
+
+    if journey_id == SPEC016_PAYOUT_JOURNEY_ID or requirement_id == SPEC016_PAYOUT_REQUIREMENT_ID:
+        if requirement_id != SPEC016_PAYOUT_REQUIREMENT_ID:
+            result.error(f"{location}.signed.requirement_ids", f"SPEC-016 payout journey-result may only promote {SPEC016_PAYOUT_REQUIREMENT_ID}")
+        _validate_spec016_payout_journey_result(root, signed, source, journeys, artifact_records, steps, location, result)
 
     return len(result.errors) == before
 

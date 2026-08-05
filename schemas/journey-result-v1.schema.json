@@ -141,8 +141,241 @@
             "operator_identity_redacted": {"const": true},
             "local_account_names_redacted": {"const": true}
           }
+        },
+        "spec_id": {"type": "string", "pattern": "^SPEC-[0-9]{3}$"},
+        "run_id": {"type": "string", "minLength": 1},
+        "execution_mode": {"type": "string", "minLength": 1},
+        "harness": {"type": "object"},
+        "config_before": {"type": "object"},
+        "config_after": {"type": "object"},
+        "restoration": {"type": "object"},
+        "observations": {"type": "object"},
+        "eip712": {"type": "object"},
+        "candidate": {"type": "object"},
+        "signer": {"type": "object"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "journey_id": {"const": "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"}
+                },
+                "required": ["journey_id"]
+              },
+              {
+                "properties": {
+                  "requirement_ids": {"contains": {"const": "SPEC-016-R002"}}
+                },
+                "required": ["requirement_ids"]
+              }
+            ]
+          },
+          "then": {
+            "required": [
+              "spec_id",
+              "run_id",
+              "execution_mode",
+              "harness",
+              "config_before",
+              "config_after",
+              "restoration",
+              "observations",
+              "eip712",
+              "candidate",
+              "signer"
+            ],
+            "properties": {
+              "journey_id": {"const": "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"},
+              "spec_id": {"const": "SPEC-016"},
+              "requirement_ids": {"const": ["SPEC-016-R002"]},
+              "run_id": {"type": "string", "pattern": "^spec016-r002-payout-address-[A-Za-z0-9_.:-]+$"},
+              "execution_mode": {"const": "candidate-derived-handler-only-conformance-harness"},
+              "harness": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "version",
+                  "execution_mode",
+                  "isolated_sqlite",
+                  "real_provider_token_check",
+                  "real_pause_validation",
+                  "controlled_dependencies",
+                  "production_runner_built",
+                  "external_rpc_client_built",
+                  "settlement_signer_built",
+                  "release_promotion_attempted"
+                ],
+                "properties": {
+                  "id": {"type": "string", "minLength": 1},
+                  "version": {"type": "string", "minLength": 1},
+                  "execution_mode": {"const": "candidate-derived-handler-only-conformance-harness"},
+                  "isolated_sqlite": {"const": true},
+                  "real_provider_token_check": {"const": true},
+                  "real_pause_validation": {"const": true},
+                  "controlled_dependencies": {"const": true},
+                  "production_runner_built": {"const": false},
+                  "external_rpc_client_built": {"const": false},
+                  "settlement_signer_built": {"const": false},
+                  "release_promotion_attempted": {"const": false}
+                }
+              },
+              "config_before": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["payout_enabled", "runner_started", "external_rpc_started", "settlement_signer_started"],
+                "properties": {
+                  "payout_enabled": {"const": false},
+                  "runner_started": {"const": false},
+                  "external_rpc_started": {"const": false},
+                  "settlement_signer_started": {"const": false}
+                }
+              },
+              "config_after": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "payout_enabled",
+                  "runner_started",
+                  "external_rpc_started",
+                  "settlement_signer_started",
+                  "settlement_attempted",
+                  "production_side_effects"
+                ],
+                "properties": {
+                  "payout_enabled": {"const": false},
+                  "runner_started": {"const": false},
+                  "external_rpc_started": {"const": false},
+                  "settlement_signer_started": {"const": false},
+                  "settlement_attempted": {"const": false},
+                  "production_side_effects": {"const": false}
+                }
+              },
+              "restoration": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["result"],
+                "properties": {
+                  "result": {"type": "string", "minLength": 1}
+                }
+              },
+              "observations": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "provider_id_sha256",
+                  "hot_wallet_sha256",
+                  "first_address_sha256",
+                  "eip712_digest_sha256",
+                  "raw_signature_redacted",
+                  "provider_token_redacted",
+                  "private_keys_redacted"
+                ],
+                "properties": {
+                  "provider_id_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "hot_wallet_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "first_address_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "rotated_address_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "eip712_digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "cooling_off_hours": {"type": "integer"},
+                  "raw_signature_redacted": {"const": true},
+                  "provider_token_redacted": {"const": true},
+                  "private_keys_redacted": {"const": true}
+                }
+              },
+              "eip712": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "typed_data_artifact_sha256",
+                  "digest_sha256",
+                  "signer_address_sha256",
+                  "verifier",
+                  "verification_result",
+                  "raw_signature_access_controlled"
+                ],
+                "properties": {
+                  "typed_data_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "signer_address_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "verifier": {"type": "string", "minLength": 1},
+                  "verification_result": {"const": "pass"},
+                  "raw_signature_access_controlled": {"const": true}
+                }
+              },
+              "candidate": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["payout_address_client_sha256"],
+                "properties": {
+                  "coordinator_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "malibu_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "addresses_go_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "eip712_go_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "attempts_go_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "payout_address_client_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "payout_wallet_flow_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "payout_signer_resource_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {"required": ["coordinator_sha256"]},
+                      {"required": ["addresses_go_sha256", "eip712_go_sha256", "attempts_go_sha256"]}
+                    ]
+                  },
+                  {
+                    "anyOf": [
+                      {"required": ["malibu_sha256"]},
+                      {"required": ["payout_wallet_flow_sha256", "payout_signer_resource_sha256"]}
+                    ]
+                  }
+                ]
+              },
+              "signer": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["key_id", "identity_fingerprint", "trust_root_sha256", "verification_result"],
+                "properties": {
+                  "key_id": {"type": "string", "minLength": 1},
+                  "identity_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "trust_root_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "verification_result": {"const": "pass"}
+                }
+              },
+              "artifacts": {
+                "items": {
+                  "not": {
+                    "properties": {
+                      "source": {"pattern": "\\.candidate\\.json$"}
+                    },
+                    "required": ["source"]
+                  }
+                }
+              },
+              "steps": {
+                "minItems": 11,
+                "maxItems": 11,
+                "allOf": [
+                  {"contains": {"properties": {"id": {"const": "step-01"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-02"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-03"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-04"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-05"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-06"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-07"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-08"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-09"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-10"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"properties": {"id": {"const": "step-11"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1}
+                ]
+              }
+            }
+          }
         }
-      }
+      ]
     }
   }
 }

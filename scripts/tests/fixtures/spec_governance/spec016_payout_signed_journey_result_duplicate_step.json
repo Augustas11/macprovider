@@ -1,0 +1,6 @@
+{
+  "mutation": {
+    "operation": "spec016_payout_signed_journey_result_duplicate_step"
+  },
+  "expected": "duplicate SPEC-016 payout physical step 'step-01'"
+}

@@ -15,6 +15,10 @@ from pathlib import Path
 
 from scripts.check_spec_governance import validate_repository
 from scripts.tests.test_spec_governance import (
+    SPEC016_PAYOUT_JOURNEY_ID,
+    SPEC016_PAYOUT_RUN_ID,
+    apply_mutation,
+    spec016_payout_signed_envelope,
     signed_journey_envelope,
     write_repository,
     base_repository,
@@ -263,6 +267,74 @@ class JourneyResultToolsTests(unittest.TestCase):
 
             self.assertNotEqual(0, completed.returncode)
             self.assertIn("signed journey-result rejected", completed.stderr)
+            self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
+
+    def test_promoter_rejects_spec016_candidate_only_artifact_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = base_repository()
+            apply_mutation(repository, {"operation": "valid_spec016_payout_signed_journey_result"})
+            write_repository(root, repository)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            private_key = generate_acceptance_key(root)
+            trusted_hash = hashlib.sha256((root / "security" / "acceptance-candidate-signing-public.pem").read_bytes()).hexdigest()
+            candidate_path = root / "journeys" / "evidence" / "spec016-payout.candidate.json"
+            candidate_path.write_text(
+                json.dumps({
+                    "schema_version": "macprovider.journey-result-candidate.v1",
+                    "journey_id": SPEC016_PAYOUT_JOURNEY_ID,
+                    "run_id": SPEC016_PAYOUT_RUN_ID,
+                    "promotion_ready": False,
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            artifact_record = {
+                "id": "redacted-payout-address-journey",
+                "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+                "source": "journeys/evidence/spec016-payout.candidate.json",
+            }
+            payload_path = root / "journey-payload.json"
+            envelope = spec016_payout_signed_envelope(commit, artifact_record)
+            payload_path.write_text(json.dumps(envelope["signed"], indent=2) + "\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM"] = private_key
+            openssl = shutil.which("openssl")
+            if openssl is None:
+                raise unittest.SkipTest("openssl is required")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SIGNER),
+                    "--root",
+                    str(root),
+                    "--input",
+                    str(payload_path),
+                    "--output",
+                    "journeys/evidence/signed-result.json",
+                    "--verified-at",
+                    "2026-01-01T00:00:01Z",
+                    "--openssl-bin",
+                    openssl,
+                ],
+                env=env,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            conformance_path = root / "specs" / "CONFORMANCE.json"
+            original = conformance_path.read_text(encoding="utf-8")
+
+            promoter = load_promoter_module()
+            stderr = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+                promoter.promote(
+                    root,
+                    "SPEC-016-R002",
+                    "journeys/evidence/signed-result.json",
+                    base_ref="HEAD",
+                    trusted_public_key_sha256=trusted_hash,
+                )
+
+            self.assertIn("SPEC-016 payout journey-result cannot promote candidate-only artifact files", stderr.getvalue())
             self.assertEqual(original, conformance_path.read_text(encoding="utf-8"))
 
     def test_promoter_does_not_trust_path_hijacked_openssl(self) -> None:
