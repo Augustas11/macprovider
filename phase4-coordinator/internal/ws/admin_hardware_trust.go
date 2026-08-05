@@ -96,13 +96,14 @@ func (s *Server) handleHardwareTrustWaiting(w http.ResponseWriter, r *http.Reque
 			"unified_memory_gb":      job.UnifiedMemoryGB,
 			"hardware_identity_hash": job.HardwareIdentityHash,
 			"decision_reason":        job.DecisionReason,
-			// approvable tells the operator which waiting_trust jobs the request
-			// endpoint will accept: only missing_trusted_hardware_identity waits
-			// with a hardware_identity_hash can be unblocked by an operator_api
-			// trust root. missing_trusted_chip_profile waits are surfaced too, with
-			// approvable=false, so operators can see the full backlog (issue #582
-			// FIX 10).
-			"approvable":   hardwareTrustJobApprovable(job.DecisionReason, job.HardwareIdentityHash),
+			"chip_profile_present":   job.ChipProfilePresent,
+			// approvable tells the operator which waiting_trust jobs can complete
+			// the operator approval path: only missing_trusted_hardware_identity
+			// waits with a hardware_identity_hash and known chip profile can be
+			// unblocked by an operator_api trust root. missing chip-profile waits
+			// are surfaced too, with approvable=false, so operators can see the
+			// full backlog (issue #582 FIX 10).
+			"approvable":   hardwareTrustJobApprovable(job.DecisionReason, job.HardwareIdentityHash, job.ChipProfilePresent),
 			"submitted_at": job.SubmittedAt.Format(time.RFC3339),
 		})
 	}
@@ -420,15 +421,17 @@ func (s *Server) handleHardwareTrustRevoke(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// hardwareTrustJobApprovable reports whether a waiting_trust job can be unblocked
-// by the operator hardware-trust approval path — i.e. whether
-// request_hardware_trust_approval would accept it. The bound job must carry a
-// hardware_identity_hash and its decision_reason (stored version-prefixed, e.g.
-// "hardware-verifier.v2:missing_trusted_hardware_identity") must reduce to
-// missing_trusted_hardware_identity; a missing_trusted_chip_profile wait is
-// listed but not approvable (issue #582 FIX 10).
-func hardwareTrustJobApprovable(decisionReason, hardwareIdentityHash string) bool {
+// hardwareTrustJobApprovable reports whether a waiting_trust job can complete
+// the operator hardware-trust approval path. The bound job must carry a
+// hardware_identity_hash, a known chip profile, and its decision_reason (stored
+// version-prefixed, e.g. "hardware-verifier.v2:missing_trusted_hardware_identity")
+// must reduce to missing_trusted_hardware_identity; missing chip-profile waits
+// are listed but not approvable (issue #582 FIX 10).
+func hardwareTrustJobApprovable(decisionReason, hardwareIdentityHash string, chipProfilePresent bool) bool {
 	if strings.TrimSpace(hardwareIdentityHash) == "" {
+		return false
+	}
+	if !chipProfilePresent {
 		return false
 	}
 	bare := decisionReason

@@ -324,6 +324,7 @@ func TestHardwareTrustWaitingListsParkedJobs(t *testing.T) {
 		UnifiedMemoryGB:      32,
 		HardwareIdentityHash: "hash-abc",
 		DecisionReason:       "waiting_trust",
+		ChipProfilePresent:   true,
 		SubmittedAt:          submitted,
 	}}}
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
@@ -368,6 +369,7 @@ func TestHardwareTrustWaitingMarksApprovability(t *testing.T) {
 			ProviderID:           "mac",
 			HardwareIdentityHash: "hash-abc",
 			DecisionReason:       "hardware-verifier.v2:missing_trusted_hardware_identity",
+			ChipProfilePresent:   true,
 			SubmittedAt:          submitted,
 		},
 		{
@@ -375,6 +377,7 @@ func TestHardwareTrustWaitingMarksApprovability(t *testing.T) {
 			ProviderID:           "air",
 			HardwareIdentityHash: "hash-def",
 			DecisionReason:       "hardware-verifier.v2:missing_trusted_chip_profile",
+			ChipProfilePresent:   false,
 			SubmittedAt:          submitted,
 		},
 		{
@@ -382,6 +385,15 @@ func TestHardwareTrustWaitingMarksApprovability(t *testing.T) {
 			ProviderID:           "studio",
 			HardwareIdentityHash: "",
 			DecisionReason:       "hardware-verifier.v2:missing_trusted_hardware_identity",
+			ChipProfilePresent:   true,
+			SubmittedAt:          submitted,
+		},
+		{
+			JobID:                10,
+			ProviderID:           "max",
+			HardwareIdentityHash: "hash-ghi",
+			DecisionReason:       "hardware-verifier.v2:missing_trusted_hardware_identity",
+			ChipProfilePresent:   false,
 			SubmittedAt:          submitted,
 		},
 	}}
@@ -404,10 +416,11 @@ func TestHardwareTrustWaitingMarksApprovability(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if len(out.WaitingTrust) != 3 {
-		t.Fatalf("waiting list length = %d, want 3", len(out.WaitingTrust))
+	if len(out.WaitingTrust) != 4 {
+		t.Fatalf("waiting list length = %d, want 4", len(out.WaitingTrust))
 	}
-	wantApprovable := map[float64]bool{7: true, 8: false, 9: false}
+	wantApprovable := map[float64]bool{7: true, 8: false, 9: false, 10: false}
+	wantChipProfile := map[float64]bool{7: true, 8: false, 9: true, 10: false}
 	for _, row := range out.WaitingTrust {
 		jobID, _ := row["job_id"].(float64)
 		approvable, ok := row["approvable"].(bool)
@@ -416,6 +429,13 @@ func TestHardwareTrustWaitingMarksApprovability(t *testing.T) {
 		}
 		if approvable != wantApprovable[jobID] {
 			t.Fatalf("job %v approvable = %t, want %t", jobID, approvable, wantApprovable[jobID])
+		}
+		chipProfilePresent, ok := row["chip_profile_present"].(bool)
+		if !ok {
+			t.Fatalf("row %v missing chip_profile_present bool: %#v", jobID, row)
+		}
+		if chipProfilePresent != wantChipProfile[jobID] {
+			t.Fatalf("job %v chip_profile_present = %t, want %t", jobID, chipProfilePresent, wantChipProfile[jobID])
 		}
 	}
 }
