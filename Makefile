@@ -66,6 +66,7 @@ test-dist:
 	bash scripts/test-signed-payout-journey-workflow.sh
 	bash scripts/test-signed-provider-prebeta-journey-workflow.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_journey_result
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh
