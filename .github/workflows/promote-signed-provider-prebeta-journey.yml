@@ -1,0 +1,230 @@
+name: Build signed provider-prebeta journey promotion artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact source/build commit SHA captured by the redacted physical evidence"
+        required: true
+        type: string
+      redacted_evidence_path:
+        description: "journeys/evidence/provider-prebeta-admission-*.redacted.json"
+        required: true
+        type: string
+      requirement_ids:
+        description: "Comma-separated pending provider-prebeta requirement IDs covered by the evidence"
+        required: true
+        type: string
+      promotion_confirmed:
+        description: "Confirm provider-prebeta signed evidence promotion artifact should be built"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-provider-prebeta-journey-${{ github.event.inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Build, sign, validate, and export provider-prebeta promotion
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - name: Checkout reviewed main controls
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main source
+        id: request
+        shell: bash
+        env:
+          SOURCE_SHA_INPUT: ${{ github.event.inputs.source_sha }}
+          REDACTED_EVIDENCE_INPUT: ${{ github.event.inputs.redacted_evidence_path }}
+          REQUIREMENT_IDS_INPUT: ${{ github.event.inputs.requirement_ids }}
+          PROMOTION_CONFIRMED_INPUT: ${{ github.event.inputs.promotion_confirmed || 'false' }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || { echo "::error::manual dispatch required" >&2; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "::error::workflow must run from main" >&2; exit 1; }
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid source SHA" >&2; exit 1; }
+          [[ "$PROMOTION_CONFIRMED_INPUT" == true ]] || { echo "::error::promotion confirmation is required" >&2; exit 1; }
+          [[ "$REDACTED_EVIDENCE_INPUT" =~ ^journeys/evidence/provider-prebeta-admission-[A-Za-z0-9_.:-]+\.redacted\.json$ ]] || { echo "::error::invalid redacted evidence path" >&2; exit 1; }
+          [[ -f "$REDACTED_EVIDENCE_INPUT" && ! -L "$REDACTED_EVIDENCE_INPUT" ]] || { echo "::error::redacted evidence is absent or unsafe" >&2; exit 1; }
+          [[ "$REQUIREMENT_IDS_INPUT" =~ ^SPEC-[0-9]{3}-R[0-9]{3}(,SPEC-[0-9]{3}-R[0-9]{3})*$ ]] || { echo "::error::invalid requirement IDs" >&2; exit 1; }
+          git fetch --quiet origin refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$main_sha" == "$GITHUB_SHA" ]] || { echo "::error::workflow commit is no longer origin/main" >&2; exit 1; }
+          git cat-file -e "${SOURCE_SHA_INPUT}^{commit}" || { echo "::error::source SHA is not reachable" >&2; exit 1; }
+          git merge-base --is-ancestor "$SOURCE_SHA_INPUT" "$GITHUB_SHA" || { echo "::error::source SHA must be an ancestor of the reviewed evidence commit" >&2; exit 1; }
+          envelope="${REDACTED_EVIDENCE_INPUT%.redacted.json}.journey-result.signed.json"
+          payload="$RUNNER_TEMP/provider-prebeta-journey-result.unsigned.json"
+          short_sha="${SOURCE_SHA_INPUT:0:12}"
+          printf 'source_sha=%s\n' "$SOURCE_SHA_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'evidence_sha=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
+          printf 'redacted=%s\n' "$REDACTED_EVIDENCE_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'requirement_ids=%s\n' "$REQUIREMENT_IDS_INPUT" >> "$GITHUB_OUTPUT"
+          printf 'payload=%s\n' "$payload" >> "$GITHUB_OUTPUT"
+          printf 'envelope=%s\n' "$envelope" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned provider-prebeta journey-result payload
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-provider-prebeta-journey-result.py \
+            --source-sha "$SOURCE_SHA" \
+            --evidence-sha "$EVIDENCE_SHA" \
+            --requirement-ids "$REQUIREMENT_IDS" \
+            --output "$PAYLOAD" \
+            "$REDACTED"
+
+      - name: Verify protected environment and repository posture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_POSTURE_TOKEN }}
+        run: bash scripts/verify-github-release-posture.sh "$GITHUB_REPOSITORY" production-release 28995904
+
+      - name: Sign journey-result payload
+        shell: bash
+        env:
+          MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM }}
+          PAYLOAD: ${{ steps.request.outputs.payload }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sign-journey-result.py \
+            --input "$PAYLOAD" \
+            --output "$ENVELOPE" \
+            --verifier ".github/workflows/promote-signed-provider-prebeta-journey.yml:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+
+      - name: Promote only after signed validation
+        shell: bash
+        env:
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 - "$REQUIREMENT_IDS" "$ENVELOPE" <<'PY'
+          import subprocess
+          import sys
+
+          requirement_ids = [item for item in sys.argv[1].split(",") if item]
+          envelope = sys.argv[2]
+          for requirement_id in requirement_ids:
+              subprocess.run(
+                  [
+                      "python3",
+                      "scripts/promote-signed-journey-result.py",
+                      "--base-ref",
+                      "origin/main",
+                      requirement_id,
+                      envelope,
+                  ],
+                  check=True,
+              )
+          PY
+
+      - name: Verify promoted ledger and committed artifact set
+        shell: bash
+        env:
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          python3 -m json.tool "$REDACTED" >/dev/null
+          python3 -m json.tool "$ENVELOPE" >/dev/null
+          python3 -m json.tool specs/CONFORMANCE.json >/dev/null
+          python3 scripts/check_spec_governance.py --base-ref origin/main
+          git diff --check
+          python3 - "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          envelope = pathlib.Path(sys.argv[1]).as_posix()
+          requirement_ids = [item for item in sys.argv[2].split(",") if item]
+          conformance = json.loads(pathlib.Path("specs/CONFORMANCE.json").read_text(encoding="utf-8"))
+          rows = {
+              item.get("requirement_id"): item
+              for item in conformance.get("requirements", [])
+              if isinstance(item, dict)
+          }
+          for requirement_id in requirement_ids:
+              requirement = rows.get(requirement_id)
+              if requirement is None:
+                  raise SystemExit(f"{requirement_id} missing from conformance ledger")
+              if requirement.get("state") != "conformant" or requirement.get("gap") is not None:
+                  raise SystemExit(f"{requirement_id} was not promoted to conformant")
+              evidence = requirement.get("evidence")
+              if not isinstance(evidence, list) or not any(item.get("source") == envelope for item in evidence if isinstance(item, dict)):
+                  raise SystemExit(f"{requirement_id} evidence does not reference the signed envelope")
+          prefix = pathlib.Path(envelope).name.removesuffix(".journey-result.signed.json")
+          for path in pathlib.Path("journeys/evidence").glob(f"{prefix}*"):
+              name = path.name
+              if name.endswith(".candidate.json") or name.endswith(".journey-result.unsigned.json"):
+                  raise SystemExit(f"non-promotable intermediate remains: {path}")
+          PY
+
+      - name: Export signed promotion artifact
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          EVIDENCE_SHA: ${{ steps.request.outputs.evidence_sha }}
+          REDACTED: ${{ steps.request.outputs.redacted }}
+          ENVELOPE: ${{ steps.request.outputs.envelope }}
+          REQUIREMENT_IDS: ${{ steps.request.outputs.requirement_ids }}
+        run: |
+          set -euo pipefail
+          export_dir="$RUNNER_TEMP/signed-provider-prebeta-journey-promotion"
+          mkdir -p "$export_dir/journeys/evidence" "$export_dir/specs"
+          cp "$REDACTED" "$export_dir/$REDACTED"
+          cp "$ENVELOPE" "$export_dir/$ENVELOPE"
+          cp specs/CONFORMANCE.json "$export_dir/specs/CONFORMANCE.json"
+          python3 - "$export_dir/promotion-manifest.json" "$SOURCE_SHA" "$EVIDENCE_SHA" "$REDACTED" "$ENVELOPE" "$REQUIREMENT_IDS" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          output, source_sha, evidence_sha, redacted, envelope, requirement_ids = sys.argv[1:]
+          root = pathlib.Path(".")
+          manifest = {
+              "schema_version": "macprovider.signed-provider-prebeta-journey-promotion.v1",
+              "source_sha": source_sha,
+              "evidence_sha": evidence_sha,
+              "requirement_ids": [item for item in requirement_ids.split(",") if item],
+              "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+              "redacted_artifact": redacted,
+              "redacted_sha256": hashlib.sha256((root / redacted).read_bytes()).hexdigest(),
+              "signed_envelope": envelope,
+              "signed_envelope_sha256": hashlib.sha256((root / envelope).read_bytes()).hexdigest(),
+              "conformance_sha256": hashlib.sha256((root / "specs/CONFORMANCE.json").read_bytes()).hexdigest(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload signed promotion artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: signed-provider-prebeta-journey-promotion-${{ steps.request.outputs.source_sha }}
+          path: ${{ runner.temp }}/signed-provider-prebeta-journey-promotion/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
