@@ -1,0 +1,191 @@
+{
+  "schema_version": "macprovider.provider-prebeta-admission-evidence.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "run_id": "provider-prebeta-admission-air5-qwen-20260727T042339Z",
+  "requirement_ids": [
+    "SPEC-010-R001",
+    "SPEC-010-R002",
+    "SPEC-010-R003",
+    "SPEC-010-R004",
+    "SPEC-033-R001"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "6a2278f4f678abcc91361d0d6f008649e63b6fc3"
+  },
+  "captured_at": "2026-07-27T04:23:39Z",
+  "expires_at": "2026-10-27",
+  "operator": {
+    "role": "provider-prebeta-operator",
+    "identity_fingerprint": "ef9f4ceaa6194ca4c6a5c6fb7f91c7cded6bcc0ef87bfe9dce5ed023a5fe216b"
+  },
+  "environment": {
+    "class": "physical-provider-prebeta-admission",
+    "hardware_profile": "apple-silicon-16gb-qwen-redacted",
+    "candidate": "provider-cli:v1.8.61"
+  },
+  "result": {
+    "status": "pass",
+    "summary": "Air5/Qwen provider-prebeta admission subset passed for model identity, coordinator admission, catalog/model evidence, buyer serving smoke, and hardware verifier acceptance. Referral activation, strict-gate variants, and broader payout/billing paths remain outside this artifact."
+  },
+  "steps": [
+    {
+      "id": "step-01-private-prebeta-authorization",
+      "status": "pass",
+      "assertion": "Private-prebeta authorization posture is anchored to the committed Entry 172 activation evidence; no SPEC-034 referral promotion is claimed from this artifact.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-02-install-launch-identity",
+      "status": "pass",
+      "assertion": "The provider installed and launched v1.8.61 from signed release assets, preserved a stable redacted provider identity, and ran launchd service live.streamvc.macprovider.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-03-provider-registration-admission",
+      "status": "pass",
+      "assertion": "Pearl admitted the same redacted provider identity for the Qwen3-8B model, assigned a coordinator session, preserved heartbeat state, and reported ready/routing-eligible.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-04-catalog-autotune-readiness",
+      "status": "pass",
+      "assertion": "The run verified signed catalog and stored recommendation bytes, the selected Qwen3-8B row identity, model hash, weights manifest digest, model-loaded status, and operator-visible installer warnings.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-05-hardware-evidence-verifier",
+      "status": "pass",
+      "assertion": "The provider resubmitted hardware evidence, received dual-control hardware trust approval, and the stats hardware verifier exited successfully with the Air5 provider no longer waiting for trust.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-06-provider-runtime-routing",
+      "status": "pass",
+      "assertion": "Local runtime health, model list, launchd state, encrypted coordinator leg, hash_verified status, coordinator session, and Pearl route eligibility were captured after install.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-07-buyer-serving-smoke",
+      "status": "pass",
+      "assertion": "A buyer smoke request through api.streamvc.live returned HTTP 200 for mlx-community/Qwen3-8B-4bit and Pearl routing selected the same redacted provider as the only matching candidate.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-08-redaction-and-correlation",
+      "status": "pass",
+      "assertion": "The public artifact omits secrets, LAN addresses, local account names, and operator identity while retaining stable hashes for provider, coordinator session, host, and request correlation.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    }
+  ],
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true
+  },
+  "observations": {
+    "evidence_scope": "derived-redacted-provider-prebeta-subset",
+    "source_artifacts": [
+      {
+        "source": "journeys/evidence/provider-autoupdate-physical-2026-07-27.air5-convergence.json",
+        "sha256": "5046096d99a6513fa73b69480d88f9eb2b7350ed64e3b6ae66589d04e3e911eb"
+      },
+      {
+        "source": "ops/runbooks/entry-172-activation-evidence-20260721.md",
+        "sha256": "c812dfa26c9319d0003f8268c8252d5958baf62bbad969c351f2bdde2584b9c7"
+      }
+    ],
+    "release": {
+      "tag": "v1.8.61",
+      "target_commitish": "6a2278f4f678abcc91361d0d6f008649e63b6fc3",
+      "published_at": "2026-07-24T10:11:25Z",
+      "package_sha256": "eb375f6601ea2d51654f0abb72fd48f090750da789c6f2715af46a3ca11939f7",
+      "tarball_sha256": "23cbcc46bb5674bbcb805216a5d6aeaaf567586545339789c578743f0e5d4458",
+      "catalog_sha256": "ec2a2b64ed3a00bb0b185840ea5d9edee6a07d4ecb551775db5f69316e463d92",
+      "autotune_candidates_sha256": "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
+    },
+    "provider": {
+      "host_sha256": "72bd7fb2e85140a9d3d556d43f5c3308241ec0f5dc9081d72c6818bb43582bab",
+      "local_account_role": "provider-admin-redacted",
+      "provider_id_sha256": "9fb058a1f78c553716f5fc1c19639eede4d64695a4673c3012c7ff5d1772b6bb",
+      "hardware_identity_hash_sha256": "6548cd8b2b624a3598a5b6e98a98880191d437ed4a60518ea10e2389a73b68d4",
+      "hardware_model": "Mac15,12",
+      "memory_bytes": 17179869184,
+      "chip": "Apple M3",
+      "binary_version": "1.8.61",
+      "provider_binary_path": "provider-home/macprovider/macprovider-cli",
+      "binary_sha256": "822590b704f5363f092a142b0a442d8b3b8b47b19f65b324883ddd400208da88",
+      "launchd_label": "live.streamvc.macprovider",
+      "launchd_state": "running",
+      "local_model_id": "qwen3-8b"
+    },
+    "coordinator": {
+      "class": "Pearl production coordinator",
+      "provider_assigned_id_sha256": "c92cb5c3e9f9d744285500356cd50c04775f172e1c7beb6a96357f8938405389",
+      "model_id": "mlx-community/Qwen3-8B-4bit",
+      "binary_version": "1.8.61",
+      "state": "ready",
+      "routing_eligible": true,
+      "admitted_at": "2026-07-27T04:20:55.38429744Z",
+      "heartbeat_observed_at": "2026-07-27T04:23:39.913512388Z",
+      "model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "weights_manifest_sha256": "269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81",
+      "hash_status": "hash_verified",
+      "encrypted_leg": true,
+      "catalog_release_id": "published-2026-07-10-catalog-recovery-v1",
+      "catalog_policy_version": "autotune-policy-v1",
+      "catalog_row_identity": "902b83ecfd20acbccbcfe2c85c0faf6725c8a1955b430689445ce65726ea17b0",
+      "catalog_signer_key_id": "streamvc-autotune-static-v4"
+    },
+    "hardware_verifier": {
+      "dual_control_job_id": 8,
+      "second_approval_status": "committed",
+      "verifier_service": "stats-hardware-verifier.service",
+      "verifier_run_at": "2026-07-27T04:18:49Z",
+      "verifier_exit_status": "SUCCESS",
+      "verifier_summary": "verified=1 rejected=0 waiting=2",
+      "provider_waiting_after_run": []
+    },
+    "buyer_smoke": {
+      "base": "https://api.streamvc.live",
+      "requested_model": "mlx-community/Qwen3-8B-4bit",
+      "http_status": 200,
+      "response_id_sha256": "23d5a0a0adb67f716fcd9d504ef4bfd88fd261f3b02ada4ab8b16d3dd3aa5a4b",
+      "gateway_request_id_sha256": "1b31bb7a795abd3d3d409d021bbc98d2765f5736c24db7431045718872429bab",
+      "response_model": "mlx-community/Qwen3-8B-4bit",
+      "candidate_count_after_filters": 1,
+      "filtered_model_mismatch_count": 2,
+      "chosen_provider_id_sha256": "9fb058a1f78c553716f5fc1c19639eede4d64695a4673c3012c7ff5d1772b6bb",
+      "gateway_wall_ms": 1703,
+      "provider_prefill_ms": 1679,
+      "provider_decode_ms": 8
+    },
+    "not_promoted_by_this_artifact": [
+      "SPEC-010-R005",
+      "SPEC-010-R006",
+      "SPEC-023-R001",
+      "SPEC-023-R002",
+      "SPEC-032-R001",
+      "SPEC-032-R002",
+      "SPEC-032-R003",
+      "SPEC-034-R001"
+    ],
+    "not_promoted_rationale": "The committed evidence does not capture enough current bridge-dependency posture, full operator-visible autotune transcript text, strict hello-gate/freshness/sandbox policy state, or current fresh-provider referral admission posture to promote those rows without a separate physical run."
+  }
+}
