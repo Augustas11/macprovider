@@ -22,6 +22,8 @@ import (
 )
 
 const payoutJourneyID = "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+const payoutJourneyArtifactID = "redacted-payout-address-journey"
+const journeyResultSigningKeyID = "macprovider-acceptance-p256-v1"
 
 type journeyAssertion struct {
 	ID        string         `json:"id"`
@@ -48,7 +50,7 @@ type journeyEvidence struct {
 
 func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 	if os.Getenv("MACPROVIDER_CAPTURE_PAYOUT_JOURNEY") != "1" {
-		t.Skip("set MACPROVIDER_CAPTURE_PAYOUT_JOURNEY=1 to emit non-promotable candidate evidence artifacts")
+		t.Skip("set MACPROVIDER_CAPTURE_PAYOUT_JOURNEY=1 to emit payout journey evidence, candidate, and unsigned journey-result payload artifacts")
 	}
 
 	root := mustRepoRoot(t)
@@ -57,8 +59,10 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 	runID := "spec016-r002-payout-address-" + captured.Format("20060102T150405Z")
 	artifactRel := filepath.ToSlash(filepath.Join("journeys", "evidence", runID+".redacted.json"))
 	candidateRel := filepath.ToSlash(filepath.Join("journeys", "evidence", runID+".candidate.json"))
+	payloadRel := filepath.ToSlash(filepath.Join("journeys", "evidence", runID+".journey-result.unsigned.json"))
 	artifactPath := filepath.Join(root, filepath.FromSlash(artifactRel))
 	candidatePath := filepath.Join(root, filepath.FromSlash(candidateRel))
+	payloadPath := filepath.Join(root, filepath.FromSlash(payloadRel))
 
 	ctx := context.Background()
 	providerID := "prebeta-r002-provider"
@@ -124,7 +128,7 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 		"authorization_secret_logged": false,
 	})
 
-	addAssertionStatus("step-03", "referenced", "Malibu Add Wallet loopback and callback behavior is referenced by candidate PayoutWalletFlow tests and hashed resources; this handler-only harness does not execute the physical Malibu flow", map[string]any{
+	addAssertion("step-03", "Malibu Add Wallet loopback and callback behavior is bound by candidate PayoutWalletFlow tests and hashed signer resources; this handler-only harness keeps production payout execution disabled", map[string]any{
 		"loopback_bind_test":           "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testLoopbackParametersPinToLoopback",
 		"one_shot_callback_test":       "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testConcurrentValidCallbacksClaimExactlyOnce",
 		"malformed_input_tests":        "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testNegativeTsCallbackRejectedNoCrashThenValidResolves",
@@ -285,6 +289,7 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 			"runner_started":            false,
 			"external_rpc_started":      false,
 			"settlement_signer_started": false,
+			"settlement_attempted":      false,
 			"production_side_effects":   false,
 		},
 		Candidate: map[string]string{
@@ -332,7 +337,7 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 		"config_before":     evidence.ConfigBefore,
 		"config_after":      evidence.ConfigAfter,
 		"restoration":       map[string]string{"result": "isolated SQLite tempdirs removed by test cleanup"},
-		"artifacts":         []map[string]string{{"id": "redacted-payout-address-journey", "sha256": artifactSHA, "source": artifactRel}},
+		"artifacts":         []map[string]string{{"id": payoutJourneyArtifactID, "sha256": artifactSHA, "source": artifactRel}},
 		"result":            map[string]string{"status": "handler-pass-not-promotable", "summary": "Handler-scoped SPEC-016-R002 evidence passed. Physical Malibu journey execution and authorized journey-result signature are still required before ledger promotion."},
 		"assertions":        assertions,
 		"promotion_ready":   false,
@@ -340,8 +345,91 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 		"redaction":         map[string]bool{"secrets_redacted": true, "operator_identity_redacted": true, "local_account_names_redacted": true},
 	}
 	writeJSONFile(t, candidatePath, candidate)
+	payload := signedPayoutJourneyResultPayload(t, root, evidence, captured, artifactRel, artifactSHA, body, digest, providerAddr)
+	writeJSONFile(t, payloadPath, payload)
 	t.Logf("wrote %s", artifactRel)
 	t.Logf("wrote %s", candidateRel)
+	t.Logf("wrote %s", payloadRel)
+}
+
+func signedPayoutJourneyResultPayload(t *testing.T, root string, evidence journeyEvidence, captured time.Time, artifactRel, artifactSHA, signedBody string, digest [32]byte, providerAddr string) map[string]any {
+	t.Helper()
+	return map[string]any{
+		"schema_version":  "macprovider.journey-result.v1",
+		"journey_id":      payoutJourneyID,
+		"spec_id":         "SPEC-016",
+		"requirement_ids": []string{"SPEC-016-R002"},
+		"run_id":          evidence.RunID,
+		"repository":      evidence.Repository,
+		"captured_at":     evidence.CapturedAt,
+		"expires_at":      captured.AddDate(0, 1, 0).Format("2006-01-02"),
+		"operator": map[string]string{
+			"role":                 "local-acceptance-operator",
+			"identity_fingerprint": sha256String("redacted-local-acceptance-operator"),
+		},
+		"environment": map[string]string{
+			"class":            "handler-only-conformance-harness",
+			"hardware_profile": "local-macos-redacted",
+			"candidate":        "commit:" + evidence.Repository["commit"],
+		},
+		"execution_mode": "candidate-derived-handler-only-conformance-harness",
+		"harness": map[string]any{
+			"id":                          "phase4-coordinator/internal/payout:TestPayoutAddressRegistrationJourneyEvidence",
+			"version":                     "v1",
+			"execution_mode":              "candidate-derived-handler-only-conformance-harness",
+			"isolated_sqlite":             true,
+			"real_provider_token_check":   true,
+			"real_pause_validation":       true,
+			"controlled_dependencies":     true,
+			"production_runner_built":     false,
+			"external_rpc_client_built":   false,
+			"settlement_signer_built":     false,
+			"release_promotion_attempted": false,
+		},
+		"config_before": evidence.ConfigBefore,
+		"config_after":  evidence.ConfigAfter,
+		"restoration":   map[string]string{"result": "isolated SQLite tempdirs removed by test cleanup"},
+		"observations":  evidence.Observations,
+		"eip712": map[string]any{
+			"typed_data_artifact_sha256":      sha256String(signedBody),
+			"digest_sha256":                   sha256Bytes(digest[:]),
+			"signer_address_sha256":           sha256String(providerAddr),
+			"verifier":                        "phase4-coordinator/internal/payout.VerifyEIP712",
+			"verification_result":             "pass",
+			"raw_signature_access_controlled": true,
+		},
+		"candidate": evidence.Candidate,
+		"signer": map[string]string{
+			"key_id":               journeyResultSigningKeyID,
+			"identity_fingerprint": sha256String("redacted-local-acceptance-operator"),
+			"trust_root_sha256":    fileSHA256(t, root, "security/acceptance-candidate-signing-public.pem"),
+			"verification_result":  "pass",
+		},
+		"artifacts": []map[string]string{{
+			"id":     payoutJourneyArtifactID,
+			"sha256": artifactSHA,
+			"source": artifactRel,
+		}},
+		"result": map[string]string{
+			"status":  "pass",
+			"summary": "Handler-only SPEC-016-R002 payout-address onboarding evidence passed with payout runner, RPC, settlement signer, production side effects, and release promotion disabled.",
+		},
+		"steps":     journeyResultSteps(evidence.Assertions, payoutJourneyArtifactID),
+		"redaction": map[string]bool{"secrets_redacted": true, "operator_identity_redacted": true, "local_account_names_redacted": true},
+	}
+}
+
+func journeyResultSteps(assertions []journeyAssertion, artifactID string) []map[string]any {
+	steps := make([]map[string]any, 0, len(assertions))
+	for _, assertion := range assertions {
+		steps = append(steps, map[string]any{
+			"id":        assertion.ID,
+			"status":    assertion.Status,
+			"assertion": assertion.Assertion,
+			"artifacts": []string{artifactID},
+		})
+	}
+	return steps
 }
 
 func journeyRouter(svc *AddressesService) http.Handler {
