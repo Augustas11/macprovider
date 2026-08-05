@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -515,6 +516,29 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	} else {
 		contractMismatch = contractMismatch || !recoveryRateContractMatches(input, promptRate, completionRate)
 	}
+	receiptExpected, hasVerifiedReceipt, err := verifiedReceiptExpectedCreditTx(ctx, tx, id, input, cached, promptRate, completionRate, multiplier, share, faultFlag)
+	if err != nil {
+		return 0, 0, true, false, err
+	}
+	if hasVerifiedReceipt {
+		summaryExpected = receiptExpected
+		rowRecomputed = receiptExpected
+		expected = receiptExpected
+		contractMismatch = multiplier != input.MultiplierPPM || share != input.ProviderShareBps
+		if usesCachedDiscount {
+			contractMismatch = contractMismatch ||
+				promptRate != input.RateEntry.PromptCreditsPerMtok ||
+				completionRate != input.RateEntry.CompletionCreditsPerMtok
+		} else {
+			contractMismatch = contractMismatch || !recoveryRateContractMatches(input, promptRate, completionRate)
+		}
+	} else if faultFlag == FaultBreakerQualifying {
+		// request_log does not persist breaker qualification. Existing hot-path
+		// credits do, so recovery must preserve that ledger-side fault contract
+		// instead of comparing it to the request-log-only FaultNone default.
+		summaryExpected = rowRecomputed
+		expected = rowRecomputed
+	}
 	if allowByteEstimated {
 		contractMismatch = contractMismatch || usageSource != UsageByteEstimated || invalidBillableTokenCount(estimated.Int64)
 	} else {
@@ -541,6 +565,65 @@ UPDATE ledger_request_credits
 		}
 	}
 	return gross, summaryExpected.GrossCredits, true, mismatch, nil
+}
+
+func verifiedReceiptExpectedCreditTx(ctx context.Context, tx *sql.Tx, requestCreditID int64, input HotPathInput, cached sql.NullInt64, promptRate, completionRate, multiplier, share int64, faultFlag string) (BilledRow, bool, error) {
+	var usageJSON string
+	err := tx.QueryRowContext(ctx, `
+SELECT sao.usage_canonical_json
+  FROM ledger_request_credits lrc
+  JOIN settlement_receipt_verdicts srv
+    ON srv.account_scope_hash = lrc.settlement_account_scope_hash
+   AND srv.request_id = lrc.request_id
+   AND srv.attempt_n = lrc.attempt_n
+   AND srv.provider_id = lrc.provider_id
+   AND srv.route_snapshot_mode = 'enforce'
+   AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
+   AND srv.closed = 1
+   AND srv.settlement_outcome = 'verified'
+  JOIN settlement_route_snapshots srs
+    ON srs.request_id = lrc.request_id
+   AND srs.attempt_n = lrc.attempt_n
+   AND srs.provider_id = lrc.provider_id
+   AND srs.route_snapshot_digest = srv.route_snapshot_digest
+   AND srs.route_snapshot_mode = 'enforce'
+   AND srs.route_snapshot_policy_version = lrc.settlement_policy_version
+  JOIN settlement_attempt_outputs sao
+    ON sao.account_scope = srs.account_scope
+   AND sao.request_id = srs.request_id
+   AND sao.attempt_n = srs.attempt_n
+   AND sao.provider_id = srs.provider_id
+   AND sao.overlapping_or_duplicate = 0
+ WHERE lrc.id = ?
+   AND lrc.settlement_policy_mode = 'enforce'
+   AND lrc.settlement_account_scope_hash IS NOT NULL
+   AND lrc.settlement_policy_version IS NOT NULL
+ LIMIT 1`, requestCreditID).Scan(&usageJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return BilledRow{}, false, nil
+		}
+		return BilledRow{}, false, err
+	}
+	var usage settlementUsageV04
+	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
+		return BilledRow{}, false, fmt.Errorf("decode settlement receipt-bound usage: %w", err)
+	}
+	chargedPrompt := usage.BillableInputTokens
+	if input.PromptTokens != nil && chargedPrompt > *input.PromptTokens {
+		chargedPrompt = *input.PromptTokens
+	}
+	completion := usage.BillableOutputTokens
+	rateEntry := RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate}
+	var cachedPrompt *int64
+	if cached.Valid && cached.Int64 > 0 {
+		if cached.Int64 > chargedPrompt {
+			return BilledRow{}, false, nil
+		}
+		cachedPrompt = &cached.Int64
+		rateEntry = input.RateEntry
+	}
+	return ComputeCreditsWithCache(&chargedPrompt, cachedPrompt, &completion, nil, UsageProviderReported, faultFlag, rateEntry, multiplier, share), true, nil
 }
 
 func recoveryRateContractMatches(input HotPathInput, promptRate, completionRate int64) bool {
