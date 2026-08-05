@@ -283,6 +283,36 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertGreaterThan(medianTPS, 0)
     }
 
+    /// Issue #901: the first completion request after candidate start can pay
+    /// cold model/JIT/prefill latency. The discard prewarm request must absorb
+    /// that latency, and only the subsequent warm request may enter the TTFT
+    /// sample set that backs autotune evidence `ttft_ms`.
+    func testStage1ProberReportsWarmTTFTAfterColdDiscardRequest() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try firstRequestSlowThenFastSSEScript(
+                coldTTFTSeconds: 0.9,
+                warmTTFTSeconds: 0.03
+            ).path,
+            logDirectory: try temporaryDirectory(name: "stage1-warm-ttft-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(_, let p95TTFTMS) = result else {
+            return XCTFail("expected feasible warm probe, got \(result)")
+        }
+        XCTAssertLessThan(p95TTFTMS, 400,
+            "autotune evidence ttft_ms must exclude the cold discard request; got \(p95TTFTMS)ms")
+    }
+
     /// If the subprocess dies BETWEEN prewarm and real probe, the prober
     /// must classify the run infeasible with a prewarm-scoped reason string
     /// instead of pretending prewarm never happened.
@@ -1300,6 +1330,74 @@ final class Stage1IteratorTests: XCTestCase {
                     "Connection: close\\r\\n"
                     "\\r\\n"
                 ).encode())
+                chunk = json.dumps({"choices":[{"delta":{"content":"hello"}}]})
+                client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// Issue #901 helper: first POST is cold/slow, later POSTs are warm/fast.
+    private func firstRequestSlowThenFastSSEScript(coldTTFTSeconds: Double, warmTTFTSeconds: Double) throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-first-slow-provider")
+        let scriptURL = directory.appendingPathComponent("first-slow-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys, time
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 first-slow provider ready", flush=True)
+
+        cold_ttft = \(coldTTFTSeconds)
+        warm_ttft = \(warmTTFTSeconds)
+        post_count = 0
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                post_count += 1
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                time.sleep(cold_ttft if post_count == 1 else warm_ttft)
                 chunk = json.dumps({"choices":[{"delta":{"content":"hello"}}]})
                 client.sendall(f"data: {chunk}\\n\\n".encode())
                 client.sendall(b"data: [DONE]\\n\\n")
