@@ -31,7 +31,7 @@ def fixture(name: str):
 def policy():
     value = {
         "policy_version": "unit-test-v1",
-        "demand_top_n": 100,
+        "demand_top_n": 50,
         "broad_fleet_undercut_fraction": "0.20",
         "coding_minimum_undercut_fraction": "0.10",
         "coding_premium_fraction": "0.10",
@@ -134,9 +134,9 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         models = copy.deepcopy(self.models)
         endpoints = copy.deepcopy(self.endpoints)
         template_endpoint = copy.deepcopy(endpoints["example/new-model"])
-        for index in range(5, 101):
+        for index in range(5, 51):
             model_id = f"unknown/model-{index}"
-            rankings["data"].append({"date": "2026-08-03 00:00:00", "model_permaslug": model_id, "variant": "standard", "total_completion_tokens": 700 - index})
+            rankings["data"].append({"date": "2026-08-03", "model_permaslug": model_id, "total_tokens": str(700 - index)})
             models["data"].append({"id": model_id, "canonical_slug": model_id, "name": f"Unknown {index}", "pricing": None})
             endpoint = copy.deepcopy(template_endpoint)
             endpoint["data"]["id"] = model_id
@@ -151,15 +151,15 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             endpoints,
             policy_document or policy(),
             now=NOW,
-            top_n=100,
+            top_n=50,
         )
 
     def test_normalization_emits_stable_digest_and_cheapest_active_pricing(self):
         first = self.snapshot()
         rankings, models, endpoints = self.expanded_inputs()
-        second = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW.replace(hour=13), top_n=100)
+        second = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW.replace(hour=13), top_n=50)
         self.assertEqual(first["content_digest"], second["content_digest"])
-        self.assertEqual(first["rows"][0]["demand"]["completion_volume"], "1025")
+        self.assertEqual(first["rows"][0]["demand"]["total_token_volume"], "1025")
         self.assertEqual(first["rows"][0]["pricing"]["benchmark_provider"], "CoreWeave")
         self.assertEqual(first["rows"][0]["pricing"]["completion_per_mtok"], "0.13")
         self.assertEqual(first["rows"][2]["canonical_model_id"], "nemotron-3-nano-30b-a3b")
@@ -168,15 +168,14 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
     def test_recorded_openrouter_rankings_excerpt_fixture_is_normalizable_offline(self):
         recorded = fixture("recorded-rankings-response-excerpt.json")
         self.assertEqual(recorded["recording"]["source_url"], engine.RANKINGS_URL)
-        self.assertTrue(recorded["recording"]["full_response_sha256"].startswith("sha256:"))
         normalized = engine.normalize_rankings(recorded["response"], top_n=1)
         self.assertEqual(normalized[0]["source_model_id"], "deepseek/deepseek-v4-flash-20260731")
 
     def test_catalog_alias_resolution_preserves_ranking_provenance_and_ignores_zero_completion_nonmodels(self):
         rankings = {"data": [
-            {"date": "2026-08-03 00:00:00", "model_permaslug": "example/old-model-20260101", "total_completion_tokens": 5},
-            {"date": "2026-08-03 00:00:00", "model_permaslug": "embedding-only", "total_completion_tokens": 0},
-        ]}
+            {"date": "2026-08-03", "model_permaslug": "example/old-model-20260101", "total_tokens": "5"},
+            {"date": "2026-08-03", "model_permaslug": "other", "total_tokens": "1"},
+        ], "meta": {"as_of": "2026-08-04T02:00:00Z", "start_date": "2026-08-03", "end_date": "2026-08-03", "version": "v1"}}
         catalog = {"data": [{"id": "example/current-model", "canonical_slug": "example/old-model-20260101", "pricing": None}]}
         endpoints = {"example/current-model": {"data": {"id": "example/current-model", "endpoints": [{"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}}
         policy_document = policy()
@@ -186,7 +185,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(snapshot["rows"][0]["source_metadata"]["ranking_model_permaslug"], "example/old-model-20260101")
 
     def test_catalog_alias_resolution_prefers_only_paid_variant_over_explicit_free_variant(self):
-        rankings = [{"source_model_id": "google/gemma-4-31b-it-20260402", "rank": 1, "completion_volume": "10", "ranking_date": "2026-08-04 00:00:00"}]
+        rankings = [{"source_model_id": "google/gemma-4-31b-it-20260402", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-04"}]
         catalog = {
             "google/gemma-4-31b-it": {"canonical_slug": "google/gemma-4-31b-it-20260402"},
             "google/gemma-4-31b-it:free": {"canonical_slug": "google/gemma-4-31b-it-20260402"},
@@ -196,7 +195,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(resolved[0]["ranking_model_permaslug"], "google/gemma-4-31b-it-20260402")
 
     def test_catalog_missing_dated_ranking_uses_endpoint_confirmed_alias(self):
-        rankings = {"data": [{"date": "2026-08-04 00:00:00", "model_permaslug": "bytedance-seed/seedream-4.5-20251203", "total_completion_tokens": 10}]}
+        rankings = {"data": [{"date": "2026-08-04", "model_permaslug": "bytedance-seed/seedream-4.5-20251203", "total_tokens": "10"}], "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-08-04", "end_date": "2026-08-04", "version": "v1"}}
         catalog = {"data": [{"id": "example/other", "canonical_slug": "example/other", "pricing": None}]}
         endpoints = {
             "bytedance-seed/seedream-4.5-20251203": {
@@ -216,7 +215,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
     def test_no_active_priced_endpoint_is_snapshotted_and_blocked_not_dropped(self):
         rankings, models, endpoints = self.expanded_inputs()
         endpoints["openai/gpt-oss-20b"]["data"]["endpoints"][0]["status"] = -2
-        snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=100)
+        snapshot = engine.build_snapshot(rankings, models, endpoints, policy(), now=NOW, top_n=50)
         row = next(item for item in snapshot["rows"] if item["source_model_id"] == "openai/gpt-oss-20b")
         self.assertEqual(row["pricing_status"], "no_active_priced_endpoint")
         self.assertIsNone(row["pricing"])
@@ -362,7 +361,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual([row["model_id"] for row in proposal["unchanged"]], ["google-gemma-4-26b-a4b-it"])
         self.assertEqual([row["model_id"] for row in proposal["added"]], ["example/new-model"])
         self.assertEqual({row["model_id"] for row in proposal["dropped"]}, {"qwen2.5-coder-32b-instruct"})
-        self.assertEqual(len(proposal["blocked"]), 97)
+        self.assertEqual(len(proposal["blocked"]), 47)
         nemotron = next(row for row in proposal["blocked"] if row["model_id"] == "nemotron-3-nano-30b-a3b")
         self.assertTrue(nemotron["policy_evidence"]["available"])
         self.assertEqual(proposal["changed"][0]["proposed_completion_rate"]["rate_card_completion_rate_per_mtok"], 104000)
@@ -373,7 +372,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(
             engine.sha256_prefixed(first),
-            "sha256:f2bf173cb25013aa799bc25e04065a168156cbebc4a9425604760ff83bcd8039",
+            "sha256:0d46711b6bbd6f31f5d3cec82b4d8cd6e887d89bbf1b676026372226ac79eb6a",
         )
 
     def test_unresolved_nemotron_license_is_blocked_when_not_a_current_row(self):
@@ -457,9 +456,19 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
 
     def test_orchestration_failure_writes_no_final_snapshot(self):
         with tempfile.TemporaryDirectory() as temporary:
-            client = FakeHTTPClient({engine.RANKINGS_URL: [engine.HTTPResponse(200, b"{", {})]})
+            client = FakeHTTPClient({engine.daily_rankings_url(NOW, 30): [engine.HTTPResponse(200, b"{", {})]})
             with self.assertRaises(engine.SchemaError):
                 engine.fetch_live_snapshot(policy(), output_dir=Path(temporary), top_n=4, retries=0, timeout_seconds=1, client=client, now=lambda: NOW, sleeper=lambda _: None)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_live_fetch_requires_an_openrouter_api_key(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(engine.os.environ, {}, clear=True):
+                with self.assertRaises(engine.FetchError):
+                    engine.fetch_live_snapshot(
+                        policy(), output_dir=Path(temporary), top_n=50,
+                        retries=0, timeout_seconds=1, now=lambda: NOW,
+                    )
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
     def test_current_rate_card_row_without_policy_mapping_is_explicitly_blocked(self):

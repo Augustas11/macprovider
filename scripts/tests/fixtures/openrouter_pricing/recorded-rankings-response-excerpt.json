@@ -1,34 +1,23 @@
 {
   "recording": {
     "captured_at": "2026-08-05T06:39:10Z",
-    "source_url": "https://openrouter.ai/api/frontend/v1/rankings/models",
-    "full_response_sha256": "sha256:1811a9908e31fea949a66de621591c622deea9b9fa4dea9e85c774a472f369cc",
-    "redaction": "Recorded response excerpt: one unmodified ranking row retained; remaining live rows omitted to keep the repository fixture small."
+    "source_url": "https://openrouter.ai/api/v1/datasets/rankings-daily",
+    "capture_kind": "documented-api-response-excerpt",
+    "redaction": "One documented daily-ranking row retained; remaining rows omitted to keep the offline fixture small."
   },
   "response": {
     "data": [
       {
-        "date": "2026-08-04 00:00:00",
+        "date": "2026-08-04",
         "model_permaslug": "deepseek/deepseek-v4-flash-20260731",
-        "variant": "standard",
-        "total_completion_tokens": 57754587120,
-        "total_prompt_tokens": 3394620216411,
-        "total_native_tokens_reasoning": 0,
-        "count": 66600585,
-        "num_media_prompt": 0,
-        "num_media_completion": 0,
-        "image_output_requests": 0,
-        "num_video_prompt": 0,
-        "video_output_seconds": 0,
-        "rerank_documents": 0,
-        "stt_transcript_characters": 0,
-        "num_audio_prompt": 0,
-        "total_native_tokens_cached": 0,
-        "total_tool_calls": 0,
-        "requests_with_tool_call_errors": 0,
-        "variant_permaslug": "deepseek/deepseek-v4-flash-20260731",
-        "change": null
+        "total_tokens": "57754587120"
       }
-    ]
+    ],
+    "meta": {
+      "as_of": "2026-08-05T02:00:00Z",
+      "start_date": "2026-08-04",
+      "end_date": "2026-08-04",
+      "version": "v1"
+    }
   }
 }

@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -31,10 +31,10 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote, urlsplit
 
 
-RANKINGS_URL = "https://openrouter.ai/api/frontend/v1/rankings/models"
+RANKINGS_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
-SNAPSHOT_SCHEMA_VERSION = 3
+SNAPSHOT_SCHEMA_VERSION = 4
 PROPOSAL_SCHEMA_VERSION = 1
 TOOL_VERSION = "openrouter-pricing-engine-v1"
 DEFAULT_POLICY_PATH = Path(__file__).with_name("openrouter_pricing_policy.json")
@@ -43,7 +43,9 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._~:-]+/[A-Za-z0-9._~:-]+$")
 # valid snapshot identities even when policy leaves them unmapped/blocked.
 CANONICAL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._/:-]*$")
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
-RANKING_ROW_KEYS = frozenset({"change", "count", "date", "image_output_requests", "model_permaslug", "num_audio_prompt", "num_media_completion", "num_media_prompt", "num_video_prompt", "requests_with_tool_call_errors", "rerank_documents", "stt_transcript_characters", "total_completion_tokens", "total_native_tokens_cached", "total_native_tokens_reasoning", "total_prompt_tokens", "total_tool_calls", "variant", "variant_permaslug", "video_output_seconds"})
+RANKING_TOP_LEVEL_KEYS = frozenset({"data", "meta"})
+RANKING_ROW_KEYS = frozenset({"date", "model_permaslug", "total_tokens"})
+RANKING_META_KEYS = frozenset({"as_of", "end_date", "start_date", "version"})
 CATALOG_ROW_KEYS = frozenset({"alias_target", "architecture", "benchmarks", "canonical_slug", "context_length", "created", "default_parameters", "description", "expiration_date", "hugging_face_id", "id", "knowledge_cutoff", "links", "name", "per_request_limits", "pricing", "reasoning", "supported_parameters", "supported_voices", "top_provider"})
 CATALOG_TOP_LEVEL_KEYS = frozenset({"data", "links", "total_count"})
 ENDPOINT_DATA_KEYS = frozenset({"architecture", "created", "description", "endpoints", "id", "name"})
@@ -202,11 +204,11 @@ def parse_rfc3339_utc(value: Any, field: str) -> datetime:
 
 def parse_ranking_date(value: Any, field: str) -> datetime:
     if not isinstance(value, str):
-        raise SchemaError(f"{field} must be OpenRouter ranking timestamp YYYY-MM-DD HH:MM:SS")
+        raise SchemaError(f"{field} must be OpenRouter daily ranking date YYYY-MM-DD")
     try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        return datetime.strptime(value, "%Y-%m-%d")
     except ValueError as error:
-        raise SchemaError(f"{field} must be OpenRouter ranking timestamp YYYY-MM-DD HH:MM:SS") from error
+        raise SchemaError(f"{field} must be OpenRouter daily ranking date YYYY-MM-DD") from error
 
 
 def canonical_json(value: Any) -> bytes:
@@ -219,7 +221,9 @@ def sha256_prefixed(value: Any) -> str:
 
 SCHEMA_CONTRACT_FINGERPRINT = sha256_prefixed(
     {
+        "rankings_top_level_keys": sorted(RANKING_TOP_LEVEL_KEYS),
         "rankings_row_keys": sorted(RANKING_ROW_KEYS),
+        "rankings_meta_keys": sorted(RANKING_META_KEYS),
         "catalog_row_keys": sorted(CATALOG_ROW_KEYS),
         "catalog_top_level_keys": sorted(CATALOG_TOP_LEVEL_KEYS),
         "endpoint_data_keys": sorted(ENDPOINT_DATA_KEYS),
@@ -382,47 +386,59 @@ def require_allowed_keys(value: Mapping[str, Any], allowed: frozenset[str], loca
         raise SchemaError(f"{location}: unexpected fields {unexpected}")
 
 
+def rankings_metadata(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    require_allowed_keys(document, RANKING_TOP_LEVEL_KEYS, "rankings response")
+    metadata = document.get("meta")
+    if not isinstance(metadata, dict):
+        raise SchemaError("rankings response: meta must be an object")
+    require_allowed_keys(metadata, RANKING_META_KEYS, "rankings response: meta")
+    if set(metadata) != RANKING_META_KEYS:
+        raise SchemaError("rankings response: meta has missing fields")
+    parse_rfc3339_utc(metadata["as_of"], "rankings response: meta.as_of")
+    start = parse_ranking_date(metadata["start_date"], "rankings response: meta.start_date")
+    end = parse_ranking_date(metadata["end_date"], "rankings response: meta.end_date")
+    if start > end or metadata["version"] != "v1":
+        raise SchemaError("rankings response: meta has invalid date range or version")
+    return metadata
+
+
 def normalize_rankings(document: Mapping[str, Any], top_n: int) -> list[dict[str, Any]]:
-    require_allowed_keys(document, frozenset({"data"}), "rankings response")
+    if isinstance(top_n, bool) or not isinstance(top_n, int) or not 1 <= top_n <= 50:
+        raise SchemaError("requested demand cohort must be an integer from 1 through 50")
+    metadata = rankings_metadata(document)
     rows = required_list(document, "data", "rankings response")
     totals: dict[str, int] = {}
     dates: dict[str, str] = {}
-    eligible_rows: list[tuple[dict[str, Any], datetime]] = []
+    seen_daily_models: set[tuple[str, str]] = set()
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise SchemaError(f"rankings response: data[{index}] must be an object")
         require_allowed_keys(row, RANKING_ROW_KEYS, f"rankings response: data[{index}]")
-        completion_tokens = row.get("total_completion_tokens")
-        if isinstance(completion_tokens, bool) or not isinstance(completion_tokens, int) or completion_tokens < 0:
-            raise SchemaError(f"rankings response: data[{index}].total_completion_tokens must be non-negative integer")
-        # Non-generation rows (for example embedding-only models) have no
-        # completion demand and are outside this completion-rate pipeline.
-        if completion_tokens == 0:
-            continue
+        total_tokens = row.get("total_tokens")
+        if not isinstance(total_tokens, str) or not total_tokens.isdigit() or int(total_tokens) <= 0:
+            raise SchemaError(f"rankings response: data[{index}].total_tokens must be a positive integer string")
         model_id = row.get("model_permaslug")
         date = row.get("date")
+        parsed_date = parse_ranking_date(date, f"rankings response: data[{index}].date")
+        if not parse_ranking_date(metadata["start_date"], "rankings response: meta.start_date") <= parsed_date <= parse_ranking_date(metadata["end_date"], "rankings response: meta.end_date"):
+            raise SchemaError(f"rankings response: data[{index}].date is outside metadata window")
+        if model_id == "other":
+            continue
         if not isinstance(model_id, str) or not model_id.strip():
             raise SchemaError(f"rankings response: data[{index}].model_permaslug must be non-empty")
         if not MODEL_ID_RE.fullmatch(model_id):
             raise SchemaError(f"rankings response: data[{index}].model_permaslug has unsafe shape")
-        parsed_date = parse_ranking_date(date, f"rankings response: data[{index}].date")
-        eligible_rows.append((row, parsed_date))
-    if not eligible_rows:
-        raise SchemaError("rankings response: no completion-demand rows")
-    latest_date = max(parsed_date for _, parsed_date in eligible_rows)
-    for row, parsed_date in eligible_rows:
-        if parsed_date != latest_date:
-            continue
-        model_id = row["model_permaslug"]
-        completion_tokens = row["total_completion_tokens"]
-        date = row["date"]
-        totals[model_id] = totals.get(model_id, 0) + completion_tokens
+        daily_key = (date, model_id)
+        if daily_key in seen_daily_models:
+            raise SchemaError(f"rankings response: duplicate daily model row {daily_key!r}")
+        seen_daily_models.add(daily_key)
+        totals[model_id] = totals.get(model_id, 0) + int(total_tokens)
         dates[model_id] = max(date, dates.get(model_id, date))
     ordered = sorted(totals, key=lambda item: (-totals[item], item))[:top_n]
-    if not ordered:
-        raise SchemaError("rankings response: no normalized ranking rows")
+    if len(ordered) != top_n:
+        raise SchemaError("rankings response: insufficient documented daily-ranking models for requested cohort")
     return [
-        {"source_model_id": model_id, "rank": rank, "completion_volume": str(totals[model_id]), "ranking_date": dates[model_id]}
+        {"source_model_id": model_id, "rank": rank, "total_token_volume": str(totals[model_id]), "ranking_date": dates[model_id]}
         for rank, model_id in enumerate(ordered, start=1)
     ]
 
@@ -591,11 +607,18 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
     if source["observed_schema_version_or_fingerprint"] != SCHEMA_CONTRACT_FINGERPRINT or not isinstance(source["generator_version"], str):
         raise SchemaError("snapshot source schema/generator provenance is invalid")
     fetch_metadata = source["fetch_metadata"]
-    if not isinstance(fetch_metadata, dict) or set(fetch_metadata) != {"successful_source_count", "observed_model_count", "requested_top_n"}:
+    required_fetch_metadata = {"successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days", "ranking_window_start_date", "ranking_window_end_date", "demand_metric"}
+    if not isinstance(fetch_metadata, dict) or set(fetch_metadata) != required_fetch_metadata:
         raise SchemaError("snapshot fetch_metadata has missing or unexpected fields")
-    for key in ("successful_source_count", "observed_model_count", "requested_top_n"):
+    for key in ("successful_source_count", "observed_model_count", "requested_top_n", "demand_window_days"):
         if isinstance(fetch_metadata[key], bool) or not isinstance(fetch_metadata[key], int) or fetch_metadata[key] < 1:
             raise SchemaError(f"snapshot fetch_metadata.{key} must be a positive integer")
+    if fetch_metadata["requested_top_n"] > 50 or fetch_metadata["demand_window_days"] > 31 or fetch_metadata["demand_metric"] != "aggregated_daily_total_tokens":
+        raise SchemaError("snapshot fetch_metadata has invalid demand cohort metadata")
+    start = parse_ranking_date(fetch_metadata["ranking_window_start_date"], "snapshot fetch_metadata.ranking_window_start_date")
+    end = parse_ranking_date(fetch_metadata["ranking_window_end_date"], "snapshot fetch_metadata.ranking_window_end_date")
+    if start > end or (end - start).days + 1 != fetch_metadata["demand_window_days"]:
+        raise SchemaError("snapshot fetch_metadata has invalid ranking window")
     if fetch_metadata["observed_model_count"] != len(rows) or fetch_metadata["successful_source_count"] != 2 + len(rows):
         raise SchemaError("snapshot fetch_metadata counts do not match rows")
     seen: set[str] = set()
@@ -620,9 +643,9 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot has duplicate source model id {source_id!r}")
         seen.add(canonical_id)
         seen_source_ids.add(source_id)
-        if not isinstance(demand, dict) or set(demand) != {"source_model_id", "rank", "completion_volume", "ranking_date", "ranking_model_permaslug"}:
+        if not isinstance(demand, dict) or set(demand) != {"source_model_id", "rank", "total_token_volume", "ranking_date", "ranking_model_permaslug"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid demand")
-        if demand["source_model_id"] != source_id or not isinstance(demand.get("rank"), int) or demand["rank"] < 1 or not isinstance(demand.get("completion_volume"), str) or not demand["completion_volume"].isdigit() or int(demand["completion_volume"]) <= 0 or not isinstance(demand.get("ranking_model_permaslug"), str) or not MODEL_ID_RE.fullmatch(demand["ranking_model_permaslug"]):
+        if demand["source_model_id"] != source_id or not isinstance(demand.get("rank"), int) or demand["rank"] < 1 or not isinstance(demand.get("total_token_volume"), str) or not demand["total_token_volume"].isdigit() or int(demand["total_token_volume"]) <= 0 or not isinstance(demand.get("ranking_model_permaslug"), str) or not MODEL_ID_RE.fullmatch(demand["ranking_model_permaslug"]):
             raise SchemaError(f"snapshot.rows[{index}] has invalid demand")
         parse_ranking_date(demand.get("ranking_date"), f"snapshot.rows[{index}].demand.ranking_date")
         if demand["ranking_model_permaslug"] in seen_ranking_slugs:
@@ -664,8 +687,14 @@ def build_snapshot(
     *,
     now: datetime,
     top_n: int,
+    demand_window_days: int | None = None,
 ) -> dict[str, Any]:
     rankings = normalize_rankings(rankings_document, top_n)
+    ranking_meta = rankings_metadata(rankings_document)
+    observed_window_days = (parse_ranking_date(ranking_meta["end_date"], "rankings response: meta.end_date") - parse_ranking_date(ranking_meta["start_date"], "rankings response: meta.start_date")).days + 1
+    if demand_window_days is not None and demand_window_days != observed_window_days:
+        raise SchemaError("rankings response metadata does not match the requested demand window")
+    resolved_window_days = observed_window_days
     catalog = validate_catalog(catalog_document)
     endpoint_requests = resolve_rankings_to_catalog(rankings, catalog)
     requested_endpoint_ids = {demand["source_model_id"] for demand in endpoint_requests}
@@ -727,6 +756,10 @@ def build_snapshot(
                 "successful_source_count": 2 + len(endpoints_documents),
                 "observed_model_count": len(normalized_rows),
                 "requested_top_n": top_n,
+                "demand_window_days": resolved_window_days,
+                "ranking_window_start_date": ranking_meta["start_date"],
+                "ranking_window_end_date": ranking_meta["end_date"],
+                "demand_metric": "aggregated_daily_total_tokens",
             },
         },
         "rows": normalized_rows,
@@ -810,8 +843,8 @@ def validate_policy(policy: Mapping[str, Any]) -> None:
     if not isinstance(policy.get("policy_version"), str) or not policy["policy_version"]:
         raise SchemaError("policy.policy_version must be non-empty")
     demand_top_n = policy.get("demand_top_n")
-    if demand_top_n != 100:
-        raise SchemaError("policy.demand_top_n must be exactly 100")
+    if demand_top_n != 50:
+        raise SchemaError("policy.demand_top_n must be exactly 50 for the documented daily rankings dataset")
     undercut = parse_decimal(policy.get("broad_fleet_undercut_fraction"), "policy.broad_fleet_undercut_fraction", allow_zero=False)
     if not Decimal("0.10") <= undercut <= Decimal("0.30"):
         raise SchemaError("policy broad-fleet undercut fraction must be within 10%-30%")
@@ -906,8 +939,8 @@ def provider_hourly_usd(internal_rate_per_mtok: int, tps: Decimal, rate_card: Ma
 def eligibility(model: Mapping[str, Any], row: Mapping[str, Any], policy: Mapping[str, Any]) -> tuple[bool, list[str], Decimal | None]:
     reasons: list[str] = []
     rank = row["demand"]["rank"]
-    if rank > 100:
-        reasons.append(f"demand rank {rank} is outside the top-100 completion-token gate")
+    if rank > 50:
+        reasons.append(f"demand rank {rank} is outside the documented daily top-50 demand gate")
     serving = model.get("serving_path")
     if not isinstance(serving, dict) or serving.get("verification_status") != "verified":
         reasons.append("MLX/GGUF serving path is not verified")
@@ -1003,15 +1036,15 @@ def build_proposal(
     assessed_current_ids: set[str] = set()
 
     def market_unavailable() -> dict[str, None]:
-        return {"demand_rank": None, "completion_volume": None, "benchmark_provider": None, "completion_per_mtok": None}
+        return {"demand_rank": None, "total_token_volume": None, "benchmark_provider": None, "completion_per_mtok": None}
 
     def market_from_snapshot_row(row: Mapping[str, Any]) -> dict[str, Any]:
         pricing = row.get("pricing")
         if row.get("pricing_status") != "active_priced" or not isinstance(pricing, dict):
-            return {"demand_rank": row["demand"]["rank"], "completion_volume": row["demand"]["completion_volume"], "benchmark_provider": None, "completion_per_mtok": None}
+            return {"demand_rank": row["demand"]["rank"], "total_token_volume": row["demand"]["total_token_volume"], "benchmark_provider": None, "completion_per_mtok": None}
         return {
             "demand_rank": row["demand"]["rank"],
-            "completion_volume": row["demand"]["completion_volume"],
+            "total_token_volume": row["demand"]["total_token_volume"],
             "benchmark_provider": pricing["benchmark_provider"],
             "completion_per_mtok": pricing["completion_per_mtok"],
         }
@@ -1055,15 +1088,15 @@ def build_proposal(
                         "source_model_id": source_model_id,
                         "action": "dropped",
                         "current_completion_rate": current_completion_rate(rate_rows, canonical_id),
-                        "eligibility": {"eligible": False, "reasons": ["model is absent from complete top-100 demand snapshot"]},
+                        "eligibility": {"eligible": False, "reasons": ["model is absent from complete documented daily top-50 demand snapshot"]},
                         "market": market_unavailable(),
                         "policy_evidence": policy_evidence(model),
-                        "reasons": ["model is absent from complete top-100 demand snapshot"],
+                        "reasons": ["model is absent from complete documented daily top-50 demand snapshot"],
                     }
                 )
             else:
                 result["blocked"].append(
-                    {"model_id": canonical_id, "source_model_id": source_model_id, "action": "blocked", "market": market_unavailable(), "eligibility": {"eligible": False, "reasons": ["model is absent from complete top-100 demand snapshot"]}, "policy_evidence": policy_evidence(model), "reasons": ["model is absent from complete top-100 demand snapshot"]}
+                    {"model_id": canonical_id, "source_model_id": source_model_id, "action": "blocked", "market": market_unavailable(), "eligibility": {"eligible": False, "reasons": ["model is absent from complete documented daily top-50 demand snapshot"]}, "policy_evidence": policy_evidence(model), "reasons": ["model is absent from complete documented daily top-50 demand snapshot"]}
                 )
             continue
         allowed, reasons, market_completion = eligibility(model, row, policy)
@@ -1184,6 +1217,14 @@ def proposal_filename(now: datetime, proposal: Mapping[str, Any]) -> str:
     return "openrouter-rate-card-proposal-" + now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ-") + artifact_suffix(proposal) + ".json"
 
 
+def daily_rankings_url(reference_time: datetime, demand_window_days: int) -> str:
+    if not isinstance(demand_window_days, int) or isinstance(demand_window_days, bool) or not 1 <= demand_window_days <= 31:
+        raise FetchError("demand window must be an integer from 1 through 31 days")
+    end_date = reference_time.astimezone(timezone.utc).date() - timedelta(days=1)
+    start_date = end_date - timedelta(days=demand_window_days - 1)
+    return f"{RANKINGS_URL}?start_date={start_date.isoformat()}&end_date={end_date.isoformat()}"
+
+
 def fetch_live_snapshot(
     policy: Mapping[str, Any],
     *,
@@ -1196,16 +1237,21 @@ def fetch_live_snapshot(
     sleeper: Callable[[float], None] = time.sleep,
     generation_timeout_seconds: float = 900.0,
     clock: Callable[[], float] = time.monotonic,
+    demand_window_days: int = 30,
 ) -> Path:
-    if isinstance(top_n, bool) or not isinstance(top_n, int) or not 1 <= top_n <= 100:
-        raise FetchError("top_n must be an integer between 1 and 100")
+    if isinstance(top_n, bool) or not isinstance(top_n, int) or not 1 <= top_n <= 50:
+        raise FetchError("top_n must be an integer between 1 and 50")
     if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60:
         raise FetchError("request timeout must be finite, positive, and no more than 60 seconds")
     if not math.isfinite(generation_timeout_seconds) or not 1 <= generation_timeout_seconds <= 3600:
         raise FetchError("generation timeout must be finite, at least one second, and no more than one hour")
-    client = client or UrllibHTTPClient()
+    if client is None:
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            raise FetchError("OPENROUTER_API_KEY is required for the documented OpenRouter APIs")
+        client = UrllibHTTPClient()
     deadline = clock() + generation_timeout_seconds
-    rankings = fetch_json(client, RANKINGS_URL, "rankings", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
+    rankings_url = daily_rankings_url(now(), demand_window_days)
+    rankings = fetch_json(client, rankings_url, "daily rankings", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     catalog = fetch_json(client, MODELS_URL, "models catalog", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     catalog_index = validate_catalog(catalog)
     ranking_rows = resolve_rankings_to_catalog(normalize_rankings(rankings, top_n), catalog_index)
@@ -1217,7 +1263,7 @@ def fetch_live_snapshot(
         url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
         endpoints[model_id] = fetch_json(client, url, f"endpoints {model_id}", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
     fetched_at = now()
-    snapshot = build_snapshot(rankings, catalog, endpoints, policy, now=fetched_at, top_n=top_n)
+    snapshot = build_snapshot(rankings, catalog, endpoints, policy, now=fetched_at, top_n=top_n, demand_window_days=demand_window_days)
     target = output_dir / snapshot_filename(fetched_at, snapshot)
     atomic_write_json(target, snapshot)
     return target
@@ -1226,7 +1272,7 @@ def fetch_live_snapshot(
 def command_fetch(args: argparse.Namespace) -> int:
     policy = load_json_file(Path(args.policy), "policy")
     validate_policy(policy)
-    result = fetch_live_snapshot(policy, output_dir=Path(args.output_dir), top_n=args.top_n, retries=args.retries, timeout_seconds=args.timeout_seconds, generation_timeout_seconds=args.generation_timeout_seconds)
+    result = fetch_live_snapshot(policy, output_dir=Path(args.output_dir), top_n=args.top_n, retries=args.retries, timeout_seconds=args.timeout_seconds, generation_timeout_seconds=args.generation_timeout_seconds, demand_window_days=args.demand_window_days)
     print(result)
     return 0
 
@@ -1249,7 +1295,8 @@ def parser() -> argparse.ArgumentParser:
     fetch = subcommands.add_parser("fetch", help="fetch and validate a live OpenRouter snapshot")
     fetch.add_argument("--policy", default=str(DEFAULT_POLICY_PATH))
     fetch.add_argument("--output-dir", required=True)
-    fetch.add_argument("--top-n", type=int, default=100)
+    fetch.add_argument("--top-n", type=int, default=50)
+    fetch.add_argument("--demand-window-days", type=int, default=30)
     fetch.add_argument("--retries", type=int, default=3)
     fetch.add_argument("--timeout-seconds", type=float, default=20.0)
     fetch.add_argument("--generation-timeout-seconds", type=float, default=900.0)

@@ -12,8 +12,8 @@ owns rate-card guardrails, review, and applying any accepted proposal.
 ```bash
 python3 scripts/openrouter_pricing_engine.py fetch \
   --output-dir /var/tmp/openrouter-pricing \
-  --top-n 100 --retries 3 --timeout-seconds 20 \
-  --generation-timeout-seconds 900
+  --top-n 50 --demand-window-days 30 --retries 3 \
+  --timeout-seconds 20 --generation-timeout-seconds 900
 
 python3 scripts/openrouter_pricing_engine.py compute \
   --snapshot /var/tmp/openrouter-pricing/openrouter-pricing-snapshot-<timestamp>.json \
@@ -28,51 +28,43 @@ there is intentionally no apply mode in this tool.
 
 ## Sources and normalization
 
-The fetcher uses one **undocumented frontend dependency** for demand and two
-documented OpenRouter API endpoints for catalog and pricing:
+The fetcher uses documented OpenRouter API endpoints:
 
-- demand (unstable frontend dependency):
-  `https://openrouter.ai/api/frontend/v1/rankings/models`;
-- catalog/schema cross-check (documented): `https://openrouter.ai/api/v1/models`;
-- cheapest active provider price (documented):
+- demand: `https://openrouter.ai/api/v1/datasets/rankings-daily`;
+- catalog/schema cross-check: `https://openrouter.ai/api/v1/models`;
+- cheapest active provider price:
   `https://openrouter.ai/api/v1/models/{model-id}/endpoints`.
 
-The rankings endpoint is not presented as a stable public API contract. If it
-becomes unavailable or its schema changes, `fetch` fails closed and emits no
-snapshot. The operator must stop the scheduled run, inspect and review the
-upstream change, then update this adapter or move to a documented demand source.
-The tool must not infer demand from catalog/pricing data or publish a guessed
-fallback snapshot.
+The documented daily dataset contains each day's top 50 public models by total
+token usage plus an aggregated `other` row. The fetcher requests a bounded
+UTC window (30 days by default), discards `other`, aggregates `total_tokens` by
+`model_permaslug`, and selects the requested cohort of up to 50 observed
+models. It does not claim to construct a global top-100 ranking, nor does it
+infer demand from catalog/pricing data. A changed schema, unavailable response,
+or insufficient daily-ranking cohort fails closed and emits no snapshot.
 
 ## Authentication
 
 Set `OPENROUTER_API_KEY` in the environment before running `fetch` to send the
 documented `Authorization: Bearer <token>` header to OpenRouter. An environment
 variable keeps the credential out of shell history, command-line process
-arguments, snapshots, proposals, and error output. It is optional for
-compatibility with currently unauthenticated responses, but operators should
-configure it for reliable product use. If unauthenticated access stops working,
-set the variable and rerun; a failed request still publishes nothing.
+arguments, snapshots, proposals, and error output. It is required: the
+documented rankings, models, and endpoints APIs require bearer authentication.
+A missing key or failed request publishes nothing.
 
-Ranking records are aggregated by `model_permaslug`, sorted by completion-token
-volume, and reduced to the requested number of distinct models. Only the latest
-valid OpenRouter ranking timestamp (`YYYY-MM-DD HH:MM:SS`) in the response is
-used; variants from older dates are never
-summed into current demand. Zero-completion
-non-generation rows (for example embedding-only entries) are excluded before
-model-ID validation because they cannot participate in a completion-rate
-proposal. Each selected
+Daily ranking records are aggregated by `model_permaslug`, sorted by total-token
+volume, and reduced to the requested number of distinct models. Each selected
 model must appear in the catalog and have a complete endpoints response. The
 normalizer chooses the lowest completion price among active (`status == 0`)
 provider endpoints, breaking ties deterministically by prompt price and
 provider name. Decimal strings—not binary floats—are used for stored money and
 all calculations.
 
-The snapshot schema is version `3`:
+The snapshot schema is version `4`:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "snapshot_type": "openrouter-pricing",
   "fetched_at": "2026-08-05T12:00:00Z",
   "content_digest": "sha256:<normalized-content-hash>",
@@ -83,8 +75,12 @@ The snapshot schema is version `3`:
     "generator_version": "openrouter-pricing-engine-v1",
     "fetch_metadata": {
       "successful_source_count": 102,
-      "observed_model_count": 100,
-      "requested_top_n": 100
+      "observed_model_count": 50,
+      "requested_top_n": 50,
+      "demand_window_days": 30,
+      "ranking_window_start_date": "2026-07-06",
+      "ranking_window_end_date": "2026-08-04",
+      "demand_metric": "aggregated_daily_total_tokens"
     }
   },
   "rows": [
@@ -95,7 +91,7 @@ The snapshot schema is version `3`:
       "demand": {
         "source_model_id": "provider/model",
         "rank": 1,
-        "completion_volume": "123",
+        "total_token_volume": "123",
         "ranking_date": "...",
         "ranking_model_permaslug": "provider/model"
       },
@@ -164,8 +160,8 @@ Apple-Silicon serving paths, license evidence, active parameter count, 4-bit
 residency, and projected TPS. Unknown snapshot models remain visible as
 `blocked`; they are never inferred into a Macprovider identity.
 
-Candidates must be in a complete snapshot covering the mandatory top-100
-completion-token demand population, have a
+Candidates must be in a complete snapshot covering the mandatory documented
+daily top-50 demand cohort (aggregated total tokens over the fetch window), have a
 verified MLX/MLX-Swift/production GGUF-Metal path, and have a commercially
 permitted license. Broad-fleet models require active parameters at or below
 8B, 4-bit residency at or below 18 GB, and projected M-base TPS of at least
@@ -219,8 +215,7 @@ rate-card row with no verified policy mapping.
 
 Fixtures under `scripts/tests/fixtures/openrouter_pricing/` are offline response
 fixtures. `recorded-rankings-response-excerpt.json` is a provenance-labelled,
-redacted excerpt of a live OpenRouter response; it records capture time, source
-URL, and the SHA-256 of the full captured response. The remaining small fixtures
+redacted documented-API response excerpt. The remaining small fixtures
 are deterministic response-shape fixtures. None contains credentials or headers.
 
 ```bash

@@ -1,6 +1,6 @@
 {
-  "policy_version": "research-227-v3-engine-v1",
-  "demand_top_n": 100,
+  "policy_version": "research-227-v3-engine-v2-daily-top-50",
+  "demand_top_n": 50,
   "broad_fleet_undercut_fraction": "0.20",
   "coding_minimum_undercut_fraction": "0.10",
   "coding_premium_fraction": "0.10",
