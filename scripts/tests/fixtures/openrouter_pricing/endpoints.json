@@ -1,0 +1,6 @@
+{
+  "openai/gpt-oss-20b": {"data": {"id": "openai/gpt-oss-20b", "endpoints": [{"provider_name": "CoreWeave", "status": 0, "pricing": {"prompt": "0.00000003", "completion": "0.00000013"}}, {"provider_name": "Inactive", "status": -2, "pricing": {"prompt": "0.00000001", "completion": "0.00000001"}}]}},
+  "google/gemma-4-26b-a4b-it": {"data": {"id": "google/gemma-4-26b-a4b-it", "endpoints": [{"provider_name": "Cloudflare", "status": 0, "pricing": {"prompt": "0.00000006", "completion": "0.00000030"}}]}},
+  "nvidia/nemotron-3-nano-30b-a3b": {"data": {"id": "nvidia/nemotron-3-nano-30b-a3b", "endpoints": [{"provider_name": "DeepInfra", "status": 0, "pricing": {"prompt": "0.00000004", "completion": "0.00000020"}}]}},
+  "example/new-model": {"data": {"id": "example/new-model", "endpoints": [{"provider_name": "ExampleCloud", "status": 0, "pricing": {"prompt": "0.00000005", "completion": "0.00000025"}}]}}
+}

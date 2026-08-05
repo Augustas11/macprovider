@@ -1,0 +1,23 @@
+{
+  "recording": {
+    "captured_at": "2026-08-05T06:39:10Z",
+    "source_url": "https://openrouter.ai/api/v1/datasets/rankings-daily",
+    "capture_kind": "documented-api-response-excerpt",
+    "redaction": "One documented daily-ranking row retained; remaining rows omitted to keep the offline fixture small."
+  },
+  "response": {
+    "data": [
+      {
+        "date": "2026-08-04",
+        "model_permaslug": "deepseek/deepseek-v4-flash-20260731",
+        "total_tokens": "57754587120"
+      }
+    ],
+    "meta": {
+      "as_of": "2026-08-05T02:00:00Z",
+      "start_date": "2026-08-04",
+      "end_date": "2026-08-04",
+      "version": "v1"
+    }
+  }
+}
