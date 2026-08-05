@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -295,6 +296,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			FaultFlag:                    FaultNone,
 			ConfigSnapshotID:             snapshotID,
 			RateEntry:                    RateFor(rewards.RateCard, model),
+			RateCard:                     rewards.RateCard,
 			MultiplierPPM:                multiplier,
 			ProviderShareBps:             share,
 			SettlementAccountScopeHash:   settlementHash,
@@ -483,38 +485,51 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	if quarantined == 1 {
 		return 0, 0, true, false, nil
 	}
-	recomputed := expected
+	summaryExpected := expected
+	rowRecomputed := expected
 	recomputeRateEntry := input.RateEntry
+	usesCachedDiscount := cached.Valid && cached.Int64 > 0
+	if !usesCachedDiscount {
+		recomputeRateEntry = RateCardEntry{
+			PromptCreditsPerMtok:     promptRate,
+			CompletionCreditsPerMtok: completionRate,
+		}
+	}
 	allowByteEstimated := usageSource == UsageByteEstimated && input.CompletionTokens == nil && estimated.Valid
 	if allowByteEstimated {
-		recomputed = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
+		summaryExpected = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, input.RateEntry, input.MultiplierPPM, input.ProviderShareBps)
+		rowRecomputed = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
 	} else {
-		recomputed = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, input.EstimatedCompTokens, usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
+		rowRecomputed = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, input.EstimatedCompTokens, usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
 	}
 	var operatorCredits sql.NullInt64
 	var operatorRows int64
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(operator_credits), 0), COUNT(*) FROM ledger_operator_credits WHERE request_credit_id = ?`, id).Scan(&operatorCredits, &operatorRows); err != nil {
 		return 0, 0, true, false, err
 	}
-	contractMismatch := promptRate != input.RateEntry.PromptCreditsPerMtok ||
-		completionRate != input.RateEntry.CompletionCreditsPerMtok ||
-		multiplier != input.MultiplierPPM ||
-		share != input.ProviderShareBps
+	contractMismatch := multiplier != input.MultiplierPPM || share != input.ProviderShareBps
+	if usesCachedDiscount {
+		contractMismatch = contractMismatch ||
+			promptRate != input.RateEntry.PromptCreditsPerMtok ||
+			completionRate != input.RateEntry.CompletionCreditsPerMtok
+	} else {
+		contractMismatch = contractMismatch || !recoveryRateContractMatches(input, promptRate, completionRate)
+	}
 	if allowByteEstimated {
 		contractMismatch = contractMismatch || usageSource != UsageByteEstimated || invalidBillableTokenCount(estimated.Int64)
 	} else {
 		contractMismatch = contractMismatch || usageSource != expected.UsageSource || faultFlag != expected.FaultFlag
 	}
-	mismatch := recomputed.GrossCredits != gross ||
-		recomputed.ProviderCredits != providerCredits ||
-		recomputed.FaultFlag != faultFlag ||
+	mismatch := rowRecomputed.GrossCredits != gross ||
+		rowRecomputed.ProviderCredits != providerCredits ||
+		rowRecomputed.FaultFlag != faultFlag ||
 		!nullInt64MatchesPtr(cached, input.CachedPromptTokens) ||
 		contractMismatch ||
 		operatorRows != 1 ||
 		providerCredits+operatorCredits.Int64 != gross
 	if mismatch {
 		if settled == 1 || settlementID.Valid {
-			return gross, recomputed.GrossCredits, true, false, fmt.Errorf("ledger mismatch on settled credit request_id=%s attempt_n=%d provider_id=%s", input.RequestID, input.AttemptN, input.ProviderID)
+			return gross, summaryExpected.GrossCredits, true, false, fmt.Errorf("ledger mismatch on settled credit request_id=%s attempt_n=%d provider_id=%s", input.RequestID, input.AttemptN, input.ProviderID)
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
@@ -525,7 +540,66 @@ UPDATE ledger_request_credits
 			return 0, 0, true, false, err
 		}
 	}
-	return gross, recomputed.GrossCredits, true, mismatch, nil
+	return gross, summaryExpected.GrossCredits, true, mismatch, nil
+}
+
+func recoveryRateContractMatches(input HotPathInput, promptRate, completionRate int64) bool {
+	if rateEntryMatches(input.RateEntry, promptRate, completionRate) {
+		return true
+	}
+	return recoveryLegacyDefaultRateMatches(input, promptRate, completionRate)
+}
+
+// recoveryLegacyDefaultRateCutoffUTC bounds the served-alias/default-rate
+// compatibility carve-out to rows created before the catalog-alias resolver
+// rollout. Read-only Pearl evidence on 2026-08-05 showed the affected
+// mlx-community Llama rows ended at 05:11Z; the origin/main resolver commit
+// followed at 05:21Z.
+var recoveryLegacyDefaultRateCutoffUTC = time.Date(2026, 8, 5, 5, 21, 11, 0, time.UTC)
+
+func recoveryLegacyDefaultRateMatches(input HotPathInput, promptRate, completionRate int64) bool {
+	if input.RateCard == nil {
+		return false
+	}
+	if !input.TSUtc.Before(recoveryLegacyDefaultRateCutoffUTC) {
+		return false
+	}
+	if !legacyServedAliasDefaultFallbackModel(input.Model) {
+		return false
+	}
+	if _, ok := input.RateCard[input.Model]; ok {
+		return false
+	}
+	lowerModel := strings.ToLower(strings.TrimSpace(input.Model))
+	if _, ok := input.RateCard[lowerModel]; ok {
+		return false
+	}
+	normalizedModel := NormalizeModelKey(input.Model)
+	if normalizedModel != "" {
+		if _, ok := input.RateCard[normalizedModel]; ok {
+			return false
+		}
+	}
+	entry, ok := input.RateCard["default"]
+	return ok && rateEntryMatches(entry, promptRate, completionRate)
+}
+
+func legacyServedAliasDefaultFallbackModel(model string) bool {
+	key := strings.ToLower(strings.TrimSpace(model))
+	namespace := ""
+	if slash := strings.IndexByte(key, '/'); slash >= 0 {
+		namespace = key[:slash]
+		key = key[slash+1:]
+	}
+	for _, suffix := range []string{"-mxfp4-q8", "-4bit", "-8bit"} {
+		key = strings.TrimSuffix(key, suffix)
+	}
+	return namespace == "mlx-community" && strings.HasPrefix(key, "llama-")
+}
+
+func rateEntryMatches(entry RateCardEntry, promptRate, completionRate int64) bool {
+	return entry.PromptCreditsPerMtok == promptRate &&
+		entry.CompletionCreditsPerMtok == completionRate
 }
 
 func ledgerRowExistsForRequestAttemptTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, assignedID string) (bool, error) {

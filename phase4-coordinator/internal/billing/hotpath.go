@@ -31,6 +31,7 @@ type HotPathInput struct {
 	StickyMissReason             string
 	ConfigSnapshotID             int64
 	RateEntry                    RateCardEntry
+	RateCard                     map[string]RateCardEntry
 	MultiplierPPM                int64
 	ProviderShareBps             int64
 	SettlementAccountScopeHash   string
