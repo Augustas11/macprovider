@@ -1388,6 +1388,13 @@ if transport_verify < transport_publish or anonymous < transport_verify:
     raise SystemExit("rollout must verify immutable and anonymous discovery after publication")
 for requirement in (
     "contents: write",
+    "runs-on: macos-15-intel",
+    "- name: Seal reviewed OpenSSL 3",
+    "id: protected_openssl",
+    "scripts/install-sealed-release-openssl.sh",
+    "/private/var/macprovider-openssl-release-rollout",
+    'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}',
+    '--openssl "$OPENSSL_BIN"',
     "ref: refs/heads/main",
     "fetch-depth: 0",
     "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main",
@@ -1400,6 +1407,8 @@ for requirement in (
 ):
     if requirement not in rollout:
         raise SystemExit(f"post-publication rollout omits: {requirement}")
+if "${OPENSSL_BIN:-openssl}" in rollout:
+    raise SystemExit("post-publication rollout falls back to PATH-selected OpenSSL")
 renewal = (workflow_dir / "renew-release-discovery-head.yml").read_text(
     encoding="utf-8"
 )

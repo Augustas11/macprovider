@@ -21,7 +21,7 @@ concurrency:
 jobs:
   verify:
     name: Verify public release, Pearl recommendation, and discovery rollout
-    runs-on: macos-15
+    runs-on: macos-15-intel
     environment: production-release
     permissions:
       contents: write
@@ -33,10 +33,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Seal reviewed OpenSSL 3
+        id: protected_openssl
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          sealed_bin="$(
+            bash scripts/install-sealed-release-openssl.sh \
+              /private/var/macprovider-openssl-release-rollout
+          )"
+          "$sealed_bin" version | grep -E '^OpenSSL 3\.'
+          printf 'bin=%s\n' "$sealed_bin" >> "$GITHUB_OUTPUT"
+
       - name: Verify public immutable release and live rollout
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -121,6 +136,7 @@ jobs:
             --pearl-release-json "$assets/pearl-release.json" \
             --trusted-keys "$assets/trusted-keys.json" \
             --coordinator-url https://coordinator.streamvc.live \
+            --openssl "$OPENSSL_BIN" \
             --publication-phase post-publication
           transport_tag="$(python3 - "$assets/macprovider-release-discovery.json" <<'PY'
           import json
@@ -144,7 +160,7 @@ jobs:
             --transport-tag "$transport_tag" \
             --target-tag "$TAG" \
             --target-commit "$target_commit" \
-            --openssl "${OPENSSL_BIN:-openssl}" >/dev/null
+            --openssl "$OPENSSL_BIN" >/dev/null
           if git ls-remote --tags origin "$transport_tag" | grep -q .; then
             echo "discovery transport tag already exists: $transport_tag" >&2
             exit 1
@@ -174,6 +190,7 @@ jobs:
             --pearl-release-json "$assets/pearl-release.json" \
             --trusted-keys "$assets/trusted-keys.json" \
             --coordinator-url https://coordinator.streamvc.live \
+            --openssl "$OPENSSL_BIN" \
             --publication-phase post-publication
           notes="$RUNNER_TEMP/discovery-notes.md"
           printf 'Signed append-only discovery transport for %s.\n' "$TAG" > "$notes"
@@ -207,7 +224,7 @@ jobs:
             --target-tag "$TAG" \
             --target-commit "$target_commit" \
             --require-immutable \
-            --openssl "${OPENSSL_BIN:-openssl}" >/dev/null
+            --openssl "$OPENSSL_BIN" >/dev/null
           GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
             scripts/verify-anonymous-release-discovery.sh \
               "$TAG" "$target_commit" "$TAG" "$transport_tag"
