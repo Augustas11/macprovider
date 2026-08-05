@@ -528,8 +528,20 @@ def require_rollout(workflow_path):
         raise SystemExit("post-publication rollout proof must share the production serialization")
     if "contents: write" not in workflow or "secrets." in workflow:
         raise SystemExit("post-publication rollout must have only GitHub contents publication authority")
-    if "runs-on: macos-15" not in workflow or "runs-on: ubuntu-" in workflow:
-        raise SystemExit("rollout anonymous discovery proof must run on the reviewed macOS runner")
+    if "runs-on: macos-15-intel" not in workflow or "runs-on: ubuntu-" in workflow:
+        raise SystemExit("rollout anonymous discovery proof must run on the reviewed Intel macOS runner")
+    for required in (
+        "- name: Seal reviewed OpenSSL 3",
+        "id: protected_openssl",
+        "scripts/install-sealed-release-openssl.sh",
+        "/private/var/macprovider-openssl-release-rollout",
+        'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}',
+        "--openssl \"$OPENSSL_BIN\"",
+    ):
+        if required not in workflow:
+            raise SystemExit(f"rollout proof OpenSSL binding omits {required}")
+    if "${OPENSSL_BIN:-openssl}" in workflow:
+        raise SystemExit("rollout proof must not fall back to PATH-selected OpenSSL")
     if "ref: refs/heads/main" not in workflow or "fetch-depth: 0" not in workflow:
         raise SystemExit("rollout proof must check out the reviewed main branch with history")
     if "git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main" not in workflow:
