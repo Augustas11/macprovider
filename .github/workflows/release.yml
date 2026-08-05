@@ -116,8 +116,8 @@ jobs:
         run: |
           bash scripts/test-coordinator-advertised-version.sh \
             "${{ steps.release_source.outputs.tag }}" \
-            --allow-previous-stable=1.8.81 \
-            --staged-candidate=1.8.82
+            --allow-previous-stable=1.8.82 \
+            --staged-candidate=1.8.88
 
       - name: Select and verify reviewed release toolchain
         shell: bash
@@ -1278,8 +1278,8 @@ jobs:
               scripts/dist/malibu-v1.8.32-sparkle-public-key
             bash scripts/test-coordinator-advertised-version.sh \
               "$tag" \
-              --allow-previous-stable=1.8.81 \
-              --staged-candidate=1.8.82
+              --allow-previous-stable=1.8.82 \
+              --staged-candidate=1.8.88
           elif [ -e phase3-binary/app/dist/appcast.xml ]; then
             echo "::error::legacy appcast must exist only for v1.8.39" >&2
             exit 1
@@ -1834,7 +1834,7 @@ jobs:
               --trusted-keys trusted-keys.json \
               --coordinator-url https://coordinator.streamvc.live \
               --openssl "$OPENSSL_BIN" \
-              --expected-previous-recommendation 1.8.81 \
+              --expected-previous-recommendation 1.8.82 \
               --publication-phase pre-publication
             echo "::endgroup::"
           fi

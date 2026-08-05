@@ -91,15 +91,15 @@ The `hardware_evidence.autotune.v2` envelope is coupled to provider CLI
    hard binary floor.
 
 The checked-in coordinator examples remain on the previous stable
-recommendation (`1.8.81`) until the signed `1.8.82` provider assets are
+recommendation (`1.8.82`) until the signed `1.8.88` provider assets are
 published and the embedded CLI byte-identity check passes. The v2 handler may
 be deployed ahead of that release, but the coordinator must not advertise an
 unpublished version. Once the v2 handler is active, v1 hardware-evidence
 submissions are no longer accepted for refresh; those providers must upgrade
-to the signed v1.8.82 release before they can renew admission evidence.
+to a signed v1.8.82-or-newer release before they can renew admission evidence.
 
 The release workflow's staged version-cohesion exception is bound to the exact
-`--staged-candidate=1.8.82` release. A later release must update both the
+`--staged-candidate=1.8.88` release. A later release must update both the
 previous-stable and staged-candidate values; the guard rejects an unbound
 candidate.
 
