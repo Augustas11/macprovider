@@ -1,0 +1,228 @@
+{
+  "schema_version": "macprovider.payout-address-journey-evidence.v1",
+  "journey_id": "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION",
+  "requirement_id": "SPEC-016-R002",
+  "run_id": "spec016-r002-payout-address-20260805T054857Z",
+  "captured_at": "2026-08-05T05:48:57Z",
+  "repository": {
+    "commit": "57d9813957b1421199b59e5b3f09488f7c9644cd",
+    "name": "Augustas11/macprovider"
+  },
+  "harness": {
+    "controlled_dependencies": true,
+    "exact_handlers": [
+      "AddressesService.ServePayoutChallenge",
+      "AddressesService.ServePayoutAddress"
+    ],
+    "execution_mode": "candidate-derived-handler-only-conformance-harness",
+    "external_rpc_client_built": false,
+    "id": "phase4-coordinator/internal/payout:TestPayoutAddressRegistrationJourneyEvidence",
+    "isolated_sqlite": true,
+    "production_runner_built": false,
+    "real_pause_validation": true,
+    "real_provider_token_check": true,
+    "release_promotion_attempted": false,
+    "settlement_signer_built": false,
+    "version": "v1"
+  },
+  "config_before": {
+    "external_rpc_started": false,
+    "payout_enabled": false,
+    "runner_started": false,
+    "settlement_signer_started": false
+  },
+  "config_after": {
+    "external_rpc_started": false,
+    "payout_enabled": false,
+    "production_side_effects": false,
+    "runner_started": false,
+    "settlement_attempted": false,
+    "settlement_signer_started": false
+  },
+  "candidate": {
+    "addresses_go_sha256": "a60a51bf7a9c2a0f568528fc4578201b4360007bff27d7bea55a506623635991",
+    "attempts_go_sha256": "86eaec1819432e2c66453991189bc6279cb914a06578f0c3fb495c473668396c",
+    "eip712_go_sha256": "bbaa72cff7121ee91430053eb2dce1d93ab4510fc1a643316f42bfd238351894",
+    "payout_address_client_sha256": "66019b9034da5552001b414661d1e47cc6aab3da875d824e32c6aac227734ee4",
+    "payout_signer_resource_sha256": "5b92b26c64dc5a406e49866933d3829db7259042c04328d9b4d3def49992a202",
+    "payout_wallet_flow_sha256": "4a8ba1a247509456ab73277cb7cb178266ac5ffd62f058a9d89d08bb782935b1"
+  },
+  "observations": {
+    "cooling_off_hours": 24,
+    "eip712_digest_sha256": "115deb27a65f7b43256f95ad6e1f879c8d9fef97fbc44c36fac41ed7ba32d22b",
+    "first_address_sha256": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+    "hot_wallet_sha256": "71ddf285f60df1b7a39b928b554f8959bc0a78803ae79cf972a975bf3aacaf43",
+    "private_keys_redacted": true,
+    "provider_id_sha256": "c00ad79bc9fb825e38a60c3f4ed736d45d5e3601b58ebdc277288fde833393d8",
+    "provider_token_redacted": true,
+    "raw_signature_redacted": true,
+    "rotated_address_sha256": "0ef59b64bf35622caa4d1efe24c22f59893dad60b6ffe83e9e22935142e6b2bf"
+  },
+  "assertions": [
+    {
+      "id": "step-01",
+      "status": "pass",
+      "assertion": "handler-only harness initialized with payout disabled and no runner, RPC client, settlement signer, or settlement attempt",
+      "details": {
+        "database_namespace": "isolated-sqlite-tempdir-redacted",
+        "external_rpc_started": false,
+        "hot_wallet_fingerprint": "71ddf285f60df1b7a39b928b554f8959bc0a78803ae79cf972a975bf3aacaf43",
+        "payout_enabled": false,
+        "runner_started": false,
+        "settlement_attempted": false,
+        "settlement_signer_started": false
+      }
+    },
+    {
+      "id": "step-02",
+      "status": "pass",
+      "assertion": "challenge retrieval binds provider token, path provider, EIP-712 domain, Base chain, hot wallet, and server timestamp",
+      "details": {
+        "authorization_secret_logged": false,
+        "chain": "base-mainnet",
+        "chain_id": 8453,
+        "domain_name": "macprovider-payout",
+        "domain_version": "1",
+        "provider_id_sha256": "c00ad79bc9fb825e38a60c3f4ed736d45d5e3601b58ebdc277288fde833393d8",
+        "server_ts_utc": 1785908907,
+        "status": 200,
+        "verifying_contract_sha256": "71ddf285f60df1b7a39b928b554f8959bc0a78803ae79cf972a975bf3aacaf43"
+      }
+    },
+    {
+      "id": "step-03",
+      "status": "pass",
+      "assertion": "Malibu Add Wallet loopback and callback behavior is bound by candidate PayoutWalletFlow tests and hashed signer resources; this handler-only harness keeps production payout execution disabled",
+      "details": {
+        "loopback_bind_test": "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testLoopbackParametersPinToLoopback",
+        "malformed_input_tests": "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testNegativeTsCallbackRejectedNoCrashThenValidResolves",
+        "one_shot_callback_test": "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testConcurrentValidCallbacksClaimExactlyOnce",
+        "oversized_body_test": "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:testOversizedBodyRejected",
+        "payout_cli_client_sha256": "66019b9034da5552001b414661d1e47cc6aab3da875d824e32c6aac227734ee4",
+        "payout_wallet_flow_sha256": "4a8ba1a247509456ab73277cb7cb178266ac5ffd62f058a9d89d08bb782935b1",
+        "private_key_stayed_in_signer": true,
+        "signer_html_sha256": "5b92b26c64dc5a406e49866933d3829db7259042c04328d9b4d3def49992a202"
+      }
+    },
+    {
+      "id": "step-04",
+      "status": "pass",
+      "assertion": "disposable-wallet EIP-712 signature verifies without exposing private key or raw signature in public artifact",
+      "details": {
+        "address_fingerprint": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+        "nonce_sha256": "92a52681f60689536d3369ce79369c436cebbd1ec25956a21cb4a2b55aa1c3f9",
+        "private_key_material_seen": false,
+        "raw_signature_redacted": true,
+        "request_body_sha256": "fee5ad5f0eefa716e25c5c2193fe4acb8133a35f678967421aead44de4882b5e",
+        "signed_digest_sha256": "115deb27a65f7b43256f95ad6e1f879c8d9fef97fbc44c36fac41ed7ba32d22b"
+      }
+    },
+    {
+      "id": "step-05",
+      "status": "pass",
+      "assertion": "registration persists scoped address, hot-wallet stamp, audit event, payout_allowed=1, future cooling-off, and no pre-cooling runner selection",
+      "details": {
+        "address_fingerprint": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+        "payout_allowed": 1,
+        "pending_until_utc": "2026-08-06T05:48:27Z",
+        "registered_against_hot_wallet": "71ddf285f60df1b7a39b928b554f8959bc0a78803ae79cf972a975bf3aacaf43",
+        "runner_selection_before_cooling": 0,
+        "status": 201
+      }
+    },
+    {
+      "id": "step-06",
+      "status": "pass",
+      "assertion": "replay and consumed/mismatched nonce attempts reject without a second registration or payout-permission mutation",
+      "details": {
+        "mismatch_status": 400,
+        "payout_allowed": 1,
+        "registration_row_count": 1,
+        "replay_status": 400
+      }
+    },
+    {
+      "id": "step-07",
+      "status": "pass",
+      "assertion": "invalid signature, wrong domain, wrong chain, wrong provider, typed-data mismatch, and stale timestamp fail closed",
+      "details": {
+        "invalid_signature_durable_rows": 0,
+        "invalid_signature_status": 400,
+        "stale_timestamp_durable_rows": 0,
+        "stale_timestamp_status": 400,
+        "typed_data_mismatch_durable_rows": 0,
+        "typed_data_mismatch_status": 400,
+        "wrong_chain_durable_rows": 0,
+        "wrong_chain_status": 400,
+        "wrong_domain_durable_rows": 0,
+        "wrong_domain_status": 400,
+        "wrong_provider_durable_rows": 0,
+        "wrong_provider_status": 403
+      }
+    },
+    {
+      "id": "step-08",
+      "status": "pass",
+      "assertion": "allowed rotation keeps payout_allowed=1, preserves previous address during cooling, switches after cooling, and payout_allowed=0 rotation rejects unchanged",
+      "details": {
+        "after_cooling_effective": "0ef59b64bf35622caa4d1efe24c22f59893dad60b6ffe83e9e22935142e6b2bf",
+        "disabled_rotation": {
+          "address_unchanged": true,
+          "durable_row_count": 1,
+          "payout_allowed": 0,
+          "reason_seen": true,
+          "status": 409
+        },
+        "during_cooling_effective": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+        "new_address_fingerprint": "0ef59b64bf35622caa4d1efe24c22f59893dad60b6ffe83e9e22935142e6b2bf",
+        "payout_allowed_after_rotation": 1,
+        "rotated_from_fingerprint": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+        "rotation_status": 200
+      }
+    },
+    {
+      "id": "step-09",
+      "status": "pass",
+      "assertion": "registration pause, TOCTOU pause, and provider-scoped rate limit reject with expected status and no durable mutation",
+      "details": {
+        "challenge_pause_bodies_identical": true,
+        "other_provider_after_rate_limit_status": 400,
+        "rate_limit_provider_scoped": true,
+        "rate_limit_status": 429,
+        "registration_pause_status": 503,
+        "toctou_durable_rows": 0,
+        "toctou_status": 503
+      }
+    },
+    {
+      "id": "step-10",
+      "status": "pass",
+      "assertion": "logs and public artifacts are redacted and contain no bearer token, private key, or raw signed request body",
+      "details": {
+        "bearer_token_present_in_logs": false,
+        "log_sha256": "77e02e8678a74ff6aae7f020b6ed1fd5b6c5722f947952adb875015815a7e163",
+        "raw_signed_body_present": false
+      }
+    },
+    {
+      "id": "step-11",
+      "status": "pass",
+      "assertion": "final configuration confirms payout remains default-off and no production payout, settlement, RPC, or release-promotion side effect occurred",
+      "details": {
+        "external_rpc_started": false,
+        "payout_enabled": false,
+        "production_side_effects": false,
+        "restoration_result": "isolated SQLite tempdir removed by test cleanup",
+        "runner_started": false,
+        "settlement_attempted": false,
+        "settlement_signer_started": false
+      }
+    }
+  ],
+  "redaction": {
+    "local_account_names_redacted": true,
+    "operator_identity_redacted": true,
+    "raw_signatures_redacted": true,
+    "secrets_redacted": true
+  }
+}

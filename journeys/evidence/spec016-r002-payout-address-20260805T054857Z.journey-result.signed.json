@@ -1,0 +1,207 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIQDPn1hODqj5dAAddqUGrKuB0ZbNF6c58cgRGMjeJzOy+AIgWdN4Maw4MzddaPjXyQTYdNdypRtxLyzgt932ekLjX6I=",
+      "signed_sha256": "0edc08b1dd8f1a9a4b64f53f94c88227aaf74eb39b7169e053fea521da1f199b",
+      "verified_at": "2026-08-05T05:49:00Z",
+      "verifier": ".github/workflows/promote-signed-payout-journey.yml:30979223347:1"
+    }
+  ],
+  "signed": {
+    "artifacts": [
+      {
+        "id": "redacted-payout-address-journey",
+        "sha256": "47526719bcad8e0c59955c228ed240fde2af22a05348a6a64adfd5da04941ae0",
+        "source": "journeys/evidence/spec016-r002-payout-address-20260805T054857Z.redacted.json"
+      }
+    ],
+    "candidate": {
+      "addresses_go_sha256": "a60a51bf7a9c2a0f568528fc4578201b4360007bff27d7bea55a506623635991",
+      "attempts_go_sha256": "86eaec1819432e2c66453991189bc6279cb914a06578f0c3fb495c473668396c",
+      "eip712_go_sha256": "bbaa72cff7121ee91430053eb2dce1d93ab4510fc1a643316f42bfd238351894",
+      "payout_address_client_sha256": "66019b9034da5552001b414661d1e47cc6aab3da875d824e32c6aac227734ee4",
+      "payout_signer_resource_sha256": "5b92b26c64dc5a406e49866933d3829db7259042c04328d9b4d3def49992a202",
+      "payout_wallet_flow_sha256": "4a8ba1a247509456ab73277cb7cb178266ac5ffd62f058a9d89d08bb782935b1"
+    },
+    "captured_at": "2026-08-05T05:48:57Z",
+    "config_after": {
+      "external_rpc_started": false,
+      "payout_enabled": false,
+      "production_side_effects": false,
+      "runner_started": false,
+      "settlement_attempted": false,
+      "settlement_signer_started": false
+    },
+    "config_before": {
+      "external_rpc_started": false,
+      "payout_enabled": false,
+      "runner_started": false,
+      "settlement_signer_started": false
+    },
+    "eip712": {
+      "digest_sha256": "115deb27a65f7b43256f95ad6e1f879c8d9fef97fbc44c36fac41ed7ba32d22b",
+      "raw_signature_access_controlled": true,
+      "signer_address_sha256": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+      "typed_data_artifact_sha256": "fee5ad5f0eefa716e25c5c2193fe4acb8133a35f678967421aead44de4882b5e",
+      "verification_result": "pass",
+      "verifier": "phase4-coordinator/internal/payout.VerifyEIP712"
+    },
+    "environment": {
+      "candidate": "commit:57d9813957b1421199b59e5b3f09488f7c9644cd",
+      "class": "handler-only-conformance-harness",
+      "hardware_profile": "local-macos-redacted"
+    },
+    "execution_mode": "candidate-derived-handler-only-conformance-harness",
+    "expires_at": "2026-09-05",
+    "harness": {
+      "controlled_dependencies": true,
+      "execution_mode": "candidate-derived-handler-only-conformance-harness",
+      "external_rpc_client_built": false,
+      "id": "phase4-coordinator/internal/payout:TestPayoutAddressRegistrationJourneyEvidence",
+      "isolated_sqlite": true,
+      "production_runner_built": false,
+      "real_pause_validation": true,
+      "real_provider_token_check": true,
+      "release_promotion_attempted": false,
+      "settlement_signer_built": false,
+      "version": "v1"
+    },
+    "journey_id": "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION",
+    "observations": {
+      "cooling_off_hours": 24,
+      "eip712_digest_sha256": "115deb27a65f7b43256f95ad6e1f879c8d9fef97fbc44c36fac41ed7ba32d22b",
+      "first_address_sha256": "d8321319c63bf38165f8c73ed964a98678e6d43aa80e895cd70c530b12181fb2",
+      "hot_wallet_sha256": "71ddf285f60df1b7a39b928b554f8959bc0a78803ae79cf972a975bf3aacaf43",
+      "private_keys_redacted": true,
+      "provider_id_sha256": "c00ad79bc9fb825e38a60c3f4ed736d45d5e3601b58ebdc277288fde833393d8",
+      "provider_token_redacted": true,
+      "raw_signature_redacted": true,
+      "rotated_address_sha256": "0ef59b64bf35622caa4d1efe24c22f59893dad60b6ffe83e9e22935142e6b2bf"
+    },
+    "operator": {
+      "identity_fingerprint": "81b0da4369df9cd6c533c456ebb56a393d9e1bb48894cc9b82fcbdffa6a12ac8",
+      "role": "local-acceptance-operator"
+    },
+    "redaction": {
+      "local_account_names_redacted": true,
+      "operator_identity_redacted": true,
+      "secrets_redacted": true
+    },
+    "repository": {
+      "commit": "57d9813957b1421199b59e5b3f09488f7c9644cd",
+      "name": "Augustas11/macprovider"
+    },
+    "requirement_ids": [
+      "SPEC-016-R002"
+    ],
+    "restoration": {
+      "result": "isolated SQLite tempdirs removed by test cleanup"
+    },
+    "result": {
+      "status": "pass",
+      "summary": "Handler-only SPEC-016-R002 payout-address onboarding evidence passed with payout runner, RPC, settlement signer, production side effects, and release promotion disabled."
+    },
+    "run_id": "spec016-r002-payout-address-20260805T054857Z",
+    "schema_version": "macprovider.journey-result.v1",
+    "signer": {
+      "identity_fingerprint": "81b0da4369df9cd6c533c456ebb56a393d9e1bb48894cc9b82fcbdffa6a12ac8",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "trust_root_sha256": "849e9c9bc53db1fb8e28d3b46ab431089b12cb50b398c5317ced682d39bdbd38",
+      "verification_result": "pass"
+    },
+    "spec_id": "SPEC-016",
+    "steps": [
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "handler-only harness initialized with payout disabled and no runner, RPC client, settlement signer, or settlement attempt",
+        "id": "step-01",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "challenge retrieval binds provider token, path provider, EIP-712 domain, Base chain, hot wallet, and server timestamp",
+        "id": "step-02",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "Malibu Add Wallet loopback and callback behavior is bound by candidate PayoutWalletFlow tests and hashed signer resources; this handler-only harness keeps production payout execution disabled",
+        "id": "step-03",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "disposable-wallet EIP-712 signature verifies without exposing private key or raw signature in public artifact",
+        "id": "step-04",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "registration persists scoped address, hot-wallet stamp, audit event, payout_allowed=1, future cooling-off, and no pre-cooling runner selection",
+        "id": "step-05",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "replay and consumed/mismatched nonce attempts reject without a second registration or payout-permission mutation",
+        "id": "step-06",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "invalid signature, wrong domain, wrong chain, wrong provider, typed-data mismatch, and stale timestamp fail closed",
+        "id": "step-07",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "allowed rotation keeps payout_allowed=1, preserves previous address during cooling, switches after cooling, and payout_allowed=0 rotation rejects unchanged",
+        "id": "step-08",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "registration pause, TOCTOU pause, and provider-scoped rate limit reject with expected status and no durable mutation",
+        "id": "step-09",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "logs and public artifacts are redacted and contain no bearer token, private key, or raw signed request body",
+        "id": "step-10",
+        "status": "pass"
+      },
+      {
+        "artifacts": [
+          "redacted-payout-address-journey"
+        ],
+        "assertion": "final configuration confirms payout remains default-off and no production payout, settlement, RPC, or release-promotion side effect occurred",
+        "id": "step-11",
+        "status": "pass"
+      }
+    ]
+  }
+}
