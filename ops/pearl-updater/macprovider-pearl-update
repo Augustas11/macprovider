@@ -5138,8 +5138,8 @@ class Updater:
         )
 
     def verify_runtime_only_buyer_canary_policy(self, release: Release) -> None:
-        if release.catalog is None and self.config.buyer_canary_mode != BUYER_CANARY_MODE_REQUIRED:
-            raise UpdateError("runtime-only Pearl release requires buyer canary mode required")
+        if release.catalog is None and self.config.buyer_canary_mode not in BUYER_CANARY_MODES:
+            raise UpdateError("runtime-only Pearl release requires an explicit buyer canary mode")
 
     def verify_rollout(self, release: Release) -> None:
         self.verify_runtime_only_buyer_canary_policy(release)
@@ -5521,9 +5521,12 @@ class Updater:
     def _prove_rollback_serving(self, tx: Path) -> None:
         previous_runtime = self._transaction_json(tx, "previous-runtime.json")
         identity = RuntimeIdentity(**previous_runtime)
+        advertised = self.journal.get("previous_advertised_version") if self.journal is not None else None
+        if not isinstance(advertised, str) or not advertised:
+            advertised = identity.advertised_version
         self.prove_serving_recovery(
             identity,
-            legacy_rollback_version=identity.advertised_version,
+            legacy_rollback_version=advertised,
         )
 
     def restore_auxiliary_services(self) -> None:

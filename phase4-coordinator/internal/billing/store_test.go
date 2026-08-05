@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1178,6 +1179,175 @@ func TestRecoverLedger_QuarantinesExistingSplitMismatch(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'split-mismatch' AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`); got != 1 {
 		t.Fatalf("mismatch quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_PreservesBreakerQualifyingExistingCredit(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	prompt := int64(36)
+	row.RequestID = "breaker-qualifying-recovery"
+	row.Status = 502
+	row.PromptTokens = &prompt
+	row.CompletionTokens = nil
+	input.RequestID = row.RequestID
+	input.Status = row.Status
+	input.PromptTokens = &prompt
+	input.CompletionTokens = nil
+	input.FaultFlag = FaultBreakerQualifying
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0 AND fault_flag = ? AND gross_credits = 0 AND provider_credits = 0`, row.RequestID, FaultBreakerQualifying); got != 1 {
+		t.Fatalf("active breaker-qualifying rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantine_reason = 'reconciliation_mismatch'`, row.RequestID); got != 0 {
+		t.Fatalf("reconciliation mismatch rows=%d want 0", got)
+	}
+}
+
+func TestRecoverLedger_AcceptsVerifiedReceiptSyncedCompletionAboveEstimate(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]RateCardEntry{
+			"default": {PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000},
+			"qwen3-8b": {
+				PromptCreditsPerMtok:     13500,
+				CompletionCreditsPerMtok: 27000,
+			},
+		},
+	}
+	ts := time.Date(2026, 8, 5, 9, 21, 42, 0, time.UTC)
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := testRouteSnapshot()
+	route.RequestID = "verified-receipt-recovery"
+	route.ProviderID = "provider-qwen"
+	route.ModelID = "mlx-community/Qwen3-8B-4bit"
+	route.RouteSnapshotMode = RouteSnapshotModeEnforce
+	route.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	route.RouteDecisionTSUnixMS = ts.UnixMilli()
+	route.RequestStartTSUnixMS = ts.UnixMilli()
+	route.PendingDeadlineSeconds = 30
+	route.AccountScope = "acct_sha256:" + strings.Repeat("7", 64)
+	routeDigest, err := store.InsertRouteSnapshot(context.Background(), route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, completion, estimate := int64(20), int64(120), int64(65)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:               ts,
+		RequestID:           route.RequestID,
+		AccountID:           "buyer-a",
+		Model:               route.ModelID,
+		ProviderAssignedID:  "assigned-qwen",
+		PromptTokens:        &prompt,
+		CompletionTokens:    &completion,
+		EstimatedCompTokens: &estimate,
+		Status:              200,
+		BuyerIP:             "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	input := HotPathInput{
+		RequestID:                  route.RequestID,
+		ProviderAssignedID:         "assigned-qwen",
+		ProviderID:                 route.ProviderID,
+		Model:                      route.ModelID,
+		Status:                     200,
+		TSUtc:                      ts,
+		PromptTokens:               &prompt,
+		CompletionTokens:           &completion,
+		ConfigSnapshotID:           snapshotID,
+		RateEntry:                  RateFor(cfg.RateCard, route.ModelID),
+		RateCard:                   cfg.RateCard,
+		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
+		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
+		SettlementAccountScopeHash: SettlementAccountScopeHash(route.AccountScope),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    RouteSnapshotPolicyVersion,
+	}
+	result := ComputeCreditsWithCache(&prompt, nil, &completion, nil, UsageProviderReported, FaultNone, input.RateEntry, input.MultiplierPPM, input.ProviderShareBps)
+	if result.GrossCredits != 4 || result.ProviderCredits != 4 {
+		t.Fatalf("fixture credits=%d/%d want 4/4", result.GrossCredits, result.ProviderCredits)
+	}
+	requestCreditID, err := insertRequestCreditTx(context.Background(), store.db, input, result, "hot_path", ts.Format(time.RFC3339Nano), false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertOperatorCreditTx(context.Background(), store.db, requestCreditID, input, result, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertProviderIdentitySnapshotTx(context.Background(), store.db, input, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	usage := SettlementUsage{
+		BillableInputTokens:  prompt,
+		BillableOutputTokens: completion,
+		DeliveredOutputBytes: 603,
+		ObservedInputTokens:  prompt,
+		ObservedOutputTokens: completion,
+	}
+	usageHash, usageCanonical, err := usage.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputHash := strings.Repeat("8", 64)
+	if _, err := store.db.Exec(`
+INSERT INTO settlement_attempt_outputs (
+    account_scope, request_id, attempt_n, provider_id, terminal_state, terminal_state_ts_unix_ms,
+    output_available, output_prefix_start_byte, output_prefix_end_byte,
+    output_hash, usage_hash, usage_canonical_json, usage_source,
+    overlapping_or_duplicate, created_at_utc
+) VALUES (?, ?, 0, ?, ?, ?, 1, 0, 603, ?, ?, ?, ?, 0, ?)`,
+		route.AccountScope, route.RequestID, route.ProviderID, TerminalStateNormalDone, ts.UnixMilli(),
+		outputHash, usageHash, string(usageCanonical), UsageSourceCoordinatorObserved, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := ts.Add(time.Duration(route.PendingDeadlineSeconds) * time.Second).UnixMilli()
+	if _, err := store.db.Exec(`
+INSERT INTO settlement_receipt_verdicts (
+    account_scope_hash, request_id, attempt_n, provider_id,
+    receipt_present, receipt_version, receipt_result, settlement_outcome,
+    reason, idempotency_status, closed, terminal_state, terminal_state_ts_unix_ms,
+    pending_deadline_unix_ms, received_at_unix_ms, route_snapshot_digest,
+    route_snapshot_policy_version, route_snapshot_mode, paid_entrypoint,
+    spec008_hash_status, provider_reported_model_hash, provider_receipt_key_fingerprint,
+    catalog_id, catalog_body_digest, expected_catalog_model_hash, model_id, model_hash,
+    receipt_profile, buyer_debit_outcome, provider_settlement_outcome,
+    payout_exclusion_outcome, prompt_hash, output_hash, usage_digest,
+    receipt_tuple_canonical_sha256, checks_json, verifier_diagnostics_json,
+    facts_json, created_at_utc
+) VALUES (?, ?, 0, ?, 1, 'spec015-v0.4', 'valid', 'verified',
+          'verified_settlement', 'first_terminal', 1, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, NULL, 'spec015-v0.4', 'no_money_movement_step5',
+          'no_money_movement_step5', 'excluded_until_spec022_verified',
+          ?, ?, ?, NULL, '{}', '{}', NULL, ?)`,
+		SettlementAccountScopeHash(route.AccountScope), route.RequestID, route.ProviderID,
+		TerminalStateNormalDone, ts.UnixMilli(), deadline, ts.UnixMilli(), routeDigest,
+		RouteSnapshotPolicyVersion, RouteSnapshotModeEnforce, route.PaidEntrypoint,
+		route.Spec008HashStatus, route.ProviderReportedModelHash, route.ProviderReceiptKeyID,
+		route.CatalogID, route.CatalogBodyDigest, route.ExpectedCatalogModelHash, route.ModelID,
+		route.PromptHash, outputHash, usageHash, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0 AND gross_credits = 4 AND provider_credits = 4`, route.RequestID); got != 1 {
+		t.Fatalf("active verified-receipt rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantine_reason = 'reconciliation_mismatch'`, route.RequestID); got != 0 {
+		t.Fatalf("reconciliation mismatch rows=%d want 0", got)
 	}
 }
 

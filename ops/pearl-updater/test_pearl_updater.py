@@ -2858,7 +2858,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.verify_disabled_buyer_canary_posture.assert_called_once_with()
         self.updater.run_canary_gate.assert_not_called()
 
-    def test_runtime_only_rollout_requires_buyer_canary_mode(self):
+    def test_runtime_only_rollout_accepts_disabled_buyer_canary_mode(self):
         self.make_bundle(runtime_only=True)
         release = self.verify()
         self.updater.config = updater_module.dataclasses.replace(
@@ -2866,28 +2866,17 @@ class PearlUpdaterTests(unittest.TestCase):
             buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
         )
 
-        with self.assertRaisesRegex(updater_module.UpdateError, "runtime-only Pearl release requires buyer canary"):
-            self.updater.verify_rollout(release)
+        self.updater.verify_runtime_only_buyer_canary_policy(release)
 
-    def test_runtime_only_apply_rejects_disabled_canary_before_journal_or_mutation(self):
+    def test_runtime_only_disabled_canary_mode_uses_rollout_replacement_gates(self):
         self.make_bundle(runtime_only=True)
         release = self.verify()
         self.updater.config = updater_module.dataclasses.replace(
             self.updater.config,
             buyer_canary_mode=updater_module.BUYER_CANARY_MODE_DISABLED,
         )
-        self.updater.audit = mock.Mock()
-        self.updater._start_journal = mock.Mock()
-        self.updater.stop_for_rollout = mock.Mock()
-        self.updater.install_release = mock.Mock()
 
-        with self.assertRaisesRegex(updater_module.UpdateError, "runtime-only Pearl release requires buyer canary"):
-            self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
-
-        self.updater.audit.assert_not_called()
-        self.updater._start_journal.assert_not_called()
-        self.updater.stop_for_rollout.assert_not_called()
-        self.updater.install_release.assert_not_called()
+        self.updater.verify_runtime_only_buyer_canary_policy(release)
 
     def test_run_canary_gate_rejects_disabled_mode(self):
         self.updater.config = updater_module.dataclasses.replace(
@@ -2903,22 +2892,23 @@ class PearlUpdaterTests(unittest.TestCase):
         (transaction / "previous-runtime.json").write_text(
             json.dumps(
                 {
-                    "coordinator_version": "v1.8.30",
-                    "gateway_version": "v1.8.30",
-                    "advertised_version": "1.8.30",
+                    "coordinator_version": "v1.8.85",
+                    "gateway_version": "v1.8.85",
+                    "advertised_version": "1.8.85",
                 }
             )
             + "\n"
         )
         (transaction / "previous-runtime.json").chmod(0o600)
+        self.updater.journal = {"previous_advertised_version": "1.8.82"}
         self.updater.prove_serving_recovery = mock.Mock()
 
         self.updater._prove_rollback_serving(transaction)
 
-        identity = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
+        identity = updater_module.RuntimeIdentity("v1.8.85", "v1.8.85", "1.8.85")
         self.updater.prove_serving_recovery.assert_called_once_with(
             identity,
-            legacy_rollback_version="1.8.30",
+            legacy_rollback_version="1.8.82",
         )
 
     def test_serving_proof_requires_three_consecutive_public_fleet_samples(self):
