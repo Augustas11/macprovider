@@ -18,8 +18,13 @@ tag, dmg_name, appcast_name, public_key_name = sys.argv[1:]
 dmg = pathlib.Path(dmg_name)
 appcast = pathlib.Path(appcast_name)
 public_key_path = pathlib.Path(public_key_name)
-if tag != "v1.8.39":
-    fail("legacy Malibu bootstrap is frozen to v1.8.39")
+if not tag.startswith("v"):
+    fail("tag must use a v prefix")
+short_version = tag[1:]
+parts = short_version.split(".")
+if len(parts) != 3 or not all(part.isdigit() for part in parts):
+    fail("tag must be vX.Y.Z")
+build_version = str(int(parts[2]))
 if any(
     not path.is_file() or path.is_symlink()
     for path in (dmg, appcast, public_key_path)
@@ -35,11 +40,11 @@ items = root.findall("./channel/item")
 if len(items) != 1:
     fail("appcast must contain exactly one item")
 short_versions = items[0].findall(f"{{{namespace}}}shortVersionString")
-if len(short_versions) != 1 or (short_versions[0].text or "").strip() != "1.8.39":
-    fail("appcast short version differs from the bootstrap target")
+if len(short_versions) != 1 or (short_versions[0].text or "").strip() != short_version:
+    fail("appcast short version differs from the release target")
 build_versions = items[0].findall(f"{{{namespace}}}version")
-if len(build_versions) != 1 or (build_versions[0].text or "").strip() != "39":
-    fail("appcast build version differs from the bootstrap target")
+if len(build_versions) != 1 or (build_versions[0].text or "").strip() != build_version:
+    fail("appcast build version differs from the release target")
 enclosures = items[0].findall("enclosure")
 if len(enclosures) != 1:
     fail("appcast must contain exactly one enclosure")

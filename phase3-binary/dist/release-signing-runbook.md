@@ -191,7 +191,7 @@ select the `production-release` environment and add these environment secrets:
 | `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
 | `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` | P-256 private key matching the public key embedded in `phase3-binary/dist/install.sh` |
 | `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM` | Dedicated P-256 private key matching `security/acceptance-candidate-signing-public.pem`; provision with `scripts/provision-acceptance-signing-key.sh` |
-| `SPARKLE_EDDSA_PRIVATE_KEY` | Base64 Ed25519 seed matching `scripts/dist/malibu-v1.8.32-sparkle-public-key`; used only to generate the frozen stable `v1.8.39` bootstrap appcast |
+| `SPARKLE_EDDSA_PRIVATE_KEY` | Base64 Ed25519 seed matching `scripts/dist/malibu-v1.8.32-sparkle-public-key`; used only to generate the signed Malibu appcast |
 | `MALIBU_DOWNLOAD_SSH_KEY` | Complete OpenSSH private-key contents for the root Pearl publication account; the workflow writes it to a mode-0600 temporary file |
 | `MALIBU_DOWNLOAD_VPS_HOST` | Pearl publication IPv4 address (`159.223.165.194` unless the host is deliberately migrated) |
 | `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read access |
@@ -440,11 +440,8 @@ MALIBU_BUILD="$(defaults read "$MALIBU_APP/Contents/Info" CFBundleVersion)"
 awk -F '\t' -v version="$MALIBU_VERSION" -v build="$MALIBU_BUILD" \
   '$1 == version && $2 == build { found = 1 } END { exit !found }' \
   phase3-binary/app/release-builds.tsv
-if test "$TAG" = v1.8.39; then
-  test "$MALIBU_VERSION/$MALIBU_BUILD" = 1.8.39/39
-else
-  test "$MALIBU_VERSION" != 1.8.39
-fi
+test "v$MALIBU_VERSION" = "$TAG"
+test "$MALIBU_BUILD" = "${TAG##*.}"
 xcrun stapler validate "$MALIBU_APP"
 spctl -a -t exec "$MALIBU_APP"
 cmp "$HOME/macprovider/compatibility-set.json" \
@@ -490,11 +487,10 @@ gh workflow run release.yml --repo Augustas11/macprovider --ref main \
 
 Wait until the unsigned `build` job succeeds and `sign_publish` is waiting for
 the independent `production-release` environment review. Do not approve yet.
-The candidate build preflights Malibu's bundle identity, path shape, frozen
-bridge key, absence of legacy update keys, and absence of a Sparkle runtime
-before capturing unsigned inputs. Malibu remains independently versioned; only
-the frozen v1.8.39 bridge release requires the app version/build to match
-1.8.39/39.
+The candidate build preflights Malibu's bundle identity, path shape, absence of
+legacy update keys, and absence of a Sparkle runtime before capturing unsigned
+inputs. Malibu remains independently versioned; the app version/build must match
+the requested `vX.Y.Z` tag as `X.Y.Z/Z`.
 Recheck that `origin/main` is still the captured commit, create the signed
 annotated tag at that exact commit, push it, and verify the peeled remote target:
 
@@ -910,26 +906,25 @@ without `xattr -d`.
 
 ## Publication recovery
 
-GitHub's immutable numeric release remains the release authority. One narrow
-exception exists for the Malibu 1.8.32 installed cohort: stable `v1.8.39`
-includes `appcast.xml`, signed with the existing Sparkle EdDSA secret and
-verified against `scripts/dist/malibu-v1.8.32-sparkle-public-key`. Only after
-the numeric GitHub release is immutable does the protected workflow atomically
-publish that exact appcast and `Malibu-v1.8.39.dmg` to Pearl. The workflow then
-downloads `appcast.xml`, `latest.dmg`, and the versioned DMG over HTTPS and
-requires their hashes and EdDSA signature to match the immutable release.
+GitHub's immutable numeric release remains the release authority. Independent
+Malibu releases include `appcast.xml`, signed with the existing Sparkle EdDSA
+secret and verified against
+`scripts/dist/malibu-v1.8.32-sparkle-public-key`. Only after the numeric GitHub
+release is immutable does the protected workflow atomically publish the exact
+appcast, `latest.dmg`, versioned `Malibu-vX.Y.Z.dmg`, and versioned SHA-256
+sidecar to Pearl. The workflow then downloads `appcast.xml`, `latest.dmg`, the
+versioned DMG, and the versioned SHA-256 sidecar over HTTPS and requires their
+hashes, checksum contents, and EdDSA signature to match the immutable release.
 
-This is a bootstrap bridge, not a restored update subsystem. Malibu 1.8.39 has
-no Sparkle package/framework, `SUFeedURL`, automatic-check setting, or updater
-runtime. Its final signed bundle does retain the exact frozen `SUPublicEDKey`
-from Malibu 1.8.32 because Sparkle 2.6.4 rejects a target that removes the old
-key after extraction. The protected workflow injects that inert public trust
-anchor before protected bundle writes, re-verifies the completed bundle before
-codesigning, and requires the exact key with no Sparkle runtime or feed in the
-final DMG. Later app updates are
-owned by the signed CLI compatibility transaction, and every later Malibu build
-must omit the key. The generator, verifier, remote installer, workflow
-conditions, and regression tests all reject bridge tags other than `v1.8.39`.
+This is an old-client compatibility surface, not a restored update subsystem.
+Malibu has no Sparkle package/framework, `SUFeedURL`, automatic-check setting,
+or updater runtime. Its final signed bundle retains the exact frozen
+`SUPublicEDKey` from Malibu 1.8.32 because Sparkle 2.6.4 rejects a target that
+removes the old key after extraction. The protected workflow injects that inert
+public trust anchor before protected bundle writes, re-verifies the completed
+bundle before codesigning, and requires the exact key with no Sparkle runtime or
+feed in the final DMG. Later provider/CLI updates are owned by the signed CLI
+compatibility transaction.
 
 If publication stops before draft-to-public transition, inspect or delete the
 numeric draft and rerun from the same reviewed tag. If GitHub is immutable but
@@ -941,7 +936,7 @@ exact release commit:
 
 ```bash
 export REPO=Augustas11/macprovider
-export TAG=v1.8.39
+export TAG=vX.Y.Z
 export GH_TOKEN="$(gh auth token -u Augustas11)"
 export RELEASE_ID="$(
   gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
@@ -955,29 +950,28 @@ export RELEASE_COMMIT="$(
 [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
 
 git fetch origin main
-export RECOVERY_WORKTREE=../macprovider-v1839-publication-recovery
+export RECOVERY_WORKTREE=../macprovider-malibu-publication-recovery
 test ! -e "$RECOVERY_WORKTREE"
 git worktree add --detach "$RECOVERY_WORKTREE" "$RELEASE_COMMIT"
 cd "$RECOVERY_WORKTREE"
 
 MALIBU_DOWNLOAD_VPS_HOST=159.223.165.194 \
 MALIBU_DOWNLOAD_SSH_KEY="$HOME/.ssh/pearl_operator_ed25519" \
-  bash scripts/recover-malibu-publication.sh "$RELEASE_ID"
+  bash scripts/recover-independent-malibu-publication.sh "$RELEASE_ID"
 ```
 
 For local recovery, `MALIBU_DOWNLOAD_SSH_KEY` is a path to a regular private-key
 file; the Actions environment secret with the same name stores the key contents.
 `GH_TOKEN` needs only repository contents read access. The helper accepts no tag,
-commit, or asset-ID overrides: it requires the immutable stable `v1.8.39` numeric
-release, discovers the six required uploaded assets by exact name (including
-`compatibility-artifact-index.json`), revalidates their numeric identities after
-download, verifies the clean checkout and protected remote tag, reconstructs the
-publication manifest through `capture-release-publication.py`, and invokes the
-same signed-set verifier and atomic Pearl publisher as the protected workflow.
+commit, or asset-ID overrides: it requires an immutable stable numeric release,
+discovers the three independent Malibu publication assets by exact name, requires
+the recovery checkout to be at the release commit, reconstructs the publication
+manifest from GitHub's release JSON, and invokes the same current-publication
+verifier plus atomic Pearl publisher as the protected workflow.
 
 The command is idempotent for the same immutable publication. Never regenerate
-checksums, replace a public asset, pass hand-copied asset IDs, or construct a
-partial compatibility set.
+checksums, replace a public asset, pass hand-copied asset IDs, or publish only
+one member of the DMG/appcast/checksum set.
 
 ## Related
 

@@ -6,7 +6,10 @@ generator="$root/scripts/generate-malibu-appcast.sh"
 signature_verifier="$root/scripts/verify-malibu-sparkle-signature.py"
 trust_anchor_helper="$root/scripts/prepare-malibu-bootstrap-trust-anchor.py"
 set_verifier="$root/scripts/verify-malibu-publication-set.sh"
+current_set_verifier="$root/scripts/verify-malibu-current-publication-set.sh"
 publisher="$root/scripts/publish-malibu-latest-dmg.sh"
+independent_publisher="$root/scripts/publish-independent-malibu-latest-dmg.sh"
+independent_recovery="$root/scripts/recover-independent-malibu-publication.sh"
 installer="$root/scripts/install-malibu-publication.sh"
 public_verifier="$root/scripts/verify-malibu-bootstrap-publication.sh"
 ssh_helper="$root/scripts/malibu-download-ssh.sh"
@@ -18,7 +21,7 @@ fail() {
   exit 1
 }
 
-for script in "$generator" "$set_verifier" "$publisher" "$installer" "$public_verifier" "$ssh_helper"; do
+for script in "$generator" "$set_verifier" "$current_set_verifier" "$publisher" "$independent_publisher" "$independent_recovery" "$installer" "$public_verifier" "$ssh_helper"; do
   [[ -f "$script" ]] || fail "missing $script"
   bash -n "$script"
 done
@@ -102,8 +105,9 @@ expect_anchor_failure() {
   grep -q "$pattern" "$work/$label.out" || fail "$label rejection was unclear"
 }
 
-# The released v1.8.39 target must carry exactly the old client's public key,
-# while source and every later app remain free of Sparkle update authority.
+# Released targets must carry exactly the old client's public key so Sparkle
+# can validate the extracted bundle, while source remains free of Sparkle
+# runtime and feed authority.
 create_test_app "$work/bridge.app" 1.8.39 39
 python3 "$trust_anchor_helper" prepare v1.8.39 \
   "$work/bridge.app" "$legacy_key" >/dev/null
@@ -124,7 +128,7 @@ assert document["SUPublicEDKey"] == values[0]
 assert sorted(key for key in document if key.startswith("SU")) == ["SUPublicEDKey"]
 PY
 
-create_test_app "$work/later.app" 1.8.45 45
+create_test_app "$work/later.app" 1.8.65 65
 cp "$work/later.app/Contents/Info.plist" "$work/later.Info.plist"
 python3 "$trust_anchor_helper" preflight v1.8.65 \
   "$work/later.app" "$legacy_key" >/dev/null
@@ -132,18 +136,26 @@ cmp "$work/later.Info.plist" "$work/later.app/Contents/Info.plist" ||
   fail "candidate preflight mutated independently versioned Malibu"
 python3 "$trust_anchor_helper" prepare v1.8.65 \
   "$work/later.app" "$legacy_key" >/dev/null
-cmp "$work/later.Info.plist" "$work/later.app/Contents/Info.plist" ||
-  fail "non-bridge preparation mutated independently versioned Malibu"
 python3 "$trust_anchor_helper" verify \
   "$work/later.app" "$legacy_key" >/dev/null
+python3 - "$work/later.app/Contents/Info.plist" "$legacy_key" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+document = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
+values = [
+    line.strip()
+    for line in pathlib.Path(sys.argv[2]).read_text(encoding="ascii").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+assert document["SUPublicEDKey"] == values[0]
+assert sorted(key for key in document if key.startswith("SU")) == ["SUPublicEDKey"]
+PY
 
 create_test_app "$work/wrong-bridge-version.app" 1.8.45 45
 expect_anchor_failure wrong-bridge-version 'bundle version 1.8.45 does not match release tag v1.8.39' \
   preflight v1.8.39 "$work/wrong-bridge-version.app" "$legacy_key"
-
-create_test_app "$work/reserved-bridge-version.app" 1.8.39 39
-expect_anchor_failure reserved-bridge-version 'reserved for the v1.8.39 trust-anchor release' \
-  preflight v1.8.65 "$work/reserved-bridge-version.app" "$legacy_key"
 
 create_test_app "$work/missing-anchor.app" 1.8.39 39
 expect_anchor_failure missing-anchor 'must contain only the exact frozen' \
@@ -203,9 +215,18 @@ expect_anchor_failure symlink-key 'regular non-symlink file' \
 grep -q 'StrictHostKeyChecking=yes' "$ssh_helper" || fail "Pearl SSH must fail closed"
 grep -q 'malibu-download-known_hosts' "$ssh_helper" || fail "Pearl SSH host key is not pinned"
 grep -q '/root/\.malibu-publish/stage\.XXXXXXXX' "$publisher" || fail "remote staging is predictable"
+grep -q '/root/\.malibu-publish/stage\.XXXXXXXX' "$independent_publisher" || fail "independent remote staging is predictable"
 grep -q "stat -c '%u:%g:%a:%h:%F'" "$publisher" || fail "remote transfer metadata is not verified"
+grep -q "stat -c '%u:%g:%a:%h:%F'" "$independent_publisher" || fail "independent remote transfer metadata is not verified"
 grep -q 'verify-malibu-bootstrap-publication.sh' "$publisher" || fail "public bytes are not verified"
-if grep -q -- '--resolve' "$public_verifier" || grep -q 'MALIBU_DOWNLOAD_RESOLVE_IP' "$publisher"; then
+grep -q 'verify-malibu-bootstrap-publication.sh' "$independent_publisher" || fail "independent public bytes are not verified"
+grep -q 'verify-malibu-current-publication-set.sh' "$independent_publisher" ||
+  fail "independent publication does not verify the current manifest"
+grep -q 'legacy provider-coupled Malibu publisher is frozen to v1.8.39' "$publisher" ||
+  fail "legacy provider-coupled publisher is not frozen"
+grep -q 'legacy provider-coupled Malibu publication is frozen to v1.8.39' "$set_verifier" ||
+  fail "legacy provider-coupled verifier is not frozen"
+if grep -q -- '--resolve' "$public_verifier" || grep -q 'MALIBU_DOWNLOAD_RESOLVE_IP' "$publisher" || grep -q 'MALIBU_DOWNLOAD_RESOLVE_IP' "$independent_publisher"; then
   fail "public verification can bypass client DNS resolution"
 fi
 grep -q 'same-tag publication drift refused' "$installer" || fail "same-tag drift is not refused"
@@ -216,6 +237,8 @@ mkdir -p "$work/input" "$work/webroot"
 printf 'signed dmg bytes\n' > "$work/input/Malibu-v1.8.39.dmg"
 printf 'signed appcast bytes\n' > "$work/input/appcast.xml"
 printf 'artifact index bytes\n' > "$work/input/compatibility-artifact-index.json"
+dmg_sha="$(shasum -a 256 "$work/input/Malibu-v1.8.39.dmg" | awk '{print $1}')"
+printf '%s  Malibu-v1.8.39.dmg\n' "$dmg_sha" > "$work/input/Malibu-v1.8.39.dmg.sha256"
 
 # Public DNS/HTTPS is part of the client path. A failed ordinary fetch must
 # fail the gate instead of retrying against a forced origin address.
@@ -231,6 +254,7 @@ if MOCK_CURL_CALLS="$work/no-dns-curl.calls" \
   PATH="$work/no-dns-bin:$PATH" \
   bash "$public_verifier" v1.8.39 \
     "$work/input/Malibu-v1.8.39.dmg" "$work/input/appcast.xml" \
+    "$work/input/Malibu-v1.8.39.dmg.sha256" \
     >"$work/no-dns.out" 2>&1; then
   fail "public verifier accepted failed DNS/client routing"
 fi
@@ -280,8 +304,6 @@ publication_id="$(create_manifest \
   "$work/input/publication-manifest.json" \
   "$work/input/Malibu-v1.8.39.dmg" "$work/input/appcast.xml" \
   "$work/input/compatibility-artifact-index.json" false)"
-dmg_sha="$(shasum -a 256 "$work/input/Malibu-v1.8.39.dmg" | awk '{print $1}')"
-printf '%s  Malibu-v1.8.39.dmg\n' "$dmg_sha" > "$work/input/Malibu-v1.8.39.dmg.sha256"
 
 MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
   "$work/webroot" v1.8.39 "$publication_id" \
@@ -308,6 +330,67 @@ if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
 fi
 grep -q 'same-tag publication drift refused' "$work/drift.out" || fail "drift rejection was unclear"
 
+mkdir -p "$work/current"
+printf 'current signed dmg bytes\n' > "$work/current/Malibu-v1.8.65.dmg"
+printf 'current signed appcast bytes\n' > "$work/current/appcast.xml"
+current_dmg_sha="$(shasum -a 256 "$work/current/Malibu-v1.8.65.dmg" | awk '{print $1}')"
+printf '%s  Malibu-v1.8.65.dmg\n' "$current_dmg_sha" > "$work/current/Malibu-v1.8.65.dmg.sha256"
+python3 - "$work/current/release.json" "$work/current/publication-manifest.json" \
+  "$work/current/Malibu-v1.8.65.dmg" "$work/current/appcast.xml" \
+  "$work/current/Malibu-v1.8.65.dmg.sha256" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+release_path, manifest_path, dmg_path, appcast_path, checksum_path = map(pathlib.Path, sys.argv[1:])
+tag = "v1.8.65"
+commit = "b" * 40
+local = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (dmg_path, appcast_path, checksum_path)}
+identity = hashlib.sha256(json.dumps({
+    "appcast_sha256": local["appcast.xml"],
+    "dmg_sha256": local[dmg_path.name],
+    "sha256_sidecar_sha256": local[checksum_path.name],
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+assets = [
+    {"id": 401, "name": dmg_path.name, "digest": "sha256:" + local[dmg_path.name]},
+    {"id": 402, "name": "appcast.xml", "digest": "sha256:" + local["appcast.xml"]},
+    {"id": 403, "name": checksum_path.name, "digest": "sha256:" + local[checksum_path.name]},
+]
+release_path.write_text(json.dumps({
+    "id": 301,
+    "tag_name": tag,
+    "target_commitish": commit,
+    "draft": False,
+    "prerelease": False,
+    "immutable": True,
+    "assets": assets,
+}, sort_keys=True) + "\n")
+manifest_path.write_text(json.dumps({
+    "schema_version": 1,
+    "repository": "Augustas11/macprovider",
+    "tag": tag,
+    "commit": commit,
+    "prerelease": False,
+    "release_id": 301,
+    "publication_id": identity,
+    "assets": {
+        asset["name"]: {"id": asset["id"], "sha256": local[asset["name"]]}
+        for asset in assets
+    },
+}, sort_keys=True) + "\n")
+PY
+printf 'stale current appcast bytes\n' > "$work/current/appcast.xml"
+if bash "$current_set_verifier" \
+  "$work/current/release.json" "$work/current/publication-manifest.json" \
+  "$work/current/Malibu-v1.8.65.dmg" "$work/current/appcast.xml" \
+  "$work/current/Malibu-v1.8.65.dmg.sha256" \
+  >"$work/current-drift.out" 2>&1; then
+  fail "current Malibu verifier accepted stale appcast bytes"
+fi
+grep -q 'publication manifest does not bind appcast.xml' "$work/current-drift.out" ||
+  fail "current stale appcast rejection was unclear"
+
 create_manifest "$work/input/prerelease.json" \
   "$work/input/Malibu-v1.8.39.dmg" "$work/input/appcast.xml" \
   "$work/input/compatibility-artifact-index.json" true >/dev/null
@@ -325,13 +408,13 @@ if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
   "$work/input/publication-manifest.json" "$work/input/Malibu-v1.8.39.dmg" \
   "$work/input/appcast.xml" "$work/input/Malibu-v1.8.39.dmg.sha256" \
   >"$work/tag.out" 2>&1; then
-  fail "bridge installer accepted a later tag"
+  fail "installer accepted mismatched publication identity"
 fi
-grep -q 'frozen to v1.8.39' "$work/tag.out" || fail "tag rejection was unclear"
+grep -q 'publication manifest identity mismatch' "$work/tag.out" || fail "tag rejection was unclear"
 
 if bash "$generator" v1.8.40 >"$work/generator.out" 2>&1; then
-  fail "bridge generator accepted a later tag"
+  fail "generator accepted a missing later DMG"
 fi
-grep -q 'frozen to v1.8.39' "$work/generator.out" || fail "generator tag rejection was unclear"
+grep -q 'missing dmg:' "$work/generator.out" || fail "generator later-tag path was unclear"
 
 echo 'Malibu bootstrap bridge regression checks passed'

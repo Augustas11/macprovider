@@ -1,40 +1,34 @@
 #!/usr/bin/env bash
-# Publish a locally captured, signed Malibu release set to Pearl.
+# Publish an independently versioned Malibu release to download.malibu.tech.
 set -euo pipefail
 
 die() {
-  printf '[publish-malibu-latest-dmg] ERROR: %s\n' "$*" >&2
+  printf '[publish-independent-malibu-latest-dmg] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
-[[ "$#" == 7 ]] ||
-  die "usage: $0 MANIFEST DMG APPCAST ARTIFACT_INDEX CHECKSUMS SIGNATURE PROVENANCE"
-
-manifest="$1"
-asset="$2"
-appcast="$3"
-artifact_index="$4"
-checksums="$5"
-signature="$6"
-provenance="$7"
+[[ "$#" == 5 ]] || die "usage: RELEASE_JSON MANIFEST DMG APPCAST SHA256"
+release_json="$1"
+manifest="$2"
+asset="$3"
+appcast="$4"
+checksum="$5"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-bash "$SCRIPT_DIR/verify-malibu-publication-set.sh" \
-  "$manifest" "$asset" "$appcast" "$artifact_index" \
-  "$checksums" "$signature" "$provenance"
+bash "$SCRIPT_DIR/verify-malibu-current-publication-set.sh" \
+  "$release_json" "$manifest" "$asset" "$appcast" "$checksum"
 
-read -r tag commit release_number publication_id dmg_asset_id appcast_asset_id < <(
+read -r tag release_number publication_id dmg_asset_id appcast_asset_id < <(
   python3 - "$manifest" <<'PY'
 import json
 import pathlib
 import sys
 
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-tag = manifest["tag"]
 assets = manifest["assets"]
+tag = manifest["tag"]
 print(
     tag,
-    manifest["commit"],
     manifest["release_id"],
     manifest["publication_id"],
     assets[f"Malibu-{tag}.dmg"]["id"],
@@ -43,8 +37,6 @@ print(
 PY
 )
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "manifest tag is invalid"
-[[ "$tag" == v1.8.39 ]] || die "legacy provider-coupled Malibu publisher is frozen to v1.8.39"
-[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "manifest commit is invalid"
 [[ "$release_number" =~ ^[1-9][0-9]*$ ]] || die "manifest release id is invalid"
 [[ "$publication_id" =~ ^[0-9a-f]{64}$ ]] || die "manifest publication id is invalid"
 [[ "$dmg_asset_id" =~ ^[1-9][0-9]*$ && "$appcast_asset_id" =~ ^[1-9][0-9]*$ ]] ||
@@ -69,8 +61,6 @@ sha256_file() {
 }
 
 dmg_name="Malibu-${tag}.dmg"
-checksum_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/Malibu-${tag}.XXXXXX.sha256")"
-printf '%s  %s\n' "$(sha256_file "$asset")" "$dmg_name" >"$checksum_file"
 
 # Resolved relative to this script at runtime.
 # shellcheck disable=SC1091
@@ -78,14 +68,13 @@ source "$SCRIPT_DIR/malibu-download-ssh.sh"
 
 remote_stage=""
 cleanup() {
-  rm -f "$checksum_file"
   if [[ -n "$remote_stage" && "$remote_stage" =~ ^/root/\.malibu-publish/stage\.[A-Za-z0-9]+$ ]]; then
     malibu_download_ssh "rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
 
-# This block intentionally expands only on Pearl.
+# Remote variables must expand on Pearl, not in this local shell.
 # shellcheck disable=SC2016
 remote_stage="$(malibu_download_ssh 'set -eu
   umask 077
@@ -98,7 +87,7 @@ remote_stage="$(malibu_download_ssh 'set -eu
   die "Pearl returned an unsafe staging path"
 
 helper="$SCRIPT_DIR/install-malibu-publication.sh"
-declare -a local_paths=("$manifest" "$asset" "$appcast" "$checksum_file" "$helper")
+declare -a local_paths=("$manifest" "$asset" "$appcast" "$checksum" "$helper")
 declare -a remote_names=(publication-manifest.json "$dmg_name" appcast.xml "${dmg_name}.sha256" install-helper)
 declare -a expected_hashes=()
 for index in "${!local_paths[@]}"; do
@@ -149,7 +138,7 @@ malibu_download_ssh "set -euo pipefail
 remote_stage=""
 
 bash "$SCRIPT_DIR/verify-malibu-bootstrap-publication.sh" \
-  "$tag" "$asset" "$appcast" "$checksum_file"
+  "$tag" "$asset" "$appcast" "$checksum"
 
-printf '[publish-malibu-latest-dmg] ok: %s/%s + latest.dmg on Pearl (release=%s assets=%s,%s commit=%s)\n' \
-  "$WEBROOT" "$dmg_name" "$release_number" "$dmg_asset_id" "$appcast_asset_id" "$commit"
+printf '[publish-independent-malibu-latest-dmg] ok: %s/%s + latest.dmg/appcast.xml on Pearl (release=%s assets=%s,%s)\n' \
+  "$WEBROOT" "$dmg_name" "$release_number" "$dmg_asset_id" "$appcast_asset_id"

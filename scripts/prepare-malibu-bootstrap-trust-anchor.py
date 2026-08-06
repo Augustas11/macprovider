@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare or verify Malibu's one-time Sparkle trust-continuity anchor."""
+"""Prepare or verify Malibu's Sparkle trust-continuity anchor."""
 
 from __future__ import annotations
 
@@ -14,9 +14,6 @@ import stat
 import tempfile
 
 
-BRIDGE_TAG = "v1.8.39"
-BRIDGE_VERSION = "1.8.39"
-BRIDGE_BUILD = "39"
 EXPECTED_PUBLIC_KEY = "JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="
 TAG_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 
@@ -127,6 +124,12 @@ def validate_identity(document: dict[str, object], expected_tag: str | None) -> 
         fail("CFBundleVersion is not a positive decimal build")
     if expected_tag is not None and expected_tag != f"v{version}":
         fail(f"bundle version {version} does not match release tag {expected_tag}")
+    expected_build = str(int(version.rsplit(".", 1)[1]))
+    if build != expected_build:
+        fail(
+            f"release {version} requires bundle version/build "
+            f"{version}/{expected_build}, got {version}/{build}"
+        )
     return version, build
 
 
@@ -177,24 +180,10 @@ def preflight(
     key = load_frozen_key(key_path)
     info = contents / "Info.plist"
     document, plist_format, mode = load_plist(info)
-    version, build = validate_identity(
-        document,
-        tag if tag == BRIDGE_TAG else None,
-    )
+    version, build = validate_identity(document, tag)
     found = legacy_update_keys(document)
     if found:
         fail("source Malibu app unexpectedly contains legacy update keys: " + ", ".join(found))
-
-    if tag == BRIDGE_TAG and (version != BRIDGE_VERSION or build != BRIDGE_BUILD):
-        fail(
-            f"{BRIDGE_TAG} trust anchor requires bundle version/build "
-            f"{BRIDGE_VERSION}/{BRIDGE_BUILD}, got {version}/{build}"
-        )
-    if tag != BRIDGE_TAG and version == BRIDGE_VERSION:
-        fail(
-            f"bundle version {BRIDGE_VERSION} is reserved for the "
-            f"{BRIDGE_TAG} trust-anchor release"
-        )
     print(
         f"preflighted Malibu {version}/{build} for {tag} without legacy "
         "app-update authority"
@@ -209,14 +198,10 @@ def prepare(tag: str, app: pathlib.Path, key_path: pathlib.Path) -> None:
         key_path,
     )
 
-    if tag != BRIDGE_TAG:
-        print(f"Malibu {tag} remains free of legacy app-update authority")
-        return
-
     document["SUPublicEDKey"] = key
     atomic_write_plist(contents / "Info.plist", document, plist_format, mode)
     verify(app, key_path)
-    print(f"injected frozen Malibu v1.8.32 trust anchor into {BRIDGE_TAG}")
+    print(f"injected frozen Malibu Sparkle trust anchor into {tag}")
 
 
 def verify(app: pathlib.Path, key_path: pathlib.Path) -> None:
@@ -226,26 +211,12 @@ def verify(app: pathlib.Path, key_path: pathlib.Path) -> None:
     version, build = validate_identity(document, None)
     found = legacy_update_keys(document)
 
-    if version == BRIDGE_VERSION:
-        if build != BRIDGE_BUILD:
-            fail(
-                f"bundle version {BRIDGE_VERSION} must use bridge build {BRIDGE_BUILD}, "
-                f"got {build}"
-            )
-        if found != ["SUPublicEDKey"] or document.get("SUPublicEDKey") != key:
-            fail(
-                f"Malibu {BRIDGE_VERSION} must contain only the exact frozen "
-                "SUPublicEDKey trust anchor"
-            )
-        print(f"verified one-time Malibu {BRIDGE_VERSION} trust anchor")
-        return
-
-    if found:
+    if found != ["SUPublicEDKey"] or document.get("SUPublicEDKey") != key:
         fail(
-            f"Malibu {version} must not retain legacy app-update keys: "
-            + ", ".join(found)
+            f"Malibu {version} must contain only the exact frozen "
+            "SUPublicEDKey trust anchor"
         )
-    print(f"verified Malibu {version} has no legacy app-update keys")
+    print(f"verified Malibu {version} Sparkle trust anchor")
 
 
 def parse_args() -> argparse.Namespace:

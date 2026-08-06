@@ -6,7 +6,8 @@ Status: DRAFT v0.22 · Owner: augstar · Target: 2026 Q3
 public **Download for Mac** button to the immutable versioned GitHub release asset
 for the accepted release, matching §6 step 11 and the v0.13 removal of `latest.dmg`
 authority. §10 previously still specified `https://download.malibu.tech/latest.dmg`,
-a retired mutable endpoint; the shipped page combined that stale button with a
+which is retained only for old-client compatibility and retired as the primary
+landing-page download authority; the shipped page combined that stale button with a
 version and SHA-256 fetched live from the GitHub API, so it advertised the current
 release's digest while serving v1.8.53 bytes. The tag, digest, and link MUST now all
 resolve from one pinned accepted release. P4 in §11 is reconciled to match.
@@ -80,15 +81,14 @@ protocol capabilities and schema versions, not marketing-version equality,
 govern referral UI availability.
 
 **Change log v0.14 (2026-07-15, issue #585 bootstrap trust continuity).**
-Stable Malibu 1.8.39 is the only CLI-owned build whose signed app bundle retains
-the exact `SUPublicEDKey` shipped by Malibu 1.8.32. Sparkle 2.6.4 rejects an
-otherwise valid update when the target bundle removes that key, so the protected
-release injects the frozen public key after unsigned app construction, before
-protected bundle writes, and re-verifies it after bundling before codesigning. The
-target still contains no Sparkle package/framework, feed URL, automatic-check
-setting, or updater runtime; the key is inert trust metadata for the one legacy
-hop. Final-DMG verification requires that exact posture, and every later Malibu
-version must omit the key again.
+Malibu 1.8.39 was the first CLI-owned build whose signed app bundle retained the
+exact `SUPublicEDKey` shipped by Malibu 1.8.32. Sparkle 2.6.4 rejects an
+otherwise valid update when the target bundle removes that key, so protected
+Malibu releases inject the frozen public key after unsigned app construction,
+before protected bundle writes, and re-verify it after bundling before
+codesigning. The target still contains no Sparkle package/framework, feed URL,
+automatic-check setting, or updater runtime; the key is inert trust metadata for
+old-client compatibility. Final-DMG verification requires that exact posture.
 
 **Change log v0.13 (2026-07-14, issue #585 Option 2 completion).** The
 launchd-managed CLI is the sole provider lifecycle, credential, admission-identity,
@@ -98,10 +98,12 @@ control-socket projection for CLI-authenticated earnings, and invokes only the s
 installed CLI's typed repair/update/uninstall transactions. A legacy App-Keychain
 bearer may be read once as migration input, but is deleted only after fresh CLI custody
 is proven; production Malibu cannot create a provider bearer, register an identity, or
-sign coordinator admission. Sparkle, appcast publication, `latest.dmg`, and independent
-App update ownership are removed. The signed compatibility set binds Malibu.app, the
-CLI, launchd definitions, watchdog, catalog/resources, coordinator admission metadata,
-and rollback plan. v0.18 supersedes v0.13's target-admission commit gate with
+sign coordinator admission. Sparkle runtime/feed ownership and independent App update
+ownership are removed; later old-client compatibility publication may still use a
+signed appcast/`latest.dmg` surface as distribution metadata, not as Malibu-owned update
+authority. The signed compatibility set binds Malibu.app, the CLI, launchd definitions,
+watchdog, catalog/resources, coordinator admission metadata, and rollback plan. v0.18
+supersedes v0.13's target-admission commit gate with
 SPEC-020's local signed-set/health commit and separate network-readiness result.
 Auto-update opt-out applies to the entire set while explicit user update remains
 available. **Every older statement below that assigns credentials, identity,
@@ -500,10 +502,11 @@ time (60–240 s for the first model) in the background.
 - The launchd CLI owns both scheduled and user-requested updates. Malibu's menu and
   dashboard invoke `macprovider-cli update`; they do not download or replace artifacts.
   Removing the Sparkle dependency/runtime and feed settings eliminates the prior
-  second update authority. Stable v1.8.39 alone retains the frozen 1.8.32
-  `SUPublicEDKey` in its signed target bundle because Sparkle 2.6.4 requires key
-  continuity after extraction; without Sparkle code or a feed, this public key cannot
-  initiate an update. Later builds must omit it.
+  second update authority. Independent Malibu release publication still emits a signed
+  public appcast and `latest.dmg` compatibility surface for already-installed Sparkle
+  clients. Every signed Malibu target retains only the frozen 1.8.32 `SUPublicEDKey`
+  because Sparkle 2.6.4 requires key continuity after extraction; without Sparkle code
+  or a feed URL in the target bundle, this public key cannot initiate future updates.
 - The updater acquires the maintenance lease, persists a phase journal and exact
   typed rollback plan, stages and validates the target, drains buyer work,
   installs the whole set, restarts launchd, and commits only after exact signed
@@ -716,9 +719,11 @@ Runs on the same macOS runner as the existing job, after the CLI binary is signe
 10. Build the exact compatibility-set manifest and typed rollback plan, then place the
     DMG and every provider runtime/policy artifact in the signed
     `compatibility-artifact-index.json`.
-11. Publish only immutable versioned GitHub release artifacts; the updater discovers
-    the signed exact set through the coordinator/catalog trust path. There is no mutable
-    `latest.dmg` or appcast authority.
+11. Publish immutable versioned GitHub release artifacts, including `appcast.xml` for
+    old-client compatibility, then atomically publish the exact DMG, SHA-256 sidecar,
+    and appcast bytes to `download.malibu.tech`. The updater discovers signed provider
+    sets through the coordinator/catalog trust path; the appcast is not a second CLI
+    update authority.
 
 Reuse `cleanup_signing_material` trap from the existing job.
 
@@ -864,9 +869,9 @@ try SMAppService.mainApp.register()   // the APP login item, not the CLI daemon
 - The CLI verifies the catalog/release trust chain, artifact-index signature, exact set
   identity, per-role uniqueness, hashes, Developer ID identity/team where applicable,
   launchd labels, and target coordinator policy before any drain or replacement.
-- Malibu carries no feed URL or independent discovery channel. Stable v1.8.39
-  alone carries the frozen v1.8.32 public key as inert trust-continuity metadata;
-  it has no Sparkle runtime, and later builds carry no app-update public key.
+- Malibu carries no feed URL or independent in-app discovery channel. Signed
+  release targets carry the frozen v1.8.32 public key as inert trust-continuity
+  metadata for old Sparkle clients; they have no Sparkle runtime or feed URL.
   Failure to verify or fetch any required member leaves the current set running and
   emits a typed redacted update state. A staged target that fails exact signed-set
   identity, launch, or local provider health enters SPEC-020 rollback recovery.
@@ -906,7 +911,7 @@ model (run `install.sh`, monitor over HTTP). See §3.1 and §5 for the shipped f
 | **P1 — Onboarding** (1 wk) | `malibu://` URL scheme; portal deep-link flow; wallet paste; hardware autotune call; `SMAppService.register()`; dashboard read-only. | 5 friendly testers install by drag-drop and start earning without CLI. |
 | **P2 — `.app`/`.dmg` signing** (0.5 wk) | **Extend** existing `release.yml` "Sign + notarize binary" step with the App-track substeps in §6.2. Verify entitlements + hardened runtime. No new secrets except `SPARKLE_EDDSA_PRIVATE_KEY`. | Gatekeeper accepts `.dmg` on a fresh macOS 14 install (no `xattr -d`); `stapler validate` passes. |
 | **P3 — Sparkle + updates** (0.5 wk) | Appcast, EdDSA signing key, delta patches, phased rollout. | Live `v0.1 → v0.2` update on 5 test Macs, one via delta patch. |
-| **P4 — Landing page swap** (0.5 wk) | Redesigned `host/index.html` pinned to the immutable release asset (the `download.malibu.tech` endpoint is retired, superseded v0.22), SHA-256 sidecar, troubleshoot page. | 50/50 A/B against current curl page for 1 wk on `malibu.tech/host`. |
+| **P4 — Landing page swap** (0.5 wk) | Redesigned `host/index.html` pinned to immutable release assets so the landing-page primary download no longer depends on mutable `latest.dmg`; `download.malibu.tech` remains the old-client compatibility appcast/DMG surface. | 50/50 A/B against current curl page for 1 wk on `malibu.tech/host`. |
 | **P5 — WalletConnect** (1 wk) | Alongside paste flow; opens Rainbow / MetaMask / Coinbase Wallet via deep link; nonce signature bound to provider_id server-side. | 3 wallets verified round-trip. |
 | **P6 — Homebrew Cask** (0.5 wk) | `brew install --cask malibu` pulls the same signed `.dmg`. | `brew audit --cask malibu` clean, install / uninstall round-trip. |
 
