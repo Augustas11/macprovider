@@ -263,29 +263,42 @@ func TestAC04_WindowStateMachine(t *testing.T) {
 			ThresholdMargin: 0.01, MinPassCount: 1, MinWarnCount: 1, MinQuarantineCandidateCount: 1,
 			Action: flappingActionManualReview, ClearRule: flappingClearPassSequence,
 		}
+		now := base + 100*hour
 		// tv_lower hovering just below the 0.05 quarantine median: margin ~0.005 <= 0.01.
 		canaries := []FlappingCanary{
-			{Verdict: VerdictPass, MedianTVLower: 0.045, MaxPositionTVLower: 0.09},
-			{Verdict: VerdictWarn, MedianTVLower: 0.046, MaxPositionTVLower: 0.095},
-			{Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047, MaxPositionTVLower: 0.098},
+			{CanaryID: "c1", AtMs: now - hour, Verdict: VerdictPass, MedianTVLower: 0.045, MaxPositionTVLower: 0.09},
+			{CanaryID: "c2", AtMs: now - hour, Verdict: VerdictWarn, MedianTVLower: 0.046, MaxPositionTVLower: 0.095},
+			{CanaryID: "c3", AtMs: now - hour, Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047, MaxPositionTVLower: 0.098},
 		}
-		ev := EvaluateFlapping(canaries, fp, th)
+		ev := EvaluateFlapping(canaries, fp, th, now)
 		if !ev.Triggered {
 			t.Fatalf("persistent near-boundary flapping should trigger, metric=%v", ev.MetricValue)
+		}
+		if len(ev.CanaryIDs) != 3 {
+			t.Fatalf("evidence must record contributing canary ids, got %v", ev.CanaryIDs)
+		}
+		// Stale canaries outside the lookback window do not count.
+		stale := []FlappingCanary{
+			{CanaryID: "old1", AtMs: now - 30*day, Verdict: VerdictPass, MedianTVLower: 0.047},
+			{CanaryID: "old2", AtMs: now - 30*day, Verdict: VerdictWarn, MedianTVLower: 0.047},
+			{CanaryID: "old3", AtMs: now - 30*day, Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047},
+		}
+		if EvaluateFlapping(stale, fp, th, now).Triggered {
+			t.Fatal("stale canaries outside lookback must not trigger flapping")
 		}
 		// Counts below the minimum do not trigger.
 		fp2 := fp
 		fp2.MinQuarantineCandidateCount = 5
-		if EvaluateFlapping(canaries, fp2, th).Triggered {
+		if EvaluateFlapping(canaries, fp2, th, now).Triggered {
 			t.Fatal("insufficient quarantine_candidate count must not trigger")
 		}
 		// A clearly-clean history (large margins) does not trigger.
 		clean := []FlappingCanary{
-			{Verdict: VerdictPass, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
-			{Verdict: VerdictWarn, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
-			{Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
+			{CanaryID: "p", AtMs: now, Verdict: VerdictPass, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
+			{CanaryID: "w", AtMs: now, Verdict: VerdictWarn, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
+			{CanaryID: "q", AtMs: now, Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
 		}
-		if EvaluateFlapping(clean, fp, th).Triggered {
+		if EvaluateFlapping(clean, fp, th, now).Triggered {
 			t.Fatal("clean history must not trigger flapping")
 		}
 		// action=none is telemetry only (no state change); manual_review moves the key.
@@ -293,11 +306,11 @@ func TestAC04_WindowStateMachine(t *testing.T) {
 		k := winKey("a", 1, "temp-0.7")
 		none := fp
 		none.Action = flappingActionNone
-		s.ApplyFlapping(k, none, th, canaries, OriginEnforcePreserved)
+		s.ApplyFlapping(k, none, th, canaries, now, OriginEnforcePreserved)
 		if s.OverlayState(k.Overlay()) != "" {
 			t.Fatal("action=none must not change state")
 		}
-		s.ApplyFlapping(k, fp, th, canaries, OriginEnforcePreserved)
+		s.ApplyFlapping(k, fp, th, canaries, now, OriginEnforcePreserved)
 		if s.OverlayState(k.Overlay()) != StateBlockedManualReview {
 			t.Fatalf("action=manual_review must block, got %s", s.OverlayState(k.Overlay()))
 		}
@@ -316,8 +329,8 @@ func TestAC04_WindowStateMachine(t *testing.T) {
 		th := Thresholds{TauQuarantinePosition: 0.10}
 		fp := FlappingWindowPolicy{Enabled: true, Metric: flappingMetricPosition, ThresholdMargin: 0.01}
 		// One canary comes within 0.005 of the position quarantine threshold.
-		canaries := []FlappingCanary{{MaxPositionTVLower: 0.095}, {MaxPositionTVLower: 0.0}}
-		if EvaluateFlapping(canaries, fp, th).MetricValue > 0.01 {
+		canaries := []FlappingCanary{{AtMs: 1, MaxPositionTVLower: 0.095}, {AtMs: 1, MaxPositionTVLower: 0.0}}
+		if EvaluateFlapping(canaries, fp, th, 1).MetricValue > 0.01 {
 			t.Fatal("position metric should reflect the closest position (min margin)")
 		}
 	})

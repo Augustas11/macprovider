@@ -154,6 +154,19 @@ func goodEnforcePolicy() Policy {
 	p.SamplerStage = SamplerStagePostSampler
 	p.PositiveStateFreshnessTTLHrs = 24
 	p.CanaryCadenceMinutes = 360 // 24h*60=1440 >= 2*360=720
+	// FR-1 load-bearing coverage/identity fields.
+	p.PolicyVersion = "ci-v1"
+	p.ModelIDs = []string{"model-x"}
+	p.TargetModelHash = "hash-x"
+	p.TokenizerIdentity = "tok-x"
+	p.Entrypoints = []string{"/v1/chat/completions"}
+	p.SamplingProfiles = []string{"temp-0.7"}
+	p.ReferenceFaultCheckVersion = "rfc-v1"
+	p.HardwareRuntimeClass = "m3-max"
+	p.CorpusVersion = "corpus-1"
+	p.ThresholdVersion = "thr-1"
+	p.DisclosureCopyVersion = "disc-v1"
+	p.DisclosureCopyDigest = "sha256:disc"
 	return p
 }
 
@@ -199,6 +212,26 @@ func TestAC10_ActivationPreconditions(t *testing.T) {
 		p.CanaryCadenceMinutes = 900 // 2*900=1800 > 1440
 		if CanActivateEnforce(p, goodActivationDeps()) {
 			t.Fatal("TTL < 2x cadence must refuse enforce")
+		}
+	})
+
+	t.Run("an underspecified policy (empty coverage/identity fields) refuses enforce", func(t *testing.T) {
+		p := NewDefaultPolicy()
+		p.Mode = ModeEnforce
+		p.SamplerStage = SamplerStagePostSampler
+		p.PositiveStateFreshnessTTLHrs = 24
+		p.CanaryCadenceMinutes = 360
+		// deliberately no model_ids / tokenizer / entrypoints / profiles / digests.
+		if CanActivateEnforce(p, goodActivationDeps()) {
+			t.Fatal("an empty/underspecified policy must not activate enforce")
+		}
+	})
+
+	t.Run("both target_model_hash and signed_catalog_selector set refuses enforce", func(t *testing.T) {
+		p := goodEnforcePolicy()
+		p.SignedCatalogSelector = "catalog-sel" // now both are set
+		if CanActivateEnforce(p, goodActivationDeps()) {
+			t.Fatal("exactly one of hash/catalog selector must be set")
 		}
 	})
 }

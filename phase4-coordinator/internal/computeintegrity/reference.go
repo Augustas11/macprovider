@@ -117,6 +117,35 @@ func (r ReferenceEvent) PositionSetDigest() (string, error) {
 	return jcsDigest(list)
 }
 
+// distributionsWellFormed reports whether every position's compact distribution is
+// valid (FR-5): finite probabilities in [0,1], total mass not exceeding 1 (within the
+// mass tolerance), top-K ids with no duplicates, and top-K a subset of the distribution
+// support. A malformed reference distribution (e.g. total mass > 1) must be rejected as
+// schema_invalid, never silently clamped to an admissible TV of 0.
+func (r ReferenceEvent) distributionsWellFormed() bool {
+	for _, pos := range r.Positions {
+		if !noDuplicates(pos.TopK) {
+			return false
+		}
+		var mass float64
+		for _, p := range pos.Full {
+			if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+				return false
+			}
+			mass += p
+		}
+		if mass > 1+massConservationTolerance {
+			return false
+		}
+		for _, id := range pos.TopK {
+			if _, ok := pos.Full[id]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ReferencesIndependent reports the closed FR-5 three-way independence predicate: two
 // sources are independent iff ALL THREE of (a) distinct operator identity, (b)
 // distinct hardware failure domain, and (c) distinct runtime-build/kernel provenance
@@ -209,8 +238,8 @@ func ComputeAdmissibility(in AdmissibilityInput) AdmissibilityStatus {
 		if (in.CoveredKey != ThresholdKey{}) && r.coveredKey() != in.CoveredKey {
 			return AdmissibilitySchemaInvalid // reference bound to a different covered key.
 		}
-		if len(r.Positions) == 0 {
-			return AdmissibilitySchemaInvalid // empty position set cannot be compared.
+		if len(r.Positions) == 0 || !r.distributionsWellFormed() {
+			return AdmissibilitySchemaInvalid // empty or malformed distributions cannot be compared.
 		}
 		pd, err := r.PositionSetDigest()
 		if err != nil {

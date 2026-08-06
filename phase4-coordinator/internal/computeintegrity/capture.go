@@ -121,11 +121,24 @@ func (c Capture) structurallyUnreadable() bool {
 	return false
 }
 
+// compositeBindingUnreadable reports whether the captured composite SPEC-022 binding
+// is missing/unreadable (FR-4). A covered row always carries the binding; if it is
+// absent the capture is malformed and MUST fail closed as compute_integrity_unreadable
+// — a `spec022_effective_enforce=false` that arises from a missing binding must NOT be
+// mistaken for a legitimate "SPEC-022 not enforcing" and paid through.
+func (c Capture) compositeBindingUnreadable() bool {
+	return c.Spec022PolicyVersion == "" || c.Spec022PolicyMode == "" ||
+		c.Spec022RouteSnapshotDigest == ""
+}
+
 // missingEnforceEvidence reports whether a captured row that claims a payable
 // verified/warn positive state is missing a load-bearing FR-4 field required for
-// enforce settlement: the composite SPEC-022 coverage digest, the SPEC-036 policy
-// digest, the reference set id / event digests, or the v0.1 covered sampler stage.
-// Such a row is not payable and settles compute_integrity_unreadable.
+// enforce settlement. It requires the composite SPEC-022 coverage digest, the SPEC-036
+// policy digest, the v0.1 covered sampler stage, AND complete, consistent
+// reference-set admissibility evidence (a two-reference independent quorum must be
+// provable): a non-empty reference set id, admissibility digest, and fault-check
+// version; a quorum count of at least two; and at least that many non-empty reference
+// event digests. Such a row is not payable and settles compute_integrity_unreadable.
 func (c Capture) missingEnforceEvidence() bool {
 	if c.SamplerStage != SamplerStagePostSampler {
 		return true
@@ -133,8 +146,17 @@ func (c Capture) missingEnforceEvidence() bool {
 	if c.ComputeIntegrityPolicyDigest == "" || c.Spec022CoverageDigest == "" {
 		return true
 	}
-	if c.ReferenceSetID == "" || len(c.ReferenceEventDigests) == 0 {
+	if c.ReferenceSetID == "" || c.ReferenceSetAdmissibilityDigest == "" ||
+		c.ReferenceFaultCheckVersion == "" {
 		return true
+	}
+	if c.ReferenceQuorumCount < 2 || len(c.ReferenceEventDigests) < c.ReferenceQuorumCount {
+		return true
+	}
+	for _, d := range c.ReferenceEventDigests {
+		if d == "" {
+			return true
+		}
 	}
 	return false
 }

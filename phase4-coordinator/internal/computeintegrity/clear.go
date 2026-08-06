@@ -60,7 +60,8 @@ func (s *Store) DualApproveClear(key ComputeIntegrityKey, approverA, approverB s
 		cleared = true
 	}
 	// Dual-approved review may also retire the lineage tombstone.
-	if tomb := key.Overlay().TombstoneScope(); s.tombstones[tomb] {
+	tomb := key.Overlay().TombstoneScope()
+	if _, ok := s.tombstones[tomb]; ok {
 		delete(s.tombstones, tomb)
 		cleared = true
 	}

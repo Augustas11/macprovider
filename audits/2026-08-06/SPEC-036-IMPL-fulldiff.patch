@@ -88,10 +88,10 @@ index 00000000..76b6f6f4
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/activation_test.go b/phase4-coordinator/internal/computeintegrity/activation_test.go
 new file mode 100644
-index 00000000..9660e4da
+index 00000000..505293c5
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/activation_test.go
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,234 @@
 +package computeintegrity
 +
 +import "testing"
@@ -145,7 +145,7 @@ index 00000000..9660e4da
 +	})
 +
 +	t.Run("a complete approved record is enforce-ready", func(t *testing.T) {
-+		if refs := goodThresholdRecord().ValidateCalibrationForEnforce(calMins()); len(refs) != 0 {
++		if refs := goodThresholdRecord().ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) != 0 {
 +			t.Fatalf("good record should be enforce-ready, got %v", refs)
 +		}
 +	})
@@ -155,7 +155,7 @@ index 00000000..9660e4da
 +		r.KnownGoodCohortDigest = ""
 +		r.MeasuredFPWindow = ""
 +		r.MeasuredFalseQuarantineDenominator = 0
-+		if refs := r.ValidateCalibrationForEnforce(calMins()); len(refs) == 0 {
++		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
 +			t.Fatal("missing measured-FP evidence must refuse enforce")
 +		}
 +	})
@@ -164,7 +164,7 @@ index 00000000..9660e4da
 +		r := goodThresholdRecord()
 +		r.MeasuredFalseQuarantineNumerator = 10 // 10/200 = 0.05 > budget 0.01
 +		r.MeasuredFalseQuarantineRate = 0.05
-+		if refs := r.ValidateCalibrationForEnforce(calMins()); len(refs) == 0 {
++		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
 +			t.Fatal("measured rate above budget must refuse enforce")
 +		}
 +	})
@@ -173,8 +173,29 @@ index 00000000..9660e4da
 +		r := goodThresholdRecord()
 +		r.CalibrationSampleCount = 10
 +		r.MinEligibleCanaryCount = 10
-+		if refs := r.ValidateCalibrationForEnforce(calMins()); len(refs) == 0 {
++		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
 +			t.Fatal("underpowered calibration must refuse enforce")
++		}
++	})
++
++	t.Run("calibration record must match the covered key's 8-tuple", func(t *testing.T) {
++		r := goodThresholdRecord()
++		want := r.ThresholdKey()
++		if refs := r.ValidateCalibrationForEnforce(want, calMins()); len(refs) != 0 {
++			t.Fatalf("matching 8-tuple should be enforce-ready, got %v", refs)
++		}
++		wrong := want
++		wrong.HardwareRuntimeClass = "m4-pro"
++		if refs := r.ValidateCalibrationForEnforce(wrong, calMins()); len(refs) == 0 {
++			t.Fatal("a mismatched 8-tuple must refuse enforce")
++		}
++	})
++
++	t.Run("thresholds below the FR-8 floor refuse enforce", func(t *testing.T) {
++		r := goodThresholdRecord()
++		r.TauQuarantineMedian = 0.01 // below the 0.060 floor
++		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
++			t.Fatal("a threshold below the floor must refuse enforce")
 +		}
 +	})
 +
@@ -696,10 +717,10 @@ index 00000000..16a453ba
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/capture.go b/phase4-coordinator/internal/computeintegrity/capture.go
 new file mode 100644
-index 00000000..44ed3f7d
+index 00000000..7379553d
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/capture.go
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,149 @@
 +package computeintegrity
 +
 +// Capture is the immutable request-start compute-integrity state captured for
@@ -710,82 +731,81 @@ index 00000000..44ed3f7d
 +//
 +// A missing or unreadable value in any load-bearing field fails closed as
 +// compute_integrity_unreadable (see SettlementDecision).
++// The json tags define the closed snake_case FR-4 captured-state object used for the
++// FR-13 request-start snapshot digest. Fields that are settlement-verification inputs
++// rather than part of the captured object (the route-snapshot class digest, the
++// derived profile-coverage boolean, and the internal breaker-present/unreadable flags)
++// are excluded with json:"-".
 +type Capture struct {
 +	// Identity / key fields.
-+	StableProviderIdentity string
-+	ProviderID             string
-+	AssignedID             string
-+	ModelID                string
-+	TargetModelHash        string
-+	TokenizerIdentity      string
-+	SamplerStage           string
-+	SamplingProfile        string
-+	CorpusVersion          string
-+	ThresholdVersion       string
-+	HardwareRuntimeClass   string
-+	TargetGeneration       int64
++	StableProviderIdentity string `json:"stable_provider_identity"`
++	ProviderID             string `json:"provider_id"`
++	AssignedID             string `json:"assigned_id"`
++	ModelID                string `json:"model_id"`
++	TargetModelHash        string `json:"target_model_hash"`
++	TokenizerIdentity      string `json:"tokenizer_identity"`
++	SamplerStage           string `json:"sampler_stage"`
++	SamplingProfile        string `json:"sampling_profile"`
++	CorpusVersion          string `json:"corpus_version"`
++	ThresholdVersion       string `json:"threshold_version"`
++	HardwareRuntimeClass   string `json:"hardware_runtime_class"`
++	TargetGeneration       int64  `json:"target_generation"`
 +
 +	// Coverage.
-+	SamplingProfileCoverageMode SamplingProfileCoverageMode
++	SamplingProfileCoverageMode SamplingProfileCoverageMode `json:"sampling_profile_coverage_mode"`
 +	// CoveredSamplingProfileSetDigest is the SHA-256 over the JCS-canonical sorted
 +	// covered-profile list for an all-profile window; empty for a per-profile window.
-+	CoveredSamplingProfileSetDigest string
-+	// RequestSamplingProfileCovered reports whether the buyer request's sampling
-+	// profile is a member of the captured covered window with its own fresh satisfied
-+	// sub-window (FR-10 all-profile grid; FR-11 coverage). False => uncovered profile.
-+	RequestSamplingProfileCovered bool
++	CoveredSamplingProfileSetDigest string `json:"covered_sampling_profile_set_digest"`
++	// RequestSamplingProfileCovered is a settlement-verification input, not part of the
++	// captured object.
++	RequestSamplingProfileCovered bool `json:"-"`
 +
 +	// HardwareRuntimeClassDigest binds the covered class the state was measured under.
-+	// A mismatch vs the route snapshot's provider class fails closed as
-+	// uncovered_profile.
-+	HardwareRuntimeClassDigest       string
-+	RouteSnapshotHardwareClassDigest string
++	HardwareRuntimeClassDigest string `json:"hardware_runtime_class_digest"`
++	// RouteSnapshotHardwareClassDigest is the route snapshot's provider class (compared
++	// against the capture), not part of the captured object.
++	RouteSnapshotHardwareClassDigest string `json:"-"`
 +
-+	// Composite SPEC-022 policy snapshot (FR-3, FR-4). Settlement reads this to decide
-+	// whether SPEC-022 was itself in enforce for the request's coverage.
-+	Spec022PolicyVersion       string
-+	Spec022PolicyMode          string
-+	Spec022CoverageDigest      string
-+	Spec022EffectiveEnforce    bool
-+	Spec022RouteSnapshotDigest string
++	// Composite SPEC-022 policy snapshot (FR-3, FR-4).
++	Spec022PolicyVersion       string `json:"spec022_policy_version"`
++	Spec022PolicyMode          string `json:"spec022_policy_mode"`
++	Spec022CoverageDigest      string `json:"spec022_coverage_digest"`
++	Spec022EffectiveEnforce    bool   `json:"spec022_effective_enforce"`
++	Spec022RouteSnapshotDigest string `json:"spec022_route_snapshot_digest"`
 +
 +	// SPEC-036 policy snapshot.
-+	ComputeIntegrityPolicyVersion string
-+	ComputeIntegrityPolicyMode    Mode
-+	ComputeIntegrityPolicyDigest  string
++	ComputeIntegrityPolicyVersion string `json:"compute_integrity_policy_version"`
++	ComputeIntegrityPolicyMode    Mode   `json:"compute_integrity_policy_mode"`
++	ComputeIntegrityPolicyDigest  string `json:"compute_integrity_policy_digest"`
 +
 +	// The captured compute-integrity state and its metadata.
-+	State       State
-+	ExpiryCause ExpiryCause // set only when State == StateExpired
++	State       State       `json:"compute_integrity_state"`
++	ExpiryCause ExpiryCause `json:"expiry_cause,omitempty"`
 +
-+	// AdjudicationOrigin of any captured overlay/breaker adverse state (FR-3 matrix).
-+	AdjudicationOrigin AdjudicationOrigin
++	AdjudicationOrigin AdjudicationOrigin `json:"adjudication_origin,omitempty"`
 +
 +	// Reference-set admissibility (FR-4).
-+	ReferenceSetAdmissibilityStatus AdmissibilityStatus
-+	ReferenceSetAdmissibilityDigest string
-+	ReferenceQuorumCount            int
-+	ReferenceFaultCheckVersion      string
-+	ReferenceSetID                  string
-+	ReferenceEventDigests           []string
++	ReferenceSetAdmissibilityStatus AdmissibilityStatus `json:"reference_set_admissibility_status"`
++	ReferenceSetAdmissibilityDigest string              `json:"reference_set_admissibility_digest"`
++	ReferenceQuorumCount            int                 `json:"reference_quorum_count"`
++	ReferenceFaultCheckVersion      string              `json:"reference_fault_check_version"`
++	ReferenceSetID                  string              `json:"reference_set_id"`
++	ReferenceEventDigests           []string            `json:"reference_event_digests"`
 +
-+	// Circuit-breaker capture (FR-4, FR-16). CircuitBreakerActive is a non-null bool
-+	// on every covered enforce row; CircuitBreakerScope is present exactly when
-+	// active. BreakerFieldsPresent must be true — a missing active/scope pair fails
-+	// closed as unreadable.
-+	CircuitBreakerActive bool
-+	CircuitBreakerScope  CircuitBreakerScope
-+	BreakerFieldsPresent bool
++	// Circuit-breaker capture (FR-4, FR-16).
++	CircuitBreakerActive bool                `json:"circuit_breaker_active"`
++	CircuitBreakerScope  CircuitBreakerScope `json:"circuit_breaker_scope,omitempty"`
++	// BreakerFieldsPresent is an internal consistency flag, not part of the captured
++	// object.
++	BreakerFieldsPresent bool `json:"-"`
 +
-+	WindowID            string
-+	SignedCatalogDigest string
-+	CapturedAtUnixMS    int64
++	WindowID            string `json:"compute_integrity_window_id"`
++	SignedCatalogDigest string `json:"signed_catalog_digest"`
++	CapturedAtUnixMS    int64  `json:"captured_at"`
 +
-+	// Unreadable marks a capture whose key fields failed to verify against the route
-+	// snapshot / request sampler at settlement, or that carries a missing/malformed
-+	// load-bearing field. Settlement fails such a row closed as
-+	// compute_integrity_unreadable at the highest precedence.
-+	Unreadable bool
++	// Unreadable is an internal settlement-verification flag, not part of the captured
++	// object.
++	Unreadable bool `json:"-"`
 +}
 +
 +// breakerConsistent reports whether the captured circuit-breaker fields are
@@ -801,6 +821,47 @@ index 00000000..44ed3f7d
 +	return c.CircuitBreakerScope == ""
 +}
 +
++// structurallyUnreadable reports whether the capture is malformed in a way that
++// prevents trusting ANY field — an unknown state/admissibility/expiry/coverage-mode
++// enum value, an inconsistent breaker, an adverse overlay or active breaker whose
++// adjudication_origin is missing/unknown, or the explicit Unreadable flag. Such a
++// capture fails closed to compute_integrity_unreadable in EVERY mode (FR-3): a
++// preserved-adverse row rolled back to warn_only must not pass through payable just
++// because its metadata is corrupt.
++func (c Capture) structurallyUnreadable() bool {
++	if c.Unreadable || !c.breakerConsistent() || !c.State.Known() ||
++		!c.ReferenceSetAdmissibilityStatus.Known() || !c.SamplingProfileCoverageMode.Known() {
++		return true
++	}
++	if c.State == StateExpired && !c.ExpiryCause.Known() {
++		return true
++	}
++	// An adverse overlay state or an active breaker MUST carry a known adjudication
++	// origin; a missing/unknown origin on money-affecting adverse state is unreadable.
++	if (c.State.IsAdverseOverlay() || c.CircuitBreakerActive) && !c.AdjudicationOrigin.Known() {
++		return true
++	}
++	return false
++}
++
++// missingEnforceEvidence reports whether a captured row that claims a payable
++// verified/warn positive state is missing a load-bearing FR-4 field required for
++// enforce settlement: the composite SPEC-022 coverage digest, the SPEC-036 policy
++// digest, the reference set id / event digests, or the v0.1 covered sampler stage.
++// Such a row is not payable and settles compute_integrity_unreadable.
++func (c Capture) missingEnforceEvidence() bool {
++	if c.SamplerStage != SamplerStagePostSampler {
++		return true
++	}
++	if c.ComputeIntegrityPolicyDigest == "" || c.Spec022CoverageDigest == "" {
++		return true
++	}
++	if c.ReferenceSetID == "" || len(c.ReferenceEventDigests) == 0 {
++		return true
++	}
++	return false
++}
++
 +// hardwareClassMatches reports whether the captured hardware_runtime_class digest
 +// equals the route snapshot's provider class digest (FR-4). A mismatch fails closed
 +// as uncovered_profile. When the route snapshot digest is empty we treat it as an
@@ -811,10 +872,10 @@ index 00000000..44ed3f7d
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/clear.go b/phase4-coordinator/internal/computeintegrity/clear.go
 new file mode 100644
-index 00000000..0c8d99cf
+index 00000000..0e7d98fc
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/clear.go
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,68 @@
 +package computeintegrity
 +
 +// FR-10 clear rules. quarantined_compute_drift and blocked:abusive_inconclusive clear
@@ -825,11 +886,16 @@ index 00000000..0c8d99cf
 +
 +// AttemptClear tries to clear a pass-sequence-clearable overlay adverse state
 +// (quarantined_compute_drift or blocked:abusive_inconclusive) using the accumulated
-+// pass streak (FR-10). It clears only when clear_pass_count consecutive passes have
-+// been recorded over at least 24 hours. Returns whether it cleared.
-+func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, nowMs int64) bool {
++// pass streak (FR-10). It clears only when clear_pass_count CONSECUTIVE passes have
++// been recorded over at least 24 hours (any intervening warn/quarantine_candidate
++// resets the streak in RecordCanary) AND the current reference set is fresh and
++// admissible. Returns whether it cleared.
++func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, admissibility AdmissibilityStatus, nowMs int64) bool {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
++	if admissibility != AdmissibilityAdmissible {
++		return false // clear requires current fresh admissible reference evidence.
++	}
 +	ov := s.overlays[key.Overlay()]
 +	if ov == nil {
 +		return false
@@ -970,10 +1036,10 @@ index 00000000..2e065380
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/coverage.go b/phase4-coordinator/internal/computeintegrity/coverage.go
 new file mode 100644
-index 00000000..42d6e6cb
+index 00000000..ff9db277
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/coverage.go
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,58 @@
 +package computeintegrity
 +
 +import "sort"
@@ -990,10 +1056,9 @@ index 00000000..42d6e6cb
 +func CoveredProfileSetDigest(profiles []string) (string, error) {
 +	sorted := append([]string(nil), profiles...)
 +	sort.Strings(sorted)
-+	return jcsDigest(map[string]any{
-+		"type":     "compute_integrity_covered_profile_set_v1",
-+		"profiles": toAnySlice(sorted),
-+	})
++	// Normative preimage: the canonical JSON array of sorted profile strings, not a
++	// wrapper object, so external auditors/producers compute the same digest.
++	return jcsDigest(toAnySlice(sorted))
 +}
 +
 +// AllProfileGridSatisfied reports whether an all-profile window is payable: every
@@ -1257,6 +1322,122 @@ index 00000000..6025942c
 +			t.Fatal("approved copy must not trip the forbidden-claim check")
 +		}
 +	})
++}
+diff --git a/phase4-coordinator/internal/computeintegrity/flapping.go b/phase4-coordinator/internal/computeintegrity/flapping.go
+new file mode 100644
+index 00000000..e07e5d5e
+--- /dev/null
++++ b/phase4-coordinator/internal/computeintegrity/flapping.go
+@@ -0,0 +1,110 @@
++package computeintegrity
++
++import "math"
++
++// FR-10 flapping_window_policy_v0_1 (disabled by default). When enabled, a key that
++// persistently hovers near the quarantine boundary — enough pass/warn/quarantine_
++// candidate results in the lookback AND the configured margin metric at or below
++// threshold_margin — takes the configured action (none or blocked:manual_review_required).
++
++// FlappingCanary is one eligible canary's flapping inputs over the lookback: its
++// verdict and the tv_lower summary statistics used by the FR-10 margin metrics.
++type FlappingCanary struct {
++	Verdict            Verdict
++	MedianTVLower      float64 // median(tv_lower) for the canary
++	MaxPositionTVLower float64 // max over positions of tv_lower
++}
++
++// FlappingEvidence is the FR-10 audit evidence recorded when the flapping predicate is
++// evaluated (metric values, counts, action).
++type FlappingEvidence struct {
++	Metric                   string
++	MetricValue              float64
++	PassCount                int
++	WarnCount                int
++	QuarantineCandidateCount int
++	Action                   string
++	Triggered                bool
++}
++
++// EvaluateFlapping evaluates the exact FR-10 flapping conjunction over the lookback
++// canaries. It returns whether the trigger fired and the audit evidence. The metric is
++// each canary's non-negative margin below the quarantine threshold (smaller = closer to
++// quarantine); median uses the canonical lower-middle median, max_position uses the
++// minimum margin (the closest any position came to quarantine). The trigger boundary is
++// metric <= threshold_margin.
++func EvaluateFlapping(canaries []FlappingCanary, fp FlappingWindowPolicy, th Thresholds) FlappingEvidence {
++	ev := FlappingEvidence{Metric: fp.Metric, Action: fp.Action}
++	if !fp.Enabled {
++		return ev
++	}
++	medianMargins := make([]float64, 0, len(canaries))
++	positionMargins := make([]float64, 0, len(canaries))
++	for _, c := range canaries {
++		switch c.Verdict {
++		case VerdictPass:
++			ev.PassCount++
++		case VerdictWarn:
++			ev.WarnCount++
++		case VerdictQuarantineCandidate:
++			ev.QuarantineCandidateCount++
++		}
++		medianMargins = append(medianMargins, math.Max(0, th.TauQuarantineMedian-c.MedianTVLower))
++		positionMargins = append(positionMargins, math.Max(0, th.TauQuarantinePosition-c.MaxPositionTVLower))
++	}
++	switch fp.Metric {
++	case flappingMetricMedian:
++		ev.MetricValue = canonicalMedian(medianMargins)
++	case flappingMetricPosition:
++		ev.MetricValue = minFloat(positionMargins)
++	default:
++		return ev // unknown metric: never triggers.
++	}
++	countsMet := ev.PassCount >= fp.MinPassCount &&
++		ev.WarnCount >= fp.MinWarnCount &&
++		ev.QuarantineCandidateCount >= fp.MinQuarantineCandidateCount
++	ev.Triggered = countsMet && ev.MetricValue <= fp.ThresholdMargin
++	return ev
++}
++
++func minFloat(xs []float64) float64 {
++	if len(xs) == 0 {
++		return 0
++	}
++	m := xs[0]
++	for _, x := range xs[1:] {
++		if x < m {
++			m = x
++		}
++	}
++	return m
++}
++
++// ApplyFlapping evaluates the flapping predicate for a key and, when it triggers with
++// action blocked:manual_review_required, moves the overlay to that block (FR-10). The
++// clear_rule (dual_approval or clear_pass_count_sequence) is recorded on the policy and
++// governs how the block later clears. Returns the evidence. Action "none" is telemetry
++// only and changes no state.
++func (s *Store) ApplyFlapping(key ComputeIntegrityKey, fp FlappingWindowPolicy, th Thresholds,
++	canaries []FlappingCanary, origin AdjudicationOrigin) FlappingEvidence {
++	ev := EvaluateFlapping(canaries, fp, th)
++	if !ev.Triggered || fp.Action != flappingActionManualReview {
++		return ev
++	}
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	ov := s.overlay(key.Overlay())
++	if !ov.state.IsAdverseOverlay() {
++		ov.state = StateBlockedManualReview
++		ov.origin = origin
++	}
++	return ev
++}
++
++// FlappingClearsByPassSequence reports whether a blocked:manual_review_required entered
++// by the flapping policy may clear via a clear_pass_count pass sequence (the sole
++// exception to dual-approval-only clearing, FR-10), i.e. when the policy's clear_rule is
++// clear_pass_count_sequence.
++func FlappingClearsByPassSequence(fp FlappingWindowPolicy) bool {
++	return fp.Enabled && fp.ClearRule == flappingClearPassSequence
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/jcs.go b/phase4-coordinator/internal/computeintegrity/jcs.go
 new file mode 100644
@@ -1753,10 +1934,10 @@ index 00000000..55fa26d2
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/onboarding.go b/phase4-coordinator/internal/computeintegrity/onboarding.go
 new file mode 100644
-index 00000000..7d7d8bc4
+index 00000000..e4aa4c44
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/onboarding.go
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,101 @@
 +package computeintegrity
 +
 +// FR-11 onboarding gate. SPEC-036 never blocks the SPEC-026 local App onboarding flow
@@ -1798,16 +1979,25 @@ index 00000000..7d7d8bc4
 +//
 +// passes are the onboarding canary verdict timestamps observed so far (only pass
 +// canaries advance the gate).
-+func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, passTimestampsMs []int64) OnboardingGateResult {
++func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, spec022Enforce bool, passTimestampsMs []int64) OnboardingGateResult {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
 +
-+	// Overlay inheritance is checked before the gate runs (FR-11, FR-12).
-+	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked {
++	// Overlay inheritance is checked before the gate runs (FR-11, FR-12), but ONLY for
++	// an overlay whose effect is ACTIVE per the FR-3 matrix: a dormant telemetry-only
++	// overlay never blocks onboarding.
++	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked &&
++		EffectiveAdverseState(mode, spec022Enforce, sw.origin, attribProviderOrBreaker) {
 +		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: StateBlockedSwapLaunder}
 +	}
 +	if ov := s.overlays[key.Overlay()]; ov != nil && ov.state.IsAdverseOverlay() {
-+		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: ov.state}
++		attrib := attribCoordinator
++		if ov.state.IsProviderAttributable() {
++			attrib = attribProviderOrBreaker
++		}
++		if EffectiveAdverseState(mode, spec022Enforce, ov.origin, attrib) {
++			return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: ov.state}
++		}
 +	}
 +	// An unresolved lineage tombstone means the short onboarding gate cannot restore
 +	// eligibility (FR-10/FR-12).
@@ -1835,23 +2025,23 @@ index 00000000..7d7d8bc4
 +}
 +
 +// OnboardingBlocksRouting reports whether an onboarding result blocks covered paid
-+// routing for the given mode (FR-11). In enforce, a non-verified gate blocks. In
-+// warn_only/observe, onboarding never blocks clean keys — but an inherited
-+// enforce-origin provider-attributable overlay does (returned via InheritedOverlay).
++// routing for the given mode (FR-11). InheritedOverlay is set by EvaluateOnboarding
++// only when the overlay's effect is ACTIVE per the FR-3 matrix (so it already encodes
++// the §3 Preserved-adverse-state exception), and it blocks regardless of mode. Absent
++// an active overlay, enforce blocks a non-verified gate; warn_only/observe never block
++// clean onboarding keys.
 +func OnboardingBlocksRouting(mode Mode, r OnboardingGateResult) bool {
 +	if r.InheritedOverlay.IsAdverseOverlay() {
-+		// The §3 Preserved-adverse-state exception: provider-attributable enforce-origin
-+		// overlays exclude the key regardless of mode.
-+		return r.InheritedOverlay.IsProviderAttributable() || mode == ModeEnforce
++		return true
 +	}
 +	if mode != ModeEnforce {
-+		return false // warn_only/observe never block clean onboarding keys.
++		return false
 +	}
 +	return r.Status != OnboardingVerified
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/onboarding_test.go b/phase4-coordinator/internal/computeintegrity/onboarding_test.go
 new file mode 100644
-index 00000000..9948a472
+index 00000000..a64de02c
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/onboarding_test.go
 @@ -0,0 +1,83 @@
@@ -1869,7 +2059,7 @@ index 00000000..9948a472
 +	t.Run("5 passes over >=30 minutes verifies onboarding", func(t *testing.T) {
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
-+		r := s.EvaluateOnboarding(k, ModeEnforce, fivePasses)
++		r := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses)
 +		if r.Status != OnboardingVerified {
 +			t.Fatalf("want verified, got %s", r.Status)
 +		}
@@ -1878,7 +2068,7 @@ index 00000000..9948a472
 +	t.Run("fewer than 5 passes stays pending", func(t *testing.T) {
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
-+		r := s.EvaluateOnboarding(k, ModeEnforce, fivePasses[:3])
++		r := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses[:3])
 +		if r.Status != OnboardingPending {
 +			t.Fatalf("want pending, got %s", r.Status)
 +		}
@@ -1888,7 +2078,7 @@ index 00000000..9948a472
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		quick := []int64{base, base + 1, base + 2, base + 3, base + 4}
-+		if r := s.EvaluateOnboarding(k, ModeEnforce, quick); r.Status != OnboardingPending {
++		if r := s.EvaluateOnboarding(k, ModeEnforce, true, quick); r.Status != OnboardingPending {
 +			t.Fatalf("want pending for <30min, got %s", r.Status)
 +		}
 +	})
@@ -1896,11 +2086,11 @@ index 00000000..9948a472
 +	t.Run("enforce blocks billable routing until onboarding verified", func(t *testing.T) {
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
-+		pending := s.EvaluateOnboarding(k, ModeEnforce, fivePasses[:2])
++		pending := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses[:2])
 +		if !OnboardingBlocksRouting(ModeEnforce, pending) {
 +			t.Fatal("enforce must block routing while onboarding pending")
 +		}
-+		verified := s.EvaluateOnboarding(k, ModeEnforce, fivePasses)
++		verified := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses)
 +		if OnboardingBlocksRouting(ModeEnforce, verified) {
 +			t.Fatal("enforce must not block a verified onboarding")
 +		}
@@ -1909,7 +2099,7 @@ index 00000000..9948a472
 +	t.Run("warn_only does not block billable routing on onboarding", func(t *testing.T) {
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
-+		pending := s.EvaluateOnboarding(k, ModeWarnOnly, fivePasses[:1])
++		pending := s.EvaluateOnboarding(k, ModeWarnOnly, true, fivePasses[:1])
 +		if OnboardingBlocksRouting(ModeWarnOnly, pending) {
 +			t.Fatal("warn_only must not block routing on an onboarding verdict")
 +		}
@@ -1919,7 +2109,7 @@ index 00000000..9948a472
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		s.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
-+		r := s.EvaluateOnboarding(k, ModeWarnOnly, fivePasses)
++		r := s.EvaluateOnboarding(k, ModeWarnOnly, true, fivePasses)
 +		if r.InheritedOverlay != StateQuarantinedDrift {
 +			t.Fatalf("onboarding must inherit an active overlay, got %s", r.InheritedOverlay)
 +		}
@@ -1932,7 +2122,7 @@ index 00000000..9948a472
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		s.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
-+		r := s.EvaluateOnboarding(k, ModeEnforce, fivePasses) // even with 5 passes
++		r := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses) // even with 5 passes
 +		if r.Status == OnboardingVerified {
 +			t.Fatal("onboarding must not verify over an active overlay quarantine")
 +		}
@@ -2469,10 +2659,10 @@ index 00000000..1fc1a8f9
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/probe.go b/phase4-coordinator/internal/computeintegrity/probe.go
 new file mode 100644
-index 00000000..07143567
+index 00000000..1224cd11
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/probe.go
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,277 @@
 +package computeintegrity
 +
 +import (
@@ -2694,6 +2884,9 @@ index 00000000..07143567
 +		if pos.PromptID == "" || pos.PromptRef == "" {
 +			return fmt.Errorf("probe request: position missing prompt_id/prompt_ref")
 +		}
++		if pos.PositionIndex < 0 {
++			return fmt.Errorf("probe request: negative position_index %d", pos.PositionIndex)
++		}
 +		if ref, ok := prompts[pos.PromptID]; ok {
 +			if ref != pos.PromptRef {
 +				return fmt.Errorf("probe request: prompt_id %q maps to two prompt_refs", pos.PromptID)
@@ -2749,10 +2942,10 @@ index 00000000..07143567
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/probe_tv_test.go b/phase4-coordinator/internal/computeintegrity/probe_tv_test.go
 new file mode 100644
-index 00000000..274e7697
+index 00000000..4e64e5e6
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/probe_tv_test.go
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,283 @@
 +package computeintegrity
 +
 +import (
@@ -2913,12 +3106,23 @@ index 00000000..274e7697
 +		th := Thresholds{TauWarnMedian: 0.01, TauWarnPosition: 0.02, TauQuarantineMedian: 0.05, TauQuarantinePosition: 0.10}
 +		// tv_lower just under quarantine-median minus 0.005 slack triggers retry.
 +		iv := []TVInterval{{Lower: 0.046, Upper: 0.005}}
-+		if !RequiresK256Retry(64, iv, 0.0, th) {
++		if !RequiresK256Retry(64, [][]TVInterval{iv}, 0.0, th) {
 +			t.Fatal("expected K=256 retry near quarantine boundary")
 +		}
 +		// Clean low-divergence canary does not require retry.
-+		if RequiresK256Retry(64, []TVInterval{{Lower: 0.001, Upper: 0.001}}, 0.0, th) {
++		if RequiresK256Retry(64, [][]TVInterval{{{Lower: 0.001, Upper: 0.001}}}, 0.0, th) {
 +			t.Fatal("clean canary should not require retry")
++		}
++	})
++
++	t.Run("K=64 retry predicate is per reference (a flat cross-reference median must not suppress it)", func(t *testing.T) {
++		th := Thresholds{TauWarnMedian: 0.01, TauWarnPosition: 0.02, TauQuarantineMedian: 0.05, TauQuarantinePosition: 0.10}
++		perRef := [][]TVInterval{
++			{{Lower: 0.0, Upper: 0.0}, {Lower: 0.0, Upper: 0.0}, {Lower: 0.0, Upper: 0.0}},
++			{{Lower: 0.0, Upper: 0.015}, {Lower: 0.0, Upper: 0.015}, {Lower: 0.0, Upper: 0.015}}, // median upper 0.015 >= tau_warn_median
++		}
++		if !RequiresK256Retry(64, perRef, 0.0, th) {
++			t.Fatal("a single reference crossing the median predicate must force the K=256 retry")
 +		}
 +	})
 +
@@ -3027,10 +3231,10 @@ index 00000000..274e7697
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/reference.go b/phase4-coordinator/internal/computeintegrity/reference.go
 new file mode 100644
-index 00000000..aedf352a
+index 00000000..5554fe3c
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/reference.go
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,300 @@
 +package computeintegrity
 +
 +import (
@@ -3145,7 +3349,9 @@ index 00000000..aedf352a
 +	for i, p := range pairs {
 +		list[i] = []any{p[0], p[1]}
 +	}
-+	return jcsDigest(map[string]any{"type": "compute_integrity_position_set_v1", "positions": list})
++	// Normative preimage: the canonical JSON array [[prompt_id, position_index], ...],
++	// not a wrapper object, so external auditors/producers compute the same digest.
++	return jcsDigest(list)
 +}
 +
 +// ReferencesIndependent reports the closed FR-5 three-way independence predicate: two
@@ -3163,20 +3369,27 @@ index 00000000..aedf352a
 +// pair of references over the union of their per-position top-K (FR-5), mirroring the
 +// FR-7 provider tv_upper math applied reference-vs-reference.
 +func referencePairTVUpper(a, b ReferenceEvent) (medianUpper, maxUpper float64) {
-+	n := len(a.Positions)
-+	if len(b.Positions) < n {
-+		n = len(b.Positions)
++	// Align positions by their (prompt_id, position_index) identity, not slice order, so
++	// two references listing the same positions in a different order are compared
++	// position-for-position (FR-5).
++	bByID := make(map[[2]any]ReferencePosition, len(b.Positions))
++	for _, bp := range b.Positions {
++		bByID[[2]any{bp.PromptID, bp.PositionIndex}] = bp
 +	}
-+	uppers := make([]float64, 0, n)
-+	for i := 0; i < n; i++ {
-+		s := numericUnion(a.Positions[i].TopK, b.Positions[i].TopK)
++	uppers := make([]float64, 0, len(a.Positions))
++	for _, ap := range a.Positions {
++		bp, ok := bByID[[2]any{ap.PromptID, ap.PositionIndex}]
++		if !ok {
++			continue // positions not in both references are not comparable.
++		}
++		s := numericUnion(ap.TopK, bp.TopK)
 +		var aMass, bMass, diff float64
 +		for _, t := range s {
-+			ap := a.Positions[i].Full[t]
-+			bp := b.Positions[i].Full[t]
-+			aMass += ap
-+			bMass += bp
-+			diff += math.Abs(ap - bp)
++			pa := ap.Full[t]
++			pb := bp.Full[t]
++			aMass += pa
++			bMass += pb
++			diff += math.Abs(pa - pb)
 +		}
 +		aTail := math.Max(0, 1.0-aMass)
 +		bTail := math.Max(0, 1.0-bMass)
@@ -3214,6 +3427,15 @@ index 00000000..aedf352a
 +// key (FR-5). The status is a single closed value; only Admissible can support a
 +// payable verified/warn row. Checks are ordered from most-structural to most-specific.
 +func ComputeAdmissibility(in AdmissibilityInput) AdmissibilityStatus {
++	// Fail closed on a misconfigured admissibility request: enforce requires a quorum of
++	// at least two independent references and a positive freshness TTL; a caller that
++	// omits these must never yield admissible.
++	if in.MinQuorum < 2 {
++		return AdmissibilityMissingQuorum
++	}
++	if in.FreshnessTTLMillis <= 0 {
++		return AdmissibilityStaleReference
++	}
 +	var wantPosDigest string
 +	// Schema: every event must be well-formed, bind the covered key, carry a non-empty
 +	// position set, and compare over the IDENTICAL measurement position set.
@@ -3515,10 +3737,10 @@ index 00000000..e32cc4aa
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/settlement.go b/phase4-coordinator/internal/computeintegrity/settlement.go
 new file mode 100644
-index 00000000..4455c5b0
+index 00000000..b80f7db6
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/settlement.go
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,361 @@
 +package computeintegrity
 +
 +// This file implements the SPEC-036 money-path core (FR-3):
@@ -3647,6 +3869,12 @@ index 00000000..4455c5b0
 +	// unknown mode must NOT be treated as non-enforce (which would let a fresh verified
 +	// row pay through). It settles compute_integrity_unreadable.
 +	if !mode.Known() {
++		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
++	}
++	// A structurally-unreadable capture (bad enum, inconsistent breaker, adverse state
++	// with missing origin) fails closed in EVERY mode when SPEC-022 is enforcing — a
++	// corrupt preserved-adverse row must never pass through payable under warn_only.
++	if c.structurallyUnreadable() {
 +		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
 +	}
 +
@@ -3784,11 +4012,12 @@ index 00000000..4455c5b0
 +	}
 +
 +	if len(hits) == 0 {
-+		// Payable only from a fresh verified/warn positive state with no active
-+		// breaker, admissible references, and covered profile.
++		// Payable only from a fresh verified/warn positive state with no active breaker,
++		// admissible references, covered profile, AND complete load-bearing FR-4 evidence
++		// (policy/coverage digests, reference set id/digests, covered sampler stage).
 +		if (c.State == StateVerified || c.State == StateWarn) &&
 +			c.ReferenceSetAdmissibilityStatus == AdmissibilityAdmissible &&
-+			!c.CircuitBreakerActive {
++			!c.CircuitBreakerActive && !c.missingEnforceEvidence() {
 +			return "", nil, true
 +		}
 +		// Defensive: a state we could not classify as payable and produced no reason
@@ -3875,10 +4104,10 @@ index 00000000..4455c5b0
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/settlement_test.go b/phase4-coordinator/internal/computeintegrity/settlement_test.go
 new file mode 100644
-index 00000000..a052040b
+index 00000000..d9808eb5
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/settlement_test.go
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,345 @@
 +package computeintegrity
 +
 +import "testing"
@@ -3893,7 +4122,7 @@ index 00000000..a052040b
 +		ModelID:                          "model-x",
 +		TargetModelHash:                  "hash-x",
 +		TokenizerIdentity:                "tok-x",
-+		SamplerStage:                     "post_processors_post_sampling_profile_next_emitted_token",
++		SamplerStage:                     SamplerStagePostSampler,
 +		SamplingProfile:                  "temp-0.7",
 +		CorpusVersion:                    "corpus-1",
 +		ThresholdVersion:                 "thr-1",
@@ -3906,6 +4135,7 @@ index 00000000..a052040b
 +		Spec022PolicyVersion:             "spec022-prereq-v1",
 +		Spec022PolicyMode:                "enforce",
 +		Spec022EffectiveEnforce:          true,
++		Spec022CoverageDigest:            "sha256:cov022",
 +		Spec022RouteSnapshotDigest:       "sha256:route",
 +		ComputeIntegrityPolicyVersion:    "ci-v1",
 +		ComputeIntegrityPolicyMode:       ModeEnforce,
@@ -3913,6 +4143,8 @@ index 00000000..a052040b
 +		State:                            StateVerified,
 +		AdjudicationOrigin:               OriginEnforcePreserved,
 +		ReferenceSetAdmissibilityStatus:  AdmissibilityAdmissible,
++		ReferenceSetID:                   "refset-1",
++		ReferenceEventDigests:            []string{"sha256:refA", "sha256:refB"},
 +		ReferenceQuorumCount:             2,
 +		BreakerFieldsPresent:             true,
 +		CircuitBreakerActive:             false,
@@ -4223,10 +4455,10 @@ index 00000000..a052040b
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/states.go b/phase4-coordinator/internal/computeintegrity/states.go
 new file mode 100644
-index 00000000..85882705
+index 00000000..149a7cf2
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/states.go
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,206 @@
 +package computeintegrity
 +
 +// This file defines the closed enums SPEC-036 is specified over. Every set here
@@ -4274,6 +4506,17 @@ index 00000000..85882705
 +	StateBlockedSwapLaunder  State = "blocked:swap_laundering_suspected"
 +	StateExpired             State = "expired"
 +)
++
++var knownStates = map[State]bool{
++	StateUnknown: true, StatePending: true, StateVerified: true, StateWarn: true,
++	StateQuarantinedDrift: true, StateBlockedRefMissing: true, StateBlockedCalibMissing: true,
++	StateBlockedAbusive: true, StateBlockedRefFault: true, StateBlockedManualReview: true,
++	StateBlockedSwapLaunder: true, StateExpired: true,
++}
++
++// Known reports whether s is a member of the closed state enum. An unknown captured
++// state fails closed at settlement (FR-3).
++func (s State) Known() bool { return knownStates[s] }
 +
 +// IsBlocked reports whether s is a blocked:<reason> state.
 +func (s State) IsBlocked() bool {
@@ -4374,6 +4617,11 @@ index 00000000..85882705
 +	OriginTelemetryOnly AdjudicationOrigin = "telemetry_only"
 +)
 +
++// Known reports whether o is a member of the closed origin enum.
++func (o AdjudicationOrigin) Known() bool {
++	return o == OriginEnforcePreserved || o == OriginTelemetryOnly
++}
++
 +// CircuitBreakerScope is the closed scope enum for an active circuit-breaker hold
 +// (FR-4, FR-16). Present exactly when circuit_breaker_active is true.
 +type CircuitBreakerScope string
@@ -4409,15 +4657,20 @@ index 00000000..85882705
 +	CoverageAllProfile SamplingProfileCoverageMode = "all_profile"
 +)
 +
++// Known reports whether m is a member of the closed coverage-mode enum.
++func (m SamplingProfileCoverageMode) Known() bool {
++	return m == CoveragePerProfile || m == CoverageAllProfile
++}
++
 +// AllProfilesWindowProfile is the reserved sampling_profile marker for an
 +// all-profile (closed profile grid) window (FR-10).
 +const AllProfilesWindowProfile = "__all_profiles__"
 diff --git a/phase4-coordinator/internal/computeintegrity/threshold.go b/phase4-coordinator/internal/computeintegrity/threshold.go
 new file mode 100644
-index 00000000..faf22218
+index 00000000..14e147cc
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/threshold.go
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,191 @@
 +package computeintegrity
 +
 +import "math"
@@ -4526,15 +4779,58 @@ index 00000000..faf22218
 +	MinTailMassFeasibility  float64
 +}
 +
++// ThresholdKey returns the record's 8-tuple key.
++func (r ThresholdRecord) ThresholdKey() ThresholdKey {
++	return ThresholdKey{
++		ModelID:              r.ModelID,
++		TargetModelHash:      r.TargetModelHash,
++		TokenizerIdentity:    r.TokenizerIdentity,
++		SamplerStage:         r.SamplerStage,
++		SamplingProfile:      r.SamplingProfile,
++		CorpusVersion:        r.CorpusVersion,
++		ThresholdVersion:     r.ThresholdVersion,
++		HardwareRuntimeClass: r.HardwareRuntimeClass,
++	}
++}
++
++func finiteNonNeg(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
++
 +// ValidateCalibrationForEnforce reports whether a calibration record is sufficient to
-+// activate enforce for its key (FR-8). Enforce MUST refuse a key whose record lacks a
-+// MEASURED realized false-quarantine rate at or below the numeric budget; an
-+// aspirational target without measured validation is insufficient. Returns a non-empty
-+// slice of refusal reasons, or nil if the record is enforce-ready.
-+func (r ThresholdRecord) ValidateCalibrationForEnforce(min CalibrationMinimums) []string {
++// activate enforce for the given covered key (FR-8). It verifies the full 8-tuple
++// matches, thresholds meet the FR-8 floors, all calibration values are finite and
++// non-negative, and a MEASURED realized false-quarantine rate at or below the numeric
++// budget is present (an aspirational target without measured validation is
++// insufficient). Returns a non-empty slice of refusal reasons, or nil if enforce-ready.
++func (r ThresholdRecord) ValidateCalibrationForEnforce(expectedKey ThresholdKey, min CalibrationMinimums) []string {
 +	var reasons []string
 +	if r.ThresholdVersion == "" || r.HardwareRuntimeClass == "" {
 +		reasons = append(reasons, "threshold record missing key fields")
++	}
++	if (expectedKey != ThresholdKey{}) && r.ThresholdKey() != expectedKey {
++		reasons = append(reasons, "threshold record 8-tuple does not match the covered key")
++	}
++	// Thresholds must be finite/non-negative and at or above the FR-8 floors (they may
++	// only widen for noisier keys, never tighten below the floor).
++	floors := DeriveThresholds(r.BaselineMedianTVUpperP99, r.BaselinePositionTVUpperP99)
++	for _, chk := range []struct {
++		name       string
++		val, floor float64
++	}{
++		{"tau_warn_median", r.TauWarnMedian, floors.TauWarnMedian},
++		{"tau_warn_position", r.TauWarnPosition, floors.TauWarnPosition},
++		{"tau_quarantine_median", r.TauQuarantineMedian, floors.TauQuarantineMedian},
++		{"tau_quarantine_position", r.TauQuarantinePosition, floors.TauQuarantinePosition},
++		{"tau_reference_fault_median", r.TauReferenceFaultMedian, floors.TauReferenceFaultMedian},
++		{"tau_reference_fault_position", r.TauReferenceFaultPosition, floors.TauReferenceFaultPosition},
++	} {
++		if !finiteNonNeg(chk.val) {
++			reasons = append(reasons, chk.name+" is non-finite or negative")
++		} else if chk.val < chk.floor {
++			reasons = append(reasons, chk.name+" is below the FR-8 floor")
++		}
++	}
++	if !finiteNonNeg(r.BaselineMedianTVUpperP99) || !finiteNonNeg(r.BaselinePositionTVUpperP99) {
++		reasons = append(reasons, "baseline p99 values are non-finite or negative")
 +	}
 +	if r.ApprovalTimestamp == "" || r.ApproverGroup == "" {
 +		reasons = append(reasons, "calibration not approved")
@@ -4568,10 +4864,10 @@ index 00000000..faf22218
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/tv.go b/phase4-coordinator/internal/computeintegrity/tv.go
 new file mode 100644
-index 00000000..a92ffbee
+index 00000000..8909e6f0
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/tv.go
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,241 @@
 +package computeintegrity
 +
 +import (
@@ -4711,6 +5007,19 @@ index 00000000..a92ffbee
 +	if math.Abs(sum+pos.ProviderTailMass-1.0) > massConservationTolerance {
 +		return fmt.Errorf("provider mass not conserved: sum=%v tail=%v", sum, pos.ProviderTailMass)
 +	}
++	// Provider top-K must be ordered by non-increasing probability with ascending token
++	// id as tie-break (SPEC-030 §FR-7). The probabilities come from the support map.
++	probByToken := make(map[int64]float64, len(pos.SupportTokenIDs))
++	for i, id := range pos.SupportTokenIDs {
++		probByToken[id] = pos.ProviderSupportProbabilities[i]
++	}
++	for i := 1; i < len(pos.ProviderTopKTokenIDs); i++ {
++		prev, cur := pos.ProviderTopKTokenIDs[i-1], pos.ProviderTopKTokenIDs[i]
++		pp, cp := probByToken[prev], probByToken[cur]
++		if cp > pp || (cp == pp && cur < prev) {
++			return fmt.Errorf("provider top-K not ordered by non-increasing probability (token %d after %d)", cur, prev)
++		}
++	}
 +	return nil
 +}
 +
@@ -4763,30 +5072,34 @@ index 00000000..a92ffbee
 +// before assigning pass/warn/quarantine_candidate (FR-7). intervals are the
 +// per-reference intervals for one canary; providerTail/refTail are the max observed
 +// tail masses across positions/references.
-+func RequiresK256Retry(k int, intervals []TVInterval, maxTailMass float64, th Thresholds) bool {
++func RequiresK256Retry(k int, perReference [][]TVInterval, maxTailMass float64, th Thresholds) bool {
 +	if k != 64 {
 +		return false
 +	}
 +	if maxTailMass > 0.01 {
 +		return true
 +	}
-+	uppers := make([]float64, len(intervals))
-+	lowers := make([]float64, len(intervals))
-+	for i, iv := range intervals {
-+		uppers[i] = iv.Upper
-+		lowers[i] = iv.Lower
-+		if iv.Upper >= th.TauWarnPosition {
++	// Evaluate the median predicates PER REFERENCE (FR-7): a flattened cross-reference
++	// median must not suppress a mandatory retry that one reference's positions trigger.
++	for _, positions := range perReference {
++		uppers := make([]float64, len(positions))
++		lowers := make([]float64, len(positions))
++		for i, iv := range positions {
++			uppers[i] = iv.Upper
++			lowers[i] = iv.Lower
++			if iv.Upper >= th.TauWarnPosition {
++				return true
++			}
++			if iv.Lower >= th.TauQuarantinePosition-0.005 {
++				return true
++			}
++		}
++		if canonicalMedian(uppers) >= th.TauWarnMedian {
 +			return true
 +		}
-+		if iv.Lower >= th.TauQuarantinePosition-0.005 {
++		if canonicalMedian(lowers) >= th.TauQuarantineMedian-0.005 {
 +			return true
 +		}
-+	}
-+	if canonicalMedian(uppers) >= th.TauWarnMedian {
-+		return true
-+	}
-+	if canonicalMedian(lowers) >= th.TauQuarantineMedian-0.005 {
-+		return true
 +	}
 +	return false
 +}
@@ -4958,10 +5271,10 @@ index 00000000..d1260151
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/warmswap.go b/phase4-coordinator/internal/computeintegrity/warmswap.go
 new file mode 100644
-index 00000000..a40c48b4
+index 00000000..1858b931
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/warmswap.go
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,116 @@
 +package computeintegrity
 +
 +// FR-12 warm-swap and generation handling. Positive state never carries across a
@@ -4991,12 +5304,6 @@ index 00000000..a40c48b4
 +	ContinuityProvenReconnect        bool // exempt
 +	SameHashReload                   bool // exempt
 +	AtMs                             int64
-+	// Mode and Spec022EffectiveEnforce set the origin of a newly-adjudicated
-+	// swap-laundering block when the source risk is accumulator-only. A block DERIVED
-+	// from an enforce_preserved adverse overlay always inherits enforce_preserved
-+	// regardless of these (FR-3 origin inheritance).
-+	Mode                    Mode
-+	Spec022EffectiveEnforce bool
 +}
 +
 +// priorOverlayCarriesRisk reports whether the prior per-key overlay carries active
@@ -5037,14 +5344,16 @@ index 00000000..a40c48b4
 +		s.swaps[scope] = sw
 +	}
 +	sw.blocked = true
-+	// Origin: a block DERIVED from an enforce_preserved provider-attributable adverse
-+	// overlay inherits enforce_preserved regardless of the mode at derivation time
-+	// (FR-3 origin inheritance). Otherwise (accumulator-only source risk) the block is
-+	// a new adjudication whose origin reflects the current mode + SPEC-022 enforce.
-+	if ov.state.IsProviderAttributable() && ov.origin == OriginEnforcePreserved {
-+		sw.origin = OriginEnforcePreserved
++	// Origin INHERITANCE (FR-3): a swap-laundering block is DERIVED from the prior
++	// overlay's risk, so it inherits that overlay's origin. It must NOT launder a
++	// telemetry_only source into an enforce_preserved money-blocking state merely because
++	// the artifact change happened under enforce — only a fresh enforce-mode adjudication
++	// (a new enforce-mode quarantine) creates enforce_preserved risk. When the source is
++	// accumulator-only with no recorded origin, default to telemetry_only (conservative).
++	if ov.origin.Known() {
++		sw.origin = ov.origin
 +	} else {
-+		sw.origin = deriveOrigin(ev.Mode, ev.Spec022EffectiveEnforce)
++		sw.origin = OriginTelemetryOnly
 +	}
 +	return true
 +}
@@ -5084,10 +5393,10 @@ index 00000000..a40c48b4
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window.go b/phase4-coordinator/internal/computeintegrity/window.go
 new file mode 100644
-index 00000000..55c459ff
+index 00000000..3ba63d2f
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window.go
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,360 @@
 +package computeintegrity
 +
 +import "sync"
@@ -5185,9 +5494,12 @@ index 00000000..55c459ff
 +}
 +
 +// RecordCanary records a finalized eligible canary and updates the overlay
-+// accumulators (FR-9, FR-10). A quarantine_candidate increments the rolling
-+// quarantine-candidate window count; a pass advances the clear streak.
-+func (s *Store) RecordCanary(key ComputeIntegrityKey, v Verdict, atMs int64) {
++// accumulators (FR-9, FR-10). origin is the FR-3 adjudication origin under which this
++// canary was measured (deriveOrigin at record time); it is stamped onto the overlay the
++// first time risk (a quarantine_candidate) is recorded, so a later swap-laundering block
++// or promotion derived from accumulator-only risk inherits the correct origin. A
++// quarantine_candidate increments the rolling count; a pass advances the clear streak.
++func (s *Store) RecordCanary(key ComputeIntegrityKey, v Verdict, atMs int64, origin AdjudicationOrigin) {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
 +	ws := s.window(key.Window())
@@ -5197,15 +5509,21 @@ index 00000000..55c459ff
 +
 +	ov := s.overlay(key.Overlay())
 +	switch v {
-+	case VerdictQuarantineCandidate:
-+		ov.quarantineCandWindow++
-+		ov.passStreak = 0
-+		ov.firstPassMs = 0
 +	case VerdictPass:
 +		if ov.passStreak == 0 {
 +			ov.firstPassMs = atMs
 +		}
 +		ov.passStreak++
++	case VerdictQuarantineCandidate:
++		ov.quarantineCandWindow++
++		ov.passStreak = 0 // any non-pass breaks the consecutive-pass clear streak (FR-10).
++		ov.firstPassMs = 0
++		if !ov.origin.Known() {
++			ov.origin = origin // stamp the origin of the accumulated risk.
++		}
++	default: // warn, inconclusive: not a pass, so the consecutive-pass streak resets.
++		ov.passStreak = 0
++		ov.firstPassMs = 0
 +	}
 +}
 +
@@ -5267,81 +5585,101 @@ index 00000000..55c459ff
 +// FR-10 ordered resolution (first match wins). It is deterministic and never sticky:
 +// an intervening quarantine_candidate that does not satisfy the window quarantine rule
 +// resolves to pending, not a retained verified.
-+func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, ExpiryCause) {
++func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, ExpiryCause, AdjudicationOrigin) {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
 +
-+	// 1. Swap-laundering overlay (consulted first, FR-12) or per-key overlay adverse state.
++	mode := in.Policy.Mode
++	spec022 := in.Spec022EffectiveEnforce
++	origin := deriveOrigin(mode, spec022)
++
++	// 1. Adverse overlays take precedence ONLY when their effect is active per the FR-3
++	// effective_adverse_state matrix; a dormant (telemetry_only, or coordinator-
++	// attributable on a SPEC-036-only downgrade) overlay persists but falls through to
++	// positive-state recomputation, so a telemetry-only quarantine never blocks routing.
 +	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked {
-+		return StateBlockedSwapLaunder, ""
++		if EffectiveAdverseState(mode, spec022, sw.origin, attribProviderOrBreaker) {
++			return StateBlockedSwapLaunder, "", sw.origin
++		}
 +	}
-+	origin := deriveOrigin(in.Policy.Mode, in.Spec022EffectiveEnforce)
 +	ov := s.overlays[key.Overlay()]
++	if ov == nil && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
++		ov = s.overlay(key.Overlay())
++	}
 +	if ov != nil {
-+		// A window that meets the quarantine rule promotes to quarantined_compute_drift
-+		// with the origin of the mode it was adjudicated under.
++		// A window that meets the quarantine rule promotes to quarantined_compute_drift.
++		// Its origin is the origin already stamped on the accumulated risk when Known
++		// (never downgrade an enforce_preserved accumulation), else the current mode's.
 +		if ov.state == "" && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
 +			ov.state = StateQuarantinedDrift
-+			ov.origin = origin
++			if !ov.origin.Known() {
++				ov.origin = origin
++			}
 +		}
 +		if ov.state.IsAdverseOverlay() {
-+			return ov.state, ""
++			attrib := attribCoordinator
++			if ov.state.IsProviderAttributable() {
++				attrib = attribProviderOrBreaker
++			}
++			if EffectiveAdverseState(mode, spec022, ov.origin, attrib) {
++				return ov.state, "", ov.origin
++			}
++			// Dormant overlay: persist, fall through to positive resolution below.
 +		}
-+	} else if s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
-+		nov := s.overlay(key.Overlay())
-+		nov.state = StateQuarantinedDrift
-+		nov.origin = origin
-+		return StateQuarantinedDrift, ""
 +	}
 +
-+	// Coordinator-attributable reference block from admissibility.
-+	switch in.AdmissibilityStatus {
-+	case AdmissibilityMissingQuorum:
-+		return StateBlockedRefMissing, ""
-+	case AdmissibilityReferenceFault, AdmissibilityIndepFailed, AdmissibilityProvMissing:
-+		return StateBlockedRefFault, ""
++	// Coordinator-attributable reference block from admissibility (a live coordinator
++	// condition). Under a SPEC-036-only downgrade these are dormant for routing per the
++	// matrix; they still prevent a fresh verified/warn positive state below.
++	if mode == ModeEnforce && spec022 {
++		switch in.AdmissibilityStatus {
++		case AdmissibilityMissingQuorum:
++			return StateBlockedRefMissing, "", OriginEnforcePreserved
++		case AdmissibilityReferenceFault, AdmissibilityIndepFailed, AdmissibilityProvMissing:
++			return StateBlockedRefFault, "", OriginEnforcePreserved
++		}
 +	}
 +
 +	// 2. Freshness/invalidation failure -> expired with cause.
 +	if in.InvalidationCause != "" {
-+		return StateExpired, in.InvalidationCause
++		return StateExpired, in.InvalidationCause, ""
 +	}
 +
 +	ws := s.windows[key.Window()]
 +	// 3. No valid result yet -> unknown.
 +	if ws == nil || len(ws.canaries) == 0 {
 +		if ws != nil && ws.hasPending {
-+			return StatePending, ""
++			return StatePending, "", ""
 +		}
-+		return StateUnknown, ""
++		return StateUnknown, "", ""
 +	}
 +
 +	elig := eligible(ws, in.Policy, in.NowMs)
 +	// Under-sampled windows (including a window all of whose canaries aged out beyond
 +	// window_size_days) remain pending, never expired (FR-10).
 +	if len(elig) < in.Policy.MinWindowCanaries {
-+		return StatePending, ""
++		return StatePending, "", ""
 +	}
 +	// Freshness TTL: a window whose newest eligible canary is older than the
 +	// positive-state TTL expires as window_ttl_expired (non-payable), not pending (FR-10).
 +	newest := elig[len(elig)-1]
 +	ttlMs := int64(in.Policy.PositiveStateFreshnessTTLHrs) * 3600 * 1000
 +	if ttlMs > 0 && in.NowMs-newest.atMs > ttlMs {
-+		return StateExpired, ExpiryWindowTTLExpired
++		return StateExpired, ExpiryWindowTTLExpired, ""
 +	}
 +	// Coordinator-attributable non-admissibility or an unmet quarantine rule leaves the
 +	// key non-payable but not expired -> pending.
 +	if in.AdmissibilityStatus != AdmissibilityAdmissible || s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
-+		return StatePending, ""
++		return StatePending, "", ""
 +	}
 +	// 4/5: payable positive states.
 +	if s.verifiedPassRule(key.Window(), in.Policy, in.NowMs) {
-+		return StateVerified, ""
++		return StateVerified, "", ""
 +	}
 +	if latestIsWarnClass(ws) {
-+		return StateWarn, ""
++		return StateWarn, "", ""
 +	}
-+	return StatePending, ""
++	return StatePending, "", ""
 +}
 +
 +// eligibleCanaries returns the canaries within window_size_days of now, oldest-first.
@@ -5421,10 +5759,10 @@ index 00000000..55c459ff
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window_test.go b/phase4-coordinator/internal/computeintegrity/window_test.go
 new file mode 100644
-index 00000000..3ec6a988
+index 00000000..611864d1
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window_test.go
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,428 @@
 +package computeintegrity
 +
 +import "testing"
@@ -5471,12 +5809,12 @@ index 00000000..3ec6a988
 +		b := winKey("asg-b", 1, "temp-0.7")
 +		b.StableProviderIdentity = "provider-B"
 +		for i := 0; i < 5; i++ {
-+			s.RecordCanary(a, VerdictPass, base+int64(i)*hour)
++			s.RecordCanary(a, VerdictPass, base+int64(i)*hour, OriginEnforcePreserved)
 +		}
-+		if st, _ := s.ResolveState(a, winResolveInput(p, base+5*hour)); st != StateVerified {
++		if st, _, _ := s.ResolveState(a, winResolveInput(p, base+5*hour)); st != StateVerified {
 +			t.Fatalf("provider A should be verified, got %s", st)
 +		}
-+		if st, _ := s.ResolveState(b, winResolveInput(p, base+5*hour)); st == StateVerified {
++		if st, _, _ := s.ResolveState(b, winResolveInput(p, base+5*hour)); st == StateVerified {
 +			t.Fatal("provider B must NOT inherit provider A's verified window")
 +		}
 +	})
@@ -5496,9 +5834,9 @@ index 00000000..3ec6a988
 +	t.Run("swap-laundering block spans a hash/tokenizer change (scope = stable+model)", func(t *testing.T) {
 +		s := NewStore()
 +		prior := winKey("asg", 1, "temp-0.7") // hash-x
-+		s.RecordCanary(prior, VerdictQuarantineCandidate, base)
++		s.RecordCanary(prior, VerdictQuarantineCandidate, base, OriginEnforcePreserved)
 +		if !s.EscalateSwapLaunderingIfRisky(prior, ArtifactChangeEvent{
-+			HashTokenizerOrGenerationChanged: true, AtMs: base, Mode: ModeEnforce, Spec022EffectiveEnforce: true,
++			HashTokenizerOrGenerationChanged: true, AtMs: base,
 +		}) {
 +			t.Fatal("risky change should escalate")
 +		}
@@ -5506,7 +5844,7 @@ index 00000000..3ec6a988
 +		succ := winKey("asg2", 2, "temp-1.0")
 +		succ.TargetModelHash = "hash-NEW"
 +		succ.TokenizerIdentity = "tok-NEW"
-+		if st, _ := s.ResolveState(succ, winResolveInput(p, base)); st != StateBlockedSwapLaunder {
++		if st, _, _ := s.ResolveState(succ, winResolveInput(p, base)); st != StateBlockedSwapLaunder {
 +			t.Fatalf("swap-laundering must follow the provider across artifact churn, got %s", st)
 +		}
 +	})
@@ -5518,13 +5856,21 @@ index 00000000..3ec6a988
 +		obs.Mode = ModeObserve
 +		in := ResolveInput{Policy: obs, NowMs: base, AdmissibilityStatus: AdmissibilityAdmissible, Spec022EffectiveEnforce: true}
 +		for i := 0; i < 5; i++ {
-+			s.RecordCanary(k, VerdictQuarantineCandidate, base+int64(i)*hour)
++			s.RecordCanary(k, VerdictQuarantineCandidate, base+int64(i)*hour, OriginTelemetryOnly)
 +		}
-+		st, _ := s.ResolveState(k, in) // promotes quarantine under observe -> telemetry_only
-+		if st != StateQuarantinedDrift {
-+			t.Fatalf("expected quarantine, got %s", st)
++		// ResolveState promotes+stores the quarantine, but being telemetry_only under
++		// observe its EFFECT is dormant, so the resolved (effective) state falls through
++		// to the positive path, not the money-blocking quarantine.
++		st, _, _ := s.ResolveState(k, in)
++		if st == StateQuarantinedDrift {
++			t.Fatalf("telemetry_only quarantine must be dormant for routing, got effective %s", st)
 +		}
-+		// Under observe/warn_only, a telemetry_only quarantine has no money effect.
++		// The overlay is nonetheless STORED as a quarantine (persists; effect resumes if
++		// re-adjudicated under enforce).
++		if s.OverlayState(k.Overlay()) != StateQuarantinedDrift {
++			t.Fatalf("overlay should store the quarantine, got %s", s.OverlayState(k.Overlay()))
++		}
++		// And settlement never blocks money on a telemetry_only quarantine.
 +		c := payableCapture()
 +		c.State = StateQuarantinedDrift
 +		c.AdjudicationOrigin = OriginTelemetryOnly
@@ -5545,9 +5891,9 @@ index 00000000..3ec6a988
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		for i := 0; i < 3; i++ { // fewer than min_window_canaries=5
-+			s.RecordCanary(k, VerdictPass, base+int64(i)*hour)
++			s.RecordCanary(k, VerdictPass, base+int64(i)*hour, OriginEnforcePreserved)
 +		}
-+		st, _ := s.ResolveState(k, winResolveInput(p, base+4*hour))
++		st, _, _ := s.ResolveState(k, winResolveInput(p, base+4*hour))
 +		if st != StatePending {
 +			t.Fatalf("under-sampled: want pending, got %s", st)
 +		}
@@ -5559,9 +5905,9 @@ index 00000000..3ec6a988
 +		// latest 5 = qc, pass, qc, pass, qc -> 3 quarantine_candidates -> quarantine.
 +		seq := []Verdict{VerdictQuarantineCandidate, VerdictPass, VerdictQuarantineCandidate, VerdictPass, VerdictQuarantineCandidate}
 +		for i, v := range seq {
-+			s.RecordCanary(k, v, base+int64(i)*hour)
++			s.RecordCanary(k, v, base+int64(i)*hour, OriginEnforcePreserved)
 +		}
-+		st, _ := s.ResolveState(k, winResolveInput(p, base+5*hour))
++		st, _, _ := s.ResolveState(k, winResolveInput(p, base+5*hour))
 +		if st != StateQuarantinedDrift {
 +			t.Fatalf("intervening passes must not prevent quarantine: got %s", st)
 +		}
@@ -5571,9 +5917,9 @@ index 00000000..3ec6a988
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		for i := 0; i < 5; i++ {
-+			s.RecordCanary(k, VerdictPass, base+int64(i)*hour)
++			s.RecordCanary(k, VerdictPass, base+int64(i)*hour, OriginEnforcePreserved)
 +		}
-+		st, _ := s.ResolveState(k, winResolveInput(p, base+5*hour))
++		st, _, _ := s.ResolveState(k, winResolveInput(p, base+5*hour))
 +		if st != StateVerified {
 +			t.Fatalf("5 passes: want verified, got %s", st)
 +		}
@@ -5583,11 +5929,11 @@ index 00000000..3ec6a988
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		for i := 0; i < 5; i++ {
-+			s.RecordCanary(k, VerdictPass, base+int64(i)*hour)
++			s.RecordCanary(k, VerdictPass, base+int64(i)*hour, OriginEnforcePreserved)
 +		}
 +		// Now is > positive_state_freshness_ttl_hours (24h) after the newest canary:
 +		// the window expires (non-payable), it does not silently linger as pending.
-+		st, cause := s.ResolveState(k, winResolveInput(p, base+5*hour+25*hour))
++		st, cause, _ := s.ResolveState(k, winResolveInput(p, base+5*hour+25*hour))
 +		if st != StateExpired || cause != ExpiryWindowTTLExpired {
 +			t.Fatalf("stale verified: want expired/window_ttl_expired, got %s/%s", st, cause)
 +		}
@@ -5610,18 +5956,18 @@ index 00000000..3ec6a988
 +		s.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
 +		// 5 passes within a couple hours: streak reached but < 24h -> no clear.
 +		for i := 0; i < 5; i++ {
-+			s.RecordCanary(k, VerdictPass, base+int64(i)*hour)
++			s.RecordCanary(k, VerdictPass, base+int64(i)*hour, OriginEnforcePreserved)
 +		}
-+		if s.AttemptClear(k, p, base+5*hour) {
++		if s.AttemptClear(k, p, AdmissibilityAdmissible, base+5*hour) {
 +			t.Fatal("must not clear before 24h elapsed")
 +		}
 +		// 5 passes spanning >24h -> clears.
 +		s2 := NewStore()
 +		s2.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
 +		for i := 0; i < 5; i++ {
-+			s2.RecordCanary(k, VerdictPass, base+int64(i)*7*hour) // spread over 28h
++			s2.RecordCanary(k, VerdictPass, base+int64(i)*7*hour, OriginEnforcePreserved) // spread over 28h
 +		}
-+		if !s2.AttemptClear(k, p, base+5*7*hour) {
++		if !s2.AttemptClear(k, p, AdmissibilityAdmissible, base+5*7*hour) {
 +			t.Fatal("should clear after 5 passes over >=24h")
 +		}
 +		if s2.OverlayState(k.Overlay()) != "" {
@@ -5634,9 +5980,9 @@ index 00000000..3ec6a988
 +		k := winKey("a", 1, "temp-0.7")
 +		s.SetOverlayAdverse(k.Overlay(), StateBlockedManualReview, OriginEnforcePreserved)
 +		for i := 0; i < 6; i++ {
-+			s.RecordCanary(k, VerdictPass, base+int64(i)*7*hour)
++			s.RecordCanary(k, VerdictPass, base+int64(i)*7*hour, OriginEnforcePreserved)
 +		}
-+		if s.AttemptClear(k, p, base+6*7*hour) {
++		if s.AttemptClear(k, p, AdmissibilityAdmissible, base+6*7*hour) {
 +			t.Fatal("manual_review must not clear by pass sequence")
 +		}
 +		if !s.DualApproveClear(k, "ops-a", "ops-b") {
@@ -5647,8 +5993,8 @@ index 00000000..3ec6a988
 +	t.Run("accumulators live on the overlay key and are not reset by assigned_id churn", func(t *testing.T) {
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
-+		s.RecordCanary(k, VerdictQuarantineCandidate, base)
-+		s.RecordCanary(k, VerdictQuarantineCandidate, base+hour)
++		s.RecordCanary(k, VerdictQuarantineCandidate, base, OriginEnforcePreserved)
++		s.RecordCanary(k, VerdictQuarantineCandidate, base+hour, OriginEnforcePreserved)
 +		before := s.QuarantineCandidateWindowCount(k.Overlay())
 +		// assigned_id change: purge positive window but keep overlay accumulators.
 +		s.InvalidatePositiveWindow(k.Window())
@@ -5663,7 +6009,7 @@ index 00000000..3ec6a988
 +		s := NewStore()
 +		ka := winKey("a", 1, "temp-0.7")
 +		kb := winKey("a", 1, "temp-1.0")
-+		s.RecordCanary(ka, VerdictQuarantineCandidate, base)
++		s.RecordCanary(ka, VerdictQuarantineCandidate, base, OriginEnforcePreserved)
 +		if s.QuarantineCandidateWindowCount(kb.Overlay()) != 0 {
 +			t.Fatal("distinct profiles must not share overlay accumulators")
 +		}
@@ -5672,6 +6018,72 @@ index 00000000..3ec6a988
 +	t.Run("flapping policy is disabled by default", func(t *testing.T) {
 +		if NewDefaultPolicy().FlappingPolicy.Enabled {
 +			t.Fatal("flapping_window_policy_v0_1 must default to disabled")
++		}
++	})
++
++	t.Run("flapping trigger: median metric, counts, action, and clear-rule variants", func(t *testing.T) {
++		th := Thresholds{TauWarnMedian: 0.01, TauWarnPosition: 0.02, TauQuarantineMedian: 0.05, TauQuarantinePosition: 0.10}
++		fp := FlappingWindowPolicy{
++			Enabled: true, LookbackWindowDays: 7, Metric: flappingMetricMedian,
++			ThresholdMargin: 0.01, MinPassCount: 1, MinWarnCount: 1, MinQuarantineCandidateCount: 1,
++			Action: flappingActionManualReview, ClearRule: flappingClearPassSequence,
++		}
++		// tv_lower hovering just below the 0.05 quarantine median: margin ~0.005 <= 0.01.
++		canaries := []FlappingCanary{
++			{Verdict: VerdictPass, MedianTVLower: 0.045, MaxPositionTVLower: 0.09},
++			{Verdict: VerdictWarn, MedianTVLower: 0.046, MaxPositionTVLower: 0.095},
++			{Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047, MaxPositionTVLower: 0.098},
++		}
++		ev := EvaluateFlapping(canaries, fp, th)
++		if !ev.Triggered {
++			t.Fatalf("persistent near-boundary flapping should trigger, metric=%v", ev.MetricValue)
++		}
++		// Counts below the minimum do not trigger.
++		fp2 := fp
++		fp2.MinQuarantineCandidateCount = 5
++		if EvaluateFlapping(canaries, fp2, th).Triggered {
++			t.Fatal("insufficient quarantine_candidate count must not trigger")
++		}
++		// A clearly-clean history (large margins) does not trigger.
++		clean := []FlappingCanary{
++			{Verdict: VerdictPass, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
++			{Verdict: VerdictWarn, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
++			{Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
++		}
++		if EvaluateFlapping(clean, fp, th).Triggered {
++			t.Fatal("clean history must not trigger flapping")
++		}
++		// action=none is telemetry only (no state change); manual_review moves the key.
++		s := NewStore()
++		k := winKey("a", 1, "temp-0.7")
++		none := fp
++		none.Action = flappingActionNone
++		s.ApplyFlapping(k, none, th, canaries, OriginEnforcePreserved)
++		if s.OverlayState(k.Overlay()) != "" {
++			t.Fatal("action=none must not change state")
++		}
++		s.ApplyFlapping(k, fp, th, canaries, OriginEnforcePreserved)
++		if s.OverlayState(k.Overlay()) != StateBlockedManualReview {
++			t.Fatalf("action=manual_review must block, got %s", s.OverlayState(k.Overlay()))
++		}
++		// clear_rule variants: this flapping block clears by pass-sequence (the sole exception).
++		if !FlappingClearsByPassSequence(fp) {
++			t.Fatal("clear_pass_count_sequence flapping should clear by pass sequence")
++		}
++		dualOnly := fp
++		dualOnly.ClearRule = flappingClearDualApproval
++		if FlappingClearsByPassSequence(dualOnly) {
++			t.Fatal("dual_approval flapping must not clear by pass sequence")
++		}
++	})
++
++	t.Run("flapping position metric uses the closest-to-quarantine position", func(t *testing.T) {
++		th := Thresholds{TauQuarantinePosition: 0.10}
++		fp := FlappingWindowPolicy{Enabled: true, Metric: flappingMetricPosition, ThresholdMargin: 0.01}
++		// One canary comes within 0.005 of the position quarantine threshold.
++		canaries := []FlappingCanary{{MaxPositionTVLower: 0.095}, {MaxPositionTVLower: 0.0}}
++		if EvaluateFlapping(canaries, fp, th).MetricValue > 0.01 {
++			t.Fatal("position metric should reflect the closest position (min margin)")
 +		}
 +	})
 +}
@@ -5686,7 +6098,7 @@ index 00000000..3ec6a988
 +		k := winKey("a", 1, "temp-0.7")
 +		in := winResolveInput(p, base)
 +		in.InvalidationCause = ExpiryTargetGenerationChg
-+		st, cause := s.ResolveState(k, in)
++		st, cause, _ := s.ResolveState(k, in)
 +		if st != StateExpired || cause != ExpiryTargetGenerationChg {
 +			t.Fatalf("generation change: want expired/target_generation_changed, got %s/%s", st, cause)
 +		}
@@ -5698,7 +6110,7 @@ index 00000000..3ec6a988
 +		s.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
 +		// A generation-churned key shares the overlay key (which omits target_generation).
 +		churned := winKey("b", 2, "temp-0.7")
-+		st, _ := s.ResolveState(churned, winResolveInput(p, base))
++		st, _, _ := s.ResolveState(churned, winResolveInput(p, base))
 +		if st != StateQuarantinedDrift {
 +			t.Fatalf("churned key must inherit overlay quarantine, got %s", st)
 +		}
@@ -5713,7 +6125,7 @@ index 00000000..3ec6a988
 +	t.Run("provider-originated artifact change with active risk escalates swap-laundering", func(t *testing.T) {
 +		s := NewStore()
 +		prior := winKey("a", 1, "temp-0.7")
-+		s.RecordCanary(prior, VerdictQuarantineCandidate, base) // non-zero accumulator = active risk
++		s.RecordCanary(prior, VerdictQuarantineCandidate, base, OriginEnforcePreserved) // non-zero accumulator = active risk
 +		escalated := s.EscalateSwapLaunderingIfRisky(prior, ArtifactChangeEvent{
 +			HashTokenizerOrGenerationChanged: true, AtMs: base,
 +		})
@@ -5722,7 +6134,7 @@ index 00000000..3ec6a988
 +		}
 +		// Every covered key of that provider/model is now blocked.
 +		other := winKey("z", 9, "temp-1.0")
-+		st, _ := s.ResolveState(other, winResolveInput(p, base))
++		st, _, _ := s.ResolveState(other, winResolveInput(p, base))
 +		if st != StateBlockedSwapLaunder {
 +			t.Fatalf("swap-laundering must span the provider/model, got %s", st)
 +		}
@@ -5737,7 +6149,7 @@ index 00000000..3ec6a988
 +		}
 +		// risky provider but continuity-proven reconnect / same-hash reload are exempt.
 +		s2 := NewStore()
-+		s2.RecordCanary(prior, VerdictQuarantineCandidate, base)
++		s2.RecordCanary(prior, VerdictQuarantineCandidate, base, OriginEnforcePreserved)
 +		if s2.EscalateSwapLaunderingIfRisky(prior, ArtifactChangeEvent{ContinuityProvenReconnect: true, AtMs: base}) {
 +			t.Fatal("continuity-proven reconnect must not escalate")
 +		}
@@ -5750,7 +6162,7 @@ index 00000000..3ec6a988
 +		s := NewStore()
 +		k := winKey("a", 1, "temp-0.7")
 +		for i := 0; i < 5; i++ {
-+			s.RecordCanary(k, VerdictPass, base+int64(i)*3600*1000)
++			s.RecordCanary(k, VerdictPass, base+int64(i)*3600*1000, OriginEnforcePreserved)
 +		}
 +		s.SetOverlayAdverse(k.Overlay(), StateBlockedAbusive, OriginEnforcePreserved)
 +		s.InvalidatePositiveWindow(k.Window())
@@ -5773,7 +6185,7 @@ index 00000000..3ec6a988
 +		if !s.HasTombstone(succ) {
 +			t.Fatal("successor key must see the tombstone")
 +		}
-+		r := s.EvaluateOnboarding(succ, ModeEnforce, []int64{base, base + onboardingMinElapsedMs + 1, base, base, base})
++		r := s.EvaluateOnboarding(succ, ModeEnforce, true, []int64{base, base + onboardingMinElapsedMs + 1, base, base, base})
 +		if r.Status != OnboardingFailed {
 +			t.Fatal("onboarding must not clear a tombstoned lineage")
 +		}

@@ -7,16 +7,21 @@ import "math"
 // candidate results in the lookback AND the configured margin metric at or below
 // threshold_margin — takes the configured action (none or blocked:manual_review_required).
 
-// FlappingCanary is one eligible canary's flapping inputs over the lookback: its
-// verdict and the tv_lower summary statistics used by the FR-10 margin metrics.
+// FlappingCanary is one eligible canary's flapping inputs over the lookback: its id,
+// timestamp, verdict, and the tv_lower summary statistics used by the FR-10 margin
+// metrics.
 type FlappingCanary struct {
+	CanaryID           string
+	AtMs               int64
 	Verdict            Verdict
 	MedianTVLower      float64 // median(tv_lower) for the canary
 	MaxPositionTVLower float64 // max over positions of tv_lower
 }
 
 // FlappingEvidence is the FR-10 audit evidence recorded when the flapping predicate is
-// evaluated (metric values, counts, action).
+// evaluated: metric values, counts, action, and — for a settlement-affecting block —
+// the contributing canary ids and (on clear) approver / clear evidence, so the block is
+// audit-replayable.
 type FlappingEvidence struct {
 	Metric                   string
 	MetricValue              float64
@@ -25,22 +30,30 @@ type FlappingEvidence struct {
 	QuarantineCandidateCount int
 	Action                   string
 	Triggered                bool
+	CanaryIDs                []string
+	Approver                 string
+	ClearEvidence            string
 }
 
-// EvaluateFlapping evaluates the exact FR-10 flapping conjunction over the lookback
-// canaries. It returns whether the trigger fired and the audit evidence. The metric is
-// each canary's non-negative margin below the quarantine threshold (smaller = closer to
-// quarantine); median uses the canonical lower-middle median, max_position uses the
-// minimum margin (the closest any position came to quarantine). The trigger boundary is
-// metric <= threshold_margin.
-func EvaluateFlapping(canaries []FlappingCanary, fp FlappingWindowPolicy, th Thresholds) FlappingEvidence {
+// EvaluateFlapping evaluates the exact FR-10 flapping conjunction over the canaries
+// within lookback_window_days of nowMs. It returns whether the trigger fired and the
+// audit evidence. The metric is each canary's non-negative margin below the quarantine
+// threshold (smaller = closer to quarantine); median uses the canonical lower-middle
+// median, max_position uses the minimum margin (the closest any position came to
+// quarantine). The trigger boundary is metric <= threshold_margin.
+func EvaluateFlapping(canaries []FlappingCanary, fp FlappingWindowPolicy, th Thresholds, nowMs int64) FlappingEvidence {
 	ev := FlappingEvidence{Metric: fp.Metric, Action: fp.Action}
 	if !fp.Enabled {
 		return ev
 	}
+	lookbackMs := int64(fp.LookbackWindowDays) * day
 	medianMargins := make([]float64, 0, len(canaries))
 	positionMargins := make([]float64, 0, len(canaries))
 	for _, c := range canaries {
+		if lookbackMs > 0 && nowMs-c.AtMs > lookbackMs {
+			continue // stale canary outside the lookback window does not count.
+		}
+		ev.CanaryIDs = append(ev.CanaryIDs, c.CanaryID)
 		switch c.Verdict {
 		case VerdictPass:
 			ev.PassCount++
@@ -86,8 +99,8 @@ func minFloat(xs []float64) float64 {
 // governs how the block later clears. Returns the evidence. Action "none" is telemetry
 // only and changes no state.
 func (s *Store) ApplyFlapping(key ComputeIntegrityKey, fp FlappingWindowPolicy, th Thresholds,
-	canaries []FlappingCanary, origin AdjudicationOrigin) FlappingEvidence {
-	ev := EvaluateFlapping(canaries, fp, th)
+	canaries []FlappingCanary, nowMs int64, origin AdjudicationOrigin) FlappingEvidence {
+	ev := EvaluateFlapping(canaries, fp, th, nowMs)
 	if !ev.Triggered || fp.Action != flappingActionManualReview {
 		return ev
 	}

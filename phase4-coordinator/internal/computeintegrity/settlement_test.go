@@ -33,6 +33,8 @@ func payableCapture() Capture {
 		State:                            StateVerified,
 		AdjudicationOrigin:               OriginEnforcePreserved,
 		ReferenceSetAdmissibilityStatus:  AdmissibilityAdmissible,
+		ReferenceSetAdmissibilityDigest:  "sha256:adm",
+		ReferenceFaultCheckVersion:       "rfc-v1",
 		ReferenceSetID:                   "refset-1",
 		ReferenceEventDigests:            []string{"sha256:refA", "sha256:refB"},
 		ReferenceQuorumCount:             2,
@@ -322,6 +324,35 @@ func TestAC16_ClosedReasonPrecedence(t *testing.T) {
 		d := Evaluate(c)
 		if !d.Applies || d.Payable || d.Reason != ReasonUnreadable {
 			t.Fatalf("unknown mode must fail closed unreadable, got %+v", d)
+		}
+	})
+
+	t.Run("a verified row with incomplete reference-quorum evidence fails closed", func(t *testing.T) {
+		mutators := []func(*Capture){
+			func(c *Capture) { c.ReferenceQuorumCount = 1 },                         // < 2
+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:only"} },  // < quorum
+			func(c *Capture) { c.ReferenceSetAdmissibilityDigest = "" },             // missing digest
+			func(c *Capture) { c.ReferenceFaultCheckVersion = "" },                  // missing fault version
+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:a", ""} }, // empty digest
+		}
+		for i, m := range mutators {
+			c := payableCapture()
+			m(&c)
+			if d := Evaluate(c); d.Payable {
+				t.Fatalf("case %d: incomplete reference evidence must not be payable", i)
+			}
+		}
+	})
+
+	t.Run("a missing composite SPEC-022 binding fails closed unreadable", func(t *testing.T) {
+		c := payableCapture()
+		c.Spec022EffectiveEnforce = false // could be a malformed capture...
+		c.Spec022PolicyVersion = ""       // ...whose binding is actually missing.
+		c.Spec022PolicyMode = ""
+		c.Spec022RouteSnapshotDigest = ""
+		d := Evaluate(c)
+		if !d.Applies || d.Payable || d.Reason != ReasonUnreadable {
+			t.Fatalf("missing composite binding must fail closed unreadable, got %+v", d)
 		}
 	})
 

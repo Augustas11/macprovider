@@ -56,6 +56,21 @@ func ActivationCheck(p Policy, deps ActivationDeps) []string {
 	if err := p.Validate(); err != nil {
 		reasons = append(reasons, "policy invalid: "+err.Error())
 	}
+	// FR-1 load-bearing coverage/identity fields must be present so the authoritative
+	// policy surface can prove an exact covered-route/key match; enforce refuses an
+	// empty/underspecified policy.
+	add(p.PolicyVersion != "", "policy_version missing")
+	add(len(p.ModelIDs) > 0, "covered model_ids missing")
+	add((p.TargetModelHash != "") != (p.SignedCatalogSelector != ""),
+		"exactly one of target_model_hash / signed_catalog_selector must be set")
+	add(p.TokenizerIdentity != "", "tokenizer_identity missing")
+	add(len(p.Entrypoints) > 0, "covered entrypoints missing")
+	add(len(p.SamplingProfiles) > 0, "covered sampling_profiles missing")
+	add(p.ReferenceFaultCheckVersion != "", "reference_fault_check_version missing")
+	add(p.HardwareRuntimeClass != "", "hardware_runtime_class missing")
+	add(p.CorpusVersion != "", "corpus_version missing")
+	add(p.ThresholdVersion != "", "threshold_version missing")
+	add(p.DisclosureCopyVersion != "" && p.DisclosureCopyDigest != "", "disclosure copy binding missing")
 	add(deps.SPEC030PrimitivesExposed, "SPEC-030 primitives not exposed")
 	add(deps.SPEC022Enforce, "SPEC-022 is not in enforce for the covered coverage")
 	add(deps.SPEC022CoverageSubset, "SPEC-036 coverage is not a subset of SPEC-022 enforce coverage")

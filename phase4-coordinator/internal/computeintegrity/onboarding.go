@@ -59,9 +59,11 @@ func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, spec022En
 			return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: ov.state}
 		}
 	}
-	// An unresolved lineage tombstone means the short onboarding gate cannot restore
-	// eligibility (FR-10/FR-12).
-	if s.tombstones[key.Overlay().TombstoneScope()] {
+	// An unresolved lineage tombstone whose effect is ACTIVE per the FR-3 matrix means
+	// the short onboarding gate cannot restore eligibility (FR-10/FR-12); a telemetry-
+	// only tombstone is dormant and does not block.
+	if tomb, ok := s.tombstones[key.Overlay().TombstoneScope()]; ok &&
+		EffectiveAdverseState(mode, spec022Enforce, tomb, attribProviderOrBreaker) {
 		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: StateBlockedManualReview}
 	}
 

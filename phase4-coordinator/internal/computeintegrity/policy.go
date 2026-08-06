@@ -276,6 +276,11 @@ func (p Policy) Digest() (string, error) {
 			"model_scope_threshold":  p.CircuitBreaker.ModelScopeThreshold,
 			"fleet_scope_threshold":  p.CircuitBreaker.FleetScopeThreshold,
 			"quiet_window_minutes":   p.CircuitBreaker.QuietWindowMinutes,
+			// The fixed FR-1 in-scope transition set and boundary convention are bound
+			// into the settlement-bearing policy digest so the contract is provable and a
+			// later change is a visible digest change, not a silent code-constant edit.
+			"in_scope_transitions": []any{string(TransitionDrift), string(TransitionReferenceFault)},
+			"boundary_convention":  "activates_at_or_above",
 		},
 		"flapping_window_policy_v0_1": map[string]any{
 			"enabled":                        p.FlappingPolicy.Enabled,

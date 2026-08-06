@@ -47,11 +47,13 @@ type swapState struct {
 // A concrete durable store can wrap the same key algebra; the window/overlay ownership
 // rules here are what the AC fixtures pin.
 type Store struct {
-	mu         sync.Mutex
-	windows    map[WindowKey]*windowState
-	overlays   map[OverlayKey]*overlayState
-	swaps      map[SwapLaunderingScope]*swapState
-	tombstones map[TombstoneScope]bool
+	mu       sync.Mutex
+	windows  map[WindowKey]*windowState
+	overlays map[OverlayKey]*overlayState
+	swaps    map[SwapLaunderingScope]*swapState
+	// tombstones records the adjudication origin of each lineage tombstone so its effect
+	// can be gated through EffectiveAdverseState (a telemetry-only tombstone never blocks).
+	tombstones map[TombstoneScope]AdjudicationOrigin
 }
 
 // NewStore returns an empty in-memory compute-integrity store.
@@ -60,7 +62,7 @@ func NewStore() *Store {
 		windows:    map[WindowKey]*windowState{},
 		overlays:   map[OverlayKey]*overlayState{},
 		swaps:      map[SwapLaunderingScope]*swapState{},
-		tombstones: map[TombstoneScope]bool{},
+		tombstones: map[TombstoneScope]AdjudicationOrigin{},
 	}
 }
 

@@ -93,16 +93,23 @@ func (s *Store) WriteTombstoneIfAdverse(priorKey ComputeIntegrityKey) bool {
 	if ov == nil || !ov.state.IsAdverseOverlay() {
 		return false
 	}
-	s.tombstones[priorKey.Overlay().TombstoneScope()] = true
+	// The tombstone inherits the source overlay's origin, so a telemetry-only lineage
+	// never becomes money-blocking (FR-3).
+	origin := ov.origin
+	if !origin.Known() {
+		origin = OriginTelemetryOnly
+	}
+	s.tombstones[priorKey.Overlay().TombstoneScope()] = origin
 	return true
 }
 
-// HasTombstone reports whether an unresolved adverse-state lineage tombstone exists
-// for a key's tombstone scope (FR-10, FR-12).
+// HasTombstone reports whether a lineage tombstone exists for a key's tombstone scope,
+// regardless of its effect (FR-10, FR-12).
 func (s *Store) HasTombstone(key ComputeIntegrityKey) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.tombstones[key.Overlay().TombstoneScope()]
+	_, ok := s.tombstones[key.Overlay().TombstoneScope()]
+	return ok
 }
 
 // SetOverlayAdverse forces an overlay adverse state (used by tests and by the verdict

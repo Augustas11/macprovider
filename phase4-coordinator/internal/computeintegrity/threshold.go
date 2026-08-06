@@ -171,13 +171,24 @@ func (r ThresholdRecord) ValidateCalibrationForEnforce(expectedKey ThresholdKey,
 	if r.BaselineTailMassFeasibilityRate < min.MinTailMassFeasibility {
 		reasons = append(reasons, "tail-mass feasibility below minimum")
 	}
-	if r.FalsePositiveBudget <= 0 || r.FalsePositiveBudget > 1 {
+	if r.BaselineTailMassFeasibilityRate < 0 || r.BaselineTailMassFeasibilityRate > 1 {
+		reasons = append(reasons, "baseline_tail_mass_feasibility_rate out of [0,1]")
+	}
+	if math.IsNaN(r.FalsePositiveBudget) || r.FalsePositiveBudget <= 0 || r.FalsePositiveBudget > 1 {
 		reasons = append(reasons, "false_positive_budget out of (0,1]")
 	}
-	// Measured evidence MUST be present and the measured rate at or below the budget.
+	// Measured evidence MUST be present, finite, in range, and the measured rate at or
+	// below the budget (FR-8): reject negative/NaN numerator/denominator/rate and any
+	// numerator exceeding the denominator.
 	if r.KnownGoodCohortDigest == "" || r.MeasuredFPWindow == "" ||
 		r.MeasuredFalseQuarantineDenominator <= 0 {
 		reasons = append(reasons, "missing measured false-quarantine evidence")
+	} else if r.MeasuredFalseQuarantineNumerator < 0 ||
+		r.MeasuredFalseQuarantineNumerator > r.MeasuredFalseQuarantineDenominator {
+		reasons = append(reasons, "measured false-quarantine numerator out of [0, denominator]")
+	} else if math.IsNaN(r.MeasuredFalseQuarantineRate) ||
+		r.MeasuredFalseQuarantineRate < 0 || r.MeasuredFalseQuarantineRate > 1 {
+		reasons = append(reasons, "measured_false_quarantine_rate out of [0,1]")
 	} else {
 		measured := float64(r.MeasuredFalseQuarantineNumerator) / float64(r.MeasuredFalseQuarantineDenominator)
 		if math.Abs(measured-r.MeasuredFalseQuarantineRate) > 1e-9 {
