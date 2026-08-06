@@ -1,9 +1,9 @@
 diff --git a/phase4-coordinator/internal/computeintegrity/activation.go b/phase4-coordinator/internal/computeintegrity/activation.go
 new file mode 100644
-index 00000000..76b6f6f4
+index 00000000..49127344
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/activation.go
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,97 @@
 +package computeintegrity
 +
 +// FR-1 enforce activation preconditions. enforce MUST refuse activation unless every
@@ -62,6 +62,21 @@ index 00000000..76b6f6f4
 +	if err := p.Validate(); err != nil {
 +		reasons = append(reasons, "policy invalid: "+err.Error())
 +	}
++	// FR-1 load-bearing coverage/identity fields must be present so the authoritative
++	// policy surface can prove an exact covered-route/key match; enforce refuses an
++	// empty/underspecified policy.
++	add(p.PolicyVersion != "", "policy_version missing")
++	add(len(p.ModelIDs) > 0, "covered model_ids missing")
++	add((p.TargetModelHash != "") != (p.SignedCatalogSelector != ""),
++		"exactly one of target_model_hash / signed_catalog_selector must be set")
++	add(p.TokenizerIdentity != "", "tokenizer_identity missing")
++	add(len(p.Entrypoints) > 0, "covered entrypoints missing")
++	add(len(p.SamplingProfiles) > 0, "covered sampling_profiles missing")
++	add(p.ReferenceFaultCheckVersion != "", "reference_fault_check_version missing")
++	add(p.HardwareRuntimeClass != "", "hardware_runtime_class missing")
++	add(p.CorpusVersion != "", "corpus_version missing")
++	add(p.ThresholdVersion != "", "threshold_version missing")
++	add(p.DisclosureCopyVersion != "" && p.DisclosureCopyDigest != "", "disclosure copy binding missing")
 +	add(deps.SPEC030PrimitivesExposed, "SPEC-030 primitives not exposed")
 +	add(deps.SPEC022Enforce, "SPEC-022 is not in enforce for the covered coverage")
 +	add(deps.SPEC022CoverageSubset, "SPEC-036 coverage is not a subset of SPEC-022 enforce coverage")
@@ -88,10 +103,10 @@ index 00000000..76b6f6f4
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/activation_test.go b/phase4-coordinator/internal/computeintegrity/activation_test.go
 new file mode 100644
-index 00000000..505293c5
+index 00000000..9e3cb5bf
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/activation_test.go
-@@ -0,0 +1,234 @@
+@@ -0,0 +1,267 @@
 +package computeintegrity
 +
 +import "testing"
@@ -248,6 +263,19 @@ index 00000000..505293c5
 +	p.SamplerStage = SamplerStagePostSampler
 +	p.PositiveStateFreshnessTTLHrs = 24
 +	p.CanaryCadenceMinutes = 360 // 24h*60=1440 >= 2*360=720
++	// FR-1 load-bearing coverage/identity fields.
++	p.PolicyVersion = "ci-v1"
++	p.ModelIDs = []string{"model-x"}
++	p.TargetModelHash = "hash-x"
++	p.TokenizerIdentity = "tok-x"
++	p.Entrypoints = []string{"/v1/chat/completions"}
++	p.SamplingProfiles = []string{"temp-0.7"}
++	p.ReferenceFaultCheckVersion = "rfc-v1"
++	p.HardwareRuntimeClass = "m3-max"
++	p.CorpusVersion = "corpus-1"
++	p.ThresholdVersion = "thr-1"
++	p.DisclosureCopyVersion = "disc-v1"
++	p.DisclosureCopyDigest = "sha256:disc"
 +	return p
 +}
 +
@@ -293,6 +321,26 @@ index 00000000..505293c5
 +		p.CanaryCadenceMinutes = 900 // 2*900=1800 > 1440
 +		if CanActivateEnforce(p, goodActivationDeps()) {
 +			t.Fatal("TTL < 2x cadence must refuse enforce")
++		}
++	})
++
++	t.Run("an underspecified policy (empty coverage/identity fields) refuses enforce", func(t *testing.T) {
++		p := NewDefaultPolicy()
++		p.Mode = ModeEnforce
++		p.SamplerStage = SamplerStagePostSampler
++		p.PositiveStateFreshnessTTLHrs = 24
++		p.CanaryCadenceMinutes = 360
++		// deliberately no model_ids / tokenizer / entrypoints / profiles / digests.
++		if CanActivateEnforce(p, goodActivationDeps()) {
++			t.Fatal("an empty/underspecified policy must not activate enforce")
++		}
++	})
++
++	t.Run("both target_model_hash and signed_catalog_selector set refuses enforce", func(t *testing.T) {
++		p := goodEnforcePolicy()
++		p.SignedCatalogSelector = "catalog-sel" // now both are set
++		if CanActivateEnforce(p, goodActivationDeps()) {
++			t.Fatal("exactly one of hash/catalog selector must be set")
 +		}
 +	})
 +}
@@ -717,10 +765,10 @@ index 00000000..16a453ba
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/capture.go b/phase4-coordinator/internal/computeintegrity/capture.go
 new file mode 100644
-index 00000000..7379553d
+index 00000000..63c81609
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/capture.go
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,171 @@
 +package computeintegrity
 +
 +// Capture is the immutable request-start compute-integrity state captured for
@@ -844,11 +892,24 @@ index 00000000..7379553d
 +	return false
 +}
 +
++// compositeBindingUnreadable reports whether the captured composite SPEC-022 binding
++// is missing/unreadable (FR-4). A covered row always carries the binding; if it is
++// absent the capture is malformed and MUST fail closed as compute_integrity_unreadable
++// — a `spec022_effective_enforce=false` that arises from a missing binding must NOT be
++// mistaken for a legitimate "SPEC-022 not enforcing" and paid through.
++func (c Capture) compositeBindingUnreadable() bool {
++	return c.Spec022PolicyVersion == "" || c.Spec022PolicyMode == "" ||
++		c.Spec022RouteSnapshotDigest == ""
++}
++
 +// missingEnforceEvidence reports whether a captured row that claims a payable
 +// verified/warn positive state is missing a load-bearing FR-4 field required for
-+// enforce settlement: the composite SPEC-022 coverage digest, the SPEC-036 policy
-+// digest, the reference set id / event digests, or the v0.1 covered sampler stage.
-+// Such a row is not payable and settles compute_integrity_unreadable.
++// enforce settlement. It requires the composite SPEC-022 coverage digest, the SPEC-036
++// policy digest, the v0.1 covered sampler stage, AND complete, consistent
++// reference-set admissibility evidence (a two-reference independent quorum must be
++// provable): a non-empty reference set id, admissibility digest, and fault-check
++// version; a quorum count of at least two; and at least that many non-empty reference
++// event digests. Such a row is not payable and settles compute_integrity_unreadable.
 +func (c Capture) missingEnforceEvidence() bool {
 +	if c.SamplerStage != SamplerStagePostSampler {
 +		return true
@@ -856,8 +917,17 @@ index 00000000..7379553d
 +	if c.ComputeIntegrityPolicyDigest == "" || c.Spec022CoverageDigest == "" {
 +		return true
 +	}
-+	if c.ReferenceSetID == "" || len(c.ReferenceEventDigests) == 0 {
++	if c.ReferenceSetID == "" || c.ReferenceSetAdmissibilityDigest == "" ||
++		c.ReferenceFaultCheckVersion == "" {
 +		return true
++	}
++	if c.ReferenceQuorumCount < 2 || len(c.ReferenceEventDigests) < c.ReferenceQuorumCount {
++		return true
++	}
++	for _, d := range c.ReferenceEventDigests {
++		if d == "" {
++			return true
++		}
 +	}
 +	return false
 +}
@@ -872,10 +942,10 @@ index 00000000..7379553d
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/clear.go b/phase4-coordinator/internal/computeintegrity/clear.go
 new file mode 100644
-index 00000000..0e7d98fc
+index 00000000..5a5921e3
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/clear.go
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,69 @@
 +package computeintegrity
 +
 +// FR-10 clear rules. quarantined_compute_drift and blocked:abusive_inconclusive clear
@@ -938,7 +1008,8 @@ index 00000000..0e7d98fc
 +		cleared = true
 +	}
 +	// Dual-approved review may also retire the lineage tombstone.
-+	if tomb := key.Overlay().TombstoneScope(); s.tombstones[tomb] {
++	tomb := key.Overlay().TombstoneScope()
++	if _, ok := s.tombstones[tomb]; ok {
 +		delete(s.tombstones, tomb)
 +		cleared = true
 +	}
@@ -1325,10 +1396,10 @@ index 00000000..6025942c
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/flapping.go b/phase4-coordinator/internal/computeintegrity/flapping.go
 new file mode 100644
-index 00000000..e07e5d5e
+index 00000000..9e9096a9
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/flapping.go
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,123 @@
 +package computeintegrity
 +
 +import "math"
@@ -1338,16 +1409,21 @@ index 00000000..e07e5d5e
 +// candidate results in the lookback AND the configured margin metric at or below
 +// threshold_margin — takes the configured action (none or blocked:manual_review_required).
 +
-+// FlappingCanary is one eligible canary's flapping inputs over the lookback: its
-+// verdict and the tv_lower summary statistics used by the FR-10 margin metrics.
++// FlappingCanary is one eligible canary's flapping inputs over the lookback: its id,
++// timestamp, verdict, and the tv_lower summary statistics used by the FR-10 margin
++// metrics.
 +type FlappingCanary struct {
++	CanaryID           string
++	AtMs               int64
 +	Verdict            Verdict
 +	MedianTVLower      float64 // median(tv_lower) for the canary
 +	MaxPositionTVLower float64 // max over positions of tv_lower
 +}
 +
 +// FlappingEvidence is the FR-10 audit evidence recorded when the flapping predicate is
-+// evaluated (metric values, counts, action).
++// evaluated: metric values, counts, action, and — for a settlement-affecting block —
++// the contributing canary ids and (on clear) approver / clear evidence, so the block is
++// audit-replayable.
 +type FlappingEvidence struct {
 +	Metric                   string
 +	MetricValue              float64
@@ -1356,22 +1432,30 @@ index 00000000..e07e5d5e
 +	QuarantineCandidateCount int
 +	Action                   string
 +	Triggered                bool
++	CanaryIDs                []string
++	Approver                 string
++	ClearEvidence            string
 +}
 +
-+// EvaluateFlapping evaluates the exact FR-10 flapping conjunction over the lookback
-+// canaries. It returns whether the trigger fired and the audit evidence. The metric is
-+// each canary's non-negative margin below the quarantine threshold (smaller = closer to
-+// quarantine); median uses the canonical lower-middle median, max_position uses the
-+// minimum margin (the closest any position came to quarantine). The trigger boundary is
-+// metric <= threshold_margin.
-+func EvaluateFlapping(canaries []FlappingCanary, fp FlappingWindowPolicy, th Thresholds) FlappingEvidence {
++// EvaluateFlapping evaluates the exact FR-10 flapping conjunction over the canaries
++// within lookback_window_days of nowMs. It returns whether the trigger fired and the
++// audit evidence. The metric is each canary's non-negative margin below the quarantine
++// threshold (smaller = closer to quarantine); median uses the canonical lower-middle
++// median, max_position uses the minimum margin (the closest any position came to
++// quarantine). The trigger boundary is metric <= threshold_margin.
++func EvaluateFlapping(canaries []FlappingCanary, fp FlappingWindowPolicy, th Thresholds, nowMs int64) FlappingEvidence {
 +	ev := FlappingEvidence{Metric: fp.Metric, Action: fp.Action}
 +	if !fp.Enabled {
 +		return ev
 +	}
++	lookbackMs := int64(fp.LookbackWindowDays) * day
 +	medianMargins := make([]float64, 0, len(canaries))
 +	positionMargins := make([]float64, 0, len(canaries))
 +	for _, c := range canaries {
++		if lookbackMs > 0 && nowMs-c.AtMs > lookbackMs {
++			continue // stale canary outside the lookback window does not count.
++		}
++		ev.CanaryIDs = append(ev.CanaryIDs, c.CanaryID)
 +		switch c.Verdict {
 +		case VerdictPass:
 +			ev.PassCount++
@@ -1417,8 +1501,8 @@ index 00000000..e07e5d5e
 +// governs how the block later clears. Returns the evidence. Action "none" is telemetry
 +// only and changes no state.
 +func (s *Store) ApplyFlapping(key ComputeIntegrityKey, fp FlappingWindowPolicy, th Thresholds,
-+	canaries []FlappingCanary, origin AdjudicationOrigin) FlappingEvidence {
-+	ev := EvaluateFlapping(canaries, fp, th)
++	canaries []FlappingCanary, nowMs int64, origin AdjudicationOrigin) FlappingEvidence {
++	ev := EvaluateFlapping(canaries, fp, th, nowMs)
 +	if !ev.Triggered || fp.Action != flappingActionManualReview {
 +		return ev
 +	}
@@ -1934,10 +2018,10 @@ index 00000000..55fa26d2
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/onboarding.go b/phase4-coordinator/internal/computeintegrity/onboarding.go
 new file mode 100644
-index 00000000..e4aa4c44
+index 00000000..2b5552d3
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/onboarding.go
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,103 @@
 +package computeintegrity
 +
 +// FR-11 onboarding gate. SPEC-036 never blocks the SPEC-026 local App onboarding flow
@@ -1999,9 +2083,11 @@ index 00000000..e4aa4c44
 +			return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: ov.state}
 +		}
 +	}
-+	// An unresolved lineage tombstone means the short onboarding gate cannot restore
-+	// eligibility (FR-10/FR-12).
-+	if s.tombstones[key.Overlay().TombstoneScope()] {
++	// An unresolved lineage tombstone whose effect is ACTIVE per the FR-3 matrix means
++	// the short onboarding gate cannot restore eligibility (FR-10/FR-12); a telemetry-
++	// only tombstone is dormant and does not block.
++	if tomb, ok := s.tombstones[key.Overlay().TombstoneScope()]; ok &&
++		EffectiveAdverseState(mode, spec022Enforce, tomb, attribProviderOrBreaker) {
 +		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: StateBlockedManualReview}
 +	}
 +
@@ -2352,10 +2438,10 @@ index 00000000..39118676
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/policy.go b/phase4-coordinator/internal/computeintegrity/policy.go
 new file mode 100644
-index 00000000..1fc1a8f9
+index 00000000..7694114f
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/policy.go
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,306 @@
 +package computeintegrity
 +
 +import (
@@ -2634,6 +2720,11 @@ index 00000000..1fc1a8f9
 +			"model_scope_threshold":  p.CircuitBreaker.ModelScopeThreshold,
 +			"fleet_scope_threshold":  p.CircuitBreaker.FleetScopeThreshold,
 +			"quiet_window_minutes":   p.CircuitBreaker.QuietWindowMinutes,
++			// The fixed FR-1 in-scope transition set and boundary convention are bound
++			// into the settlement-bearing policy digest so the contract is provable and a
++			// later change is a visible digest change, not a silent code-constant edit.
++			"in_scope_transitions": []any{string(TransitionDrift), string(TransitionReferenceFault)},
++			"boundary_convention":  "activates_at_or_above",
 +		},
 +		"flapping_window_policy_v0_1": map[string]any{
 +			"enabled":                        p.FlappingPolicy.Enabled,
@@ -3231,10 +3322,10 @@ index 00000000..4e64e5e6
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/reference.go b/phase4-coordinator/internal/computeintegrity/reference.go
 new file mode 100644
-index 00000000..5554fe3c
+index 00000000..a0090fb1
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/reference.go
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,329 @@
 +package computeintegrity
 +
 +import (
@@ -3354,6 +3445,35 @@ index 00000000..5554fe3c
 +	return jcsDigest(list)
 +}
 +
++// distributionsWellFormed reports whether every position's compact distribution is
++// valid (FR-5): finite probabilities in [0,1], total mass not exceeding 1 (within the
++// mass tolerance), top-K ids with no duplicates, and top-K a subset of the distribution
++// support. A malformed reference distribution (e.g. total mass > 1) must be rejected as
++// schema_invalid, never silently clamped to an admissible TV of 0.
++func (r ReferenceEvent) distributionsWellFormed() bool {
++	for _, pos := range r.Positions {
++		if !noDuplicates(pos.TopK) {
++			return false
++		}
++		var mass float64
++		for _, p := range pos.Full {
++			if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
++				return false
++			}
++			mass += p
++		}
++		if mass > 1+massConservationTolerance {
++			return false
++		}
++		for _, id := range pos.TopK {
++			if _, ok := pos.Full[id]; !ok {
++				return false
++			}
++		}
++	}
++	return true
++}
++
 +// ReferencesIndependent reports the closed FR-5 three-way independence predicate: two
 +// sources are independent iff ALL THREE of (a) distinct operator identity, (b)
 +// distinct hardware failure domain, and (c) distinct runtime-build/kernel provenance
@@ -3446,8 +3566,8 @@ index 00000000..5554fe3c
 +		if (in.CoveredKey != ThresholdKey{}) && r.coveredKey() != in.CoveredKey {
 +			return AdmissibilitySchemaInvalid // reference bound to a different covered key.
 +		}
-+		if len(r.Positions) == 0 {
-+			return AdmissibilitySchemaInvalid // empty position set cannot be compared.
++		if len(r.Positions) == 0 || !r.distributionsWellFormed() {
++			return AdmissibilitySchemaInvalid // empty or malformed distributions cannot be compared.
 +		}
 +		pd, err := r.PositionSetDigest()
 +		if err != nil {
@@ -3737,10 +3857,10 @@ index 00000000..e32cc4aa
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/settlement.go b/phase4-coordinator/internal/computeintegrity/settlement.go
 new file mode 100644
-index 00000000..b80f7db6
+index 00000000..2ab38ba5
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/settlement.go
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,367 @@
 +package computeintegrity
 +
 +// This file implements the SPEC-036 money-path core (FR-3):
@@ -3858,6 +3978,12 @@ index 00000000..b80f7db6
 +// Evaluate resolves the SPEC-036 gate decision for a captured request-start state
 +// (FR-3, FR-4). Settlement is a pure function of the immutable capture.
 +func Evaluate(c Capture) Decision {
++	// A missing/unreadable composite SPEC-022 binding fails closed BEFORE the not-enforce
++	// early return (FR-4): a malformed capture whose binding is absent must not be paid
++	// through as if SPEC-022 were legitimately not enforcing.
++	if c.compositeBindingUnreadable() {
++		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
++	}
 +	// FR-3: if the captured composite snapshot shows SPEC-022 was not in enforce for
 +	// the request's coverage, SPEC-036 MUST NOT alter the request's money outcome.
 +	if !c.Spec022EffectiveEnforce {
@@ -4104,10 +4230,10 @@ index 00000000..b80f7db6
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/settlement_test.go b/phase4-coordinator/internal/computeintegrity/settlement_test.go
 new file mode 100644
-index 00000000..d9808eb5
+index 00000000..0b485bc1
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/settlement_test.go
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,376 @@
 +package computeintegrity
 +
 +import "testing"
@@ -4143,6 +4269,8 @@ index 00000000..d9808eb5
 +		State:                            StateVerified,
 +		AdjudicationOrigin:               OriginEnforcePreserved,
 +		ReferenceSetAdmissibilityStatus:  AdmissibilityAdmissible,
++		ReferenceSetAdmissibilityDigest:  "sha256:adm",
++		ReferenceFaultCheckVersion:       "rfc-v1",
 +		ReferenceSetID:                   "refset-1",
 +		ReferenceEventDigests:            []string{"sha256:refA", "sha256:refB"},
 +		ReferenceQuorumCount:             2,
@@ -4435,6 +4563,35 @@ index 00000000..d9808eb5
 +		}
 +	})
 +
++	t.Run("a verified row with incomplete reference-quorum evidence fails closed", func(t *testing.T) {
++		mutators := []func(*Capture){
++			func(c *Capture) { c.ReferenceQuorumCount = 1 },                         // < 2
++			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:only"} },  // < quorum
++			func(c *Capture) { c.ReferenceSetAdmissibilityDigest = "" },             // missing digest
++			func(c *Capture) { c.ReferenceFaultCheckVersion = "" },                  // missing fault version
++			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:a", ""} }, // empty digest
++		}
++		for i, m := range mutators {
++			c := payableCapture()
++			m(&c)
++			if d := Evaluate(c); d.Payable {
++				t.Fatalf("case %d: incomplete reference evidence must not be payable", i)
++			}
++		}
++	})
++
++	t.Run("a missing composite SPEC-022 binding fails closed unreadable", func(t *testing.T) {
++		c := payableCapture()
++		c.Spec022EffectiveEnforce = false // could be a malformed capture...
++		c.Spec022PolicyVersion = ""       // ...whose binding is actually missing.
++		c.Spec022PolicyMode = ""
++		c.Spec022RouteSnapshotDigest = ""
++		d := Evaluate(c)
++		if !d.Applies || d.Payable || d.Reason != ReasonUnreadable {
++			t.Fatalf("missing composite binding must fail closed unreadable, got %+v", d)
++		}
++	})
++
 +	t.Run("swap_laundering outranks manual_review outranks reference outranks drift", func(t *testing.T) {
 +		order := []struct {
 +			state  State
@@ -4667,10 +4824,10 @@ index 00000000..149a7cf2
 +const AllProfilesWindowProfile = "__all_profiles__"
 diff --git a/phase4-coordinator/internal/computeintegrity/threshold.go b/phase4-coordinator/internal/computeintegrity/threshold.go
 new file mode 100644
-index 00000000..14e147cc
+index 00000000..52e1b607
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/threshold.go
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,202 @@
 +package computeintegrity
 +
 +import "math"
@@ -4844,13 +5001,24 @@ index 00000000..14e147cc
 +	if r.BaselineTailMassFeasibilityRate < min.MinTailMassFeasibility {
 +		reasons = append(reasons, "tail-mass feasibility below minimum")
 +	}
-+	if r.FalsePositiveBudget <= 0 || r.FalsePositiveBudget > 1 {
++	if r.BaselineTailMassFeasibilityRate < 0 || r.BaselineTailMassFeasibilityRate > 1 {
++		reasons = append(reasons, "baseline_tail_mass_feasibility_rate out of [0,1]")
++	}
++	if math.IsNaN(r.FalsePositiveBudget) || r.FalsePositiveBudget <= 0 || r.FalsePositiveBudget > 1 {
 +		reasons = append(reasons, "false_positive_budget out of (0,1]")
 +	}
-+	// Measured evidence MUST be present and the measured rate at or below the budget.
++	// Measured evidence MUST be present, finite, in range, and the measured rate at or
++	// below the budget (FR-8): reject negative/NaN numerator/denominator/rate and any
++	// numerator exceeding the denominator.
 +	if r.KnownGoodCohortDigest == "" || r.MeasuredFPWindow == "" ||
 +		r.MeasuredFalseQuarantineDenominator <= 0 {
 +		reasons = append(reasons, "missing measured false-quarantine evidence")
++	} else if r.MeasuredFalseQuarantineNumerator < 0 ||
++		r.MeasuredFalseQuarantineNumerator > r.MeasuredFalseQuarantineDenominator {
++		reasons = append(reasons, "measured false-quarantine numerator out of [0, denominator]")
++	} else if math.IsNaN(r.MeasuredFalseQuarantineRate) ||
++		r.MeasuredFalseQuarantineRate < 0 || r.MeasuredFalseQuarantineRate > 1 {
++		reasons = append(reasons, "measured_false_quarantine_rate out of [0,1]")
 +	} else {
 +		measured := float64(r.MeasuredFalseQuarantineNumerator) / float64(r.MeasuredFalseQuarantineDenominator)
 +		if math.Abs(measured-r.MeasuredFalseQuarantineRate) > 1e-9 {
@@ -5271,10 +5439,10 @@ index 00000000..d1260151
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/warmswap.go b/phase4-coordinator/internal/computeintegrity/warmswap.go
 new file mode 100644
-index 00000000..1858b931
+index 00000000..29b4b05e
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/warmswap.go
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,123 @@
 +package computeintegrity
 +
 +// FR-12 warm-swap and generation handling. Positive state never carries across a
@@ -5370,16 +5538,23 @@ index 00000000..1858b931
 +	if ov == nil || !ov.state.IsAdverseOverlay() {
 +		return false
 +	}
-+	s.tombstones[priorKey.Overlay().TombstoneScope()] = true
++	// The tombstone inherits the source overlay's origin, so a telemetry-only lineage
++	// never becomes money-blocking (FR-3).
++	origin := ov.origin
++	if !origin.Known() {
++		origin = OriginTelemetryOnly
++	}
++	s.tombstones[priorKey.Overlay().TombstoneScope()] = origin
 +	return true
 +}
 +
-+// HasTombstone reports whether an unresolved adverse-state lineage tombstone exists
-+// for a key's tombstone scope (FR-10, FR-12).
++// HasTombstone reports whether a lineage tombstone exists for a key's tombstone scope,
++// regardless of its effect (FR-10, FR-12).
 +func (s *Store) HasTombstone(key ComputeIntegrityKey) bool {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
-+	return s.tombstones[key.Overlay().TombstoneScope()]
++	_, ok := s.tombstones[key.Overlay().TombstoneScope()]
++	return ok
 +}
 +
 +// SetOverlayAdverse forces an overlay adverse state (used by tests and by the verdict
@@ -5393,10 +5568,10 @@ index 00000000..1858b931
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window.go b/phase4-coordinator/internal/computeintegrity/window.go
 new file mode 100644
-index 00000000..3ba63d2f
+index 00000000..59b2da16
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window.go
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,362 @@
 +package computeintegrity
 +
 +import "sync"
@@ -5446,11 +5621,13 @@ index 00000000..3ba63d2f
 +// A concrete durable store can wrap the same key algebra; the window/overlay ownership
 +// rules here are what the AC fixtures pin.
 +type Store struct {
-+	mu         sync.Mutex
-+	windows    map[WindowKey]*windowState
-+	overlays   map[OverlayKey]*overlayState
-+	swaps      map[SwapLaunderingScope]*swapState
-+	tombstones map[TombstoneScope]bool
++	mu       sync.Mutex
++	windows  map[WindowKey]*windowState
++	overlays map[OverlayKey]*overlayState
++	swaps    map[SwapLaunderingScope]*swapState
++	// tombstones records the adjudication origin of each lineage tombstone so its effect
++	// can be gated through EffectiveAdverseState (a telemetry-only tombstone never blocks).
++	tombstones map[TombstoneScope]AdjudicationOrigin
 +}
 +
 +// NewStore returns an empty in-memory compute-integrity store.
@@ -5459,7 +5636,7 @@ index 00000000..3ba63d2f
 +		windows:    map[WindowKey]*windowState{},
 +		overlays:   map[OverlayKey]*overlayState{},
 +		swaps:      map[SwapLaunderingScope]*swapState{},
-+		tombstones: map[TombstoneScope]bool{},
++		tombstones: map[TombstoneScope]AdjudicationOrigin{},
 +	}
 +}
 +
@@ -5759,10 +5936,10 @@ index 00000000..3ba63d2f
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window_test.go b/phase4-coordinator/internal/computeintegrity/window_test.go
 new file mode 100644
-index 00000000..611864d1
+index 00000000..efc36abc
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window_test.go
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,441 @@
 +package computeintegrity
 +
 +import "testing"
@@ -6028,29 +6205,42 @@ index 00000000..611864d1
 +			ThresholdMargin: 0.01, MinPassCount: 1, MinWarnCount: 1, MinQuarantineCandidateCount: 1,
 +			Action: flappingActionManualReview, ClearRule: flappingClearPassSequence,
 +		}
++		now := base + 100*hour
 +		// tv_lower hovering just below the 0.05 quarantine median: margin ~0.005 <= 0.01.
 +		canaries := []FlappingCanary{
-+			{Verdict: VerdictPass, MedianTVLower: 0.045, MaxPositionTVLower: 0.09},
-+			{Verdict: VerdictWarn, MedianTVLower: 0.046, MaxPositionTVLower: 0.095},
-+			{Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047, MaxPositionTVLower: 0.098},
++			{CanaryID: "c1", AtMs: now - hour, Verdict: VerdictPass, MedianTVLower: 0.045, MaxPositionTVLower: 0.09},
++			{CanaryID: "c2", AtMs: now - hour, Verdict: VerdictWarn, MedianTVLower: 0.046, MaxPositionTVLower: 0.095},
++			{CanaryID: "c3", AtMs: now - hour, Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047, MaxPositionTVLower: 0.098},
 +		}
-+		ev := EvaluateFlapping(canaries, fp, th)
++		ev := EvaluateFlapping(canaries, fp, th, now)
 +		if !ev.Triggered {
 +			t.Fatalf("persistent near-boundary flapping should trigger, metric=%v", ev.MetricValue)
++		}
++		if len(ev.CanaryIDs) != 3 {
++			t.Fatalf("evidence must record contributing canary ids, got %v", ev.CanaryIDs)
++		}
++		// Stale canaries outside the lookback window do not count.
++		stale := []FlappingCanary{
++			{CanaryID: "old1", AtMs: now - 30*day, Verdict: VerdictPass, MedianTVLower: 0.047},
++			{CanaryID: "old2", AtMs: now - 30*day, Verdict: VerdictWarn, MedianTVLower: 0.047},
++			{CanaryID: "old3", AtMs: now - 30*day, Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.047},
++		}
++		if EvaluateFlapping(stale, fp, th, now).Triggered {
++			t.Fatal("stale canaries outside lookback must not trigger flapping")
 +		}
 +		// Counts below the minimum do not trigger.
 +		fp2 := fp
 +		fp2.MinQuarantineCandidateCount = 5
-+		if EvaluateFlapping(canaries, fp2, th).Triggered {
++		if EvaluateFlapping(canaries, fp2, th, now).Triggered {
 +			t.Fatal("insufficient quarantine_candidate count must not trigger")
 +		}
 +		// A clearly-clean history (large margins) does not trigger.
 +		clean := []FlappingCanary{
-+			{Verdict: VerdictPass, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
-+			{Verdict: VerdictWarn, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
-+			{Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
++			{CanaryID: "p", AtMs: now, Verdict: VerdictPass, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
++			{CanaryID: "w", AtMs: now, Verdict: VerdictWarn, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
++			{CanaryID: "q", AtMs: now, Verdict: VerdictQuarantineCandidate, MedianTVLower: 0.0, MaxPositionTVLower: 0.0},
 +		}
-+		if EvaluateFlapping(clean, fp, th).Triggered {
++		if EvaluateFlapping(clean, fp, th, now).Triggered {
 +			t.Fatal("clean history must not trigger flapping")
 +		}
 +		// action=none is telemetry only (no state change); manual_review moves the key.
@@ -6058,11 +6248,11 @@ index 00000000..611864d1
 +		k := winKey("a", 1, "temp-0.7")
 +		none := fp
 +		none.Action = flappingActionNone
-+		s.ApplyFlapping(k, none, th, canaries, OriginEnforcePreserved)
++		s.ApplyFlapping(k, none, th, canaries, now, OriginEnforcePreserved)
 +		if s.OverlayState(k.Overlay()) != "" {
 +			t.Fatal("action=none must not change state")
 +		}
-+		s.ApplyFlapping(k, fp, th, canaries, OriginEnforcePreserved)
++		s.ApplyFlapping(k, fp, th, canaries, now, OriginEnforcePreserved)
 +		if s.OverlayState(k.Overlay()) != StateBlockedManualReview {
 +			t.Fatalf("action=manual_review must block, got %s", s.OverlayState(k.Overlay()))
 +		}
@@ -6081,8 +6271,8 @@ index 00000000..611864d1
 +		th := Thresholds{TauQuarantinePosition: 0.10}
 +		fp := FlappingWindowPolicy{Enabled: true, Metric: flappingMetricPosition, ThresholdMargin: 0.01}
 +		// One canary comes within 0.005 of the position quarantine threshold.
-+		canaries := []FlappingCanary{{MaxPositionTVLower: 0.095}, {MaxPositionTVLower: 0.0}}
-+		if EvaluateFlapping(canaries, fp, th).MetricValue > 0.01 {
++		canaries := []FlappingCanary{{AtMs: 1, MaxPositionTVLower: 0.095}, {AtMs: 1, MaxPositionTVLower: 0.0}}
++		if EvaluateFlapping(canaries, fp, th, 1).MetricValue > 0.01 {
 +			t.Fatal("position metric should reflect the closest position (min margin)")
 +		}
 +	})

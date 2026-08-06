@@ -148,6 +148,23 @@ func TestAC04_WindowStateMachine(t *testing.T) {
 		}
 	})
 
+	t.Run("latest window is by event time, not insertion order", func(t *testing.T) {
+		s := NewStore()
+		k := winKey("a", 1, "temp-0.7")
+		// Record 3 quarantine_candidates at recent times, THEN 2 older passes (delayed
+		// delivery). By event time the latest-5 window is [pass,pass,qc,qc,qc]... actually
+		// the newest-by-atMs are the 3 QCs, so the window must quarantine, not verify.
+		s.RecordCanary(k, VerdictQuarantineCandidate, base+10*hour, OriginEnforcePreserved)
+		s.RecordCanary(k, VerdictQuarantineCandidate, base+11*hour, OriginEnforcePreserved)
+		s.RecordCanary(k, VerdictQuarantineCandidate, base+12*hour, OriginEnforcePreserved)
+		s.RecordCanary(k, VerdictPass, base+1*hour, OriginEnforcePreserved) // delayed older
+		s.RecordCanary(k, VerdictPass, base+2*hour, OriginEnforcePreserved) // delayed older
+		st, _, _ := s.ResolveState(k, winResolveInput(p, base+13*hour))
+		if st != StateQuarantinedDrift {
+			t.Fatalf("out-of-order delivery must not verify over newer quarantine candidates, got %s", st)
+		}
+	})
+
 	t.Run("5 consecutive passes make a fresh verified window", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")

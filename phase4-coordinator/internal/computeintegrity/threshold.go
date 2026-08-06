@@ -1,6 +1,17 @@
 package computeintegrity
 
-import "math"
+import (
+	"math"
+	"time"
+)
+
+func rfc3339OK(s string) bool {
+	if s == "" {
+		return false
+	}
+	_, err := time.Parse(time.RFC3339, s)
+	return err == nil
+}
 
 // FR-8 threshold calibration. Thresholds are keyed by the 8-tuple ThresholdKey.
 // hardware_runtime_class is a policy invariant per covered key (one class per key), so
@@ -39,6 +50,10 @@ type ThresholdRecord struct {
 	MinEligibleCanaryCount   int    `json:"min_eligible_canary_count"`
 	MeasurementPositionCount int    `json:"measurement_position_count"`
 
+	// Coverage binds the covered provider/model/hash/tokenizer/sampler-stage/profile/
+	// hardware_runtime_class set the calibration applies to (FR-8).
+	Coverage ThresholdCoverage `json:"coverage"`
+
 	CalibrationWindowStart string `json:"calibration_window_start"`
 	CalibrationWindowEnd   string `json:"calibration_window_end"`
 
@@ -55,6 +70,17 @@ type ThresholdRecord struct {
 
 	ApprovalTimestamp string `json:"approval_timestamp"`
 	ApproverGroup     string `json:"approver_group"`
+}
+
+// ThresholdCoverage is the closed FR-8 coverage object binding the calibration to a
+// covered key set.
+type ThresholdCoverage struct {
+	ModelID              string `json:"model_id"`
+	TargetModelHash      string `json:"target_model_hash"`
+	TokenizerIdentity    string `json:"tokenizer_identity"`
+	SamplerStage         string `json:"sampler_stage"`
+	SamplingProfile      string `json:"sampling_profile"`
+	HardwareRuntimeClass string `json:"hardware_runtime_class"`
 }
 
 // DeriveThresholds applies the FR-8 initial threshold formulas (floors) to the two
@@ -168,14 +194,28 @@ func (r ThresholdRecord) ValidateCalibrationForEnforce(expectedKey ThresholdKey,
 	if r.MeasurementPositionCount < min.MinMeasurementPositions {
 		reasons = append(reasons, "measurement position count below minimum")
 	}
+	// The coverage object must match the covered key, and the calibration window bounds
+	// must be present and parseable RFC3339 (FR-8).
+	cov := ThresholdCoverage{
+		ModelID: r.ModelID, TargetModelHash: r.TargetModelHash, TokenizerIdentity: r.TokenizerIdentity,
+		SamplerStage: r.SamplerStage, SamplingProfile: r.SamplingProfile, HardwareRuntimeClass: r.HardwareRuntimeClass,
+	}
+	if r.Coverage != cov {
+		reasons = append(reasons, "coverage object does not match the covered key")
+	}
+	if !rfc3339OK(r.CalibrationWindowStart) || !rfc3339OK(r.CalibrationWindowEnd) {
+		reasons = append(reasons, "calibration window bounds missing or not RFC3339")
+	}
 	if r.BaselineTailMassFeasibilityRate < min.MinTailMassFeasibility {
 		reasons = append(reasons, "tail-mass feasibility below minimum")
 	}
 	if r.BaselineTailMassFeasibilityRate < 0 || r.BaselineTailMassFeasibilityRate > 1 {
 		reasons = append(reasons, "baseline_tail_mass_feasibility_rate out of [0,1]")
 	}
-	if math.IsNaN(r.FalsePositiveBudget) || r.FalsePositiveBudget <= 0 || r.FalsePositiveBudget > 1 {
-		reasons = append(reasons, "false_positive_budget out of (0,1]")
+	// The false-positive budget may be anywhere in [0,1] (a zero budget is the strictest
+	// setting, requiring a measured zero false-quarantine rate).
+	if math.IsNaN(r.FalsePositiveBudget) || r.FalsePositiveBudget < 0 || r.FalsePositiveBudget > 1 {
+		reasons = append(reasons, "false_positive_budget out of [0,1]")
 	}
 	// Measured evidence MUST be present, finite, in range, and the measured rate at or
 	// below the budget (FR-8): reject negative/NaN numerator/denominator/rate and any

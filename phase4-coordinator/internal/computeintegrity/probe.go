@@ -117,26 +117,68 @@ type ResultPosition struct {
 // discriminated union on ResultKind; the measurement variant carries Positions, the
 // provider_inconclusive variant carries ProviderReasonCode.
 type ResultPayload struct {
-	SchemaVersion             string           `json:"schema_version"`
-	ProbeID                   string           `json:"probe_id"`
-	Nonce                     string           `json:"nonce"`
-	ProbeRequestDigest        string           `json:"probe_request_digest"`
-	ResultKind                string           `json:"result_kind"`
-	RetryOfProbeID            string           `json:"retry_of_probe_id,omitempty"`
-	ModelID                   string           `json:"model_id"`
-	TargetModelHash           string           `json:"target_model_hash"`
-	TokenizerIdentity         string           `json:"tokenizer_identity"`
-	TargetGeneration          int64            `json:"target_generation"`
-	SamplingProfile           string           `json:"sampling_profile"`
-	CorpusVersion             string           `json:"corpus_version"`
-	ThresholdVersion          string           `json:"threshold_version"`
-	HardwareRuntimeClass      string           `json:"hardware_runtime_class"`
-	SupportSelection          string           `json:"support_selection"`
-	NormalizationBasis        string           `json:"normalization_basis"`
-	SamplerStage              string           `json:"sampler_stage"`
-	Positions                 []ResultPosition `json:"positions,omitempty"`
-	ProviderReasonCode        string           `json:"provider_reason_code,omitempty"`
-	IdentityUnavailableReason string           `json:"identity_unavailable_reason,omitempty"`
+	SchemaVersion             string              `json:"schema_version"`
+	ProbeID                   string              `json:"probe_id"`
+	Nonce                     string              `json:"nonce"`
+	ProbeRequestDigest        string              `json:"probe_request_digest"`
+	ResultKind                string              `json:"result_kind"`
+	RetryOfProbeID            string              `json:"retry_of_probe_id,omitempty"`
+	ModelID                   string              `json:"model_id"`
+	TargetModelHash           string              `json:"target_model_hash"`
+	TokenizerIdentity         string              `json:"tokenizer_identity"`
+	TargetGeneration          int64               `json:"target_generation"`
+	SamplingProfile           string              `json:"sampling_profile"`
+	CorpusVersion             string              `json:"corpus_version"`
+	ThresholdVersion          string              `json:"threshold_version"`
+	HardwareRuntimeClass      string              `json:"hardware_runtime_class"`
+	SupportSelection          string              `json:"support_selection"`
+	NormalizationBasis        string              `json:"normalization_basis"`
+	SamplerStage              string              `json:"sampler_stage"`
+	Positions                 []ResultPosition    `json:"positions,omitempty"`
+	ValidationMetadata        *ValidationMetadata `json:"validation_metadata,omitempty"`
+	ProviderReasonCode        string              `json:"provider_reason_code,omitempty"`
+	IdentityUnavailableReason string              `json:"identity_unavailable_reason,omitempty"`
+}
+
+// ValidationMetadata is the measurement-variant-only FR-6 metadata block. All fields
+// are advisory except that provider_scalar_verdict is non-authoritative — the
+// coordinator derives the verdict itself (FR-7). Present exactly for a measurement
+// result; forbidden on a provider_inconclusive result.
+type ValidationMetadata struct {
+	ProviderMeasuredAt    string   `json:"provider_measured_at"`    // RFC3339 UTC
+	ProviderExecutionMs   int64    `json:"provider_execution_ms"`   // non-negative
+	ProviderFinalK        int      `json:"provider_final_k"`        // 64 or 256
+	ProviderScalarVerdict *float64 `json:"provider_scalar_verdict"` // nullable, advisory
+}
+
+// ValidateResultVariant enforces the FR-6 discriminated-union rules: a measurement
+// result MUST carry positions + validation_metadata and MUST NOT carry a provider
+// reason code; a provider_inconclusive result MUST carry a valid provider_reason_code
+// and MUST NOT carry positions or validation_metadata.
+func ValidateResultVariant(p ResultPayload) error {
+	switch p.ResultKind {
+	case ResultKindMeasurement:
+		if len(p.Positions) == 0 || p.ValidationMetadata == nil {
+			return fmt.Errorf("measurement result must carry positions and validation_metadata")
+		}
+		if p.ProviderReasonCode != "" {
+			return fmt.Errorf("measurement result must not carry provider_reason_code")
+		}
+		if p.ValidationMetadata.ProviderExecutionMs < 0 ||
+			(p.ValidationMetadata.ProviderFinalK != 64 && p.ValidationMetadata.ProviderFinalK != 256) {
+			return fmt.Errorf("measurement validation_metadata out of range")
+		}
+	case ResultKindProviderInconclusive:
+		if !ValidProviderReasonCode(p.ProviderReasonCode) {
+			return fmt.Errorf("provider_inconclusive result must carry a valid provider_reason_code")
+		}
+		if len(p.Positions) != 0 || p.ValidationMetadata != nil {
+			return fmt.Errorf("provider_inconclusive result must not carry positions/validation_metadata")
+		}
+	default:
+		return fmt.Errorf("unknown result_kind %q", p.ResultKind)
+	}
+	return nil
 }
 
 // ResultEnvelope is the outer probe result envelope (FR-6).
@@ -254,6 +296,49 @@ func ValidateRequestBounds(env RequestEnvelope) error {
 	// is checked by ValidateProbeExpiry, which knows the issuance time).
 	if _, err := time.Parse(time.RFC3339, p.ExpiresAt); err != nil {
 		return fmt.Errorf("probe request: expires_at not RFC3339: %w", err)
+	}
+	return nil
+}
+
+// ValidateRetryBinding enforces the FR-7 mandatory-retry binding: a K=256 retry MUST
+// bind the SAME covered key, corpus positions (prompt/prefix/context and reference
+// top-K sets), and target_generation as the K=64 attempt it retries, and echo its
+// probe_id. This prevents a provider from substituting easier/different evidence on
+// retry after the K=64 trigger.
+func ValidateRetryBinding(retry, original RequestEnvelope) error {
+	rp, op := retry.Payload, original.Payload
+	if rp.K != 256 || op.K != 64 {
+		return fmt.Errorf("retry binding: expected K=256 retry of a K=64 attempt")
+	}
+	if rp.RetryOfProbeID != op.ProbeID {
+		return fmt.Errorf("retry binding: retry_of_probe_id does not echo the K=64 probe_id")
+	}
+	// Covered key must match exactly.
+	if rp.ModelID != op.ModelID || rp.TargetModelHash != op.TargetModelHash ||
+		rp.TokenizerIdentity != op.TokenizerIdentity || rp.SamplerStage != op.SamplerStage ||
+		rp.TargetGeneration != op.TargetGeneration || rp.SamplingProfile != op.SamplingProfile ||
+		rp.CorpusVersion != op.CorpusVersion || rp.ThresholdVersion != op.ThresholdVersion ||
+		rp.HardwareRuntimeClass != op.HardwareRuntimeClass {
+		return fmt.Errorf("retry binding: covered key differs from the K=64 attempt")
+	}
+	// Position set and per-position binding (including reference top-K) must match.
+	if len(rp.Positions) != len(op.Positions) {
+		return fmt.Errorf("retry binding: position count differs")
+	}
+	for i := range rp.Positions {
+		a, b := rp.Positions[i], op.Positions[i]
+		if a.PromptID != b.PromptID || a.PositionIndex != b.PositionIndex ||
+			a.TokenPrefixDigest != b.TokenPrefixDigest || a.ContextHash != b.ContextHash {
+			return fmt.Errorf("retry binding: position %d identity differs", i)
+		}
+		if len(a.ReferenceTopKSets) != len(b.ReferenceTopKSets) {
+			return fmt.Errorf("retry binding: position %d reference-set count differs", i)
+		}
+		for j := range a.ReferenceTopKSets {
+			if a.ReferenceTopKSets[j].ReferenceEventDigest != b.ReferenceTopKSets[j].ReferenceEventDigest {
+				return fmt.Errorf("retry binding: position %d reference digest differs", i)
+			}
+		}
 	}
 	return nil
 }

@@ -241,6 +241,7 @@ func (p Policy) Digest() (string, error) {
 	obj := map[string]any{
 		"policy_version":                       p.PolicyVersion,
 		"mode":                                 string(p.Mode),
+		"enabled_at":                           p.EnabledAt,
 		"model_ids":                            toAnySlice(models),
 		"target_model_hash":                    p.TargetModelHash,
 		"signed_catalog_selector":              p.SignedCatalogSelector,

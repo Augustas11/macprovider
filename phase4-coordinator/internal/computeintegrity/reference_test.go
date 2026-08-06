@@ -92,6 +92,44 @@ func TestAC02_ReferenceAdmission(t *testing.T) {
 		}
 	})
 
+	t.Run("future or missing reference refresh timestamps are not fresh", func(t *testing.T) {
+		a, b := refFixtureEvent("a"), refFixtureEvent("b")
+		b.RefreshedAtUnixMS = 999999999999999 // far future
+		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilityStaleReference {
+			t.Fatalf("future refresh timestamp must not be fresh, got %s", got)
+		}
+		a2, b2 := refFixtureEvent("a"), refFixtureEvent("b")
+		b2.RefreshedAtUnixMS = 0 // missing
+		if got := ComputeAdmissibility(refFixtureInput(a2, b2)); got != AdmissibilityStaleReference {
+			t.Fatalf("missing refresh timestamp must not be fresh, got %s", got)
+		}
+	})
+
+	t.Run("impossible reference distribution (mass > 1) is inadmissible", func(t *testing.T) {
+		a, b := refFixtureEvent("a"), refFixtureEvent("b")
+		b.Positions = []ReferencePosition{{PromptID: "p1", PositionIndex: 0, TopK: []int64{1, 2}, Full: ReferenceDistribution{1: 0.8, 2: 0.8}}}
+		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilitySchemaInvalid {
+			t.Fatalf("mass>1 reference distribution must be schema_invalid, got %s", got)
+		}
+	})
+
+	t.Run("closed reference_set_admissibility_v1 digest is deterministic", func(t *testing.T) {
+		key := refFixtureEvent("a").coveredKey()
+		obj := BuildReferenceSetAdmissibility("refset-1", key, AdmissibilityAdmissible, 2, "rfc-v1",
+			[]ReferenceEvent{refFixtureEvent("b"), refFixtureEvent("a")})
+		d1, err := obj.Digest()
+		if err != nil || d1 == "" {
+			t.Fatalf("admissibility digest failed: %v", err)
+		}
+		// Member order in the input must not change the digest (sorted by event digest).
+		obj2 := BuildReferenceSetAdmissibility("refset-1", key, AdmissibilityAdmissible, 2, "rfc-v1",
+			[]ReferenceEvent{refFixtureEvent("a"), refFixtureEvent("b")})
+		d2, _ := obj2.Digest()
+		if d1 != d2 {
+			t.Fatal("admissibility digest must be order-independent over members")
+		}
+	})
+
 	t.Run("references bound to a different covered key are inadmissible", func(t *testing.T) {
 		a, b := refFixtureEvent("a"), refFixtureEvent("b")
 		b.TargetModelHash = "hash-OTHER" // b covers a different artifact

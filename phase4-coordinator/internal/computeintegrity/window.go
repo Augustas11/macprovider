@@ -1,6 +1,9 @@
 package computeintegrity
 
-import "sync"
+import (
+	"sort"
+	"sync"
+)
 
 // FR-10 window state machine + FR-12 warm-swap/laundering. State ownership is
 // canonical (FR-10, §3): positive measurement/verdict state and the rolling verdict
@@ -9,10 +12,12 @@ import "sync"
 // higher-level swap-laundering overlay keyed by (stable_provider_identity, model_id)
 // spans all artifacts for that provider/model.
 
-// canary is one finalized eligible canary result on a window key.
+// canary is one finalized eligible canary result on a window key. seq is the insertion
+// index, used only as a stable tie-break when ordering by event time (atMs).
 type canary struct {
 	verdict Verdict
 	atMs    int64
+	seq     int
 }
 
 // windowState holds the rolling verdict window and outstanding-probe markers for a
@@ -34,6 +39,10 @@ type overlayState struct {
 	onboardingFailures   []int64 // 24h onboarding-failure timestamps
 	passStreak           int     // consecutive passes toward a clear
 	firstPassMs          int64   // first pass in the current clear streak
+	// flappingPassClearable marks a blocked:manual_review_required entered by the
+	// flapping policy whose clear_rule is clear_pass_count_sequence — the sole
+	// manual-review block that may clear via a pass sequence (FR-10).
+	flappingPassClearable bool
 }
 
 // swapState holds the swap-laundering overlay for a (stable_provider_identity, model)
@@ -211,11 +220,13 @@ func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, E
 	}
 	if ov != nil {
 		// A window that meets the quarantine rule promotes to quarantined_compute_drift.
-		// Its origin is the origin already stamped on the accumulated risk when Known
-		// (never downgrade an enforce_preserved accumulation), else the current mode's.
+		// Re-adjudication (FR-3): a quarantine established under enforce + SPEC-022 enforce
+		// is a fresh enforce_preserved adjudication and UPGRADES any prior telemetry-only
+		// stamp (so an early observe-mode candidate cannot pin a later enforce quarantine
+		// dormant). Otherwise the existing Known origin is preserved (never downgraded).
 		if ov.state == "" && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
 			ov.state = StateQuarantinedDrift
-			if !ov.origin.Known() {
+			if origin == OriginEnforcePreserved || !ov.origin.Known() {
 				ov.origin = origin
 			}
 		}
@@ -279,24 +290,33 @@ func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, E
 	if s.verifiedPassRule(key.Window(), in.Policy, in.NowMs) {
 		return StateVerified, "", ""
 	}
-	if latestIsWarnClass(ws) {
+	if elig[len(elig)-1].verdict == VerdictWarn { // latest BY EVENT TIME.
 		return StateWarn, "", ""
 	}
 	return StatePending, "", ""
 }
 
-// eligibleCanaries returns the canaries within window_size_days of now, oldest-first.
+// eligible returns the canaries within window_size_days of now, ordered by event time
+// (atMs) ascending with a stable tie-break, NOT by insertion order — a delayed older
+// canary recorded after newer ones must not be treated as "latest" (FR-10). All
+// latest/window/TTL/verified/warn checks consume this ordered slice.
 func eligible(ws *windowState, policy Policy, nowMs int64) []canary {
 	if ws == nil {
 		return nil
 	}
 	windowMs := int64(policy.WindowSizeDays) * day
 	out := make([]canary, 0, len(ws.canaries))
-	for _, c := range ws.canaries {
+	for i, c := range ws.canaries {
 		if windowMs <= 0 || nowMs-c.atMs <= windowMs {
-			out = append(out, c)
+			out = append(out, canary{verdict: c.verdict, atMs: c.atMs, seq: i})
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].atMs != out[j].atMs {
+			return out[i].atMs < out[j].atMs
+		}
+		return out[i].seq < out[j].seq // stable tie-break on insertion order.
+	})
 	return out
 }
 
@@ -331,13 +351,6 @@ func (s *Store) verifiedPassRule(k WindowKey, policy Policy, nowMs int64) bool {
 		}
 	}
 	return true
-}
-
-func latestIsWarnClass(ws *windowState) bool {
-	if len(ws.canaries) == 0 {
-		return false
-	}
-	return ws.canaries[len(ws.canaries)-1].verdict == VerdictWarn
 }
 
 // QuarantineCandidateWindowCount returns the overlay's rolling quarantine-candidate

@@ -261,10 +261,19 @@ func ComputeAdmissibility(in AdmissibilityInput) AdmissibilityStatus {
 	if len(in.References) < in.MinQuorum {
 		return AdmissibilityMissingQuorum
 	}
-	// Freshness: keep only fresh references.
+	// A missing/invalid clock fails closed: a zero or negative "now", or a reference
+	// whose refresh timestamp is absent or in the future, cannot be treated as fresh.
+	if in.NowUnixMS <= 0 {
+		return AdmissibilityStaleReference
+	}
+	// Freshness: keep only references with a valid, non-future refresh timestamp within
+	// the TTL.
 	fresh := make([]ReferenceEvent, 0, len(in.References))
 	for _, r := range in.References {
-		if in.FreshnessTTLMillis <= 0 || in.NowUnixMS-r.RefreshedAtUnixMS <= in.FreshnessTTLMillis {
+		if r.RefreshedAtUnixMS <= 0 || r.RefreshedAtUnixMS > in.NowUnixMS {
+			continue // missing or future refresh time is not fresh.
+		}
+		if in.NowUnixMS-r.RefreshedAtUnixMS <= in.FreshnessTTLMillis {
 			fresh = append(fresh, r)
 		}
 	}
@@ -316,6 +325,63 @@ func maxIndependentSet(refs []ReferenceEvent) int {
 	}
 	return best
 }
+
+const (
+	ReferenceSetAdmissibilityType   = "reference_set_admissibility_v1"
+	ReferenceSetAdmissibilitySchema = "reference_set_admissibility_v1"
+)
+
+// ReferenceAdmissibilityMember is one reference's admissibility evidence (FR-4, §3).
+type ReferenceAdmissibilityMember struct {
+	ReferenceEventDigest          string `json:"reference_event_digest"`
+	ReferenceSourceID             string `json:"reference_source_id"`
+	ReferenceFailureDomainID      string `json:"reference_failure_domain_id"`
+	SourceIndependenceEvidence    string `json:"source_independence_evidence_digest"`
+	RuntimeBuildProvenanceDigest  string `json:"runtime_build_provenance_digest"`
+	GoldenFixtureValidationDigest string `json:"golden_fixture_validation_digest"`
+	RefreshedAt                   int64  `json:"refreshed_at"`
+}
+
+// ReferenceSetAdmissibilityV1 is the closed FR-4 reference_set_admissibility_v1 object.
+// Its RFC 8785/JCS digest is the settlement-bearing preimage for the capture's
+// ReferenceSetAdmissibilityDigest and the auditor bundle.
+type ReferenceSetAdmissibilityV1 struct {
+	Type                   string                         `json:"type"`
+	SchemaVersion          string                         `json:"schema_version"`
+	ReferenceSetID         string                         `json:"reference_set_id"`
+	Key                    ThresholdKey                   `json:"key"`
+	Status                 AdmissibilityStatus            `json:"reference_set_admissibility_status"`
+	ReferenceQuorumCount   int                            `json:"reference_quorum_count"`
+	ReferenceFaultCheckVer string                         `json:"reference_fault_check_version"`
+	References             []ReferenceAdmissibilityMember `json:"references"`
+}
+
+// BuildReferenceSetAdmissibility constructs the closed admissibility object from a
+// covered key, status, and reference events (members sorted by reference_event_digest).
+func BuildReferenceSetAdmissibility(setID string, key ThresholdKey, status AdmissibilityStatus,
+	quorum int, faultCheckVersion string, refs []ReferenceEvent) ReferenceSetAdmissibilityV1 {
+	members := make([]ReferenceAdmissibilityMember, 0, len(refs))
+	for _, r := range refs {
+		members = append(members, ReferenceAdmissibilityMember{
+			ReferenceEventDigest:          r.ReferenceEventDigest,
+			ReferenceSourceID:             r.ReferenceSourceID,
+			ReferenceFailureDomainID:      r.FailureDomainID,
+			SourceIndependenceEvidence:    r.OperatorID, // operator identity is the independence discriminant
+			RuntimeBuildProvenanceDigest:  r.RuntimeBuildProvenanceDigest,
+			GoldenFixtureValidationDigest: r.GoldenFixtureValidationDigest,
+			RefreshedAt:                   r.RefreshedAtUnixMS,
+		})
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].ReferenceEventDigest < members[j].ReferenceEventDigest })
+	return ReferenceSetAdmissibilityV1{
+		Type: ReferenceSetAdmissibilityType, SchemaVersion: ReferenceSetAdmissibilitySchema,
+		ReferenceSetID: setID, Key: key, Status: status, ReferenceQuorumCount: quorum,
+		ReferenceFaultCheckVer: faultCheckVersion, References: members,
+	}
+}
+
+// Digest returns the JCS SHA-256 digest of the closed admissibility object (FR-4).
+func (a ReferenceSetAdmissibilityV1) Digest() (string, error) { return jcsDigest(a) }
 
 // AuditorReferenceDigests returns the sorted set of reference event digests used for
 // a verdict, for inclusion in auditor bundles (FR-5, FR-13).

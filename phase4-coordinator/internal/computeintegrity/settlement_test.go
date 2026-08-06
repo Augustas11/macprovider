@@ -329,11 +329,12 @@ func TestAC16_ClosedReasonPrecedence(t *testing.T) {
 
 	t.Run("a verified row with incomplete reference-quorum evidence fails closed", func(t *testing.T) {
 		mutators := []func(*Capture){
-			func(c *Capture) { c.ReferenceQuorumCount = 1 },                         // < 2
-			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:only"} },  // < quorum
-			func(c *Capture) { c.ReferenceSetAdmissibilityDigest = "" },             // missing digest
-			func(c *Capture) { c.ReferenceFaultCheckVersion = "" },                  // missing fault version
-			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:a", ""} }, // empty digest
+			func(c *Capture) { c.ReferenceQuorumCount = 1 },                                     // < 2
+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:only"} },              // < quorum
+			func(c *Capture) { c.ReferenceSetAdmissibilityDigest = "" },                         // missing digest
+			func(c *Capture) { c.ReferenceFaultCheckVersion = "" },                              // missing fault version
+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:a", ""} },             // empty digest
+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:dup", "sha256:dup"} }, // duplicate = one reference
 		}
 		for i, m := range mutators {
 			c := payableCapture()

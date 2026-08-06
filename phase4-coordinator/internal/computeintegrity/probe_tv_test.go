@@ -114,6 +114,53 @@ func TestAC03_ProbeSchemaAndTV(t *testing.T) {
 		}
 	})
 
+	t.Run("K=256 retry must bind the exact K=64 attempt (no evidence substitution)", func(t *testing.T) {
+		orig := sampleRequest() // K=64, probe-1
+		retry := sampleRequest()
+		retry.Payload.K = 256
+		retry.Payload.ProbeID = "probe-2"
+		retry.Payload.RetryOfProbeID = "probe-1"
+		if err := ValidateRetryBinding(retry, orig); err != nil {
+			t.Fatalf("a faithful retry should bind: %v", err)
+		}
+		// Substituting the reference digest on retry must be rejected.
+		bad := retry
+		bad.Payload.Positions = []RequestPosition{{
+			PromptID: "p1", PromptRef: "corpus://p1", TokenPrefixDigest: "sha256:pfx", ContextHash: "sha256:ctx",
+			ReferenceTopKSets: []ReferenceTopKSet{{ReferenceEventDigest: "sha256:SUBSTITUTED", ReferenceTopKTokenIDs: []int64{1, 2, 3}}},
+		}}
+		if err := ValidateRetryBinding(bad, orig); err == nil {
+			t.Fatal("a retry that substitutes reference evidence must be rejected")
+		}
+		// Changing the covered key on retry must be rejected.
+		bad2 := retry
+		bad2.Payload.TargetModelHash = "hash-DIFFERENT"
+		if err := ValidateRetryBinding(bad2, orig); err == nil {
+			t.Fatal("a retry that changes the covered key must be rejected")
+		}
+	})
+
+	t.Run("result variant validation enforces the FR-6 discriminated union", func(t *testing.T) {
+		meas := ResultPayload{ResultKind: ResultKindMeasurement,
+			Positions:          []ResultPosition{{PromptID: "p1"}},
+			ValidationMetadata: &ValidationMetadata{ProviderMeasuredAt: "2026-08-06T00:00:00Z", ProviderFinalK: 64}}
+		if err := ValidateResultVariant(meas); err != nil {
+			t.Fatalf("valid measurement should pass: %v", err)
+		}
+		// Measurement missing validation_metadata is rejected.
+		noMeta := meas
+		noMeta.ValidationMetadata = nil
+		if err := ValidateResultVariant(noMeta); err == nil {
+			t.Fatal("measurement without validation_metadata must be rejected")
+		}
+		// provider_inconclusive carrying positions is rejected.
+		inc := ResultPayload{ResultKind: ResultKindProviderInconclusive,
+			ProviderReasonCode: "inconclusive:model_swap", Positions: []ResultPosition{{PromptID: "p1"}}}
+		if err := ValidateResultVariant(inc); err == nil {
+			t.Fatal("provider_inconclusive must not carry positions")
+		}
+	})
+
 	t.Run("retry_of_probe_id present only for K=256", func(t *testing.T) {
 		req := sampleRequest() // K=64
 		req.Payload.RetryOfProbeID = "probe-0"

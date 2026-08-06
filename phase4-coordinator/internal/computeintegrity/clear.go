@@ -22,8 +22,13 @@ func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, admissibili
 	if ov == nil {
 		return false
 	}
-	if ov.state != StateQuarantinedDrift && ov.state != StateBlockedAbusive {
-		return false // manual_review / swap / reference blocks need dual approval.
+	// Pass-sequence-clearable states are quarantined_compute_drift, blocked:abusive, and
+	// a flapping-origin blocked:manual_review whose clear_rule is clear_pass_count_sequence
+	// (the sole manual-review exception, FR-10). Other blocks need dual approval.
+	clearable := ov.state == StateQuarantinedDrift || ov.state == StateBlockedAbusive ||
+		(ov.state == StateBlockedManualReview && ov.flappingPassClearable)
+	if !clearable {
+		return false
 	}
 	if ov.passStreak < policy.ClearPassCount {
 		return false
@@ -34,6 +39,7 @@ func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, admissibili
 	ov.state = ""
 	ov.origin = ""
 	ov.quarantineCandWindow = 0
+	ov.flappingPassClearable = false
 	return true
 }
 

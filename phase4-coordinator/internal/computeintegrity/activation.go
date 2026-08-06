@@ -70,6 +70,8 @@ func ActivationCheck(p Policy, deps ActivationDeps) []string {
 	add(p.HardwareRuntimeClass != "", "hardware_runtime_class missing")
 	add(p.CorpusVersion != "", "corpus_version missing")
 	add(p.ThresholdVersion != "", "threshold_version missing")
+	add(p.NormalizationBasis == NormalizationFullDist, "normalization_basis must be full_distribution for v0.1")
+	add(p.EnabledAt > 0, "enabled_at must be set for an active enforce policy")
 	add(p.DisclosureCopyVersion != "" && p.DisclosureCopyDigest != "", "disclosure copy binding missing")
 	add(deps.SPEC030PrimitivesExposed, "SPEC-030 primitives not exposed")
 	add(deps.SPEC022Enforce, "SPEC-022 is not in enforce for the covered coverage")

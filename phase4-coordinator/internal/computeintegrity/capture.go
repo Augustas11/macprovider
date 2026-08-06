@@ -110,6 +110,12 @@ func (c Capture) structurallyUnreadable() bool {
 		!c.ReferenceSetAdmissibilityStatus.Known() || !c.SamplingProfileCoverageMode.Known() {
 		return true
 	}
+	// A missing hardware-class digest on either side (capture or route snapshot) is an
+	// unreadable capture, not merely an uncovered profile — the class binding cannot be
+	// verified at all.
+	if c.HardwareRuntimeClassDigest == "" || c.RouteSnapshotHardwareClassDigest == "" {
+		return true
+	}
 	if c.State == StateExpired && !c.ExpiryCause.Known() {
 		return true
 	}
@@ -153,10 +159,17 @@ func (c Capture) missingEnforceEvidence() bool {
 	if c.ReferenceQuorumCount < 2 || len(c.ReferenceEventDigests) < c.ReferenceQuorumCount {
 		return true
 	}
+	// Require at least ReferenceQuorumCount DISTINCT non-empty reference event digests:
+	// a repeated digest is one reference, not a provable independent quorum.
+	seen := make(map[string]struct{}, len(c.ReferenceEventDigests))
 	for _, d := range c.ReferenceEventDigests {
 		if d == "" {
 			return true
 		}
+		seen[d] = struct{}{}
+	}
+	if len(seen) < c.ReferenceQuorumCount {
+		return true
 	}
 	return false
 }

@@ -16,6 +16,12 @@ func goodThresholdRecord() ThresholdRecord {
 	r.CalibrationSampleCount = 200
 	r.MinEligibleCanaryCount = 100
 	r.MeasurementPositionCount = 8
+	r.Coverage = ThresholdCoverage{
+		ModelID: "model-x", TargetModelHash: "hash-x", TokenizerIdentity: "tok-x",
+		SamplerStage: SamplerStagePostSampler, SamplingProfile: "temp-0.7", HardwareRuntimeClass: "m3-max",
+	}
+	r.CalibrationWindowStart = "2026-07-01T00:00:00Z"
+	r.CalibrationWindowEnd = "2026-07-31T00:00:00Z"
 	r.BaselineTailMassFeasibilityRate = 0.99
 	r.FalsePositiveBudget = 0.01
 	r.KnownGoodCohortDigest = "sha256:cohort"
@@ -167,6 +173,7 @@ func goodEnforcePolicy() Policy {
 	p.ThresholdVersion = "thr-1"
 	p.DisclosureCopyVersion = "disc-v1"
 	p.DisclosureCopyDigest = "sha256:disc"
+	p.EnabledAt = 1_700_000_000
 	return p
 }
 

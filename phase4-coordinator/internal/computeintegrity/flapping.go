@@ -110,6 +110,7 @@ func (s *Store) ApplyFlapping(key ComputeIntegrityKey, fp FlappingWindowPolicy, 
 	if !ov.state.IsAdverseOverlay() {
 		ov.state = StateBlockedManualReview
 		ov.origin = origin
+		ov.flappingPassClearable = FlappingClearsByPassSequence(fp)
 	}
 	return ev
 }
