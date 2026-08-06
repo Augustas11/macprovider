@@ -1,0 +1,263 @@
+{
+  "schema_version": "macprovider.provider-prebeta-admission-evidence.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "run_id": "provider-prebeta-admission-m4pro-20260806T065625Z",
+  "requirement_ids": [
+    "SPEC-033-R001"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "002cdc35d055ae0a103219b10ab89c4aaf27b401"
+  },
+  "captured_at": "2026-08-06T06:56:25Z",
+  "expires_at": "2026-11-06",
+  "operator": {
+    "role": "provider-prebeta-operator",
+    "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+  },
+  "environment": {
+    "class": "physical-provider-prebeta-admission",
+    "hardware_profile": "apple-silicon-m4-pro-24gb-redacted",
+    "candidate": "provider-cli:v1.8.88"
+  },
+  "result": {
+    "status": "pass",
+    "summary": "M4 Pro 24GB provider-prebeta hardware-profile and verifier acceptance passed on Pearl production. The provider submitted replacement hardware evidence, received dual-control hardware trust, verified through stats-hardware-verifier, remained route-eligible, and served a public authenticated buyer smoke request for the expected Llama model. This artifact promotes only SPEC-033-R001; strict-gate, referral, broader autotune, buyer-money, and payout-registration rows remain outside this claim."
+  },
+  "steps": [
+    {
+      "id": "step-01-private-prebeta-authorization",
+      "status": "pass",
+      "assertion": "The same-Mac replacement provider entered through the current provider-prebeta posture: referral activation was not required for this cohort claim, and hardware trust was handled through dual-control operator approval before verifier promotion.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-02-install-launch-identity",
+      "status": "pass",
+      "assertion": "The provider launched as provider-cli v1.8.88 on the redacted Apple M4 Pro 24GB Mac, produced a new stable provider identity fingerprint, and reported hardware profile fields through the CLI hello path.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-03-provider-registration-admission",
+      "status": "pass",
+      "assertion": "Pearl admitted the same redacted provider identity, assigned a coordinator session, marked bearer authentication valid, and reported the provider ready and routing-eligible after trust verification.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-04-catalog-autotune-readiness",
+      "status": "pass",
+      "assertion": "The provider selected mlx-community/Llama-3.2-3B-Instruct-4bit through the current autotune catalog row, with catalog identity, model hash, and weights manifest digest captured from Pearl pool state.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-05-hardware-evidence-verifier",
+      "status": "pass",
+      "assertion": "Hardware verifier job 24 for the same redacted provider identity moved from waiting_trust to verified after dual-control hardware trust, with decision_reason hardware-verifier.v2:verified_trusted_hardware and provider_hardware_profiles.verified=true.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-06-provider-runtime-routing",
+      "status": "pass",
+      "assertion": "After verifier success, Pearl pool state showed the provider ready, routing_eligible=true, auth_state=bearer_validated, hash_status=hash_verified, encrypted_leg=true, slots_free=1, and WS tunneled inference active.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-07-buyer-serving-smoke",
+      "status": "pass",
+      "assertion": "A public authenticated request through https://api.streamvc.live/v1/chat/completions returned HTTP 200 for mlx-community/Llama-3.2-3B-Instruct-4bit, and the buyer-visible provider attribution plus coordinator route snapshot both hashed to the newly admitted 24GB provider.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-08-redaction-and-correlation",
+      "status": "pass",
+      "assertion": "The artifact redacts provider IDs, session IDs, hostnames, endpoint URLs, account IDs, operator credentials, demo token material, and local account names while preserving stable SHA-256 fingerprints for verifier, pool, route, and buyer-smoke correlation.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    }
+  ],
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true
+  },
+  "observations": {
+    "evidence_scope": "actual-physical-provider-prebeta-hardware-verifier-slice",
+    "provider": {
+      "provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+      "provider_assigned_id_sha256": "0fec8b1339cfac1f6e4ca2de1f656ed971c1c8d164555996ef16c1d44cc92b22",
+      "hostname_sha256": "ddf096c51ffd90bb35fb480a48600966cbb1a0e9a3ba35e994f5387aeaecd5bc",
+      "receipt_pubkey_sha256": "fafa34f754c7e44e61d9452f9236c5322e5310f8fc181816f285257bfecd169c",
+      "hardware_identity_hash_sha256": "aadbc96fecacdb2102165015fe517cede9d5b279bf360d7418f8336051332fbe",
+      "hardware_model": "Apple M4 Pro",
+      "hardware_capacity": {
+        "chip": "Apple M4 Pro",
+        "cpu_cores_total": 12,
+        "gpu_cores_total": 20,
+        "bandwidth_gb_per_s": 273,
+        "network_power_kw": 0.065
+      },
+      "memory_gb": 24,
+      "macos_version": "Version 15.7.7 (Build 24G720)",
+      "binary_version": "1.8.88",
+      "local_account_role": "provider-operator-redacted",
+      "launch_state": "online via provider app or CLI replacement session",
+      "inference_path": "ws_tunneled"
+    },
+    "coordinator": {
+      "class": "Pearl production coordinator",
+      "health_observed_at": "2026-08-06T06:46:45Z",
+      "version": "v1.8.89",
+      "recommended_binary_version": "1.8.88",
+      "pool_size": 5,
+      "pool_ready": 5,
+      "pool_policy_ready": 5,
+      "trust_authority_degraded": false,
+      "target_provider_connected_at": "2026-08-06T05:24:03.308694151Z",
+      "target_provider_admitted_at": "2026-08-06T05:24:03.308694151Z",
+      "target_provider_last_heartbeat_at": "2026-08-06T07:01:16.808498783Z",
+      "target_provider_last_activity_at": "2026-08-06T07:01:16.808316898Z",
+      "state": "ready",
+      "routing_eligible": true,
+      "auth_state": "bearer_validated",
+      "hash_status": "hash_verified",
+      "encrypted_leg": true,
+      "attestation_status": "not_required",
+      "slots_free": 1,
+      "slots_total": 1,
+      "max_concurrency": 1,
+      "max_context_tokens": 4000,
+      "tier": "provisional"
+    },
+    "catalog_autotune": {
+      "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "supported_models": [
+        "mlx-community/Llama-3.2-3B-Instruct-4bit"
+      ],
+      "model_params_b": 3,
+      "model_hash": "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90",
+      "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "weights_manifest_sha256": "0baf13715db1eeb56e6d0806b0d764aa1c44497aaaaf8d2ba90c21128d9fe2fe",
+      "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1",
+      "catalog_release_id": "published-2026-07-29-inband-provenance-v1",
+      "catalog_policy_version": "autotune-policy-v1",
+      "catalog_row_identity": "c17e31e3bb1e1b64809e0157b32f91d03c1f6db716f03a2eee3fe589e8fbe9e2",
+      "catalog_candidate_sha256": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+      "catalog_signer_key_id": "streamvc-autotune-static-v4",
+      "catalog_admission_mode": "current",
+      "throughput_tps_estimate": 8.841067301277478
+    },
+    "hardware_verifier": {
+      "job_id": 24,
+      "provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+      "source": "autotune",
+      "status": "verified",
+      "chip": "Apple M4 Pro",
+      "chip_normalized": "apple m4 pro",
+      "unified_memory_gb": 24,
+      "bandwidth_tier": "B",
+      "benchmark_count": 3,
+      "max_sustained_tps": 95.45454545454545,
+      "os_version": "Version 15.7.7 (Build 24G720)",
+      "binary_version": "1.8.88",
+      "generated_at": "2026-08-06T05:22:19+00:00",
+      "submitted_at": "2026-08-06T05:23:43.502231+00:00",
+      "evidence_sha256": "a8077e857257444bdd1d28c6fc42bbd072584c6fbab46cbd8708c1ca776fcf38",
+      "decision_reason_before_trust": "hardware-verifier.v2:missing_trusted_hardware_identity",
+      "decision_reason_after_trust": "hardware-verifier.v2:verified_trusted_hardware",
+      "verifier_service": "stats-hardware-verifier.service",
+      "verifier_summary": "verified=1 rejected=0 waiting=0",
+      "provider_hardware_profile": {
+        "source": "cli_hello",
+        "verified": true,
+        "app_version": "1.8.88",
+        "last_reported_at": "2026-08-06T05:22:19+00:00"
+      },
+      "hardware_trust": {
+        "source": "operator_api",
+        "trusted_at": "2026-08-06T06:47:41.457333+00:00",
+        "trusted_by_sha256": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973",
+        "requesting_operator_sha256": "dac2e48d5d876b102a3e17b8f95a2e7c1d2390765816a7ea8a2659f8fedfa516",
+        "pending_id_sha256": "ed21f5c96e9acd12f1eadf0a02997f9bb62fbc111b9af196335947f6d1ddc2b7",
+        "incident_id": "issue-614-provider-prebeta"
+      }
+    },
+    "buyer_smoke": {
+      "base": "https://api.streamvc.live",
+      "auth_surface": "public demo-session token",
+      "requested_model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "http_status": 200,
+      "response_model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "request_id_sha256": "80ca9c4c8ca4adf4d6d94d0ac87b30c452cf99d0d40ffb761742dd551e34920f",
+      "internal_request_id_sha256": "89ed75793fbc7a1a11cad53266d7f3223e74ba514a3c1a06d1ba627dfb79043b",
+      "response_id_sha256": "cfbb28edd3a9d94f9bb0b9c1e0ae0969c030f76c8e53af1ec21fd0c2342ca69d",
+      "buyer_visible_provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+      "coordinator_snapshot_provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+      "target_provider_match": true,
+      "gateway_wall_ms": 531,
+      "coordinator_request_log_ts_utc": "2026-08-06T06:56:25.617883813Z",
+      "coordinator_request_log_status": 200,
+      "coordinator_request_log_model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "coordinator_route_snapshot_mode": "enforce",
+      "coordinator_spec008_hash_status": "hash_verified",
+      "coordinator_route_snapshot_digest_sha256": "9d24d855542f23331a2b8a4ab243f7304e08e1ad2fa49f5dbee81077a6818ac8",
+      "prompt_hash_sha256": "c9a1be2e894c35e2b14c91bffa83a677d3e2826d3c78acc73809f11bd9719ec3",
+      "prompt_tokens": 39,
+      "completion_tokens": 4,
+      "latency_ms": 464,
+      "routing_ms": 0,
+      "ttft_ms": 456,
+      "decode_ms": 2,
+      "candidate_count_after_filters": 3,
+      "filtered_model_mismatch_count": 2,
+      "candidate_hashes_after_filters": [
+        "0994cb6a985ada2f30574ac849de3250481e7975dedb532215ffe0282d3f861d",
+        "2d812448a57b8b32893191acd78ea6fc4735eba8db8def8993ff708ed2f3a387",
+        "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad"
+      ],
+      "pin_header_sent": true,
+      "pin_header_effect": "not relied on; gateway code strips or does not forward provider-pinning headers, and the route snapshot is the authoritative selected-provider proof"
+    },
+    "payout_posture": {
+      "provider_payout_setup_claimed": false,
+      "related_signed_evidence": "journeys/evidence/spec016-r002-payout-address-20260805T054857Z.journey-result.signed.json",
+      "rationale": "Provider payout-address registration is covered by JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION and is not promoted by this provider-prebeta hardware verifier artifact."
+    },
+    "not_promoted_by_this_artifact": [
+      "SPEC-010-R004",
+      "SPEC-010-R005",
+      "SPEC-010-R006",
+      "SPEC-023-R001",
+      "SPEC-023-R002",
+      "SPEC-032-R001",
+      "SPEC-032-R002",
+      "SPEC-032-R003",
+      "SPEC-034-R001",
+      "SPEC-016-R001",
+      "SPEC-016-R003",
+      "SPEC-016-R004",
+      "SPEC-016-R005",
+      "SPEC-016-R006",
+      "SPEC-016-R007",
+      "SPEC-016-R008",
+      "SPEC-016-R009",
+      "SPEC-016-R010",
+      "SPEC-016-R011"
+    ],
+    "not_promoted_rationale": "The captured physical run is strong for replacement hardware-profile submission and verifier acceptance. It does not, by itself, prove the full strict hello-gate policy matrix, referral admission semantics, all autotune operator transcript obligations, payout execution, or broader buyer/API/money-path conformance."
+  }
+}
