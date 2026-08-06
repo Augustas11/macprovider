@@ -202,6 +202,26 @@ func TestAC04_WindowStateMachine(t *testing.T) {
 		}
 	})
 
+	t.Run("abusive block does not clear using pre-block passes or while still abusive", func(t *testing.T) {
+		s := NewStore()
+		k := winKey("a", 1, "temp-0.7")
+		// 5 passes over 28h BEFORE any block.
+		for i := 0; i < 5; i++ {
+			s.RecordCanary(k, VerdictPass, base+int64(i)*7*hour, OriginEnforcePreserved)
+		}
+		// Then 4 abusive events create the block (resets the pre-block streak).
+		for i := 0; i < 4; i++ {
+			s.RecordAbusiveInconclusive(k, base+35*hour+int64(i)*hour, p.AbusiveInconclusiveLimit, OriginEnforcePreserved)
+		}
+		if s.OverlayState(k.Overlay()) != StateBlockedAbusive {
+			t.Fatalf("expected abusive block, got %s", s.OverlayState(k.Overlay()))
+		}
+		// Immediately attempting to clear with the pre-block streak must fail.
+		if s.AttemptClear(k, p, AdmissibilityAdmissible, base+36*hour) {
+			t.Fatal("pre-block passes must not clear a fresh abusive block")
+		}
+	})
+
 	t.Run("quarantine clears only after clear_pass_count passes over >=24h", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")

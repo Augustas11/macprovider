@@ -39,10 +39,50 @@ type overlayState struct {
 	onboardingFailures   []int64 // 24h onboarding-failure timestamps
 	passStreak           int     // consecutive passes toward a clear
 	firstPassMs          int64   // first pass in the current clear streak
+	blockEnteredMs       int64   // when the current adverse state was entered (0 if none)
 	// flappingPassClearable marks a blocked:manual_review_required entered by the
 	// flapping policy whose clear_rule is clear_pass_count_sequence — the sole
 	// manual-review block that may clear via a pass sequence (FR-10).
 	flappingPassClearable bool
+}
+
+// strongerOrigin returns the money-blocking-stronger of two origins: enforce_preserved
+// dominates telemetry_only, which dominates unknown. Overlay risk always records the
+// strongest origin seen so a later escalation/promotion inherits it (FR-3, FR-12).
+func strongerOrigin(a, b AdjudicationOrigin) AdjudicationOrigin {
+	if a == OriginEnforcePreserved || b == OriginEnforcePreserved {
+		return OriginEnforcePreserved
+	}
+	if a.Known() {
+		return a
+	}
+	return b
+}
+
+// enterBlock sets an adverse overlay state, recording its origin (strongest seen) and
+// resetting the clear streak so only passes recorded AFTER the block count toward a
+// clear (FR-10). A fresh enforce-preserved provider-attributable block may replace a
+// dormant telemetry-only adverse state.
+func (ov *overlayState) enterBlock(st State, origin AdjudicationOrigin, atMs int64) {
+	ov.state = st
+	ov.origin = strongerOrigin(ov.origin, origin)
+	ov.passStreak = 0
+	ov.firstPassMs = 0
+	ov.blockEnteredMs = atMs
+}
+
+// canEnterProviderBlock reports whether a fresh provider-attributable block may be
+// created: only when there is no active adverse overlay (a new block never overwrites an
+// existing adverse state).
+//
+// NOTE (v0.1 scoped): the FR-3 re-adjudication case — fresh enforce-preserved evidence
+// superseding a dormant telemetry-only overlay — is deliberately NOT implemented here.
+// It only matters in enforce mode, which §6.1 makes unreachable in v0.1 (every reachable
+// adverse state is telemetry_only with no money effect), and modeling it correctly needs
+// a separate state-origin vs risk-origin split that adds complexity for a dormant path.
+// It is a documented follow-up for the live-enforce-wiring work.
+func (ov *overlayState) canEnterProviderBlock() bool {
+	return !ov.state.IsAdverseOverlay()
 }
 
 // swapState holds the swap-laundering overlay for a (stable_provider_identity, model)
@@ -130,9 +170,7 @@ func (s *Store) RecordCanary(key ComputeIntegrityKey, v Verdict, atMs int64, ori
 		ov.quarantineCandWindow++
 		ov.passStreak = 0 // any non-pass breaks the consecutive-pass clear streak (FR-10).
 		ov.firstPassMs = 0
-		if !ov.origin.Known() {
-			ov.origin = origin // stamp the origin of the accumulated risk.
-		}
+		ov.origin = strongerOrigin(ov.origin, origin) // record the strongest risk origin.
 	default: // warn, inconclusive: not a pass, so the consecutive-pass streak resets.
 		ov.passStreak = 0
 		ov.firstPassMs = 0
@@ -146,9 +184,12 @@ func (s *Store) RecordAbusiveInconclusive(key ComputeIntegrityKey, atMs int64, l
 	defer s.mu.Unlock()
 	ov := s.overlay(key.Overlay())
 	ov.abusiveEvents = pruneWindow(append(ov.abusiveEvents, atMs), atMs, day)
-	if len(ov.abusiveEvents) > limit && !ov.state.IsAdverseOverlay() {
-		ov.state = StateBlockedAbusive
-		ov.origin = origin
+	// Decide block eligibility from the CURRENT origin (before upgrading it), so fresh
+	// enforce evidence can supersede a dormant telemetry-only overlay.
+	if len(ov.abusiveEvents) > limit && ov.canEnterProviderBlock() {
+		ov.enterBlock(StateBlockedAbusive, origin, atMs) // enterBlock records the origin.
+	} else {
+		ov.origin = strongerOrigin(ov.origin, origin) // just record the strongest risk origin.
 	}
 }
 
@@ -159,9 +200,10 @@ func (s *Store) RecordOnboardingFailure(key ComputeIntegrityKey, atMs int64, ori
 	defer s.mu.Unlock()
 	ov := s.overlay(key.Overlay())
 	ov.onboardingFailures = pruneWindow(append(ov.onboardingFailures, atMs), atMs, day)
-	if len(ov.onboardingFailures) >= 2 && !ov.state.IsAdverseOverlay() {
-		ov.state = StateBlockedManualReview
-		ov.origin = origin
+	if len(ov.onboardingFailures) >= 2 && ov.canEnterProviderBlock() {
+		ov.enterBlock(StateBlockedManualReview, origin, atMs) // enterBlock records the origin.
+	} else {
+		ov.origin = strongerOrigin(ov.origin, origin) // just record the strongest risk origin.
 	}
 }
 

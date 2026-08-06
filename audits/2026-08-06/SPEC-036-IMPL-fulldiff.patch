@@ -1,9 +1,9 @@
 diff --git a/phase4-coordinator/internal/computeintegrity/activation.go b/phase4-coordinator/internal/computeintegrity/activation.go
 new file mode 100644
-index 00000000..49127344
+index 00000000..f6085657
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/activation.go
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,99 @@
 +package computeintegrity
 +
 +// FR-1 enforce activation preconditions. enforce MUST refuse activation unless every
@@ -76,6 +76,8 @@ index 00000000..49127344
 +	add(p.HardwareRuntimeClass != "", "hardware_runtime_class missing")
 +	add(p.CorpusVersion != "", "corpus_version missing")
 +	add(p.ThresholdVersion != "", "threshold_version missing")
++	add(p.NormalizationBasis == NormalizationFullDist, "normalization_basis must be full_distribution for v0.1")
++	add(p.EnabledAt > 0, "enabled_at must be set for an active enforce policy")
 +	add(p.DisclosureCopyVersion != "" && p.DisclosureCopyDigest != "", "disclosure copy binding missing")
 +	add(deps.SPEC030PrimitivesExposed, "SPEC-030 primitives not exposed")
 +	add(deps.SPEC022Enforce, "SPEC-022 is not in enforce for the covered coverage")
@@ -103,10 +105,10 @@ index 00000000..49127344
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/activation_test.go b/phase4-coordinator/internal/computeintegrity/activation_test.go
 new file mode 100644
-index 00000000..9e3cb5bf
+index 00000000..f44182cd
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/activation_test.go
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,274 @@
 +package computeintegrity
 +
 +import "testing"
@@ -125,6 +127,12 @@ index 00000000..9e3cb5bf
 +	r.CalibrationSampleCount = 200
 +	r.MinEligibleCanaryCount = 100
 +	r.MeasurementPositionCount = 8
++	r.Coverage = ThresholdCoverage{
++		ModelID: "model-x", TargetModelHash: "hash-x", TokenizerIdentity: "tok-x",
++		SamplerStage: SamplerStagePostSampler, SamplingProfile: "temp-0.7", HardwareRuntimeClass: "m3-max",
++	}
++	r.CalibrationWindowStart = "2026-07-01T00:00:00Z"
++	r.CalibrationWindowEnd = "2026-07-31T00:00:00Z"
 +	r.BaselineTailMassFeasibilityRate = 0.99
 +	r.FalsePositiveBudget = 0.01
 +	r.KnownGoodCohortDigest = "sha256:cohort"
@@ -276,6 +284,7 @@ index 00000000..9e3cb5bf
 +	p.ThresholdVersion = "thr-1"
 +	p.DisclosureCopyVersion = "disc-v1"
 +	p.DisclosureCopyDigest = "sha256:disc"
++	p.EnabledAt = 1_700_000_000
 +	return p
 +}
 +
@@ -765,10 +774,10 @@ index 00000000..16a453ba
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/capture.go b/phase4-coordinator/internal/computeintegrity/capture.go
 new file mode 100644
-index 00000000..63c81609
+index 00000000..377c4eb3
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/capture.go
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,184 @@
 +package computeintegrity
 +
 +// Capture is the immutable request-start compute-integrity state captured for
@@ -881,6 +890,12 @@ index 00000000..63c81609
 +		!c.ReferenceSetAdmissibilityStatus.Known() || !c.SamplingProfileCoverageMode.Known() {
 +		return true
 +	}
++	// A missing hardware-class digest on either side (capture or route snapshot) is an
++	// unreadable capture, not merely an uncovered profile — the class binding cannot be
++	// verified at all.
++	if c.HardwareRuntimeClassDigest == "" || c.RouteSnapshotHardwareClassDigest == "" {
++		return true
++	}
 +	if c.State == StateExpired && !c.ExpiryCause.Known() {
 +		return true
 +	}
@@ -924,10 +939,17 @@ index 00000000..63c81609
 +	if c.ReferenceQuorumCount < 2 || len(c.ReferenceEventDigests) < c.ReferenceQuorumCount {
 +		return true
 +	}
++	// Require at least ReferenceQuorumCount DISTINCT non-empty reference event digests:
++	// a repeated digest is one reference, not a provable independent quorum.
++	seen := make(map[string]struct{}, len(c.ReferenceEventDigests))
 +	for _, d := range c.ReferenceEventDigests {
 +		if d == "" {
 +			return true
 +		}
++		seen[d] = struct{}{}
++	}
++	if len(seen) < c.ReferenceQuorumCount {
++		return true
 +	}
 +	return false
 +}
@@ -942,10 +964,10 @@ index 00000000..63c81609
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/clear.go b/phase4-coordinator/internal/computeintegrity/clear.go
 new file mode 100644
-index 00000000..5a5921e3
+index 00000000..8954e824
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/clear.go
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,75 @@
 +package computeintegrity
 +
 +// FR-10 clear rules. quarantined_compute_drift and blocked:abusive_inconclusive clear
@@ -970,8 +992,13 @@ index 00000000..5a5921e3
 +	if ov == nil {
 +		return false
 +	}
-+	if ov.state != StateQuarantinedDrift && ov.state != StateBlockedAbusive {
-+		return false // manual_review / swap / reference blocks need dual approval.
++	// Pass-sequence-clearable states are quarantined_compute_drift, blocked:abusive, and
++	// a flapping-origin blocked:manual_review whose clear_rule is clear_pass_count_sequence
++	// (the sole manual-review exception, FR-10). Other blocks need dual approval.
++	clearable := ov.state == StateQuarantinedDrift || ov.state == StateBlockedAbusive ||
++		(ov.state == StateBlockedManualReview && ov.flappingPassClearable)
++	if !clearable {
++		return false
 +	}
 +	if ov.passStreak < policy.ClearPassCount {
 +		return false
@@ -982,6 +1009,7 @@ index 00000000..5a5921e3
 +	ov.state = ""
 +	ov.origin = ""
 +	ov.quarantineCandWindow = 0
++	ov.flappingPassClearable = false
 +	return true
 +}
 +
@@ -1396,10 +1424,10 @@ index 00000000..6025942c
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/flapping.go b/phase4-coordinator/internal/computeintegrity/flapping.go
 new file mode 100644
-index 00000000..9e9096a9
+index 00000000..8f392b9b
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/flapping.go
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,124 @@
 +package computeintegrity
 +
 +import "math"
@@ -1512,6 +1540,7 @@ index 00000000..9e9096a9
 +	if !ov.state.IsAdverseOverlay() {
 +		ov.state = StateBlockedManualReview
 +		ov.origin = origin
++		ov.flappingPassClearable = FlappingClearsByPassSequence(fp)
 +	}
 +	return ev
 +}
@@ -2438,10 +2467,10 @@ index 00000000..39118676
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/policy.go b/phase4-coordinator/internal/computeintegrity/policy.go
 new file mode 100644
-index 00000000..7694114f
+index 00000000..29148202
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/policy.go
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,307 @@
 +package computeintegrity
 +
 +import (
@@ -2685,6 +2714,7 @@ index 00000000..7694114f
 +	obj := map[string]any{
 +		"policy_version":                       p.PolicyVersion,
 +		"mode":                                 string(p.Mode),
++		"enabled_at":                           p.EnabledAt,
 +		"model_ids":                            toAnySlice(models),
 +		"target_model_hash":                    p.TargetModelHash,
 +		"signed_catalog_selector":              p.SignedCatalogSelector,
@@ -2750,10 +2780,10 @@ index 00000000..7694114f
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/probe.go b/phase4-coordinator/internal/computeintegrity/probe.go
 new file mode 100644
-index 00000000..1224cd11
+index 00000000..ffa4f3e2
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/probe.go
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,362 @@
 +package computeintegrity
 +
 +import (
@@ -2873,26 +2903,68 @@ index 00000000..1224cd11
 +// discriminated union on ResultKind; the measurement variant carries Positions, the
 +// provider_inconclusive variant carries ProviderReasonCode.
 +type ResultPayload struct {
-+	SchemaVersion             string           `json:"schema_version"`
-+	ProbeID                   string           `json:"probe_id"`
-+	Nonce                     string           `json:"nonce"`
-+	ProbeRequestDigest        string           `json:"probe_request_digest"`
-+	ResultKind                string           `json:"result_kind"`
-+	RetryOfProbeID            string           `json:"retry_of_probe_id,omitempty"`
-+	ModelID                   string           `json:"model_id"`
-+	TargetModelHash           string           `json:"target_model_hash"`
-+	TokenizerIdentity         string           `json:"tokenizer_identity"`
-+	TargetGeneration          int64            `json:"target_generation"`
-+	SamplingProfile           string           `json:"sampling_profile"`
-+	CorpusVersion             string           `json:"corpus_version"`
-+	ThresholdVersion          string           `json:"threshold_version"`
-+	HardwareRuntimeClass      string           `json:"hardware_runtime_class"`
-+	SupportSelection          string           `json:"support_selection"`
-+	NormalizationBasis        string           `json:"normalization_basis"`
-+	SamplerStage              string           `json:"sampler_stage"`
-+	Positions                 []ResultPosition `json:"positions,omitempty"`
-+	ProviderReasonCode        string           `json:"provider_reason_code,omitempty"`
-+	IdentityUnavailableReason string           `json:"identity_unavailable_reason,omitempty"`
++	SchemaVersion             string              `json:"schema_version"`
++	ProbeID                   string              `json:"probe_id"`
++	Nonce                     string              `json:"nonce"`
++	ProbeRequestDigest        string              `json:"probe_request_digest"`
++	ResultKind                string              `json:"result_kind"`
++	RetryOfProbeID            string              `json:"retry_of_probe_id,omitempty"`
++	ModelID                   string              `json:"model_id"`
++	TargetModelHash           string              `json:"target_model_hash"`
++	TokenizerIdentity         string              `json:"tokenizer_identity"`
++	TargetGeneration          int64               `json:"target_generation"`
++	SamplingProfile           string              `json:"sampling_profile"`
++	CorpusVersion             string              `json:"corpus_version"`
++	ThresholdVersion          string              `json:"threshold_version"`
++	HardwareRuntimeClass      string              `json:"hardware_runtime_class"`
++	SupportSelection          string              `json:"support_selection"`
++	NormalizationBasis        string              `json:"normalization_basis"`
++	SamplerStage              string              `json:"sampler_stage"`
++	Positions                 []ResultPosition    `json:"positions,omitempty"`
++	ValidationMetadata        *ValidationMetadata `json:"validation_metadata,omitempty"`
++	ProviderReasonCode        string              `json:"provider_reason_code,omitempty"`
++	IdentityUnavailableReason string              `json:"identity_unavailable_reason,omitempty"`
++}
++
++// ValidationMetadata is the measurement-variant-only FR-6 metadata block. All fields
++// are advisory except that provider_scalar_verdict is non-authoritative — the
++// coordinator derives the verdict itself (FR-7). Present exactly for a measurement
++// result; forbidden on a provider_inconclusive result.
++type ValidationMetadata struct {
++	ProviderMeasuredAt    string   `json:"provider_measured_at"`    // RFC3339 UTC
++	ProviderExecutionMs   int64    `json:"provider_execution_ms"`   // non-negative
++	ProviderFinalK        int      `json:"provider_final_k"`        // 64 or 256
++	ProviderScalarVerdict *float64 `json:"provider_scalar_verdict"` // nullable, advisory
++}
++
++// ValidateResultVariant enforces the FR-6 discriminated-union rules: a measurement
++// result MUST carry positions + validation_metadata and MUST NOT carry a provider
++// reason code; a provider_inconclusive result MUST carry a valid provider_reason_code
++// and MUST NOT carry positions or validation_metadata.
++func ValidateResultVariant(p ResultPayload) error {
++	switch p.ResultKind {
++	case ResultKindMeasurement:
++		if len(p.Positions) == 0 || p.ValidationMetadata == nil {
++			return fmt.Errorf("measurement result must carry positions and validation_metadata")
++		}
++		if p.ProviderReasonCode != "" {
++			return fmt.Errorf("measurement result must not carry provider_reason_code")
++		}
++		if p.ValidationMetadata.ProviderExecutionMs < 0 ||
++			(p.ValidationMetadata.ProviderFinalK != 64 && p.ValidationMetadata.ProviderFinalK != 256) {
++			return fmt.Errorf("measurement validation_metadata out of range")
++		}
++	case ResultKindProviderInconclusive:
++		if !ValidProviderReasonCode(p.ProviderReasonCode) {
++			return fmt.Errorf("provider_inconclusive result must carry a valid provider_reason_code")
++		}
++		if len(p.Positions) != 0 || p.ValidationMetadata != nil {
++			return fmt.Errorf("provider_inconclusive result must not carry positions/validation_metadata")
++		}
++	default:
++		return fmt.Errorf("unknown result_kind %q", p.ResultKind)
++	}
++	return nil
 +}
 +
 +// ResultEnvelope is the outer probe result envelope (FR-6).
@@ -3014,6 +3086,49 @@ index 00000000..1224cd11
 +	return nil
 +}
 +
++// ValidateRetryBinding enforces the FR-7 mandatory-retry binding: a K=256 retry MUST
++// bind the SAME covered key, corpus positions (prompt/prefix/context and reference
++// top-K sets), and target_generation as the K=64 attempt it retries, and echo its
++// probe_id. This prevents a provider from substituting easier/different evidence on
++// retry after the K=64 trigger.
++func ValidateRetryBinding(retry, original RequestEnvelope) error {
++	rp, op := retry.Payload, original.Payload
++	if rp.K != 256 || op.K != 64 {
++		return fmt.Errorf("retry binding: expected K=256 retry of a K=64 attempt")
++	}
++	if rp.RetryOfProbeID != op.ProbeID {
++		return fmt.Errorf("retry binding: retry_of_probe_id does not echo the K=64 probe_id")
++	}
++	// Covered key must match exactly.
++	if rp.ModelID != op.ModelID || rp.TargetModelHash != op.TargetModelHash ||
++		rp.TokenizerIdentity != op.TokenizerIdentity || rp.SamplerStage != op.SamplerStage ||
++		rp.TargetGeneration != op.TargetGeneration || rp.SamplingProfile != op.SamplingProfile ||
++		rp.CorpusVersion != op.CorpusVersion || rp.ThresholdVersion != op.ThresholdVersion ||
++		rp.HardwareRuntimeClass != op.HardwareRuntimeClass {
++		return fmt.Errorf("retry binding: covered key differs from the K=64 attempt")
++	}
++	// Position set and per-position binding (including reference top-K) must match.
++	if len(rp.Positions) != len(op.Positions) {
++		return fmt.Errorf("retry binding: position count differs")
++	}
++	for i := range rp.Positions {
++		a, b := rp.Positions[i], op.Positions[i]
++		if a.PromptID != b.PromptID || a.PositionIndex != b.PositionIndex ||
++			a.TokenPrefixDigest != b.TokenPrefixDigest || a.ContextHash != b.ContextHash {
++			return fmt.Errorf("retry binding: position %d identity differs", i)
++		}
++		if len(a.ReferenceTopKSets) != len(b.ReferenceTopKSets) {
++			return fmt.Errorf("retry binding: position %d reference-set count differs", i)
++		}
++		for j := range a.ReferenceTopKSets {
++			if a.ReferenceTopKSets[j].ReferenceEventDigest != b.ReferenceTopKSets[j].ReferenceEventDigest {
++				return fmt.Errorf("retry binding: position %d reference digest differs", i)
++			}
++		}
++	}
++	return nil
++}
++
 +// ValidateProbeExpiry enforces the FR-6 load-bound expiry: the probe MUST expire no
 +// more than 120 seconds after issuance. issuedAtUnixMS is the coordinator's issuance
 +// time. It is checked at issuance (the issuer knows both times).
@@ -3033,10 +3148,10 @@ index 00000000..1224cd11
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/probe_tv_test.go b/phase4-coordinator/internal/computeintegrity/probe_tv_test.go
 new file mode 100644
-index 00000000..4e64e5e6
+index 00000000..b3887b2e
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/probe_tv_test.go
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,330 @@
 +package computeintegrity
 +
 +import (
@@ -3150,6 +3265,53 @@ index 00000000..4e64e5e6
 +		}
 +		if err := ValidateRequestBounds(req2); err == nil {
 +			t.Fatal("expected >8 positions rejection")
++		}
++	})
++
++	t.Run("K=256 retry must bind the exact K=64 attempt (no evidence substitution)", func(t *testing.T) {
++		orig := sampleRequest() // K=64, probe-1
++		retry := sampleRequest()
++		retry.Payload.K = 256
++		retry.Payload.ProbeID = "probe-2"
++		retry.Payload.RetryOfProbeID = "probe-1"
++		if err := ValidateRetryBinding(retry, orig); err != nil {
++			t.Fatalf("a faithful retry should bind: %v", err)
++		}
++		// Substituting the reference digest on retry must be rejected.
++		bad := retry
++		bad.Payload.Positions = []RequestPosition{{
++			PromptID: "p1", PromptRef: "corpus://p1", TokenPrefixDigest: "sha256:pfx", ContextHash: "sha256:ctx",
++			ReferenceTopKSets: []ReferenceTopKSet{{ReferenceEventDigest: "sha256:SUBSTITUTED", ReferenceTopKTokenIDs: []int64{1, 2, 3}}},
++		}}
++		if err := ValidateRetryBinding(bad, orig); err == nil {
++			t.Fatal("a retry that substitutes reference evidence must be rejected")
++		}
++		// Changing the covered key on retry must be rejected.
++		bad2 := retry
++		bad2.Payload.TargetModelHash = "hash-DIFFERENT"
++		if err := ValidateRetryBinding(bad2, orig); err == nil {
++			t.Fatal("a retry that changes the covered key must be rejected")
++		}
++	})
++
++	t.Run("result variant validation enforces the FR-6 discriminated union", func(t *testing.T) {
++		meas := ResultPayload{ResultKind: ResultKindMeasurement,
++			Positions:          []ResultPosition{{PromptID: "p1"}},
++			ValidationMetadata: &ValidationMetadata{ProviderMeasuredAt: "2026-08-06T00:00:00Z", ProviderFinalK: 64}}
++		if err := ValidateResultVariant(meas); err != nil {
++			t.Fatalf("valid measurement should pass: %v", err)
++		}
++		// Measurement missing validation_metadata is rejected.
++		noMeta := meas
++		noMeta.ValidationMetadata = nil
++		if err := ValidateResultVariant(noMeta); err == nil {
++			t.Fatal("measurement without validation_metadata must be rejected")
++		}
++		// provider_inconclusive carrying positions is rejected.
++		inc := ResultPayload{ResultKind: ResultKindProviderInconclusive,
++			ProviderReasonCode: "inconclusive:model_swap", Positions: []ResultPosition{{PromptID: "p1"}}}
++		if err := ValidateResultVariant(inc); err == nil {
++			t.Fatal("provider_inconclusive must not carry positions")
 +		}
 +	})
 +
@@ -3322,10 +3484,10 @@ index 00000000..4e64e5e6
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/reference.go b/phase4-coordinator/internal/computeintegrity/reference.go
 new file mode 100644
-index 00000000..a0090fb1
+index 00000000..003b4544
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/reference.go
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,395 @@
 +package computeintegrity
 +
 +import (
@@ -3589,10 +3751,19 @@ index 00000000..a0090fb1
 +	if len(in.References) < in.MinQuorum {
 +		return AdmissibilityMissingQuorum
 +	}
-+	// Freshness: keep only fresh references.
++	// A missing/invalid clock fails closed: a zero or negative "now", or a reference
++	// whose refresh timestamp is absent or in the future, cannot be treated as fresh.
++	if in.NowUnixMS <= 0 {
++		return AdmissibilityStaleReference
++	}
++	// Freshness: keep only references with a valid, non-future refresh timestamp within
++	// the TTL.
 +	fresh := make([]ReferenceEvent, 0, len(in.References))
 +	for _, r := range in.References {
-+		if in.FreshnessTTLMillis <= 0 || in.NowUnixMS-r.RefreshedAtUnixMS <= in.FreshnessTTLMillis {
++		if r.RefreshedAtUnixMS <= 0 || r.RefreshedAtUnixMS > in.NowUnixMS {
++			continue // missing or future refresh time is not fresh.
++		}
++		if in.NowUnixMS-r.RefreshedAtUnixMS <= in.FreshnessTTLMillis {
 +			fresh = append(fresh, r)
 +		}
 +	}
@@ -3645,6 +3816,63 @@ index 00000000..a0090fb1
 +	return best
 +}
 +
++const (
++	ReferenceSetAdmissibilityType   = "reference_set_admissibility_v1"
++	ReferenceSetAdmissibilitySchema = "reference_set_admissibility_v1"
++)
++
++// ReferenceAdmissibilityMember is one reference's admissibility evidence (FR-4, §3).
++type ReferenceAdmissibilityMember struct {
++	ReferenceEventDigest          string `json:"reference_event_digest"`
++	ReferenceSourceID             string `json:"reference_source_id"`
++	ReferenceFailureDomainID      string `json:"reference_failure_domain_id"`
++	SourceIndependenceEvidence    string `json:"source_independence_evidence_digest"`
++	RuntimeBuildProvenanceDigest  string `json:"runtime_build_provenance_digest"`
++	GoldenFixtureValidationDigest string `json:"golden_fixture_validation_digest"`
++	RefreshedAt                   int64  `json:"refreshed_at"`
++}
++
++// ReferenceSetAdmissibilityV1 is the closed FR-4 reference_set_admissibility_v1 object.
++// Its RFC 8785/JCS digest is the settlement-bearing preimage for the capture's
++// ReferenceSetAdmissibilityDigest and the auditor bundle.
++type ReferenceSetAdmissibilityV1 struct {
++	Type                   string                         `json:"type"`
++	SchemaVersion          string                         `json:"schema_version"`
++	ReferenceSetID         string                         `json:"reference_set_id"`
++	Key                    ThresholdKey                   `json:"key"`
++	Status                 AdmissibilityStatus            `json:"reference_set_admissibility_status"`
++	ReferenceQuorumCount   int                            `json:"reference_quorum_count"`
++	ReferenceFaultCheckVer string                         `json:"reference_fault_check_version"`
++	References             []ReferenceAdmissibilityMember `json:"references"`
++}
++
++// BuildReferenceSetAdmissibility constructs the closed admissibility object from a
++// covered key, status, and reference events (members sorted by reference_event_digest).
++func BuildReferenceSetAdmissibility(setID string, key ThresholdKey, status AdmissibilityStatus,
++	quorum int, faultCheckVersion string, refs []ReferenceEvent) ReferenceSetAdmissibilityV1 {
++	members := make([]ReferenceAdmissibilityMember, 0, len(refs))
++	for _, r := range refs {
++		members = append(members, ReferenceAdmissibilityMember{
++			ReferenceEventDigest:          r.ReferenceEventDigest,
++			ReferenceSourceID:             r.ReferenceSourceID,
++			ReferenceFailureDomainID:      r.FailureDomainID,
++			SourceIndependenceEvidence:    r.OperatorID, // operator identity is the independence discriminant
++			RuntimeBuildProvenanceDigest:  r.RuntimeBuildProvenanceDigest,
++			GoldenFixtureValidationDigest: r.GoldenFixtureValidationDigest,
++			RefreshedAt:                   r.RefreshedAtUnixMS,
++		})
++	}
++	sort.Slice(members, func(i, j int) bool { return members[i].ReferenceEventDigest < members[j].ReferenceEventDigest })
++	return ReferenceSetAdmissibilityV1{
++		Type: ReferenceSetAdmissibilityType, SchemaVersion: ReferenceSetAdmissibilitySchema,
++		ReferenceSetID: setID, Key: key, Status: status, ReferenceQuorumCount: quorum,
++		ReferenceFaultCheckVer: faultCheckVersion, References: members,
++	}
++}
++
++// Digest returns the JCS SHA-256 digest of the closed admissibility object (FR-4).
++func (a ReferenceSetAdmissibilityV1) Digest() (string, error) { return jcsDigest(a) }
++
 +// AuditorReferenceDigests returns the sorted set of reference event digests used for
 +// a verdict, for inclusion in auditor bundles (FR-5, FR-13).
 +func AuditorReferenceDigests(refs []ReferenceEvent) []string {
@@ -3657,10 +3885,10 @@ index 00000000..a0090fb1
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/reference_test.go b/phase4-coordinator/internal/computeintegrity/reference_test.go
 new file mode 100644
-index 00000000..e32cc4aa
+index 00000000..654f4647
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/reference_test.go
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,232 @@
 +package computeintegrity
 +
 +import "testing"
@@ -3752,6 +3980,44 @@ index 00000000..e32cc4aa
 +		in.NowUnixMS = 1000 + 25*3600*1000 // > 24h since refresh
 +		if got := ComputeAdmissibility(in); got != AdmissibilityStaleReference {
 +			t.Fatalf("stale: want stale_reference, got %s", got)
++		}
++	})
++
++	t.Run("future or missing reference refresh timestamps are not fresh", func(t *testing.T) {
++		a, b := refFixtureEvent("a"), refFixtureEvent("b")
++		b.RefreshedAtUnixMS = 999999999999999 // far future
++		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilityStaleReference {
++			t.Fatalf("future refresh timestamp must not be fresh, got %s", got)
++		}
++		a2, b2 := refFixtureEvent("a"), refFixtureEvent("b")
++		b2.RefreshedAtUnixMS = 0 // missing
++		if got := ComputeAdmissibility(refFixtureInput(a2, b2)); got != AdmissibilityStaleReference {
++			t.Fatalf("missing refresh timestamp must not be fresh, got %s", got)
++		}
++	})
++
++	t.Run("impossible reference distribution (mass > 1) is inadmissible", func(t *testing.T) {
++		a, b := refFixtureEvent("a"), refFixtureEvent("b")
++		b.Positions = []ReferencePosition{{PromptID: "p1", PositionIndex: 0, TopK: []int64{1, 2}, Full: ReferenceDistribution{1: 0.8, 2: 0.8}}}
++		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilitySchemaInvalid {
++			t.Fatalf("mass>1 reference distribution must be schema_invalid, got %s", got)
++		}
++	})
++
++	t.Run("closed reference_set_admissibility_v1 digest is deterministic", func(t *testing.T) {
++		key := refFixtureEvent("a").coveredKey()
++		obj := BuildReferenceSetAdmissibility("refset-1", key, AdmissibilityAdmissible, 2, "rfc-v1",
++			[]ReferenceEvent{refFixtureEvent("b"), refFixtureEvent("a")})
++		d1, err := obj.Digest()
++		if err != nil || d1 == "" {
++			t.Fatalf("admissibility digest failed: %v", err)
++		}
++		// Member order in the input must not change the digest (sorted by event digest).
++		obj2 := BuildReferenceSetAdmissibility("refset-1", key, AdmissibilityAdmissible, 2, "rfc-v1",
++			[]ReferenceEvent{refFixtureEvent("a"), refFixtureEvent("b")})
++		d2, _ := obj2.Digest()
++		if d1 != d2 {
++			t.Fatal("admissibility digest must be order-independent over members")
 +		}
 +	})
 +
@@ -4230,10 +4496,10 @@ index 00000000..2ab38ba5
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/settlement_test.go b/phase4-coordinator/internal/computeintegrity/settlement_test.go
 new file mode 100644
-index 00000000..0b485bc1
+index 00000000..d6a4dc73
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/settlement_test.go
-@@ -0,0 +1,376 @@
+@@ -0,0 +1,377 @@
 +package computeintegrity
 +
 +import "testing"
@@ -4565,11 +4831,12 @@ index 00000000..0b485bc1
 +
 +	t.Run("a verified row with incomplete reference-quorum evidence fails closed", func(t *testing.T) {
 +		mutators := []func(*Capture){
-+			func(c *Capture) { c.ReferenceQuorumCount = 1 },                         // < 2
-+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:only"} },  // < quorum
-+			func(c *Capture) { c.ReferenceSetAdmissibilityDigest = "" },             // missing digest
-+			func(c *Capture) { c.ReferenceFaultCheckVersion = "" },                  // missing fault version
-+			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:a", ""} }, // empty digest
++			func(c *Capture) { c.ReferenceQuorumCount = 1 },                                     // < 2
++			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:only"} },              // < quorum
++			func(c *Capture) { c.ReferenceSetAdmissibilityDigest = "" },                         // missing digest
++			func(c *Capture) { c.ReferenceFaultCheckVersion = "" },                              // missing fault version
++			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:a", ""} },             // empty digest
++			func(c *Capture) { c.ReferenceEventDigests = []string{"sha256:dup", "sha256:dup"} }, // duplicate = one reference
 +		}
 +		for i, m := range mutators {
 +			c := payableCapture()
@@ -4824,13 +5091,24 @@ index 00000000..149a7cf2
 +const AllProfilesWindowProfile = "__all_profiles__"
 diff --git a/phase4-coordinator/internal/computeintegrity/threshold.go b/phase4-coordinator/internal/computeintegrity/threshold.go
 new file mode 100644
-index 00000000..52e1b607
+index 00000000..14be8d11
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/threshold.go
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,242 @@
 +package computeintegrity
 +
-+import "math"
++import (
++	"math"
++	"time"
++)
++
++func rfc3339OK(s string) bool {
++	if s == "" {
++		return false
++	}
++	_, err := time.Parse(time.RFC3339, s)
++	return err == nil
++}
 +
 +// FR-8 threshold calibration. Thresholds are keyed by the 8-tuple ThresholdKey.
 +// hardware_runtime_class is a policy invariant per covered key (one class per key), so
@@ -4869,6 +5147,10 @@ index 00000000..52e1b607
 +	MinEligibleCanaryCount   int    `json:"min_eligible_canary_count"`
 +	MeasurementPositionCount int    `json:"measurement_position_count"`
 +
++	// Coverage binds the covered provider/model/hash/tokenizer/sampler-stage/profile/
++	// hardware_runtime_class set the calibration applies to (FR-8).
++	Coverage ThresholdCoverage `json:"coverage"`
++
 +	CalibrationWindowStart string `json:"calibration_window_start"`
 +	CalibrationWindowEnd   string `json:"calibration_window_end"`
 +
@@ -4885,6 +5167,17 @@ index 00000000..52e1b607
 +
 +	ApprovalTimestamp string `json:"approval_timestamp"`
 +	ApproverGroup     string `json:"approver_group"`
++}
++
++// ThresholdCoverage is the closed FR-8 coverage object binding the calibration to a
++// covered key set.
++type ThresholdCoverage struct {
++	ModelID              string `json:"model_id"`
++	TargetModelHash      string `json:"target_model_hash"`
++	TokenizerIdentity    string `json:"tokenizer_identity"`
++	SamplerStage         string `json:"sampler_stage"`
++	SamplingProfile      string `json:"sampling_profile"`
++	HardwareRuntimeClass string `json:"hardware_runtime_class"`
 +}
 +
 +// DeriveThresholds applies the FR-8 initial threshold formulas (floors) to the two
@@ -4998,14 +5291,28 @@ index 00000000..52e1b607
 +	if r.MeasurementPositionCount < min.MinMeasurementPositions {
 +		reasons = append(reasons, "measurement position count below minimum")
 +	}
++	// The coverage object must match the covered key, and the calibration window bounds
++	// must be present and parseable RFC3339 (FR-8).
++	cov := ThresholdCoverage{
++		ModelID: r.ModelID, TargetModelHash: r.TargetModelHash, TokenizerIdentity: r.TokenizerIdentity,
++		SamplerStage: r.SamplerStage, SamplingProfile: r.SamplingProfile, HardwareRuntimeClass: r.HardwareRuntimeClass,
++	}
++	if r.Coverage != cov {
++		reasons = append(reasons, "coverage object does not match the covered key")
++	}
++	if !rfc3339OK(r.CalibrationWindowStart) || !rfc3339OK(r.CalibrationWindowEnd) {
++		reasons = append(reasons, "calibration window bounds missing or not RFC3339")
++	}
 +	if r.BaselineTailMassFeasibilityRate < min.MinTailMassFeasibility {
 +		reasons = append(reasons, "tail-mass feasibility below minimum")
 +	}
 +	if r.BaselineTailMassFeasibilityRate < 0 || r.BaselineTailMassFeasibilityRate > 1 {
 +		reasons = append(reasons, "baseline_tail_mass_feasibility_rate out of [0,1]")
 +	}
-+	if math.IsNaN(r.FalsePositiveBudget) || r.FalsePositiveBudget <= 0 || r.FalsePositiveBudget > 1 {
-+		reasons = append(reasons, "false_positive_budget out of (0,1]")
++	// The false-positive budget may be anywhere in [0,1] (a zero budget is the strictest
++	// setting, requiring a measured zero false-quarantine rate).
++	if math.IsNaN(r.FalsePositiveBudget) || r.FalsePositiveBudget < 0 || r.FalsePositiveBudget > 1 {
++		reasons = append(reasons, "false_positive_budget out of [0,1]")
 +	}
 +	// Measured evidence MUST be present, finite, in range, and the measured rate at or
 +	// below the budget (FR-8): reject negative/NaN numerator/denominator/rate and any
@@ -5568,13 +5875,16 @@ index 00000000..29b4b05e
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window.go b/phase4-coordinator/internal/computeintegrity/window.go
 new file mode 100644
-index 00000000..59b2da16
+index 00000000..025bc0a9
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window.go
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,375 @@
 +package computeintegrity
 +
-+import "sync"
++import (
++	"sort"
++	"sync"
++)
 +
 +// FR-10 window state machine + FR-12 warm-swap/laundering. State ownership is
 +// canonical (FR-10, §3): positive measurement/verdict state and the rolling verdict
@@ -5583,10 +5893,12 @@ index 00000000..59b2da16
 +// higher-level swap-laundering overlay keyed by (stable_provider_identity, model_id)
 +// spans all artifacts for that provider/model.
 +
-+// canary is one finalized eligible canary result on a window key.
++// canary is one finalized eligible canary result on a window key. seq is the insertion
++// index, used only as a stable tie-break when ordering by event time (atMs).
 +type canary struct {
 +	verdict Verdict
 +	atMs    int64
++	seq     int
 +}
 +
 +// windowState holds the rolling verdict window and outstanding-probe markers for a
@@ -5608,6 +5920,10 @@ index 00000000..59b2da16
 +	onboardingFailures   []int64 // 24h onboarding-failure timestamps
 +	passStreak           int     // consecutive passes toward a clear
 +	firstPassMs          int64   // first pass in the current clear streak
++	// flappingPassClearable marks a blocked:manual_review_required entered by the
++	// flapping policy whose clear_rule is clear_pass_count_sequence — the sole
++	// manual-review block that may clear via a pass sequence (FR-10).
++	flappingPassClearable bool
 +}
 +
 +// swapState holds the swap-laundering overlay for a (stable_provider_identity, model)
@@ -5785,11 +6101,13 @@ index 00000000..59b2da16
 +	}
 +	if ov != nil {
 +		// A window that meets the quarantine rule promotes to quarantined_compute_drift.
-+		// Its origin is the origin already stamped on the accumulated risk when Known
-+		// (never downgrade an enforce_preserved accumulation), else the current mode's.
++		// Re-adjudication (FR-3): a quarantine established under enforce + SPEC-022 enforce
++		// is a fresh enforce_preserved adjudication and UPGRADES any prior telemetry-only
++		// stamp (so an early observe-mode candidate cannot pin a later enforce quarantine
++		// dormant). Otherwise the existing Known origin is preserved (never downgraded).
 +		if ov.state == "" && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
 +			ov.state = StateQuarantinedDrift
-+			if !ov.origin.Known() {
++			if origin == OriginEnforcePreserved || !ov.origin.Known() {
 +				ov.origin = origin
 +			}
 +		}
@@ -5853,24 +6171,33 @@ index 00000000..59b2da16
 +	if s.verifiedPassRule(key.Window(), in.Policy, in.NowMs) {
 +		return StateVerified, "", ""
 +	}
-+	if latestIsWarnClass(ws) {
++	if elig[len(elig)-1].verdict == VerdictWarn { // latest BY EVENT TIME.
 +		return StateWarn, "", ""
 +	}
 +	return StatePending, "", ""
 +}
 +
-+// eligibleCanaries returns the canaries within window_size_days of now, oldest-first.
++// eligible returns the canaries within window_size_days of now, ordered by event time
++// (atMs) ascending with a stable tie-break, NOT by insertion order — a delayed older
++// canary recorded after newer ones must not be treated as "latest" (FR-10). All
++// latest/window/TTL/verified/warn checks consume this ordered slice.
 +func eligible(ws *windowState, policy Policy, nowMs int64) []canary {
 +	if ws == nil {
 +		return nil
 +	}
 +	windowMs := int64(policy.WindowSizeDays) * day
 +	out := make([]canary, 0, len(ws.canaries))
-+	for _, c := range ws.canaries {
++	for i, c := range ws.canaries {
 +		if windowMs <= 0 || nowMs-c.atMs <= windowMs {
-+			out = append(out, c)
++			out = append(out, canary{verdict: c.verdict, atMs: c.atMs, seq: i})
 +		}
 +	}
++	sort.SliceStable(out, func(i, j int) bool {
++		if out[i].atMs != out[j].atMs {
++			return out[i].atMs < out[j].atMs
++		}
++		return out[i].seq < out[j].seq // stable tie-break on insertion order.
++	})
 +	return out
 +}
 +
@@ -5907,13 +6234,6 @@ index 00000000..59b2da16
 +	return true
 +}
 +
-+func latestIsWarnClass(ws *windowState) bool {
-+	if len(ws.canaries) == 0 {
-+		return false
-+	}
-+	return ws.canaries[len(ws.canaries)-1].verdict == VerdictWarn
-+}
-+
 +// QuarantineCandidateWindowCount returns the overlay's rolling quarantine-candidate
 +// count (FR-10 accumulator), used by the FR-12 swap-laundering trigger.
 +func (s *Store) QuarantineCandidateWindowCount(k OverlayKey) int {
@@ -5936,10 +6256,10 @@ index 00000000..59b2da16
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window_test.go b/phase4-coordinator/internal/computeintegrity/window_test.go
 new file mode 100644
-index 00000000..efc36abc
+index 00000000..496ba551
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window_test.go
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,458 @@
 +package computeintegrity
 +
 +import "testing"
@@ -6087,6 +6407,23 @@ index 00000000..efc36abc
 +		st, _, _ := s.ResolveState(k, winResolveInput(p, base+5*hour))
 +		if st != StateQuarantinedDrift {
 +			t.Fatalf("intervening passes must not prevent quarantine: got %s", st)
++		}
++	})
++
++	t.Run("latest window is by event time, not insertion order", func(t *testing.T) {
++		s := NewStore()
++		k := winKey("a", 1, "temp-0.7")
++		// Record 3 quarantine_candidates at recent times, THEN 2 older passes (delayed
++		// delivery). By event time the latest-5 window is [pass,pass,qc,qc,qc]... actually
++		// the newest-by-atMs are the 3 QCs, so the window must quarantine, not verify.
++		s.RecordCanary(k, VerdictQuarantineCandidate, base+10*hour, OriginEnforcePreserved)
++		s.RecordCanary(k, VerdictQuarantineCandidate, base+11*hour, OriginEnforcePreserved)
++		s.RecordCanary(k, VerdictQuarantineCandidate, base+12*hour, OriginEnforcePreserved)
++		s.RecordCanary(k, VerdictPass, base+1*hour, OriginEnforcePreserved) // delayed older
++		s.RecordCanary(k, VerdictPass, base+2*hour, OriginEnforcePreserved) // delayed older
++		st, _, _ := s.ResolveState(k, winResolveInput(p, base+13*hour))
++		if st != StateQuarantinedDrift {
++			t.Fatalf("out-of-order delivery must not verify over newer quarantine candidates, got %s", st)
 +		}
 +	})
 +

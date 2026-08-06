@@ -113,11 +113,10 @@ func (s *Store) HasTombstone(key ComputeIntegrityKey) bool {
 }
 
 // SetOverlayAdverse forces an overlay adverse state (used by tests and by the verdict
-// pipeline when a block is adjudicated). Origin defaults to enforce_preserved.
+// pipeline when a block is adjudicated). It resets the clear streak so only subsequent
+// passes count toward a clear.
 func (s *Store) SetOverlayAdverse(k OverlayKey, st State, origin AdjudicationOrigin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ov := s.overlay(k)
-	ov.state = st
-	ov.origin = origin
+	s.overlay(k).enterBlock(st, origin, 0)
 }

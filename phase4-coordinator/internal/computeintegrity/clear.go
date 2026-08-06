@@ -36,10 +36,23 @@ func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, admissibili
 	if ov.firstPassMs == 0 || nowMs-ov.firstPassMs < day {
 		return false // must span at least 24 hours.
 	}
+	// Only passes recorded AFTER the block was entered count toward a clear (FR-10):
+	// pre-block passes must not clear a fresh block.
+	if ov.firstPassMs < ov.blockEnteredMs {
+		return false
+	}
+	// blocked:abusive_inconclusive additionally requires the rolling 24h abusive window
+	// to be below the limit before it clears (FR-10).
+	if ov.state == StateBlockedAbusive {
+		if len(pruneWindow(ov.abusiveEvents, nowMs, day)) > policy.AbusiveInconclusiveLimit {
+			return false
+		}
+	}
 	ov.state = ""
 	ov.origin = ""
 	ov.quarantineCandWindow = 0
 	ov.flappingPassClearable = false
+	ov.blockEnteredMs = 0
 	return true
 }
 

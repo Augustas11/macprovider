@@ -134,7 +134,7 @@ func (c Capture) structurallyUnreadable() bool {
 // mistaken for a legitimate "SPEC-022 not enforcing" and paid through.
 func (c Capture) compositeBindingUnreadable() bool {
 	return c.Spec022PolicyVersion == "" || c.Spec022PolicyMode == "" ||
-		c.Spec022RouteSnapshotDigest == ""
+		c.Spec022CoverageDigest == "" || c.Spec022RouteSnapshotDigest == ""
 }
 
 // missingEnforceEvidence reports whether a captured row that claims a payable
@@ -149,7 +149,17 @@ func (c Capture) missingEnforceEvidence() bool {
 	if c.SamplerStage != SamplerStagePostSampler {
 		return true
 	}
-	if c.ComputeIntegrityPolicyDigest == "" || c.Spec022CoverageDigest == "" {
+	// Core covered-key identity must be present.
+	if c.StableProviderIdentity == "" || c.ModelID == "" || c.TargetModelHash == "" ||
+		c.TokenizerIdentity == "" || c.SamplingProfile == "" || c.CorpusVersion == "" ||
+		c.ThresholdVersion == "" || c.HardwareRuntimeClass == "" || c.TargetGeneration < 0 {
+		return true
+	}
+	// The positive state must be provably tied to the SPEC-036 policy, the signed
+	// catalog entry, the measurement window, and a capture time at request start.
+	if c.ComputeIntegrityPolicyVersion == "" || c.ComputeIntegrityPolicyDigest == "" ||
+		c.Spec022CoverageDigest == "" || c.SignedCatalogDigest == "" ||
+		c.WindowID == "" || c.CapturedAtUnixMS <= 0 {
 		return true
 	}
 	if c.ReferenceSetID == "" || c.ReferenceSetAdmissibilityDigest == "" ||

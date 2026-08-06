@@ -108,8 +108,7 @@ func (s *Store) ApplyFlapping(key ComputeIntegrityKey, fp FlappingWindowPolicy, 
 	defer s.mu.Unlock()
 	ov := s.overlay(key.Overlay())
 	if !ov.state.IsAdverseOverlay() {
-		ov.state = StateBlockedManualReview
-		ov.origin = origin
+		ov.enterBlock(StateBlockedManualReview, origin, nowMs)
 		ov.flappingPassClearable = FlappingClearsByPassSequence(fp)
 	}
 	return ev
