@@ -1,0 +1,127 @@
+{
+  "schema_version": "macprovider.provider-prebeta-payout-posture-evidence.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "related_journeys": [
+    "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
+  ],
+  "run_id": "provider-prebeta-payout-posture-m4pro-20260806T073417Z",
+  "captured_at": "2026-08-06T07:34:17Z",
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "b3fb7d3dbe820ebf02bbfa2dc86ec9d31052615a"
+  },
+  "operator": {
+    "role": "provider-prebeta-operator",
+    "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+  },
+  "environment": {
+    "class": "pearl-production-redacted",
+    "hardware_profile": "Apple M4 Pro 24GB provider",
+    "candidate": "commit:b3fb7d3dbe820ebf02bbfa2dc86ec9d31052615a",
+    "active_unit": "macprovider-coordinator.service",
+    "coordinator_exec_sha256": "8a7e52f5ae51112c55ace2a2f96bcb2d27bde7774c83f4b38f9209f086989089"
+  },
+  "provider": {
+    "provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+    "hardware_class": "Apple M4 Pro",
+    "memory_gb": 24,
+    "provider_token": {
+      "match_count": 1,
+      "revoked": false,
+      "bootstrap_issued": true,
+      "bootstrap_expires_at": "2026-08-06T05:33:42Z",
+      "last_used_at": "2026-08-06T07:31:10Z"
+    }
+  },
+  "payout_config": {
+    "enabled": true,
+    "dev_mode": false,
+    "hot_wallet_address_sha256": "a269fa97bb814899c8c14eaf84de1250cebc770de4ee794e2fefa6752e39e5b8",
+    "encrypted_wallet_path_sha256": "b80e42181f8d595972108a5932c323e311a9414dd2964c367543f9719d79c16a",
+    "rpc_url_primary_sha256": "da1e4a0b726081a615f3a070f91579a54a9a7deb09de13f8c5f6687d4079cf27",
+    "rpc_url_secondary_sha256": "aed56f1db49205d2f664445bed87b6c25c8fbb279ec3c07f971f0ed18581ba41",
+    "registration_paused": false
+  },
+  "payout_address_posture": {
+    "provider_payout_address_match_count": 1,
+    "provider_payout_address_total_rows": 3,
+    "match": {
+      "provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+      "chain": "base-mainnet",
+      "address_sha256": "84132cc1440b355da50f8fe6c4b33103253d94a8bdc510238c3d46bda908a6f8",
+      "payout_allowed": true,
+      "registered_at_utc": "2026-08-06T05:34:52.369793085Z",
+      "pending_until_utc": "2026-08-07T05:34:52.369793085Z",
+      "registered_against_hot_wallet_sha256": "a269fa97bb814899c8c14eaf84de1250cebc770de4ee794e2fefa6752e39e5b8",
+      "rotated_from_sha256": null
+    }
+  },
+  "runner_posture": {
+    "payout_runner_state": {
+      "payout_bootstrap_complete": false,
+      "bootstrap_completed_at_utc": null,
+      "last_run_started_at_utc": "2026-08-06T01:44:00.021584115Z",
+      "last_run_finished_at_utc": "2026-08-06T01:44:00.203661248Z",
+      "last_run_paid": 0,
+      "last_run_capped": 0,
+      "last_run_failed": 0,
+      "last_run_skipped_no_addr": 0,
+      "last_run_cancel_gas_native_wei": 0,
+      "last_run_error_text": null
+    },
+    "payout_runner_lease": {
+      "acquired_at_utc": "2026-08-05T19:44:00.013923381Z",
+      "heartbeat_at_utc": "2026-08-06T01:44:00.018720127Z",
+      "holder_host_sha256": "48207cd0ca44438cfda15b1a84ac1b868b6b86253acf5fcaa15e52acb6019aef",
+      "holder_pid": 2285344,
+      "holder_started_at_utc": "2026-08-05T19:44:00.013923381Z",
+      "holder_token_sha256": "b9ff6e057e77cc6ea925c65e9a8eb252bd667e594da9c846844d8f746774d71d",
+      "takeover_count": 0
+    },
+    "table_counts": {
+      "ledger_payout_ready": 0,
+      "payout_attempts": 0,
+      "payout_hot_wallet_funding": 0,
+      "payout_reorg_orphans": 0,
+      "runtime_flag_audit": 0
+    },
+    "target_provider_ledger_payout_ready_counts_by_status": []
+  },
+  "journal_event_counts": {
+    "since": "2026-08-05T19:40:00Z",
+    "payout_run_started": 2,
+    "payout_run_finished": 2,
+    "payout_chain_balance_ok": 12,
+    "provider_payout_address_challenge": 2,
+    "provider_payout_address_changed": 1,
+    "payout_runner_lease_conflict": 0,
+    "payout_invariant_violation": 0,
+    "payout_runner_halted_skipping_cycle": 0
+  },
+  "result": {
+    "status": "partial-pass-not-promotable",
+    "summary": "The actual M4 Pro 24GB provider has a Pearl production payout-address row on Base, payout_allowed=true, registration unpaused, and the row is stamped to the configured hot wallet fingerprint. The address is still inside its 24-hour cooling window until 2026-08-07T05:34:52.369793085Z. There are no target ledger_payout_ready rows, payout_attempts, funding rows, or reorg orphans, so this artifact proves provider payout-address onboarding posture only; it does not prove payout execution or money movement."
+  },
+  "conformance_action": {
+    "promoted": false,
+    "reason": "SPEC-016 is a signed-result domain. The existing signed SPEC-016 journey-result validates only SPEC-016-R002, and SPEC-016-R002 is already conformant through 2026-09-05. This supplemental actual-provider posture artifact is intentionally not mapped into specs/CONFORMANCE.json until a signed journey-result contract validates the specific row to be promoted."
+  },
+  "next_gate": {
+    "cooling_window_clears_at_utc": "2026-08-07T05:34:52.369793085Z",
+    "eligible_next_evidence": [
+      "recheck provider_payout_addresses after cooling clears",
+      "record hot-wallet funding/bootstrap evidence before claiming payout runner readiness",
+      "create or extend a signed SPEC-016 journey-result only for the next exact requirement being promoted"
+    ]
+  },
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true,
+    "provider_id_redacted": true,
+    "wallet_addresses_redacted": true,
+    "rpc_urls_redacted": true,
+    "token_material_redacted": true,
+    "raw_journal_payloads_redacted": true
+  }
+}
