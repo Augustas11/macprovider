@@ -158,12 +158,23 @@ func TestAC03_ProbeSchemaAndTV(t *testing.T) {
 		th := Thresholds{TauWarnMedian: 0.01, TauWarnPosition: 0.02, TauQuarantineMedian: 0.05, TauQuarantinePosition: 0.10}
 		// tv_lower just under quarantine-median minus 0.005 slack triggers retry.
 		iv := []TVInterval{{Lower: 0.046, Upper: 0.005}}
-		if !RequiresK256Retry(64, iv, 0.0, th) {
+		if !RequiresK256Retry(64, [][]TVInterval{iv}, 0.0, th) {
 			t.Fatal("expected K=256 retry near quarantine boundary")
 		}
 		// Clean low-divergence canary does not require retry.
-		if RequiresK256Retry(64, []TVInterval{{Lower: 0.001, Upper: 0.001}}, 0.0, th) {
+		if RequiresK256Retry(64, [][]TVInterval{{{Lower: 0.001, Upper: 0.001}}}, 0.0, th) {
 			t.Fatal("clean canary should not require retry")
+		}
+	})
+
+	t.Run("K=64 retry predicate is per reference (a flat cross-reference median must not suppress it)", func(t *testing.T) {
+		th := Thresholds{TauWarnMedian: 0.01, TauWarnPosition: 0.02, TauQuarantineMedian: 0.05, TauQuarantinePosition: 0.10}
+		perRef := [][]TVInterval{
+			{{Lower: 0.0, Upper: 0.0}, {Lower: 0.0, Upper: 0.0}, {Lower: 0.0, Upper: 0.0}},
+			{{Lower: 0.0, Upper: 0.015}, {Lower: 0.0, Upper: 0.015}, {Lower: 0.0, Upper: 0.015}}, // median upper 0.015 >= tau_warn_median
+		}
+		if !RequiresK256Retry(64, perRef, 0.0, th) {
+			t.Fatal("a single reference crossing the median predicate must force the K=256 retry")
 		}
 	})
 

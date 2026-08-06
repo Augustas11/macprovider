@@ -12,7 +12,7 @@ func TestAC07_OnboardingGate(t *testing.T) {
 	t.Run("5 passes over >=30 minutes verifies onboarding", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
-		r := s.EvaluateOnboarding(k, ModeEnforce, fivePasses)
+		r := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses)
 		if r.Status != OnboardingVerified {
 			t.Fatalf("want verified, got %s", r.Status)
 		}
@@ -21,7 +21,7 @@ func TestAC07_OnboardingGate(t *testing.T) {
 	t.Run("fewer than 5 passes stays pending", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
-		r := s.EvaluateOnboarding(k, ModeEnforce, fivePasses[:3])
+		r := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses[:3])
 		if r.Status != OnboardingPending {
 			t.Fatalf("want pending, got %s", r.Status)
 		}
@@ -31,7 +31,7 @@ func TestAC07_OnboardingGate(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
 		quick := []int64{base, base + 1, base + 2, base + 3, base + 4}
-		if r := s.EvaluateOnboarding(k, ModeEnforce, quick); r.Status != OnboardingPending {
+		if r := s.EvaluateOnboarding(k, ModeEnforce, true, quick); r.Status != OnboardingPending {
 			t.Fatalf("want pending for <30min, got %s", r.Status)
 		}
 	})
@@ -39,11 +39,11 @@ func TestAC07_OnboardingGate(t *testing.T) {
 	t.Run("enforce blocks billable routing until onboarding verified", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
-		pending := s.EvaluateOnboarding(k, ModeEnforce, fivePasses[:2])
+		pending := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses[:2])
 		if !OnboardingBlocksRouting(ModeEnforce, pending) {
 			t.Fatal("enforce must block routing while onboarding pending")
 		}
-		verified := s.EvaluateOnboarding(k, ModeEnforce, fivePasses)
+		verified := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses)
 		if OnboardingBlocksRouting(ModeEnforce, verified) {
 			t.Fatal("enforce must not block a verified onboarding")
 		}
@@ -52,7 +52,7 @@ func TestAC07_OnboardingGate(t *testing.T) {
 	t.Run("warn_only does not block billable routing on onboarding", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
-		pending := s.EvaluateOnboarding(k, ModeWarnOnly, fivePasses[:1])
+		pending := s.EvaluateOnboarding(k, ModeWarnOnly, true, fivePasses[:1])
 		if OnboardingBlocksRouting(ModeWarnOnly, pending) {
 			t.Fatal("warn_only must not block routing on an onboarding verdict")
 		}
@@ -62,7 +62,7 @@ func TestAC07_OnboardingGate(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
 		s.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
-		r := s.EvaluateOnboarding(k, ModeWarnOnly, fivePasses)
+		r := s.EvaluateOnboarding(k, ModeWarnOnly, true, fivePasses)
 		if r.InheritedOverlay != StateQuarantinedDrift {
 			t.Fatalf("onboarding must inherit an active overlay, got %s", r.InheritedOverlay)
 		}
@@ -75,7 +75,7 @@ func TestAC07_OnboardingGate(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
 		s.SetOverlayAdverse(k.Overlay(), StateQuarantinedDrift, OriginEnforcePreserved)
-		r := s.EvaluateOnboarding(k, ModeEnforce, fivePasses) // even with 5 passes
+		r := s.EvaluateOnboarding(k, ModeEnforce, true, fivePasses) // even with 5 passes
 		if r.Status == OnboardingVerified {
 			t.Fatal("onboarding must not verify over an active overlay quarantine")
 		}

@@ -27,12 +27,6 @@ type ArtifactChangeEvent struct {
 	ContinuityProvenReconnect        bool // exempt
 	SameHashReload                   bool // exempt
 	AtMs                             int64
-	// Mode and Spec022EffectiveEnforce set the origin of a newly-adjudicated
-	// swap-laundering block when the source risk is accumulator-only. A block DERIVED
-	// from an enforce_preserved adverse overlay always inherits enforce_preserved
-	// regardless of these (FR-3 origin inheritance).
-	Mode                    Mode
-	Spec022EffectiveEnforce bool
 }
 
 // priorOverlayCarriesRisk reports whether the prior per-key overlay carries active
@@ -73,14 +67,16 @@ func (s *Store) EscalateSwapLaunderingIfRisky(priorKey ComputeIntegrityKey, ev A
 		s.swaps[scope] = sw
 	}
 	sw.blocked = true
-	// Origin: a block DERIVED from an enforce_preserved provider-attributable adverse
-	// overlay inherits enforce_preserved regardless of the mode at derivation time
-	// (FR-3 origin inheritance). Otherwise (accumulator-only source risk) the block is
-	// a new adjudication whose origin reflects the current mode + SPEC-022 enforce.
-	if ov.state.IsProviderAttributable() && ov.origin == OriginEnforcePreserved {
-		sw.origin = OriginEnforcePreserved
+	// Origin INHERITANCE (FR-3): a swap-laundering block is DERIVED from the prior
+	// overlay's risk, so it inherits that overlay's origin. It must NOT launder a
+	// telemetry_only source into an enforce_preserved money-blocking state merely because
+	// the artifact change happened under enforce — only a fresh enforce-mode adjudication
+	// (a new enforce-mode quarantine) creates enforce_preserved risk. When the source is
+	// accumulator-only with no recorded origin, default to telemetry_only (conservative).
+	if ov.origin.Known() {
+		sw.origin = ov.origin
 	} else {
-		sw.origin = deriveOrigin(ev.Mode, ev.Spec022EffectiveEnforce)
+		sw.origin = OriginTelemetryOnly
 	}
 	return true
 }

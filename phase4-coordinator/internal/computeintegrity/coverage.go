@@ -14,10 +14,9 @@ import "sort"
 func CoveredProfileSetDigest(profiles []string) (string, error) {
 	sorted := append([]string(nil), profiles...)
 	sort.Strings(sorted)
-	return jcsDigest(map[string]any{
-		"type":     "compute_integrity_covered_profile_set_v1",
-		"profiles": toAnySlice(sorted),
-	})
+	// Normative preimage: the canonical JSON array of sorted profile strings, not a
+	// wrapper object, so external auditors/producers compute the same digest.
+	return jcsDigest(toAnySlice(sorted))
 }
 
 // AllProfileGridSatisfied reports whether an all-profile window is payable: every

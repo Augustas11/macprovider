@@ -112,7 +112,9 @@ func (r ReferenceEvent) PositionSetDigest() (string, error) {
 	for i, p := range pairs {
 		list[i] = []any{p[0], p[1]}
 	}
-	return jcsDigest(map[string]any{"type": "compute_integrity_position_set_v1", "positions": list})
+	// Normative preimage: the canonical JSON array [[prompt_id, position_index], ...],
+	// not a wrapper object, so external auditors/producers compute the same digest.
+	return jcsDigest(list)
 }
 
 // ReferencesIndependent reports the closed FR-5 three-way independence predicate: two
@@ -130,20 +132,27 @@ func ReferencesIndependent(a, b ReferenceEvent) bool {
 // pair of references over the union of their per-position top-K (FR-5), mirroring the
 // FR-7 provider tv_upper math applied reference-vs-reference.
 func referencePairTVUpper(a, b ReferenceEvent) (medianUpper, maxUpper float64) {
-	n := len(a.Positions)
-	if len(b.Positions) < n {
-		n = len(b.Positions)
+	// Align positions by their (prompt_id, position_index) identity, not slice order, so
+	// two references listing the same positions in a different order are compared
+	// position-for-position (FR-5).
+	bByID := make(map[[2]any]ReferencePosition, len(b.Positions))
+	for _, bp := range b.Positions {
+		bByID[[2]any{bp.PromptID, bp.PositionIndex}] = bp
 	}
-	uppers := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		s := numericUnion(a.Positions[i].TopK, b.Positions[i].TopK)
+	uppers := make([]float64, 0, len(a.Positions))
+	for _, ap := range a.Positions {
+		bp, ok := bByID[[2]any{ap.PromptID, ap.PositionIndex}]
+		if !ok {
+			continue // positions not in both references are not comparable.
+		}
+		s := numericUnion(ap.TopK, bp.TopK)
 		var aMass, bMass, diff float64
 		for _, t := range s {
-			ap := a.Positions[i].Full[t]
-			bp := b.Positions[i].Full[t]
-			aMass += ap
-			bMass += bp
-			diff += math.Abs(ap - bp)
+			pa := ap.Full[t]
+			pb := bp.Full[t]
+			aMass += pa
+			bMass += pb
+			diff += math.Abs(pa - pb)
 		}
 		aTail := math.Max(0, 1.0-aMass)
 		bTail := math.Max(0, 1.0-bMass)
@@ -181,6 +190,15 @@ type AdmissibilityInput struct {
 // key (FR-5). The status is a single closed value; only Admissible can support a
 // payable verified/warn row. Checks are ordered from most-structural to most-specific.
 func ComputeAdmissibility(in AdmissibilityInput) AdmissibilityStatus {
+	// Fail closed on a misconfigured admissibility request: enforce requires a quorum of
+	// at least two independent references and a positive freshness TTL; a caller that
+	// omits these must never yield admissible.
+	if in.MinQuorum < 2 {
+		return AdmissibilityMissingQuorum
+	}
+	if in.FreshnessTTLMillis <= 0 {
+		return AdmissibilityStaleReference
+	}
 	var wantPosDigest string
 	// Schema: every event must be well-formed, bind the covered key, carry a non-empty
 	// position set, and compare over the IDENTICAL measurement position set.

@@ -39,16 +39,25 @@ const (
 //
 // passes are the onboarding canary verdict timestamps observed so far (only pass
 // canaries advance the gate).
-func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, passTimestampsMs []int64) OnboardingGateResult {
+func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, spec022Enforce bool, passTimestampsMs []int64) OnboardingGateResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Overlay inheritance is checked before the gate runs (FR-11, FR-12).
-	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked {
+	// Overlay inheritance is checked before the gate runs (FR-11, FR-12), but ONLY for
+	// an overlay whose effect is ACTIVE per the FR-3 matrix: a dormant telemetry-only
+	// overlay never blocks onboarding.
+	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked &&
+		EffectiveAdverseState(mode, spec022Enforce, sw.origin, attribProviderOrBreaker) {
 		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: StateBlockedSwapLaunder}
 	}
 	if ov := s.overlays[key.Overlay()]; ov != nil && ov.state.IsAdverseOverlay() {
-		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: ov.state}
+		attrib := attribCoordinator
+		if ov.state.IsProviderAttributable() {
+			attrib = attribProviderOrBreaker
+		}
+		if EffectiveAdverseState(mode, spec022Enforce, ov.origin, attrib) {
+			return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: ov.state}
+		}
 	}
 	// An unresolved lineage tombstone means the short onboarding gate cannot restore
 	// eligibility (FR-10/FR-12).
@@ -76,17 +85,17 @@ func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, passTimes
 }
 
 // OnboardingBlocksRouting reports whether an onboarding result blocks covered paid
-// routing for the given mode (FR-11). In enforce, a non-verified gate blocks. In
-// warn_only/observe, onboarding never blocks clean keys — but an inherited
-// enforce-origin provider-attributable overlay does (returned via InheritedOverlay).
+// routing for the given mode (FR-11). InheritedOverlay is set by EvaluateOnboarding
+// only when the overlay's effect is ACTIVE per the FR-3 matrix (so it already encodes
+// the §3 Preserved-adverse-state exception), and it blocks regardless of mode. Absent
+// an active overlay, enforce blocks a non-verified gate; warn_only/observe never block
+// clean onboarding keys.
 func OnboardingBlocksRouting(mode Mode, r OnboardingGateResult) bool {
 	if r.InheritedOverlay.IsAdverseOverlay() {
-		// The §3 Preserved-adverse-state exception: provider-attributable enforce-origin
-		// overlays exclude the key regardless of mode.
-		return r.InheritedOverlay.IsProviderAttributable() || mode == ModeEnforce
+		return true
 	}
 	if mode != ModeEnforce {
-		return false // warn_only/observe never block clean onboarding keys.
+		return false
 	}
 	return r.Status != OnboardingVerified
 }

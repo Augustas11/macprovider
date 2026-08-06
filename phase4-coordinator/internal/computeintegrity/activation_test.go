@@ -51,7 +51,7 @@ func TestAC01_ThresholdCalibration(t *testing.T) {
 	})
 
 	t.Run("a complete approved record is enforce-ready", func(t *testing.T) {
-		if refs := goodThresholdRecord().ValidateCalibrationForEnforce(calMins()); len(refs) != 0 {
+		if refs := goodThresholdRecord().ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) != 0 {
 			t.Fatalf("good record should be enforce-ready, got %v", refs)
 		}
 	})
@@ -61,7 +61,7 @@ func TestAC01_ThresholdCalibration(t *testing.T) {
 		r.KnownGoodCohortDigest = ""
 		r.MeasuredFPWindow = ""
 		r.MeasuredFalseQuarantineDenominator = 0
-		if refs := r.ValidateCalibrationForEnforce(calMins()); len(refs) == 0 {
+		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
 			t.Fatal("missing measured-FP evidence must refuse enforce")
 		}
 	})
@@ -70,7 +70,7 @@ func TestAC01_ThresholdCalibration(t *testing.T) {
 		r := goodThresholdRecord()
 		r.MeasuredFalseQuarantineNumerator = 10 // 10/200 = 0.05 > budget 0.01
 		r.MeasuredFalseQuarantineRate = 0.05
-		if refs := r.ValidateCalibrationForEnforce(calMins()); len(refs) == 0 {
+		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
 			t.Fatal("measured rate above budget must refuse enforce")
 		}
 	})
@@ -79,8 +79,29 @@ func TestAC01_ThresholdCalibration(t *testing.T) {
 		r := goodThresholdRecord()
 		r.CalibrationSampleCount = 10
 		r.MinEligibleCanaryCount = 10
-		if refs := r.ValidateCalibrationForEnforce(calMins()); len(refs) == 0 {
+		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
 			t.Fatal("underpowered calibration must refuse enforce")
+		}
+	})
+
+	t.Run("calibration record must match the covered key's 8-tuple", func(t *testing.T) {
+		r := goodThresholdRecord()
+		want := r.ThresholdKey()
+		if refs := r.ValidateCalibrationForEnforce(want, calMins()); len(refs) != 0 {
+			t.Fatalf("matching 8-tuple should be enforce-ready, got %v", refs)
+		}
+		wrong := want
+		wrong.HardwareRuntimeClass = "m4-pro"
+		if refs := r.ValidateCalibrationForEnforce(wrong, calMins()); len(refs) == 0 {
+			t.Fatal("a mismatched 8-tuple must refuse enforce")
+		}
+	})
+
+	t.Run("thresholds below the FR-8 floor refuse enforce", func(t *testing.T) {
+		r := goodThresholdRecord()
+		r.TauQuarantineMedian = 0.01 // below the 0.060 floor
+		if refs := r.ValidateCalibrationForEnforce(ThresholdKey{}, calMins()); len(refs) == 0 {
+			t.Fatal("a threshold below the floor must refuse enforce")
 		}
 	})
 

@@ -128,6 +128,12 @@ func Evaluate(c Capture) Decision {
 	if !mode.Known() {
 		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
 	}
+	// A structurally-unreadable capture (bad enum, inconsistent breaker, adverse state
+	// with missing origin) fails closed in EVERY mode when SPEC-022 is enforcing — a
+	// corrupt preserved-adverse row must never pass through payable under warn_only.
+	if c.structurallyUnreadable() {
+		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
+	}
 
 	// Non-enforce runtime modes (warn_only, observe — identical behavior): only an
 	// enforce_preserved provider-attributable overlay or an enforce_preserved active
@@ -263,11 +269,12 @@ func enforceReason(c Capture) (SettlementReason, []SettlementReason, bool) {
 	}
 
 	if len(hits) == 0 {
-		// Payable only from a fresh verified/warn positive state with no active
-		// breaker, admissible references, and covered profile.
+		// Payable only from a fresh verified/warn positive state with no active breaker,
+		// admissible references, covered profile, AND complete load-bearing FR-4 evidence
+		// (policy/coverage digests, reference set id/digests, covered sampler stage).
 		if (c.State == StateVerified || c.State == StateWarn) &&
 			c.ReferenceSetAdmissibilityStatus == AdmissibilityAdmissible &&
-			!c.CircuitBreakerActive {
+			!c.CircuitBreakerActive && !c.missingEnforceEvidence() {
 			return "", nil, true
 		}
 		// Defensive: a state we could not classify as payable and produced no reason

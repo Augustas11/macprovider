@@ -95,9 +95,12 @@ func (s *Store) overlay(k OverlayKey) *overlayState {
 }
 
 // RecordCanary records a finalized eligible canary and updates the overlay
-// accumulators (FR-9, FR-10). A quarantine_candidate increments the rolling
-// quarantine-candidate window count; a pass advances the clear streak.
-func (s *Store) RecordCanary(key ComputeIntegrityKey, v Verdict, atMs int64) {
+// accumulators (FR-9, FR-10). origin is the FR-3 adjudication origin under which this
+// canary was measured (deriveOrigin at record time); it is stamped onto the overlay the
+// first time risk (a quarantine_candidate) is recorded, so a later swap-laundering block
+// or promotion derived from accumulator-only risk inherits the correct origin. A
+// quarantine_candidate increments the rolling count; a pass advances the clear streak.
+func (s *Store) RecordCanary(key ComputeIntegrityKey, v Verdict, atMs int64, origin AdjudicationOrigin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ws := s.window(key.Window())
@@ -107,15 +110,21 @@ func (s *Store) RecordCanary(key ComputeIntegrityKey, v Verdict, atMs int64) {
 
 	ov := s.overlay(key.Overlay())
 	switch v {
-	case VerdictQuarantineCandidate:
-		ov.quarantineCandWindow++
-		ov.passStreak = 0
-		ov.firstPassMs = 0
 	case VerdictPass:
 		if ov.passStreak == 0 {
 			ov.firstPassMs = atMs
 		}
 		ov.passStreak++
+	case VerdictQuarantineCandidate:
+		ov.quarantineCandWindow++
+		ov.passStreak = 0 // any non-pass breaks the consecutive-pass clear streak (FR-10).
+		ov.firstPassMs = 0
+		if !ov.origin.Known() {
+			ov.origin = origin // stamp the origin of the accumulated risk.
+		}
+	default: // warn, inconclusive: not a pass, so the consecutive-pass streak resets.
+		ov.passStreak = 0
+		ov.firstPassMs = 0
 	}
 }
 
@@ -177,81 +186,101 @@ type ResolveInput struct {
 // FR-10 ordered resolution (first match wins). It is deterministic and never sticky:
 // an intervening quarantine_candidate that does not satisfy the window quarantine rule
 // resolves to pending, not a retained verified.
-func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, ExpiryCause) {
+func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, ExpiryCause, AdjudicationOrigin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 1. Swap-laundering overlay (consulted first, FR-12) or per-key overlay adverse state.
+	mode := in.Policy.Mode
+	spec022 := in.Spec022EffectiveEnforce
+	origin := deriveOrigin(mode, spec022)
+
+	// 1. Adverse overlays take precedence ONLY when their effect is active per the FR-3
+	// effective_adverse_state matrix; a dormant (telemetry_only, or coordinator-
+	// attributable on a SPEC-036-only downgrade) overlay persists but falls through to
+	// positive-state recomputation, so a telemetry-only quarantine never blocks routing.
 	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked {
-		return StateBlockedSwapLaunder, ""
+		if EffectiveAdverseState(mode, spec022, sw.origin, attribProviderOrBreaker) {
+			return StateBlockedSwapLaunder, "", sw.origin
+		}
 	}
-	origin := deriveOrigin(in.Policy.Mode, in.Spec022EffectiveEnforce)
 	ov := s.overlays[key.Overlay()]
+	if ov == nil && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
+		ov = s.overlay(key.Overlay())
+	}
 	if ov != nil {
-		// A window that meets the quarantine rule promotes to quarantined_compute_drift
-		// with the origin of the mode it was adjudicated under.
+		// A window that meets the quarantine rule promotes to quarantined_compute_drift.
+		// Its origin is the origin already stamped on the accumulated risk when Known
+		// (never downgrade an enforce_preserved accumulation), else the current mode's.
 		if ov.state == "" && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
 			ov.state = StateQuarantinedDrift
-			ov.origin = origin
+			if !ov.origin.Known() {
+				ov.origin = origin
+			}
 		}
 		if ov.state.IsAdverseOverlay() {
-			return ov.state, ""
+			attrib := attribCoordinator
+			if ov.state.IsProviderAttributable() {
+				attrib = attribProviderOrBreaker
+			}
+			if EffectiveAdverseState(mode, spec022, ov.origin, attrib) {
+				return ov.state, "", ov.origin
+			}
+			// Dormant overlay: persist, fall through to positive resolution below.
 		}
-	} else if s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
-		nov := s.overlay(key.Overlay())
-		nov.state = StateQuarantinedDrift
-		nov.origin = origin
-		return StateQuarantinedDrift, ""
 	}
 
-	// Coordinator-attributable reference block from admissibility.
-	switch in.AdmissibilityStatus {
-	case AdmissibilityMissingQuorum:
-		return StateBlockedRefMissing, ""
-	case AdmissibilityReferenceFault, AdmissibilityIndepFailed, AdmissibilityProvMissing:
-		return StateBlockedRefFault, ""
+	// Coordinator-attributable reference block from admissibility (a live coordinator
+	// condition). Under a SPEC-036-only downgrade these are dormant for routing per the
+	// matrix; they still prevent a fresh verified/warn positive state below.
+	if mode == ModeEnforce && spec022 {
+		switch in.AdmissibilityStatus {
+		case AdmissibilityMissingQuorum:
+			return StateBlockedRefMissing, "", OriginEnforcePreserved
+		case AdmissibilityReferenceFault, AdmissibilityIndepFailed, AdmissibilityProvMissing:
+			return StateBlockedRefFault, "", OriginEnforcePreserved
+		}
 	}
 
 	// 2. Freshness/invalidation failure -> expired with cause.
 	if in.InvalidationCause != "" {
-		return StateExpired, in.InvalidationCause
+		return StateExpired, in.InvalidationCause, ""
 	}
 
 	ws := s.windows[key.Window()]
 	// 3. No valid result yet -> unknown.
 	if ws == nil || len(ws.canaries) == 0 {
 		if ws != nil && ws.hasPending {
-			return StatePending, ""
+			return StatePending, "", ""
 		}
-		return StateUnknown, ""
+		return StateUnknown, "", ""
 	}
 
 	elig := eligible(ws, in.Policy, in.NowMs)
 	// Under-sampled windows (including a window all of whose canaries aged out beyond
 	// window_size_days) remain pending, never expired (FR-10).
 	if len(elig) < in.Policy.MinWindowCanaries {
-		return StatePending, ""
+		return StatePending, "", ""
 	}
 	// Freshness TTL: a window whose newest eligible canary is older than the
 	// positive-state TTL expires as window_ttl_expired (non-payable), not pending (FR-10).
 	newest := elig[len(elig)-1]
 	ttlMs := int64(in.Policy.PositiveStateFreshnessTTLHrs) * 3600 * 1000
 	if ttlMs > 0 && in.NowMs-newest.atMs > ttlMs {
-		return StateExpired, ExpiryWindowTTLExpired
+		return StateExpired, ExpiryWindowTTLExpired, ""
 	}
 	// Coordinator-attributable non-admissibility or an unmet quarantine rule leaves the
 	// key non-payable but not expired -> pending.
 	if in.AdmissibilityStatus != AdmissibilityAdmissible || s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
-		return StatePending, ""
+		return StatePending, "", ""
 	}
 	// 4/5: payable positive states.
 	if s.verifiedPassRule(key.Window(), in.Policy, in.NowMs) {
-		return StateVerified, ""
+		return StateVerified, "", ""
 	}
 	if latestIsWarnClass(ws) {
-		return StateWarn, ""
+		return StateWarn, "", ""
 	}
-	return StatePending, ""
+	return StatePending, "", ""
 }
 
 // eligibleCanaries returns the canaries within window_size_days of now, oldest-first.

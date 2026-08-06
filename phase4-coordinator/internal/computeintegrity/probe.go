@@ -219,6 +219,9 @@ func ValidateRequestBounds(env RequestEnvelope) error {
 		if pos.PromptID == "" || pos.PromptRef == "" {
 			return fmt.Errorf("probe request: position missing prompt_id/prompt_ref")
 		}
+		if pos.PositionIndex < 0 {
+			return fmt.Errorf("probe request: negative position_index %d", pos.PositionIndex)
+		}
 		if ref, ok := prompts[pos.PromptID]; ok {
 			if ref != pos.PromptRef {
 				return fmt.Errorf("probe request: prompt_id %q maps to two prompt_refs", pos.PromptID)

@@ -46,6 +46,17 @@ const (
 	StateExpired             State = "expired"
 )
 
+var knownStates = map[State]bool{
+	StateUnknown: true, StatePending: true, StateVerified: true, StateWarn: true,
+	StateQuarantinedDrift: true, StateBlockedRefMissing: true, StateBlockedCalibMissing: true,
+	StateBlockedAbusive: true, StateBlockedRefFault: true, StateBlockedManualReview: true,
+	StateBlockedSwapLaunder: true, StateExpired: true,
+}
+
+// Known reports whether s is a member of the closed state enum. An unknown captured
+// state fails closed at settlement (FR-3).
+func (s State) Known() bool { return knownStates[s] }
+
 // IsBlocked reports whether s is a blocked:<reason> state.
 func (s State) IsBlocked() bool {
 	switch s {
@@ -145,6 +156,11 @@ const (
 	OriginTelemetryOnly AdjudicationOrigin = "telemetry_only"
 )
 
+// Known reports whether o is a member of the closed origin enum.
+func (o AdjudicationOrigin) Known() bool {
+	return o == OriginEnforcePreserved || o == OriginTelemetryOnly
+}
+
 // CircuitBreakerScope is the closed scope enum for an active circuit-breaker hold
 // (FR-4, FR-16). Present exactly when circuit_breaker_active is true.
 type CircuitBreakerScope string
@@ -179,6 +195,11 @@ const (
 	CoveragePerProfile SamplingProfileCoverageMode = "per_profile"
 	CoverageAllProfile SamplingProfileCoverageMode = "all_profile"
 )
+
+// Known reports whether m is a member of the closed coverage-mode enum.
+func (m SamplingProfileCoverageMode) Known() bool {
+	return m == CoveragePerProfile || m == CoverageAllProfile
+}
 
 // AllProfilesWindowProfile is the reserved sampling_profile marker for an
 // all-profile (closed profile grid) window (FR-10).

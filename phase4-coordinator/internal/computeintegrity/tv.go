@@ -137,6 +137,19 @@ func ValidateMeasurementPosition(pos ResultPosition, k int, refTopKs [][]int64, 
 	if math.Abs(sum+pos.ProviderTailMass-1.0) > massConservationTolerance {
 		return fmt.Errorf("provider mass not conserved: sum=%v tail=%v", sum, pos.ProviderTailMass)
 	}
+	// Provider top-K must be ordered by non-increasing probability with ascending token
+	// id as tie-break (SPEC-030 §FR-7). The probabilities come from the support map.
+	probByToken := make(map[int64]float64, len(pos.SupportTokenIDs))
+	for i, id := range pos.SupportTokenIDs {
+		probByToken[id] = pos.ProviderSupportProbabilities[i]
+	}
+	for i := 1; i < len(pos.ProviderTopKTokenIDs); i++ {
+		prev, cur := pos.ProviderTopKTokenIDs[i-1], pos.ProviderTopKTokenIDs[i]
+		pp, cp := probByToken[prev], probByToken[cur]
+		if cp > pp || (cp == pp && cur < prev) {
+			return fmt.Errorf("provider top-K not ordered by non-increasing probability (token %d after %d)", cur, prev)
+		}
+	}
 	return nil
 }
 
@@ -189,30 +202,34 @@ func canonicalMedian(xs []float64) float64 {
 // before assigning pass/warn/quarantine_candidate (FR-7). intervals are the
 // per-reference intervals for one canary; providerTail/refTail are the max observed
 // tail masses across positions/references.
-func RequiresK256Retry(k int, intervals []TVInterval, maxTailMass float64, th Thresholds) bool {
+func RequiresK256Retry(k int, perReference [][]TVInterval, maxTailMass float64, th Thresholds) bool {
 	if k != 64 {
 		return false
 	}
 	if maxTailMass > 0.01 {
 		return true
 	}
-	uppers := make([]float64, len(intervals))
-	lowers := make([]float64, len(intervals))
-	for i, iv := range intervals {
-		uppers[i] = iv.Upper
-		lowers[i] = iv.Lower
-		if iv.Upper >= th.TauWarnPosition {
+	// Evaluate the median predicates PER REFERENCE (FR-7): a flattened cross-reference
+	// median must not suppress a mandatory retry that one reference's positions trigger.
+	for _, positions := range perReference {
+		uppers := make([]float64, len(positions))
+		lowers := make([]float64, len(positions))
+		for i, iv := range positions {
+			uppers[i] = iv.Upper
+			lowers[i] = iv.Lower
+			if iv.Upper >= th.TauWarnPosition {
+				return true
+			}
+			if iv.Lower >= th.TauQuarantinePosition-0.005 {
+				return true
+			}
+		}
+		if canonicalMedian(uppers) >= th.TauWarnMedian {
 			return true
 		}
-		if iv.Lower >= th.TauQuarantinePosition-0.005 {
+		if canonicalMedian(lowers) >= th.TauQuarantineMedian-0.005 {
 			return true
 		}
-	}
-	if canonicalMedian(uppers) >= th.TauWarnMedian {
-		return true
-	}
-	if canonicalMedian(lowers) >= th.TauQuarantineMedian-0.005 {
-		return true
 	}
 	return false
 }

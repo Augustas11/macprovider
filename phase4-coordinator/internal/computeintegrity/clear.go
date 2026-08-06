@@ -8,11 +8,16 @@ package computeintegrity
 
 // AttemptClear tries to clear a pass-sequence-clearable overlay adverse state
 // (quarantined_compute_drift or blocked:abusive_inconclusive) using the accumulated
-// pass streak (FR-10). It clears only when clear_pass_count consecutive passes have
-// been recorded over at least 24 hours. Returns whether it cleared.
-func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, nowMs int64) bool {
+// pass streak (FR-10). It clears only when clear_pass_count CONSECUTIVE passes have
+// been recorded over at least 24 hours (any intervening warn/quarantine_candidate
+// resets the streak in RecordCanary) AND the current reference set is fresh and
+// admissible. Returns whether it cleared.
+func (s *Store) AttemptClear(key ComputeIntegrityKey, policy Policy, admissibility AdmissibilityStatus, nowMs int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if admissibility != AdmissibilityAdmissible {
+		return false // clear requires current fresh admissible reference evidence.
+	}
 	ov := s.overlays[key.Overlay()]
 	if ov == nil {
 		return false

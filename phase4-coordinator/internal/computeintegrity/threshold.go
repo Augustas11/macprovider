@@ -106,15 +106,58 @@ type CalibrationMinimums struct {
 	MinTailMassFeasibility  float64
 }
 
+// ThresholdKey returns the record's 8-tuple key.
+func (r ThresholdRecord) ThresholdKey() ThresholdKey {
+	return ThresholdKey{
+		ModelID:              r.ModelID,
+		TargetModelHash:      r.TargetModelHash,
+		TokenizerIdentity:    r.TokenizerIdentity,
+		SamplerStage:         r.SamplerStage,
+		SamplingProfile:      r.SamplingProfile,
+		CorpusVersion:        r.CorpusVersion,
+		ThresholdVersion:     r.ThresholdVersion,
+		HardwareRuntimeClass: r.HardwareRuntimeClass,
+	}
+}
+
+func finiteNonNeg(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
+
 // ValidateCalibrationForEnforce reports whether a calibration record is sufficient to
-// activate enforce for its key (FR-8). Enforce MUST refuse a key whose record lacks a
-// MEASURED realized false-quarantine rate at or below the numeric budget; an
-// aspirational target without measured validation is insufficient. Returns a non-empty
-// slice of refusal reasons, or nil if the record is enforce-ready.
-func (r ThresholdRecord) ValidateCalibrationForEnforce(min CalibrationMinimums) []string {
+// activate enforce for the given covered key (FR-8). It verifies the full 8-tuple
+// matches, thresholds meet the FR-8 floors, all calibration values are finite and
+// non-negative, and a MEASURED realized false-quarantine rate at or below the numeric
+// budget is present (an aspirational target without measured validation is
+// insufficient). Returns a non-empty slice of refusal reasons, or nil if enforce-ready.
+func (r ThresholdRecord) ValidateCalibrationForEnforce(expectedKey ThresholdKey, min CalibrationMinimums) []string {
 	var reasons []string
 	if r.ThresholdVersion == "" || r.HardwareRuntimeClass == "" {
 		reasons = append(reasons, "threshold record missing key fields")
+	}
+	if (expectedKey != ThresholdKey{}) && r.ThresholdKey() != expectedKey {
+		reasons = append(reasons, "threshold record 8-tuple does not match the covered key")
+	}
+	// Thresholds must be finite/non-negative and at or above the FR-8 floors (they may
+	// only widen for noisier keys, never tighten below the floor).
+	floors := DeriveThresholds(r.BaselineMedianTVUpperP99, r.BaselinePositionTVUpperP99)
+	for _, chk := range []struct {
+		name       string
+		val, floor float64
+	}{
+		{"tau_warn_median", r.TauWarnMedian, floors.TauWarnMedian},
+		{"tau_warn_position", r.TauWarnPosition, floors.TauWarnPosition},
+		{"tau_quarantine_median", r.TauQuarantineMedian, floors.TauQuarantineMedian},
+		{"tau_quarantine_position", r.TauQuarantinePosition, floors.TauQuarantinePosition},
+		{"tau_reference_fault_median", r.TauReferenceFaultMedian, floors.TauReferenceFaultMedian},
+		{"tau_reference_fault_position", r.TauReferenceFaultPosition, floors.TauReferenceFaultPosition},
+	} {
+		if !finiteNonNeg(chk.val) {
+			reasons = append(reasons, chk.name+" is non-finite or negative")
+		} else if chk.val < chk.floor {
+			reasons = append(reasons, chk.name+" is below the FR-8 floor")
+		}
+	}
+	if !finiteNonNeg(r.BaselineMedianTVUpperP99) || !finiteNonNeg(r.BaselinePositionTVUpperP99) {
+		reasons = append(reasons, "baseline p99 values are non-finite or negative")
 	}
 	if r.ApprovalTimestamp == "" || r.ApproverGroup == "" {
 		reasons = append(reasons, "calibration not approved")
