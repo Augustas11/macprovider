@@ -64,6 +64,17 @@ func sameInts(a, b []int64) bool {
 	return true
 }
 
+// validTokenIDs reports whether every token id is valid for the tokenizer (FR-6): a
+// non-negative id, and — when the vocabulary size is known — strictly below it.
+func validTokenIDs(ids []int64, vocabSize int) bool {
+	for _, id := range ids {
+		if id < 0 || (vocabSize > 0 && id >= int64(vocabSize)) {
+			return false
+		}
+	}
+	return true
+}
+
 func noDuplicates(ids []int64) bool {
 	seen := make(map[int64]struct{}, len(ids))
 	for _, x := range ids {
@@ -90,6 +101,14 @@ func ValidateMeasurementPosition(pos ResultPosition, k int, refTopKs [][]int64, 
 	}
 	if !noDuplicates(pos.ProviderTopKTokenIDs) {
 		return fmt.Errorf("provider top-K has duplicates")
+	}
+	if !validTokenIDs(pos.ProviderTopKTokenIDs, vocabSize) || !validTokenIDs(pos.SupportTokenIDs, vocabSize) {
+		return fmt.Errorf("token id out of range for tokenizer")
+	}
+	for _, r := range refTopKs {
+		if !validTokenIDs(r, vocabSize) {
+			return fmt.Errorf("reference top-K token id out of range for tokenizer")
+		}
 	}
 	if len(pos.SupportTokenIDs) != len(pos.ProviderSupportProbabilities) {
 		return fmt.Errorf("support/probability length mismatch")

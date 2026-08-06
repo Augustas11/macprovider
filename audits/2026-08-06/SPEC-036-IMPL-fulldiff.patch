@@ -774,10 +774,10 @@ index 00000000..16a453ba
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/capture.go b/phase4-coordinator/internal/computeintegrity/capture.go
 new file mode 100644
-index 00000000..377c4eb3
+index 00000000..e5d5acf8
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/capture.go
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,194 @@
 +package computeintegrity
 +
 +// Capture is the immutable request-start compute-integrity state captured for
@@ -914,7 +914,7 @@ index 00000000..377c4eb3
 +// mistaken for a legitimate "SPEC-022 not enforcing" and paid through.
 +func (c Capture) compositeBindingUnreadable() bool {
 +	return c.Spec022PolicyVersion == "" || c.Spec022PolicyMode == "" ||
-+		c.Spec022RouteSnapshotDigest == ""
++		c.Spec022CoverageDigest == "" || c.Spec022RouteSnapshotDigest == ""
 +}
 +
 +// missingEnforceEvidence reports whether a captured row that claims a payable
@@ -929,7 +929,17 @@ index 00000000..377c4eb3
 +	if c.SamplerStage != SamplerStagePostSampler {
 +		return true
 +	}
-+	if c.ComputeIntegrityPolicyDigest == "" || c.Spec022CoverageDigest == "" {
++	// Core covered-key identity must be present.
++	if c.StableProviderIdentity == "" || c.ModelID == "" || c.TargetModelHash == "" ||
++		c.TokenizerIdentity == "" || c.SamplingProfile == "" || c.CorpusVersion == "" ||
++		c.ThresholdVersion == "" || c.HardwareRuntimeClass == "" || c.TargetGeneration < 0 {
++		return true
++	}
++	// The positive state must be provably tied to the SPEC-036 policy, the signed
++	// catalog entry, the measurement window, and a capture time at request start.
++	if c.ComputeIntegrityPolicyVersion == "" || c.ComputeIntegrityPolicyDigest == "" ||
++		c.Spec022CoverageDigest == "" || c.SignedCatalogDigest == "" ||
++		c.WindowID == "" || c.CapturedAtUnixMS <= 0 {
 +		return true
 +	}
 +	if c.ReferenceSetID == "" || c.ReferenceSetAdmissibilityDigest == "" ||
@@ -964,10 +974,10 @@ index 00000000..377c4eb3
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/clear.go b/phase4-coordinator/internal/computeintegrity/clear.go
 new file mode 100644
-index 00000000..8954e824
+index 00000000..31119195
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/clear.go
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,88 @@
 +package computeintegrity
 +
 +// FR-10 clear rules. quarantined_compute_drift and blocked:abusive_inconclusive clear
@@ -1006,10 +1016,23 @@ index 00000000..8954e824
 +	if ov.firstPassMs == 0 || nowMs-ov.firstPassMs < day {
 +		return false // must span at least 24 hours.
 +	}
++	// Only passes recorded AFTER the block was entered count toward a clear (FR-10):
++	// pre-block passes must not clear a fresh block.
++	if ov.firstPassMs < ov.blockEnteredMs {
++		return false
++	}
++	// blocked:abusive_inconclusive additionally requires the rolling 24h abusive window
++	// to be below the limit before it clears (FR-10).
++	if ov.state == StateBlockedAbusive {
++		if len(pruneWindow(ov.abusiveEvents, nowMs, day)) > policy.AbusiveInconclusiveLimit {
++			return false
++		}
++	}
 +	ov.state = ""
 +	ov.origin = ""
 +	ov.quarantineCandWindow = 0
 +	ov.flappingPassClearable = false
++	ov.blockEnteredMs = 0
 +	return true
 +}
 +
@@ -1424,10 +1447,10 @@ index 00000000..6025942c
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/flapping.go b/phase4-coordinator/internal/computeintegrity/flapping.go
 new file mode 100644
-index 00000000..8f392b9b
+index 00000000..83cd0652
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/flapping.go
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,123 @@
 +package computeintegrity
 +
 +import "math"
@@ -1538,8 +1561,7 @@ index 00000000..8f392b9b
 +	defer s.mu.Unlock()
 +	ov := s.overlay(key.Overlay())
 +	if !ov.state.IsAdverseOverlay() {
-+		ov.state = StateBlockedManualReview
-+		ov.origin = origin
++		ov.enterBlock(StateBlockedManualReview, origin, nowMs)
 +		ov.flappingPassClearable = FlappingClearsByPassSequence(fp)
 +	}
 +	return ev
@@ -5746,10 +5768,10 @@ index 00000000..d1260151
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/warmswap.go b/phase4-coordinator/internal/computeintegrity/warmswap.go
 new file mode 100644
-index 00000000..29b4b05e
+index 00000000..b62cadaf
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/warmswap.go
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,122 @@
 +package computeintegrity
 +
 +// FR-12 warm-swap and generation handling. Positive state never carries across a
@@ -5865,20 +5887,19 @@ index 00000000..29b4b05e
 +}
 +
 +// SetOverlayAdverse forces an overlay adverse state (used by tests and by the verdict
-+// pipeline when a block is adjudicated). Origin defaults to enforce_preserved.
++// pipeline when a block is adjudicated). It resets the clear streak so only subsequent
++// passes count toward a clear.
 +func (s *Store) SetOverlayAdverse(k OverlayKey, st State, origin AdjudicationOrigin) {
 +	s.mu.Lock()
 +	defer s.mu.Unlock()
-+	ov := s.overlay(k)
-+	ov.state = st
-+	ov.origin = origin
++	s.overlay(k).enterBlock(st, origin, 0)
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window.go b/phase4-coordinator/internal/computeintegrity/window.go
 new file mode 100644
-index 00000000..025bc0a9
+index 00000000..61d4973d
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window.go
-@@ -0,0 +1,375 @@
+@@ -0,0 +1,417 @@
 +package computeintegrity
 +
 +import (
@@ -5920,10 +5941,50 @@ index 00000000..025bc0a9
 +	onboardingFailures   []int64 // 24h onboarding-failure timestamps
 +	passStreak           int     // consecutive passes toward a clear
 +	firstPassMs          int64   // first pass in the current clear streak
++	blockEnteredMs       int64   // when the current adverse state was entered (0 if none)
 +	// flappingPassClearable marks a blocked:manual_review_required entered by the
 +	// flapping policy whose clear_rule is clear_pass_count_sequence — the sole
 +	// manual-review block that may clear via a pass sequence (FR-10).
 +	flappingPassClearable bool
++}
++
++// strongerOrigin returns the money-blocking-stronger of two origins: enforce_preserved
++// dominates telemetry_only, which dominates unknown. Overlay risk always records the
++// strongest origin seen so a later escalation/promotion inherits it (FR-3, FR-12).
++func strongerOrigin(a, b AdjudicationOrigin) AdjudicationOrigin {
++	if a == OriginEnforcePreserved || b == OriginEnforcePreserved {
++		return OriginEnforcePreserved
++	}
++	if a.Known() {
++		return a
++	}
++	return b
++}
++
++// enterBlock sets an adverse overlay state, recording its origin (strongest seen) and
++// resetting the clear streak so only passes recorded AFTER the block count toward a
++// clear (FR-10). A fresh enforce-preserved provider-attributable block may replace a
++// dormant telemetry-only adverse state.
++func (ov *overlayState) enterBlock(st State, origin AdjudicationOrigin, atMs int64) {
++	ov.state = st
++	ov.origin = strongerOrigin(ov.origin, origin)
++	ov.passStreak = 0
++	ov.firstPassMs = 0
++	ov.blockEnteredMs = atMs
++}
++
++// canEnterProviderBlock reports whether a fresh provider-attributable block may be
++// created: only when there is no active adverse overlay (a new block never overwrites an
++// existing adverse state).
++//
++// NOTE (v0.1 scoped): the FR-3 re-adjudication case — fresh enforce-preserved evidence
++// superseding a dormant telemetry-only overlay — is deliberately NOT implemented here.
++// It only matters in enforce mode, which §6.1 makes unreachable in v0.1 (every reachable
++// adverse state is telemetry_only with no money effect), and modeling it correctly needs
++// a separate state-origin vs risk-origin split that adds complexity for a dormant path.
++// It is a documented follow-up for the live-enforce-wiring work.
++func (ov *overlayState) canEnterProviderBlock() bool {
++	return !ov.state.IsAdverseOverlay()
 +}
 +
 +// swapState holds the swap-laundering overlay for a (stable_provider_identity, model)
@@ -6011,9 +6072,7 @@ index 00000000..025bc0a9
 +		ov.quarantineCandWindow++
 +		ov.passStreak = 0 // any non-pass breaks the consecutive-pass clear streak (FR-10).
 +		ov.firstPassMs = 0
-+		if !ov.origin.Known() {
-+			ov.origin = origin // stamp the origin of the accumulated risk.
-+		}
++		ov.origin = strongerOrigin(ov.origin, origin) // record the strongest risk origin.
 +	default: // warn, inconclusive: not a pass, so the consecutive-pass streak resets.
 +		ov.passStreak = 0
 +		ov.firstPassMs = 0
@@ -6027,9 +6086,12 @@ index 00000000..025bc0a9
 +	defer s.mu.Unlock()
 +	ov := s.overlay(key.Overlay())
 +	ov.abusiveEvents = pruneWindow(append(ov.abusiveEvents, atMs), atMs, day)
-+	if len(ov.abusiveEvents) > limit && !ov.state.IsAdverseOverlay() {
-+		ov.state = StateBlockedAbusive
-+		ov.origin = origin
++	// Decide block eligibility from the CURRENT origin (before upgrading it), so fresh
++	// enforce evidence can supersede a dormant telemetry-only overlay.
++	if len(ov.abusiveEvents) > limit && ov.canEnterProviderBlock() {
++		ov.enterBlock(StateBlockedAbusive, origin, atMs) // enterBlock records the origin.
++	} else {
++		ov.origin = strongerOrigin(ov.origin, origin) // just record the strongest risk origin.
 +	}
 +}
 +
@@ -6040,9 +6102,10 @@ index 00000000..025bc0a9
 +	defer s.mu.Unlock()
 +	ov := s.overlay(key.Overlay())
 +	ov.onboardingFailures = pruneWindow(append(ov.onboardingFailures, atMs), atMs, day)
-+	if len(ov.onboardingFailures) >= 2 && !ov.state.IsAdverseOverlay() {
-+		ov.state = StateBlockedManualReview
-+		ov.origin = origin
++	if len(ov.onboardingFailures) >= 2 && ov.canEnterProviderBlock() {
++		ov.enterBlock(StateBlockedManualReview, origin, atMs) // enterBlock records the origin.
++	} else {
++		ov.origin = strongerOrigin(ov.origin, origin) // just record the strongest risk origin.
 +	}
 +}
 +
@@ -6256,10 +6319,10 @@ index 00000000..025bc0a9
 +}
 diff --git a/phase4-coordinator/internal/computeintegrity/window_test.go b/phase4-coordinator/internal/computeintegrity/window_test.go
 new file mode 100644
-index 00000000..496ba551
+index 00000000..443aa81b
 --- /dev/null
 +++ b/phase4-coordinator/internal/computeintegrity/window_test.go
-@@ -0,0 +1,458 @@
+@@ -0,0 +1,478 @@
 +package computeintegrity
 +
 +import "testing"
@@ -6461,6 +6524,26 @@ index 00000000..496ba551
 +		}
 +		if s.OverlayState(k.Overlay()) != StateBlockedAbusive {
 +			t.Fatalf("4 abusive events: want blocked:abusive_inconclusive, got %s", s.OverlayState(k.Overlay()))
++		}
++	})
++
++	t.Run("abusive block does not clear using pre-block passes or while still abusive", func(t *testing.T) {
++		s := NewStore()
++		k := winKey("a", 1, "temp-0.7")
++		// 5 passes over 28h BEFORE any block.
++		for i := 0; i < 5; i++ {
++			s.RecordCanary(k, VerdictPass, base+int64(i)*7*hour, OriginEnforcePreserved)
++		}
++		// Then 4 abusive events create the block (resets the pre-block streak).
++		for i := 0; i < 4; i++ {
++			s.RecordAbusiveInconclusive(k, base+35*hour+int64(i)*hour, p.AbusiveInconclusiveLimit, OriginEnforcePreserved)
++		}
++		if s.OverlayState(k.Overlay()) != StateBlockedAbusive {
++			t.Fatalf("expected abusive block, got %s", s.OverlayState(k.Overlay()))
++		}
++		// Immediately attempting to clear with the pre-block streak must fail.
++		if s.AttemptClear(k, p, AdmissibilityAdmissible, base+36*hour) {
++			t.Fatal("pre-block passes must not clear a fresh abusive block")
 +		}
 +	})
 +

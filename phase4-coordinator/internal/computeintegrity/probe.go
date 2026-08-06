@@ -175,6 +175,14 @@ func ValidateResultVariant(p ResultPayload) error {
 		if len(p.Positions) != 0 || p.ValidationMetadata != nil {
 			return fmt.Errorf("provider_inconclusive result must not carry positions/validation_metadata")
 		}
+		// Identity echoes may be null ONLY with a non-empty identity_unavailable_reason
+		// (FR-6): a missing identity without the reason is not sanctioned.
+		identityMissing := p.ModelID == "" || p.TargetModelHash == "" || p.TokenizerIdentity == "" ||
+			p.SamplingProfile == "" || p.CorpusVersion == "" || p.ThresholdVersion == "" ||
+			p.HardwareRuntimeClass == ""
+		if identityMissing && p.IdentityUnavailableReason == "" {
+			return fmt.Errorf("provider_inconclusive with unavailable identity must carry identity_unavailable_reason")
+		}
 	default:
 		return fmt.Errorf("unknown result_kind %q", p.ResultKind)
 	}

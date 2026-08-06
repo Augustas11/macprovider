@@ -245,6 +245,36 @@ func TestAC03_ProbeSchemaAndTV(t *testing.T) {
 			t.Fatal("expected mass-conservation rejection")
 		}
 	})
+
+	t.Run("validation rejects out-of-range token ids", func(t *testing.T) {
+		pos := ResultPosition{
+			ProviderTopKTokenIDs:         []int64{1, 200}, // 200 >= vocab 100
+			SupportTokenIDs:              []int64{1, 2, 200},
+			ProviderSupportProbabilities: []float64{0.5, 0.5, 0.0},
+			ProviderTailMass:             0.0,
+		}
+		if err := ValidateMeasurementPosition(pos, 2, [][]int64{{1, 2}}, 100); err == nil {
+			t.Fatal("token id >= vocab_size must be rejected")
+		}
+		neg := pos
+		neg.ProviderTopKTokenIDs = []int64{1, -1}
+		neg.SupportTokenIDs = []int64{-1, 1, 2}
+		if err := ValidateMeasurementPosition(neg, 2, [][]int64{{1, 2}}, 100); err == nil {
+			t.Fatal("negative token id must be rejected")
+		}
+	})
+
+	t.Run("provider_inconclusive with unavailable identity requires a reason", func(t *testing.T) {
+		bad := ResultPayload{ResultKind: ResultKindProviderInconclusive, ProviderReasonCode: "inconclusive:model_swap"}
+		if err := ValidateResultVariant(bad); err == nil {
+			t.Fatal("missing identity echoes without identity_unavailable_reason must be rejected")
+		}
+		ok := bad
+		ok.IdentityUnavailableReason = "warm swap mid-probe"
+		if err := ValidateResultVariant(ok); err != nil {
+			t.Fatalf("unavailable identity WITH a reason should pass: %v", err)
+		}
+	})
 }
 
 // AC-3 (verdict): coordinator-owned verdict with the FR-5 agreed-envelope and the

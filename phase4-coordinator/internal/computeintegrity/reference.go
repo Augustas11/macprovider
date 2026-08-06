@@ -124,12 +124,12 @@ func (r ReferenceEvent) PositionSetDigest() (string, error) {
 // schema_invalid, never silently clamped to an admissible TV of 0.
 func (r ReferenceEvent) distributionsWellFormed() bool {
 	for _, pos := range r.Positions {
-		if !noDuplicates(pos.TopK) {
+		if !noDuplicates(pos.TopK) || !validTokenIDs(pos.TopK, 0) {
 			return false
 		}
 		var mass float64
-		for _, p := range pos.Full {
-			if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+		for id, p := range pos.Full {
+			if id < 0 || math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
 				return false
 			}
 			mass += p
