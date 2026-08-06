@@ -55,23 +55,28 @@ type ComputeIntegrityKey struct {
 // window (FR-10). It projects away the concrete provider/assigned identity but
 // retains target_generation, so a generation boundary starts a fresh positive
 // window (a positive state never authorizes across a generation boundary).
+// hardware_runtime_class is NOT a WindowKey field: FR-8 pins exactly one class per
+// covered key, so the class is functionally determined by the other dimensions and is
+// a policy invariant, not a key discriminator (it is bound instead via the FR-4
+// hardware_runtime_class_digest capture and the FR-12 hardware_class_changed expiry).
 type WindowKey struct {
-	ModelID              string
-	TargetModelHash      string
-	TokenizerIdentity    string
-	SamplerStage         string
-	TargetGeneration     int64
-	SamplingProfile      string
-	CorpusVersion        string
-	ThresholdVersion     string
-	HardwareRuntimeClass string
+	StableProviderIdentity string
+	ModelID                string
+	TargetModelHash        string
+	TokenizerIdentity      string
+	SamplerStage           string
+	TargetGeneration       int64
+	SamplingProfile        string
+	CorpusVersion          string
+	ThresholdVersion       string
 }
 
 // OverlayKey owns active quarantine_compute_drift/blocked:<reason> state and the
 // three rolling accumulators (quarantine-candidate window count, 24h
-// abusive-inconclusive count, 24h onboarding-failure count) (FR-10, §3). It omits
-// target_generation from the WindowKey so an assigned_id/generation churn cannot
-// reset accumulated risk for the same stable identity + measurement conditions.
+// abusive-inconclusive count, 24h onboarding-failure count) (FR-10, §3). It is the
+// WindowKey minus target_generation, so an assigned_id/generation churn cannot reset
+// accumulated risk for the same stable identity + measurement conditions. Like the
+// window key it omits hardware_runtime_class (a per-key policy invariant, FR-8).
 type OverlayKey struct {
 	StableProviderIdentity string
 	ModelID                string
@@ -81,7 +86,6 @@ type OverlayKey struct {
 	SamplingProfile        string
 	CorpusVersion          string
 	ThresholdVersion       string
-	HardwareRuntimeClass   string
 }
 
 // ThresholdKey is the 8-tuple thresholds and calibration records are keyed by
@@ -99,13 +103,22 @@ type ThresholdKey struct {
 	HardwareRuntimeClass string
 }
 
-// SwapLaunderingScope is the (stable_provider_identity, model_id,
-// target_model_hash, tokenizer_identity, sampler_stage) scope at which a
-// blocked:swap_laundering_suspected block and an adverse-state lineage tombstone
-// are recorded (FR-10 clear rule, FR-12). It deliberately omits corpus_version
-// and threshold_version so an operator corpus/threshold rotation cannot grant an
-// active quarantine amnesty.
+// SwapLaunderingScope is the higher-level swap-laundering overlay scope
+// (stable_provider_identity, model_id) — spanning ALL hashes/tokenizers/generations/
+// profiles for that provider and model (FR-12). A blocked:swap_laundering_suspected
+// block recorded here therefore follows the provider across any artifact churn.
 type SwapLaunderingScope struct {
+	StableProviderIdentity string
+	ModelID                string
+}
+
+// TombstoneScope is the narrower adverse-state lineage tombstone scope
+// (stable_provider_identity, model_id, target_model_hash, tokenizer_identity,
+// sampler_stage) written on a corpus/threshold rotation over an active adverse overlay
+// (FR-10 clear rule). It deliberately omits corpus_version and threshold_version so an
+// operator corpus/threshold rotation cannot grant an active quarantine amnesty for the
+// same artifact.
+type TombstoneScope struct {
 	StableProviderIdentity string
 	ModelID                string
 	TargetModelHash        string
@@ -116,15 +129,15 @@ type SwapLaunderingScope struct {
 // Window projects a ComputeIntegrityKey to its WindowKey.
 func (k ComputeIntegrityKey) Window() WindowKey {
 	return WindowKey{
-		ModelID:              k.ModelID,
-		TargetModelHash:      k.TargetModelHash,
-		TokenizerIdentity:    k.TokenizerIdentity,
-		SamplerStage:         k.SamplerStage,
-		TargetGeneration:     k.TargetGeneration,
-		SamplingProfile:      k.SamplingProfile,
-		CorpusVersion:        k.CorpusVersion,
-		ThresholdVersion:     k.ThresholdVersion,
-		HardwareRuntimeClass: k.HardwareRuntimeClass,
+		StableProviderIdentity: k.StableProviderIdentity,
+		ModelID:                k.ModelID,
+		TargetModelHash:        k.TargetModelHash,
+		TokenizerIdentity:      k.TokenizerIdentity,
+		SamplerStage:           k.SamplerStage,
+		TargetGeneration:       k.TargetGeneration,
+		SamplingProfile:        k.SamplingProfile,
+		CorpusVersion:          k.CorpusVersion,
+		ThresholdVersion:       k.ThresholdVersion,
 	}
 }
 
@@ -139,11 +152,13 @@ func (k ComputeIntegrityKey) Overlay() OverlayKey {
 		SamplingProfile:        k.SamplingProfile,
 		CorpusVersion:          k.CorpusVersion,
 		ThresholdVersion:       k.ThresholdVersion,
-		HardwareRuntimeClass:   k.HardwareRuntimeClass,
 	}
 }
 
-// Threshold projects a ComputeIntegrityKey to its ThresholdKey (FR-8).
+// Threshold projects a ComputeIntegrityKey to its ThresholdKey (FR-8). The
+// ThresholdKey retains hardware_runtime_class because thresholds/calibration are
+// explicitly keyed by the full 8-tuple (a reference/threshold of one class must never
+// authorize another class).
 func (k ComputeIntegrityKey) Threshold() ThresholdKey {
 	return ThresholdKey{
 		ModelID:              k.ModelID,
@@ -157,8 +172,9 @@ func (k ComputeIntegrityKey) Threshold() ThresholdKey {
 	}
 }
 
-// Threshold projects a WindowKey to its ThresholdKey (drops target_generation).
-func (w WindowKey) Threshold() ThresholdKey {
+// Threshold projects a WindowKey to its ThresholdKey given the covered
+// hardware_runtime_class (the per-key policy invariant that the WindowKey omits, FR-8).
+func (w WindowKey) Threshold(hardwareRuntimeClass string) ThresholdKey {
 	return ThresholdKey{
 		ModelID:              w.ModelID,
 		TargetModelHash:      w.TargetModelHash,
@@ -167,15 +183,25 @@ func (w WindowKey) Threshold() ThresholdKey {
 		SamplingProfile:      w.SamplingProfile,
 		CorpusVersion:        w.CorpusVersion,
 		ThresholdVersion:     w.ThresholdVersion,
-		HardwareRuntimeClass: w.HardwareRuntimeClass,
+		HardwareRuntimeClass: hardwareRuntimeClass,
 	}
 }
 
-// SwapLaunderingScope projects an OverlayKey to the (stable identity, model,
-// hash, tokenizer, sampler_stage) scope used for swap-laundering blocks and
-// lineage tombstones (FR-12).
+// SwapLaunderingScope projects an OverlayKey to the (stable_provider_identity,
+// model_id) swap-laundering overlay scope, which spans all artifacts for that
+// provider/model (FR-12).
 func (o OverlayKey) SwapLaunderingScope() SwapLaunderingScope {
 	return SwapLaunderingScope{
+		StableProviderIdentity: o.StableProviderIdentity,
+		ModelID:                o.ModelID,
+	}
+}
+
+// TombstoneScope projects an OverlayKey to the narrower lineage-tombstone scope
+// (stable_provider_identity, model_id, target_model_hash, tokenizer_identity,
+// sampler_stage) (FR-10 clear rule).
+func (o OverlayKey) TombstoneScope() TombstoneScope {
+	return TombstoneScope{
 		StableProviderIdentity: o.StableProviderIdentity,
 		ModelID:                o.ModelID,
 		TargetModelHash:        o.TargetModelHash,

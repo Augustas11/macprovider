@@ -20,6 +20,12 @@ const (
 	ModeEnforce Mode = "enforce"
 )
 
+// Known reports whether m is a member of the closed mode enum. An unknown/missing
+// captured mode fails closed at settlement (FR-3).
+func (m Mode) Known() bool {
+	return m == ModeObserve || m == ModeWarnOnly || m == ModeEnforce
+}
+
 // State is the compute-integrity measurement/overlay state enum (FR-10). Positive
 // states (unknown/pending/verified/warn/expired) live on the window key; adverse
 // states (quarantined_compute_drift/blocked:*) live on the overlay key.

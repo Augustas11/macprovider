@@ -51,7 +51,7 @@ type Store struct {
 	windows    map[WindowKey]*windowState
 	overlays   map[OverlayKey]*overlayState
 	swaps      map[SwapLaunderingScope]*swapState
-	tombstones map[SwapLaunderingScope]bool
+	tombstones map[TombstoneScope]bool
 }
 
 // NewStore returns an empty in-memory compute-integrity store.
@@ -60,8 +60,20 @@ func NewStore() *Store {
 		windows:    map[WindowKey]*windowState{},
 		overlays:   map[OverlayKey]*overlayState{},
 		swaps:      map[SwapLaunderingScope]*swapState{},
-		tombstones: map[SwapLaunderingScope]bool{},
+		tombstones: map[TombstoneScope]bool{},
 	}
+}
+
+// deriveOrigin returns the FR-3 adjudication origin for a state adjudicated under the
+// given runtime mode and SPEC-022 enforce conjunction. Only enforce + SPEC-022 enforce
+// yields enforce_preserved; everything else is telemetry_only (which never has a
+// money/routing effect). This is the re-adjudication boundary: a telemetry_only state
+// only becomes money-blocking via a fresh enforce-mode adjudication.
+func deriveOrigin(mode Mode, spec022Enforce bool) AdjudicationOrigin {
+	if mode == ModeEnforce && spec022Enforce {
+		return OriginEnforcePreserved
+	}
+	return OriginTelemetryOnly
 }
 
 func (s *Store) window(k WindowKey) *windowState {
@@ -154,6 +166,11 @@ type ResolveInput struct {
 	// sampler, corpus, threshold, catalog, or hardware-class change.
 	InvalidationCause   ExpiryCause
 	AdmissibilityStatus AdmissibilityStatus
+	// Spec022EffectiveEnforce is whether SPEC-022 is enforcing for this coverage. It
+	// (with Policy.Mode) sets the adjudication origin of any newly-promoted adverse
+	// state (FR-3): a quarantine first met under observe/warn_only or while SPEC-022 is
+	// not enforcing is telemetry_only, not enforce_preserved.
+	Spec022EffectiveEnforce bool
 }
 
 // ResolveState recomputes the effective compute-integrity state for a key by the
@@ -168,20 +185,22 @@ func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, E
 	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked {
 		return StateBlockedSwapLaunder, ""
 	}
+	origin := deriveOrigin(in.Policy.Mode, in.Spec022EffectiveEnforce)
 	ov := s.overlays[key.Overlay()]
 	if ov != nil {
-		// A window that meets the quarantine rule promotes to quarantined_compute_drift.
-		if ov.state == "" && s.windowMeetsQuarantine(key.Window(), in.Policy) {
+		// A window that meets the quarantine rule promotes to quarantined_compute_drift
+		// with the origin of the mode it was adjudicated under.
+		if ov.state == "" && s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
 			ov.state = StateQuarantinedDrift
-			ov.origin = OriginEnforcePreserved
+			ov.origin = origin
 		}
 		if ov.state.IsAdverseOverlay() {
 			return ov.state, ""
 		}
-	} else if s.windowMeetsQuarantine(key.Window(), in.Policy) {
+	} else if s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
 		nov := s.overlay(key.Overlay())
 		nov.state = StateQuarantinedDrift
-		nov.origin = OriginEnforcePreserved
+		nov.origin = origin
 		return StateQuarantinedDrift, ""
 	}
 
@@ -207,10 +226,25 @@ func (s *Store) ResolveState(key ComputeIntegrityKey, in ResolveInput) (State, E
 		return StateUnknown, ""
 	}
 
-	// 4/5/6: payable-window prerequisites gate verified/warn; else pending.
-	if !s.payableWindowPrereqs(key.Window(), in) {
+	elig := eligible(ws, in.Policy, in.NowMs)
+	// Under-sampled windows (including a window all of whose canaries aged out beyond
+	// window_size_days) remain pending, never expired (FR-10).
+	if len(elig) < in.Policy.MinWindowCanaries {
 		return StatePending, ""
 	}
+	// Freshness TTL: a window whose newest eligible canary is older than the
+	// positive-state TTL expires as window_ttl_expired (non-payable), not pending (FR-10).
+	newest := elig[len(elig)-1]
+	ttlMs := int64(in.Policy.PositiveStateFreshnessTTLHrs) * 3600 * 1000
+	if ttlMs > 0 && in.NowMs-newest.atMs > ttlMs {
+		return StateExpired, ExpiryWindowTTLExpired
+	}
+	// Coordinator-attributable non-admissibility or an unmet quarantine rule leaves the
+	// key non-payable but not expired -> pending.
+	if in.AdmissibilityStatus != AdmissibilityAdmissible || s.windowMeetsQuarantine(key.Window(), in.Policy, in.NowMs) {
+		return StatePending, ""
+	}
+	// 4/5: payable positive states.
 	if s.verifiedPassRule(key.Window(), in.Policy, in.NowMs) {
 		return StateVerified, ""
 	}
@@ -235,12 +269,12 @@ func eligible(ws *windowState, policy Policy, nowMs int64) []canary {
 	return out
 }
 
-func (s *Store) windowMeetsQuarantine(k WindowKey, policy Policy) bool {
-	ws := s.windows[k]
-	if ws == nil {
-		return false
-	}
-	elig := ws.canaries
+// windowMeetsQuarantine reports whether at least quarantine_candidate_count of the
+// latest min_window_canaries ELIGIBLE canaries (within window_size_days) are
+// quarantine_candidate, regardless of intervening passes (FR-10). Canaries that have
+// aged out of the rolling window do not count.
+func (s *Store) windowMeetsQuarantine(k WindowKey, policy Policy, nowMs int64) bool {
+	elig := eligible(s.windows[k], policy, nowMs)
 	if len(elig) < policy.MinWindowCanaries {
 		return false
 	}
@@ -252,27 +286,6 @@ func (s *Store) windowMeetsQuarantine(k WindowKey, policy Policy) bool {
 		}
 	}
 	return count >= policy.QuarantineCandidateCount
-}
-
-func (s *Store) payableWindowPrereqs(k WindowKey, in ResolveInput) bool {
-	ws := s.windows[k]
-	elig := eligible(ws, in.Policy, in.NowMs)
-	if len(elig) < in.Policy.MinWindowCanaries {
-		return false // under-sampled -> pending
-	}
-	// Freshness TTL: newest eligible canary must be within the positive-state TTL.
-	newest := elig[len(elig)-1]
-	ttlMs := int64(in.Policy.PositiveStateFreshnessTTLHrs) * 3600 * 1000
-	if ttlMs > 0 && in.NowMs-newest.atMs > ttlMs {
-		return false
-	}
-	if in.AdmissibilityStatus != AdmissibilityAdmissible {
-		return false
-	}
-	if s.windowMeetsQuarantine(k, in.Policy) {
-		return false
-	}
-	return true
 }
 
 func (s *Store) verifiedPassRule(k WindowKey, policy Policy, nowMs int64) bool {

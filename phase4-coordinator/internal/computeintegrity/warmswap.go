@@ -27,6 +27,12 @@ type ArtifactChangeEvent struct {
 	ContinuityProvenReconnect        bool // exempt
 	SameHashReload                   bool // exempt
 	AtMs                             int64
+	// Mode and Spec022EffectiveEnforce set the origin of a newly-adjudicated
+	// swap-laundering block when the source risk is accumulator-only. A block DERIVED
+	// from an enforce_preserved adverse overlay always inherits enforce_preserved
+	// regardless of these (FR-3 origin inheritance).
+	Mode                    Mode
+	Spec022EffectiveEnforce bool
 }
 
 // priorOverlayCarriesRisk reports whether the prior per-key overlay carries active
@@ -67,9 +73,15 @@ func (s *Store) EscalateSwapLaunderingIfRisky(priorKey ComputeIntegrityKey, ev A
 		s.swaps[scope] = sw
 	}
 	sw.blocked = true
-	// Origin inheritance: a block derived from an enforce_preserved adverse state is
-	// itself enforce_preserved regardless of the mode at derivation time (FR-3).
-	sw.origin = OriginEnforcePreserved
+	// Origin: a block DERIVED from an enforce_preserved provider-attributable adverse
+	// overlay inherits enforce_preserved regardless of the mode at derivation time
+	// (FR-3 origin inheritance). Otherwise (accumulator-only source risk) the block is
+	// a new adjudication whose origin reflects the current mode + SPEC-022 enforce.
+	if ov.state.IsProviderAttributable() && ov.origin == OriginEnforcePreserved {
+		sw.origin = OriginEnforcePreserved
+	} else {
+		sw.origin = deriveOrigin(ev.Mode, ev.Spec022EffectiveEnforce)
+	}
 	return true
 }
 
@@ -85,16 +97,16 @@ func (s *Store) WriteTombstoneIfAdverse(priorKey ComputeIntegrityKey) bool {
 	if ov == nil || !ov.state.IsAdverseOverlay() {
 		return false
 	}
-	s.tombstones[priorKey.Overlay().SwapLaunderingScope()] = true
+	s.tombstones[priorKey.Overlay().TombstoneScope()] = true
 	return true
 }
 
 // HasTombstone reports whether an unresolved adverse-state lineage tombstone exists
-// for a key's swap-laundering scope (FR-10, FR-12).
+// for a key's tombstone scope (FR-10, FR-12).
 func (s *Store) HasTombstone(key ComputeIntegrityKey) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.tombstones[key.Overlay().SwapLaunderingScope()]
+	return s.tombstones[key.Overlay().TombstoneScope()]
 }
 
 // SetOverlayAdverse forces an overlay adverse state (used by tests and by the verdict

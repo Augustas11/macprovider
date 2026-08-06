@@ -17,10 +17,14 @@ type ReferenceFaultThresholds struct {
 }
 
 // ReferencePosition is one reference's compact distribution at a measured position,
-// used for the reference-vs-reference fault predicate (FR-5).
+// used for the reference-vs-reference fault predicate (FR-5). PromptID/PositionIndex
+// identify the corpus position so the quorum can be checked over the IDENTICAL
+// measurement position set.
 type ReferencePosition struct {
-	TopK []int64
-	Full ReferenceDistribution
+	PromptID      string
+	PositionIndex int
+	TopK          []int64
+	Full          ReferenceDistribution
 }
 
 // ReferenceEvent is a coordinator-held trusted reference for a covered key (FR-5, §3).
@@ -73,6 +77,42 @@ func (r ReferenceEvent) catalogAndTokenizerOK(candidateTokenizer string) bool {
 // are non-substitutable; a missing either fails admission as provenance_missing.
 func (r ReferenceEvent) hasProvenance() bool {
 	return r.RuntimeBuildProvenanceDigest != "" && r.GoldenFixtureValidationDigest != ""
+}
+
+// coveredKey returns the reference's covered-key 8-tuple (FR-5). Every reference
+// counted toward a quorum must bind the same covered key.
+func (r ReferenceEvent) coveredKey() ThresholdKey {
+	return ThresholdKey{
+		ModelID:              r.ModelID,
+		TargetModelHash:      r.TargetModelHash,
+		TokenizerIdentity:    r.TokenizerIdentity,
+		SamplerStage:         r.SamplerStage,
+		SamplingProfile:      r.SamplingProfile,
+		CorpusVersion:        r.CorpusVersion,
+		ThresholdVersion:     r.ThresholdVersion,
+		HardwareRuntimeClass: r.HardwareRuntimeClass,
+	}
+}
+
+// PositionSetDigest returns a digest over the reference's measurement position set
+// (sorted (prompt_id, position_index) pairs) (FR-5). References counted toward a
+// quorum must compare over the IDENTICAL position set, i.e. share this digest.
+func (r ReferenceEvent) PositionSetDigest() (string, error) {
+	pairs := make([][2]any, 0, len(r.Positions))
+	for _, p := range r.Positions {
+		pairs = append(pairs, [2]any{p.PromptID, p.PositionIndex})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i][0].(string) != pairs[j][0].(string) {
+			return pairs[i][0].(string) < pairs[j][0].(string)
+		}
+		return pairs[i][1].(int) < pairs[j][1].(int)
+	})
+	list := make([]any, len(pairs))
+	for i, p := range pairs {
+		list[i] = []any{p[0], p[1]}
+	}
+	return jcsDigest(map[string]any{"type": "compute_integrity_position_set_v1", "positions": list})
 }
 
 // ReferencesIndependent reports the closed FR-5 three-way independence predicate: two
@@ -128,6 +168,9 @@ func PairInReferenceFault(a, b ReferenceEvent, ft ReferenceFaultThresholds) bool
 type AdmissibilityInput struct {
 	References         []ReferenceEvent
 	CandidateTokenizer string
+	// CoveredKey is the covered key every reference must bind (FR-5). Zero value skips
+	// the check (observe/telemetry callers), but enforce callers MUST set it.
+	CoveredKey         ThresholdKey
 	MinQuorum          int // enforce requires >= 2
 	FreshnessTTLMillis int64
 	NowUnixMS          int64
@@ -138,10 +181,27 @@ type AdmissibilityInput struct {
 // key (FR-5). The status is a single closed value; only Admissible can support a
 // payable verified/warn row. Checks are ordered from most-structural to most-specific.
 func ComputeAdmissibility(in AdmissibilityInput) AdmissibilityStatus {
-	// Schema: every event must be well-formed.
-	for _, r := range in.References {
+	var wantPosDigest string
+	// Schema: every event must be well-formed, bind the covered key, carry a non-empty
+	// position set, and compare over the IDENTICAL measurement position set.
+	for i, r := range in.References {
 		if !r.admissionWellFormed() || !r.catalogAndTokenizerOK(in.CandidateTokenizer) {
 			return AdmissibilitySchemaInvalid
+		}
+		if (in.CoveredKey != ThresholdKey{}) && r.coveredKey() != in.CoveredKey {
+			return AdmissibilitySchemaInvalid // reference bound to a different covered key.
+		}
+		if len(r.Positions) == 0 {
+			return AdmissibilitySchemaInvalid // empty position set cannot be compared.
+		}
+		pd, err := r.PositionSetDigest()
+		if err != nil {
+			return AdmissibilitySchemaInvalid
+		}
+		if i == 0 {
+			wantPosDigest = pd
+		} else if pd != wantPosDigest {
+			return AdmissibilitySchemaInvalid // references measured over different positions.
 		}
 	}
 	// Provenance: every event must carry BOTH runtime-build provenance AND golden

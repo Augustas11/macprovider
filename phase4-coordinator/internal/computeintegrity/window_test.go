@@ -26,7 +26,86 @@ func winKey(assigned string, gen int64, profile string) ComputeIntegrityKey {
 }
 
 func winResolveInput(p Policy, nowMs int64) ResolveInput {
-	return ResolveInput{Policy: p, NowMs: nowMs, AdmissibilityStatus: AdmissibilityAdmissible}
+	return ResolveInput{Policy: p, NowMs: nowMs, AdmissibilityStatus: AdmissibilityAdmissible, Spec022EffectiveEnforce: true}
+}
+
+// TestKeyAlgebra_ProviderIsolationAndScopes covers the audit-hardened key algebra:
+// window state is per stable provider identity; window/overlay keys omit
+// hardware_runtime_class; and swap-laundering scope is (stable, model) only.
+func TestKeyAlgebra_ProviderIsolationAndScopes(t *testing.T) {
+	p := winPolicy()
+	base := int64(1_000_000)
+	hour := int64(3600 * 1000)
+
+	t.Run("provider A passes do not verify provider B (window keyed by stable identity)", func(t *testing.T) {
+		s := NewStore()
+		a := winKey("asg-a", 1, "temp-0.7")
+		a.StableProviderIdentity = "provider-A"
+		b := winKey("asg-b", 1, "temp-0.7")
+		b.StableProviderIdentity = "provider-B"
+		for i := 0; i < 5; i++ {
+			s.RecordCanary(a, VerdictPass, base+int64(i)*hour)
+		}
+		if st, _ := s.ResolveState(a, winResolveInput(p, base+5*hour)); st != StateVerified {
+			t.Fatalf("provider A should be verified, got %s", st)
+		}
+		if st, _ := s.ResolveState(b, winResolveInput(p, base+5*hour)); st == StateVerified {
+			t.Fatal("provider B must NOT inherit provider A's verified window")
+		}
+	})
+
+	t.Run("window/overlay keys omit hardware_runtime_class (per-key policy invariant)", func(t *testing.T) {
+		a := winKey("asg", 1, "temp-0.7")
+		b := a
+		b.HardwareRuntimeClass = "m4-pro"
+		if a.Window() != b.Window() || a.Overlay() != b.Overlay() {
+			t.Fatal("hardware_runtime_class must not discriminate window/overlay keys")
+		}
+		if a.Threshold() == b.Threshold() {
+			t.Fatal("hardware_runtime_class MUST discriminate the threshold key")
+		}
+	})
+
+	t.Run("swap-laundering block spans a hash/tokenizer change (scope = stable+model)", func(t *testing.T) {
+		s := NewStore()
+		prior := winKey("asg", 1, "temp-0.7") // hash-x
+		s.RecordCanary(prior, VerdictQuarantineCandidate, base)
+		if !s.EscalateSwapLaunderingIfRisky(prior, ArtifactChangeEvent{
+			HashTokenizerOrGenerationChanged: true, AtMs: base, Mode: ModeEnforce, Spec022EffectiveEnforce: true,
+		}) {
+			t.Fatal("risky change should escalate")
+		}
+		// Successor with a DIFFERENT hash and tokenizer, same provider+model, is blocked.
+		succ := winKey("asg2", 2, "temp-1.0")
+		succ.TargetModelHash = "hash-NEW"
+		succ.TokenizerIdentity = "tok-NEW"
+		if st, _ := s.ResolveState(succ, winResolveInput(p, base)); st != StateBlockedSwapLaunder {
+			t.Fatalf("swap-laundering must follow the provider across artifact churn, got %s", st)
+		}
+	})
+
+	t.Run("a quarantine adjudicated under observe is telemetry_only and does not block money", func(t *testing.T) {
+		s := NewStore()
+		k := winKey("asg", 1, "temp-0.7")
+		obs := winPolicy()
+		obs.Mode = ModeObserve
+		in := ResolveInput{Policy: obs, NowMs: base, AdmissibilityStatus: AdmissibilityAdmissible, Spec022EffectiveEnforce: true}
+		for i := 0; i < 5; i++ {
+			s.RecordCanary(k, VerdictQuarantineCandidate, base+int64(i)*hour)
+		}
+		st, _ := s.ResolveState(k, in) // promotes quarantine under observe -> telemetry_only
+		if st != StateQuarantinedDrift {
+			t.Fatalf("expected quarantine, got %s", st)
+		}
+		// Under observe/warn_only, a telemetry_only quarantine has no money effect.
+		c := payableCapture()
+		c.State = StateQuarantinedDrift
+		c.AdjudicationOrigin = OriginTelemetryOnly
+		c.ComputeIntegrityPolicyMode = ModeObserve
+		if d := Evaluate(c); d.Applies {
+			t.Fatalf("telemetry_only quarantine must not block money, got %+v", d)
+		}
+	})
 }
 
 // AC-4: window state machine.
@@ -73,17 +152,17 @@ func TestAC04_WindowStateMachine(t *testing.T) {
 		}
 	})
 
-	t.Run("stale verified re-evaluates as window_ttl_expired", func(t *testing.T) {
+	t.Run("stale verified re-evaluates as expired/window_ttl_expired", func(t *testing.T) {
 		s := NewStore()
 		k := winKey("a", 1, "temp-0.7")
 		for i := 0; i < 5; i++ {
 			s.RecordCanary(k, VerdictPass, base+int64(i)*hour)
 		}
-		// Now is > positive_state_freshness_ttl_hours (24h) after the newest canary.
-		st, _ := s.ResolveState(k, winResolveInput(p, base+5*hour+25*hour))
-		if st != StatePending {
-			// payable prereqs fail on freshness -> not verified; resolves pending.
-			t.Fatalf("stale verified: want non-verified (pending), got %s", st)
+		// Now is > positive_state_freshness_ttl_hours (24h) after the newest canary:
+		// the window expires (non-payable), it does not silently linger as pending.
+		st, cause := s.ResolveState(k, winResolveInput(p, base+5*hour+25*hour))
+		if st != StateExpired || cause != ExpiryWindowTTLExpired {
+			t.Fatalf("stale verified: want expired/window_ttl_expired, got %s/%s", st, cause)
 		}
 	})
 

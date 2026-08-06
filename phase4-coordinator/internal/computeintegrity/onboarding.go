@@ -52,7 +52,7 @@ func (s *Store) EvaluateOnboarding(key ComputeIntegrityKey, mode Mode, passTimes
 	}
 	// An unresolved lineage tombstone means the short onboarding gate cannot restore
 	// eligibility (FR-10/FR-12).
-	if s.tombstones[key.Overlay().SwapLaunderingScope()] {
+	if s.tombstones[key.Overlay().TombstoneScope()] {
 		return OnboardingGateResult{Status: OnboardingFailed, InheritedOverlay: StateBlockedManualReview}
 	}
 

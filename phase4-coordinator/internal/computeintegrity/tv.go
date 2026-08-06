@@ -97,9 +97,24 @@ func ValidateMeasurementPosition(pos ResultPosition, k int, refTopKs [][]int64, 
 	if !noDuplicates(pos.SupportTokenIDs) {
 		return fmt.Errorf("support has duplicate ids")
 	}
-	// Shared support must be exactly the union of provider top-K and all references' top-K.
+	// Every reference top-K must itself be well-formed (length effK unless the
+	// vocabulary is smaller, no duplicates) before it is used to build the union.
+	for i, r := range refTopKs {
+		if vocabSize > 0 && vocabSize < k {
+			if len(r) != vocabSize {
+				return fmt.Errorf("reference %d top-K length %d != vocab %d", i, len(r), vocabSize)
+			}
+		} else if len(r) != effK {
+			return fmt.Errorf("reference %d top-K length %d != %d", i, len(r), effK)
+		}
+		if !noDuplicates(r) {
+			return fmt.Errorf("reference %d top-K has duplicates", i)
+		}
+	}
+	// Shared support must be exactly the union of provider top-K and all references'
+	// top-K. This exact-union equality already bounds the support length to
+	// [effK, (N+1)*effK], so no separate length check is needed.
 	want := pos.ProviderTopKTokenIDs
-	n := len(refTopKs)
 	for _, r := range refTopKs {
 		want = numericUnion(want, r)
 	}
@@ -107,16 +122,6 @@ func ValidateMeasurementPosition(pos ResultPosition, k int, refTopKs [][]int64, 
 	sort.Slice(gotSorted, func(i, j int) bool { return gotSorted[i] < gotSorted[j] })
 	if !sameInts(gotSorted, want) {
 		return fmt.Errorf("support is not the exact provider∪references union")
-	}
-	// Support length must be in [K, (N+1)K] unless vocabulary is smaller.
-	maxLen := (n + 1) * effK
-	if len(pos.SupportTokenIDs) < effK && (vocabSize == 0 || len(pos.SupportTokenIDs) != vocabSize) {
-		return fmt.Errorf("support length %d below K=%d", len(pos.SupportTokenIDs), effK)
-	}
-	if len(pos.SupportTokenIDs) > maxLen && (vocabSize == 0 || len(pos.SupportTokenIDs) <= vocabSize) {
-		if vocabSize == 0 || len(pos.SupportTokenIDs) > vocabSize {
-			return fmt.Errorf("support length %d exceeds (N+1)K=%d", len(pos.SupportTokenIDs), maxLen)
-		}
 	}
 	var sum float64
 	for _, p := range pos.ProviderSupportProbabilities {

@@ -22,7 +22,6 @@ func breakerKey(i int, model string) OverlayKey {
 		SamplingProfile:        "temp-0.7",
 		CorpusVersion:          "corpus-1",
 		ThresholdVersion:       "thr-1",
-		HardwareRuntimeClass:   "m3-max",
 	}
 }
 

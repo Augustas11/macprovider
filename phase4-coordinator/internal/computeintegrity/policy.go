@@ -99,9 +99,13 @@ const (
 
 	eventTimeBasisTransitionRecorded = "transition_recorded_at"
 
-	// v0.1 sampler stage with a defined provider-side capture + normalization basis.
-	SamplerStagePostSampler = "post_processors_post_sampling_profile_next_emitted_token"
-	NormalizationFullDist   = "full_distribution"
+	// SamplerStagePostSampler is SPEC-036's v0.1 sampler-stage wire/key value (the only
+	// stage with a defined provider-side capture + coherent normalization basis).
+	SamplerStagePostSampler = "post_sampler_probabilities"
+	// SamplerCapturePointSPEC030 is the SPEC-030 provider-side capture point that the
+	// v0.1 sampler stage maps to (an internal mapping, not the SPEC-036 wire value).
+	SamplerCapturePointSPEC030 = "post_processors_post_sampling_profile_next_emitted_token"
+	NormalizationFullDist      = "full_distribution"
 )
 
 // NewDefaultPolicy returns a policy pre-populated with the FR-1 defaults, in observe
@@ -235,32 +239,55 @@ func (p Policy) Digest() (string, error) {
 	sort.Strings(profiles)
 
 	obj := map[string]any{
-		"policy_version":                     p.PolicyVersion,
-		"mode":                               string(p.Mode),
-		"model_ids":                          toAnySlice(models),
-		"target_model_hash":                  p.TargetModelHash,
-		"signed_catalog_selector":            p.SignedCatalogSelector,
-		"tokenizer_identity":                 p.TokenizerIdentity,
-		"sampler_stage":                      p.SamplerStage,
-		"normalization_basis":                p.NormalizationBasis,
-		"entrypoints":                        toAnySlice(entrypoints),
-		"sampling_profiles":                  toAnySlice(profiles),
-		"coverage_mode":                      string(p.CoverageMode),
-		"reference_source_mode":              p.ReferenceSourceMode,
-		"reference_fault_check_version":      p.ReferenceFaultCheckVersion,
-		"hardware_runtime_class":             p.HardwareRuntimeClass,
-		"corpus_version":                     p.CorpusVersion,
-		"threshold_version":                  p.ThresholdVersion,
-		"max_active_references":              p.MaxActiveReferences,
-		"window_size_days":                   p.WindowSizeDays,
-		"positive_state_freshness_ttl_hours": p.PositiveStateFreshnessTTLHrs,
-		"min_window_canaries":                p.MinWindowCanaries,
-		"quarantine_candidate_count":         p.QuarantineCandidateCount,
-		"clear_pass_count":                   p.ClearPassCount,
-		"reference_freshness_ttl_hours":      p.ReferenceFreshnessTTLHours,
-		"abusive_inconclusive_limit":         p.AbusiveInconclusiveLimit,
-		"disclosure_copy_version":            p.DisclosureCopyVersion,
-		"disclosure_copy_digest":             p.DisclosureCopyDigest,
+		"policy_version":                       p.PolicyVersion,
+		"mode":                                 string(p.Mode),
+		"model_ids":                            toAnySlice(models),
+		"target_model_hash":                    p.TargetModelHash,
+		"signed_catalog_selector":              p.SignedCatalogSelector,
+		"tokenizer_identity":                   p.TokenizerIdentity,
+		"sampler_stage":                        p.SamplerStage,
+		"normalization_basis":                  p.NormalizationBasis,
+		"entrypoints":                          toAnySlice(entrypoints),
+		"sampling_profiles":                    toAnySlice(profiles),
+		"coverage_mode":                        string(p.CoverageMode),
+		"reference_source_mode":                p.ReferenceSourceMode,
+		"reference_fault_check_version":        p.ReferenceFaultCheckVersion,
+		"hardware_runtime_class":               p.HardwareRuntimeClass,
+		"corpus_version":                       p.CorpusVersion,
+		"threshold_version":                    p.ThresholdVersion,
+		"max_active_references":                p.MaxActiveReferences,
+		"window_size_days":                     p.WindowSizeDays,
+		"positive_state_freshness_ttl_hours":   p.PositiveStateFreshnessTTLHrs,
+		"min_window_canaries":                  p.MinWindowCanaries,
+		"quarantine_candidate_count":           p.QuarantineCandidateCount,
+		"clear_pass_count":                     p.ClearPassCount,
+		"reference_freshness_ttl_hours":        p.ReferenceFreshnessTTLHours,
+		"abusive_inconclusive_limit":           p.AbusiveInconclusiveLimit,
+		"canary_cadence_minutes":               p.CanaryCadenceMinutes,
+		"disclosure_copy_version":              p.DisclosureCopyVersion,
+		"disclosure_copy_digest":               p.DisclosureCopyDigest,
+		"reference_unavailable_auto_downgrade": p.ReferenceUnavailableAutoDowngrade,
+		"auto_downgrade_max_minutes":           p.AutoDowngradeMaxMinutes,
+		"stable_identity_authority_named":      p.StableIdentityAuthorityNamed,
+		"approved_cost_model":                  p.ApprovedCostModel,
+		"circuit_breaker": map[string]any{
+			"rolling_window_minutes": p.CircuitBreaker.RollingWindowMinutes,
+			"event_time_basis":       p.CircuitBreaker.EventTimeBasis,
+			"model_scope_threshold":  p.CircuitBreaker.ModelScopeThreshold,
+			"fleet_scope_threshold":  p.CircuitBreaker.FleetScopeThreshold,
+			"quiet_window_minutes":   p.CircuitBreaker.QuietWindowMinutes,
+		},
+		"flapping_window_policy_v0_1": map[string]any{
+			"enabled":                        p.FlappingPolicy.Enabled,
+			"lookback_window_days":           p.FlappingPolicy.LookbackWindowDays,
+			"metric":                         p.FlappingPolicy.Metric,
+			"threshold_margin":               p.FlappingPolicy.ThresholdMargin,
+			"min_pass_count":                 p.FlappingPolicy.MinPassCount,
+			"min_warn_count":                 p.FlappingPolicy.MinWarnCount,
+			"min_quarantine_candidate_count": p.FlappingPolicy.MinQuarantineCandidateCount,
+			"action":                         p.FlappingPolicy.Action,
+			"clear_rule":                     p.FlappingPolicy.ClearRule,
+		},
 	}
 	return jcsDigest(obj)
 }

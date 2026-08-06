@@ -122,6 +122,12 @@ func Evaluate(c Capture) Decision {
 	}
 
 	mode := c.ComputeIntegrityPolicyMode
+	// Fail closed on an unreadable/malformed captured mode: with SPEC-022 enforcing, an
+	// unknown mode must NOT be treated as non-enforce (which would let a fresh verified
+	// row pay through). It settles compute_integrity_unreadable.
+	if !mode.Known() {
+		return Decision{Applies: true, Payable: false, Reason: ReasonUnreadable}
+	}
 
 	// Non-enforce runtime modes (warn_only, observe — identical behavior): only an
 	// enforce_preserved provider-attributable overlay or an enforce_preserved active

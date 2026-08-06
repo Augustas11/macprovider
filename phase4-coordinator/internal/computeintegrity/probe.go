@@ -1,6 +1,9 @@
 package computeintegrity
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // SPEC-036 owns its settlement-bearing probe wire framing (FR-6). It composes on
 // SPEC-030's measurement math (support selection, TV interval — see tv.go) but does
@@ -230,9 +233,42 @@ func ValidateRequestBounds(env RequestEnvelope) error {
 	if len(prompts) > MaxDistinctPrompts {
 		return fmt.Errorf("probe request: %d distinct prompts exceeds %d", len(prompts), MaxDistinctPrompts)
 	}
-	// retry_of_probe_id present exactly for a K=256 retry.
-	if p.RetryOfProbeID != "" && p.K != 256 {
-		return fmt.Errorf("probe request: retry_of_probe_id present but k=%d (retries are K=256)", p.K)
+	// retry_of_probe_id is present EXACTLY for a K=256 retry: every K=256 probe is a
+	// mandatory retry of a K=64 attempt (FR-7) and MUST bind it; a K=64 probe MUST NOT
+	// carry one.
+	if p.K == 64 && p.RetryOfProbeID != "" {
+		return fmt.Errorf("probe request: K=64 initial probe must not carry retry_of_probe_id")
+	}
+	if p.K == 256 && p.RetryOfProbeID == "" {
+		return fmt.Errorf("probe request: K=256 retry must carry retry_of_probe_id")
+	}
+	// Nonce must be a single-use unpredictable value of at least 128 bits (FR-6). We
+	// require at least NonceMinHexBytes*2 hex characters (or an equivalently long token).
+	if len(p.Nonce) < NonceMinBytes*2 {
+		return fmt.Errorf("probe request: nonce too short (need >= %d chars for 128 bits)", NonceMinBytes*2)
+	}
+	// expires_at must be a parseable RFC3339 timestamp (the <=120s-after-issuance bound
+	// is checked by ValidateProbeExpiry, which knows the issuance time).
+	if _, err := time.Parse(time.RFC3339, p.ExpiresAt); err != nil {
+		return fmt.Errorf("probe request: expires_at not RFC3339: %w", err)
+	}
+	return nil
+}
+
+// ValidateProbeExpiry enforces the FR-6 load-bound expiry: the probe MUST expire no
+// more than 120 seconds after issuance. issuedAtUnixMS is the coordinator's issuance
+// time. It is checked at issuance (the issuer knows both times).
+func ValidateProbeExpiry(env RequestEnvelope, issuedAtUnixMS int64) error {
+	exp, err := time.Parse(time.RFC3339, env.Payload.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("probe expiry: expires_at not RFC3339: %w", err)
+	}
+	expMs := exp.UnixMilli()
+	if expMs <= issuedAtUnixMS {
+		return fmt.Errorf("probe expiry: expires_at is not after issuance")
+	}
+	if expMs-issuedAtUnixMS > int64(ProbeExpirySeconds)*1000 {
+		return fmt.Errorf("probe expiry: expires_at more than %ds after issuance", ProbeExpirySeconds)
 	}
 	return nil
 }

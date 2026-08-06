@@ -25,6 +25,7 @@ func refFixtureEvent(id string) ReferenceEvent {
 		CoordinatorControlled:         true,
 		RefreshedAtUnixMS:             1000,
 		Positions: []ReferencePosition{{
+			PromptID: "p1", PositionIndex: 0,
 			TopK: []int64{1, 2}, Full: ReferenceDistribution{1: 0.6, 2: 0.4},
 		}},
 	}
@@ -91,6 +92,32 @@ func TestAC02_ReferenceAdmission(t *testing.T) {
 		}
 	})
 
+	t.Run("references bound to a different covered key are inadmissible", func(t *testing.T) {
+		a, b := refFixtureEvent("a"), refFixtureEvent("b")
+		b.TargetModelHash = "hash-OTHER" // b covers a different artifact
+		in := refFixtureInput(a, b)
+		in.CoveredKey = a.coveredKey()
+		if got := ComputeAdmissibility(in); got != AdmissibilitySchemaInvalid {
+			t.Fatalf("cross-covered-key references: want schema_invalid, got %s", got)
+		}
+	})
+
+	t.Run("references measured over different position sets are inadmissible", func(t *testing.T) {
+		a, b := refFixtureEvent("a"), refFixtureEvent("b")
+		b.Positions = []ReferencePosition{{PromptID: "DIFFERENT", PositionIndex: 3, TopK: []int64{1, 2}, Full: ReferenceDistribution{1: 0.6, 2: 0.4}}}
+		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilitySchemaInvalid {
+			t.Fatalf("mismatched position sets: want schema_invalid, got %s", got)
+		}
+	})
+
+	t.Run("empty-position reference events are inadmissible", func(t *testing.T) {
+		a, b := refFixtureEvent("a"), refFixtureEvent("b")
+		b.Positions = nil
+		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilitySchemaInvalid {
+			t.Fatalf("empty positions: want schema_invalid, got %s", got)
+		}
+	})
+
 	t.Run("changing runtime-build provenance makes the old identity a new source", func(t *testing.T) {
 		// Two references identical except provenance digest are still independent iff
 		// operator + failure domain also differ; changing provenance alone on a shared
@@ -139,8 +166,8 @@ func TestAC15_ReferenceQuorum(t *testing.T) {
 	t.Run("trusted-reference disagreement -> reference_fault", func(t *testing.T) {
 		a := refFixtureEvent("a")
 		b := refFixtureEvent("b")
-		// b's distribution diverges hard from a's at the shared position.
-		b.Positions = []ReferencePosition{{TopK: []int64{3, 4}, Full: ReferenceDistribution{3: 0.9, 4: 0.1}}}
+		// Same measured position (p1,0) but b's distribution diverges hard from a's.
+		b.Positions = []ReferencePosition{{PromptID: "p1", PositionIndex: 0, TopK: []int64{3, 4}, Full: ReferenceDistribution{3: 0.9, 4: 0.1}}}
 		if got := ComputeAdmissibility(refFixtureInput(a, b)); got != AdmissibilityReferenceFault {
 			t.Fatalf("disagreeing references: want reference_fault, got %s", got)
 		}

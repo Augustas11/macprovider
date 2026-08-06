@@ -311,6 +311,17 @@ func TestAC16_ClosedReasonPrecedence(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown/malformed captured mode fails closed (not treated as non-enforce)", func(t *testing.T) {
+		c := payableCapture()
+		c.ComputeIntegrityPolicyMode = "enf0rce" // malformed
+		// SPEC-022 is enforcing and the row is otherwise fresh verified; an unknown mode
+		// must NOT pass through payable — it settles unreadable.
+		d := Evaluate(c)
+		if !d.Applies || d.Payable || d.Reason != ReasonUnreadable {
+			t.Fatalf("unknown mode must fail closed unreadable, got %+v", d)
+		}
+	})
+
 	t.Run("swap_laundering outranks manual_review outranks reference outranks drift", func(t *testing.T) {
 		order := []struct {
 			state  State

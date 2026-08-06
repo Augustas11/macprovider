@@ -42,9 +42,8 @@ func (s *Store) DualApproveClear(key ComputeIntegrityKey, approverA, approverB s
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	scope := key.Overlay().SwapLaunderingScope()
 	cleared := false
-	if sw := s.swaps[scope]; sw != nil && sw.blocked {
+	if sw := s.swaps[key.Overlay().SwapLaunderingScope()]; sw != nil && sw.blocked {
 		sw.blocked = false
 		sw.origin = ""
 		cleared = true
@@ -56,8 +55,8 @@ func (s *Store) DualApproveClear(key ComputeIntegrityKey, approverA, approverB s
 		cleared = true
 	}
 	// Dual-approved review may also retire the lineage tombstone.
-	if s.tombstones[scope] {
-		delete(s.tombstones, scope)
+	if tomb := key.Overlay().TombstoneScope(); s.tombstones[tomb] {
+		delete(s.tombstones, tomb)
 		cleared = true
 	}
 	return cleared
