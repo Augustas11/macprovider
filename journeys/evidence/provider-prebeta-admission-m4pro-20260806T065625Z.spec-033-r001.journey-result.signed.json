@@ -1,0 +1,119 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIF2VhbAXOXqme/3mVdUsS93cU1eiIVE5e5KgGGOgeBflAiEAiq2k1NdhhR+ZKE4zcpcipES5tfIDetUGOa/ZL/HffP0=",
+      "signed_sha256": "ba71917a9315116ee7249c3b3b5d7d9772884451b4c9869de7cc72970dea11da",
+      "verified_at": "2026-08-06T07:08:04Z",
+      "verifier": ".github/workflows/promote-signed-provider-prebeta-journey.yml:31079621386:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+    "requirement_ids": [
+      "SPEC-033-R001"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "002cdc35d055ae0a103219b10ab89c4aaf27b401"
+    },
+    "captured_at": "2026-08-06T06:56:25Z",
+    "expires_at": "2026-11-06",
+    "operator": {
+      "role": "provider-prebeta-operator",
+      "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+    },
+    "environment": {
+      "class": "physical-provider-prebeta-admission",
+      "hardware_profile": "apple-silicon-m4-pro-24gb-redacted",
+      "candidate": "provider-cli:v1.8.88"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-prebeta-admission",
+        "sha256": "f51ed6a5a0ccecdce82e708a086d4db43b5ad434b02d77415f5458f88d24ecc2",
+        "source": "journeys/evidence/provider-prebeta-admission-m4pro-20260806T065625Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "M4 Pro 24GB provider-prebeta hardware-profile and verifier acceptance passed on Pearl production. The provider submitted replacement hardware evidence, received dual-control hardware trust, verified through stats-hardware-verifier, remained route-eligible, and served a public authenticated buyer smoke request for the expected Llama model. This artifact promotes only SPEC-033-R001; strict-gate, referral, broader autotune, buyer-money, and payout-registration rows remain outside this claim."
+    },
+    "steps": [
+      {
+        "id": "step-01-private-prebeta-authorization",
+        "status": "pass",
+        "assertion": "The same-Mac replacement provider entered through the current provider-prebeta posture: referral activation was not required for this cohort claim, and hardware trust was handled through dual-control operator approval before verifier promotion.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-02-install-launch-identity",
+        "status": "pass",
+        "assertion": "The provider launched as provider-cli v1.8.88 on the redacted Apple M4 Pro 24GB Mac, produced a new stable provider identity fingerprint, and reported hardware profile fields through the CLI hello path.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-03-provider-registration-admission",
+        "status": "pass",
+        "assertion": "Pearl admitted the same redacted provider identity, assigned a coordinator session, marked bearer authentication valid, and reported the provider ready and routing-eligible after trust verification.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-04-catalog-autotune-readiness",
+        "status": "pass",
+        "assertion": "The provider selected mlx-community/Llama-3.2-3B-Instruct-4bit through the current autotune catalog row, with catalog identity, model hash, and weights manifest digest captured from Pearl pool state.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-05-hardware-evidence-verifier",
+        "status": "pass",
+        "assertion": "Hardware verifier job 24 for the same redacted provider identity moved from waiting_trust to verified after dual-control hardware trust, with decision_reason hardware-verifier.v2:verified_trusted_hardware and provider_hardware_profiles.verified=true.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-06-provider-runtime-routing",
+        "status": "pass",
+        "assertion": "After verifier success, Pearl pool state showed the provider ready, routing_eligible=true, auth_state=bearer_validated, hash_status=hash_verified, encrypted_leg=true, slots_free=1, and WS tunneled inference active.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-07-buyer-serving-smoke",
+        "status": "pass",
+        "assertion": "A public authenticated request through https://api.streamvc.live/v1/chat/completions returned HTTP 200 for mlx-community/Llama-3.2-3B-Instruct-4bit, and the buyer-visible provider attribution plus coordinator route snapshot both hashed to the newly admitted 24GB provider.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-08-redaction-and-correlation",
+        "status": "pass",
+        "assertion": "The artifact redacts provider IDs, session IDs, hostnames, endpoint URLs, account IDs, operator credentials, demo token material, and local account names while preserving stable SHA-256 fingerprints for verifier, pool, route, and buyer-smoke correlation.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "provider-prebeta-admission-m4pro-20260806T065625Z",
+    "execution_mode": "physical-provider-prebeta-admission"
+  }
+}

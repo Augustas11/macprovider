@@ -1827,7 +1827,7 @@
     {
       "requirement_id": "SPEC-033-R001",
       "spec_id": "SPEC-033",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/onboarding/hardware_evidence.go:InsertHardwareVerificationJob",
         "phase4-coordinator/internal/onboarding/store_pg.go:UpsertProviderHardwareProfile"
@@ -1838,13 +1838,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "CODE_BUG",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "The signed 42efce21 acceptance candidate proved that both authenticated provider hardware-profile UPSERT paths failed under the intended provider_onboarding column-limited grants. The SQL has been repaired without widening authority. The provider-prebeta admission journey is now mapped to prove replacement hardware-profile submission and verifier acceptance for the cohort."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:002cdc35d055ae0a103219b10ab89c4aaf27b401",
+          "source": null,
+          "captured_at": "2026-08-06",
+          "expires_at": "2026-11-06"
+        },
+        {
+          "artifact": "sha256:69eb3e188023cc42ea959d3f41f56344a2d51db713366272cdf098069eada093",
+          "source": "journeys/evidence/provider-prebeta-admission-m4pro-20260806T065625Z.spec-033-r001.journey-result.signed.json",
+          "captured_at": "2026-08-06",
+          "expires_at": "2026-11-06"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-034-R001",
