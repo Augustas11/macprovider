@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Build the one-time Sparkle bootstrap appcast for Malibu v1.8.32 clients.
+# Build the signed Sparkle appcast for Malibu clients that still read the
+# public appcast surface.
 #
 # Requires:
 #   - Malibu-{tag}.dmg at phase3-binary/app/dist/ (or pass DMG=...)
 #   - SPARKLE_EDDSA_PRIVATE_KEY (base64 Ed25519 seed) or SPARKLE_PRIVATE_KEY_FILE
 #   - curl + tar (reviewed Sparkle release tools downloaded on demand)
 #
-# The current Malibu app remains free of Sparkle runtime and feeds. Its signed
-# v1.8.39 target retains only the old public trust anchor required by Sparkle's
-# post-extraction policy. This signer is locked to that one bridge tag.
+# Malibu remains free of Sparkle runtime and feed URLs. Release signing injects
+# only the frozen SUPublicEDKey so older Sparkle clients can validate the target
+# bundle after extraction and then land on the CLI-owned update path.
 
 set -euo pipefail
 
@@ -17,12 +18,6 @@ tag="${1:-}"
   echo "usage: $0 vX.Y.Z" >&2
   exit 2
 }
-bridge_tag="v1.8.39"
-[[ "$tag" == "$bridge_tag" ]] || {
-  echo "legacy Malibu Sparkle bootstrap is frozen to $bridge_tag" >&2
-  exit 1
-}
-
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 dmg="${DMG:-$repo_root/phase3-binary/app/dist/Malibu-${tag}.dmg}"
 [[ -f "$dmg" && ! -L "$dmg" ]] || {
@@ -83,7 +78,8 @@ EOF
   --download-url-prefix "https://download.malibu.tech/" \
   "$work"
 
-out="$repo_root/phase3-binary/app/dist/appcast.xml"
+out="${APPCAST_OUT:-$repo_root/phase3-binary/app/dist/appcast.xml}"
+mkdir -p "$(dirname "$out")"
 cp "$work/appcast.xml" "$out"
 [[ -f "$out" && ! -L "$out" ]] || {
   echo "generated appcast is not a regular file" >&2

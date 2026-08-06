@@ -33,7 +33,8 @@ print(value.get("repository", ""), value.get("tag", ""), value.get("commit", "")
 PY
 )"
 read -r expected_repository expected_tag expected_commit <<< "$expected_identity"
-[[ "$expected_tag" == v1.8.39 ]] || die "legacy Malibu publication is frozen to v1.8.39"
+[[ "$expected_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "publication tag must be vX.Y.Z"
+[[ "$expected_tag" == v1.8.39 ]] || die "legacy provider-coupled Malibu publication is frozen to v1.8.39"
 bash "$repo_root/scripts/verify-release-checksums.sh" \
   --allow-partial --openssl "$openssl_bin" \
   "$checksums" "$signature" "$provenance" \
@@ -61,8 +62,6 @@ tag = manifest.get("tag")
 commit = manifest.get("commit")
 if not isinstance(tag, str) or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
     raise SystemExit("invalid publication tag")
-if tag != "v1.8.39":
-    raise SystemExit("legacy Malibu publication is frozen to v1.8.39")
 if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
     raise SystemExit("invalid publication commit")
 if type(manifest.get("release_id")) is not int or manifest["release_id"] <= 0:

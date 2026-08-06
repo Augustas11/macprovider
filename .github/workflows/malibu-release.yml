@@ -283,6 +283,8 @@ jobs:
           signing_id="$(security find-identity -v -p codesigning build.keychain | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
           test -n "$signing_id"
 
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py prepare \
+            "v${APP_VERSION}" "$app" scripts/dist/malibu-v1.8.32-sparkle-public-key
           cp "$payload_dir/macprovider-cli" "$app/Contents/MacOS/macprovider-cli"
           chmod 755 "$app/Contents/MacOS/macprovider-cli"
           cp "$payload_dir/mlx.metallib" "$app/Contents/MacOS/mlx.metallib"
@@ -314,6 +316,8 @@ jobs:
           /usr/libexec/PlistBuddy -c \
             'Set :MalibuBundledReferralBootstrapV1 true' \
             "$app/Contents/Info.plist"
+          python3 scripts/prepare-malibu-bootstrap-trust-anchor.py verify \
+            "$app" scripts/dist/malibu-v1.8.32-sparkle-public-key
           embedded_cli="$app/Contents/MacOS/macprovider-cli"
           test "$(shasum -a 256 "$embedded_cli" | awk '{print $1}')" = "$CLI_SHA256"
 
@@ -661,6 +665,22 @@ jobs:
           cleanup_mount
           trap - EXIT
 
+      - name: Generate verified Malibu appcast
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SPARKLE_EDDSA_PRIVATE_KEY"
+          candidate="$RUNNER_TEMP/candidate"
+          dmg="$candidate/Malibu-v${APP_VERSION}.dmg"
+          DMG="$dmg" APPCAST_OUT="$candidate/appcast.xml" \
+            bash scripts/generate-malibu-appcast.sh "v${APP_VERSION}"
+          python3 scripts/verify-malibu-sparkle-signature.py \
+            "v${APP_VERSION}" "$dmg" "$candidate/appcast.xml" \
+            scripts/dist/malibu-v1.8.32-sparkle-public-key
+
       - name: Create and verify draft Malibu release
         id: draft
         shell: bash
@@ -692,6 +712,7 @@ jobs:
             "$candidate/Malibu-v${APP_VERSION}.dmg" \
             "$candidate/Malibu-v${APP_VERSION}.dmg.sha256" \
             "$candidate/candidate-manifest.json" \
+            "$candidate/appcast.xml" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Malibu ${APP_VERSION}" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
@@ -704,7 +725,8 @@ jobs:
           jq -e --arg tag "$tag" --arg commit "$SOURCE_COMMIT" \
             '.isDraft == true and .tagName == $tag and .targetCommitish == $commit and
              ([.assets[].name] | sort) == (["Malibu-v" + env.APP_VERSION + ".dmg",
-               "Malibu-v" + env.APP_VERSION + ".dmg.sha256", "candidate-manifest.json"] | sort)' \
+               "Malibu-v" + env.APP_VERSION + ".dmg.sha256", "candidate-manifest.json",
+               "appcast.xml"] | sort)' \
             "$RUNNER_TEMP/draft.json" >/dev/null
           draft_id="$(jq -r .databaseId "$RUNNER_TEMP/draft.json")"
           [[ "$draft_id" =~ ^[1-9][0-9]*$ ]]
@@ -715,6 +737,7 @@ jobs:
             "Malibu-v${APP_VERSION}.dmg.sha256" candidate-manifest.json; do
             cmp -s "$candidate/$asset" "$RUNNER_TEMP/draft-download/$asset"
           done
+          cmp -s "$candidate/appcast.xml" "$RUNNER_TEMP/draft-download/appcast.xml"
           echo "release_id=$draft_id" >> "$GITHUB_OUTPUT"
 
       - name: Publish only the revalidated draft
@@ -756,7 +779,7 @@ jobs:
 
           by_id_path, cli_path, candidate_path, release_id, tag, commit, version = sys.argv[1:]
           candidate = pathlib.Path(candidate_path)
-          names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json"]
+          names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json", "appcast.xml"]
           expected_digests = {
               name: "sha256:" + hashlib.sha256((candidate / name).read_bytes()).hexdigest()
               for name in names
@@ -800,7 +823,7 @@ jobs:
 
           by_id_path, by_tag_path, candidate_path, release_id, tag, commit, version = sys.argv[1:]
           candidate = pathlib.Path(candidate_path)
-          names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json"]
+          names = [f"Malibu-v{version}.dmg", f"Malibu-v{version}.dmg.sha256", "candidate-manifest.json", "appcast.xml"]
           expected_digests = {
               name: "sha256:" + hashlib.sha256((candidate / name).read_bytes()).hexdigest()
               for name in names
@@ -826,7 +849,80 @@ jobs:
           gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
             --dir "$RUNNER_TEMP/public-download"
           for asset in "Malibu-v${APP_VERSION}.dmg" \
-            "Malibu-v${APP_VERSION}.dmg.sha256" candidate-manifest.json; do
+            "Malibu-v${APP_VERSION}.dmg.sha256" candidate-manifest.json appcast.xml; do
             cmp -s "$candidate/$asset" "$RUNNER_TEMP/public-download/$asset"
           done
           gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url,isDraft,tagName,assets
+
+      - name: Publish current Malibu appcast to Pearl
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECTED_CLI_SHA256: ${{ inputs.cli_sha256 }}
+          MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
+          MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$MALIBU_DOWNLOAD_SSH_KEY" || {
+            echo "::error::MALIBU_DOWNLOAD_SSH_KEY is required for Malibu publication" >&2
+            exit 1
+          }
+          candidate="$RUNNER_TEMP/candidate"
+          release_json="$RUNNER_TEMP/immutable-release-by-id.json"
+          manifest="$RUNNER_TEMP/malibu-publication-manifest.json"
+          tag="v${APP_VERSION}"
+          dmg="$candidate/Malibu-v${APP_VERSION}.dmg"
+          appcast="$candidate/appcast.xml"
+          checksum="$candidate/Malibu-v${APP_VERSION}.dmg.sha256"
+          python3 - "$release_json" "$manifest" "$dmg" "$appcast" "$checksum" "$tag" "$SOURCE_COMMIT" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release_path, manifest_path, dmg_path, appcast_path, checksum_path = map(pathlib.Path, sys.argv[1:6])
+          tag, commit = sys.argv[6:8]
+          release = json.loads(release_path.read_text(encoding="utf-8"))
+          if release.get("tag_name") != tag or release.get("target_commitish") != commit:
+              raise SystemExit("release identity mismatch")
+          by_name = {
+              asset.get("name"): asset
+              for asset in release.get("assets", [])
+              if isinstance(asset, dict)
+          }
+          names = [dmg_path.name, appcast_path.name, checksum_path.name]
+          digests = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (dmg_path, appcast_path, checksum_path)}
+          content = json.dumps(
+              {
+                  "appcast_sha256": digests[appcast_path.name],
+                  "dmg_sha256": digests[dmg_path.name],
+                  "sha256_sidecar_sha256": digests[checksum_path.name],
+              },
+              sort_keys=True,
+              separators=(",", ":"),
+          ).encode()
+          manifest = {
+              "schema_version": 1,
+              "repository": "Augustas11/macprovider",
+              "tag": tag,
+              "commit": commit,
+              "prerelease": False,
+              "release_id": release["id"],
+              "publication_id": hashlib.sha256(content).hexdigest(),
+              "assets": {},
+          }
+          for name in names:
+              row = by_name.get(name)
+              if not isinstance(row, dict) or row.get("digest") != f"sha256:{digests[name]}":
+                  raise SystemExit(f"release asset mismatch for {name}")
+              manifest["assets"][name] = {"id": row["id"], "sha256": digests[name]}
+          manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+          PY
+          key_file="$(mktemp "$RUNNER_TEMP/malibu-download-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
+          bash scripts/publish-independent-malibu-latest-dmg.sh \
+            "$release_json" "$manifest" "$dmg" "$appcast" "$checksum"

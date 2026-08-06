@@ -3,6 +3,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workflow="$root/.github/workflows/release.yml"
+malibu_workflow="$root/.github/workflows/malibu-release.yml"
 guard="$root/scripts/verify-github-release-posture.sh"
 input_guard="$root/scripts/validate-release-inputs.sh"
 checksums_guard="$root/scripts/verify-release-checksums.sh"
@@ -23,6 +24,9 @@ decision_log="$root/beta/DECISION_CRITERIA.md"
 ci_workflow="$root/.github/workflows/ci.yml"
 sparkle_validator_integration="$root/scripts/test-malibu-sparkle-validator-integration.sh"
 sparkle_validator_patch="$root/scripts/fixtures/SUUpdateValidator-2.6.4-ephemeral.patch"
+current_publication_verifier="$root/scripts/verify-malibu-current-publication-set.sh"
+independent_publisher="$root/scripts/publish-independent-malibu-latest-dmg.sh"
+independent_recovery="$root/scripts/recover-independent-malibu-publication.sh"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-security-posture.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -727,15 +731,14 @@ for requirement in (
     if requirement not in app_sign:
         raise SystemExit(f"Malibu signing omits trust-continuity guard: {requirement}")
 for requirement in (
-    'BRIDGE_TAG = "v1.8.39"',
-    'BRIDGE_VERSION = "1.8.39"',
-    'BRIDGE_BUILD = "39"',
     'EXPECTED_PUBLIC_KEY = "JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="',
-    "tag if tag == BRIDGE_TAG else None",
-    "tag != BRIDGE_TAG and version == BRIDGE_VERSION",
+    'TAG_PATTERN = re.compile(r"^v[0-9]+\\.[0-9]+\\.[0-9]+$")',
+    "TAG_PATTERN.fullmatch(tag)",
+    "validate_identity(document, tag)",
     'subparsers.add_parser("preflight")',
     'key.startswith("SU")',
     'document["SUPublicEDKey"] = key',
+    'found != ["SUPublicEDKey"]',
     "os.replace(temporary_path, path)",
     "stat.S_ISREG",
     "candidate.is_symlink()",
@@ -1738,8 +1741,10 @@ if xcodegen_digest not in xcodegen or xcodegen.find("shasum -a 256") > xcodegen.
 sparkle_digest = "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
 if sparkle_digest not in sparkle or sparkle.find("shasum -a 256") > sparkle.find("tar -xJf"):
     raise SystemExit("legacy Sparkle tools must be digest-pinned before extraction")
-if 'bridge_tag="v1.8.39"' not in sparkle or "SPARKLE_VERSION" in sparkle:
-    raise SystemExit("legacy appcast generator is not frozen to one tag and tool version")
+if '"$tag" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+$' not in sparkle or 'bridge_tag="v1.8.39"' in sparkle:
+    raise SystemExit("Malibu appcast generator must support current semver tags")
+if "sparkle_version=\"2.6.4\"" not in sparkle or "50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b" not in sparkle:
+    raise SystemExit("Malibu appcast generator is not pinned to the reviewed Sparkle tool")
 key_lines = [line.strip() for line in legacy_key.splitlines() if line.strip() and not line.startswith("#")]
 if key_lines != ["JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big="]:
     raise SystemExit("legacy public key differs from the SUPublicEDKey shipped in Malibu v1.8.32")
@@ -1977,5 +1982,87 @@ if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   exit 1
 fi
 grep -q 'must allow only the main branch' "$work/policies.out"
+
+python3 - "$malibu_workflow" "$current_publication_verifier" "$independent_publisher" "$independent_recovery" "$release_runbook" "$root/specs/SPEC-025-native-mac-app.md" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+current_verifier = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+independent_publisher = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+independent_recovery = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+runbook = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+spec = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+
+required_workflow_markers = (
+    "prepare-malibu-bootstrap-trust-anchor.py prepare",
+    "prepare-malibu-bootstrap-trust-anchor.py verify",
+    "Generate verified Malibu appcast",
+    "SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}",
+    "DMG=\"$dmg\" APPCAST_OUT=\"$candidate/appcast.xml\"",
+    "scripts/generate-malibu-appcast.sh \"v${APP_VERSION}\"",
+    "scripts/verify-malibu-sparkle-signature.py",
+    '"appcast.xml"] | sort)',
+    "cmp -s \"$candidate/appcast.xml\" \"$RUNNER_TEMP/draft-download/appcast.xml\"",
+    "Publish current Malibu appcast to Pearl",
+    "MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}",
+    "scripts/publish-independent-malibu-latest-dmg.sh",
+)
+for marker in required_workflow_markers:
+    if marker not in workflow:
+        raise SystemExit(f"independent Malibu workflow omits appcast control: {marker}")
+reverify = workflow.split("- name: Reverify exact accepted bytes", 1)[1].split("\n      - name:", 1)[0]
+appcast_generation = workflow.split("- name: Generate verified Malibu appcast", 1)[1].split("\n      - name:", 1)[0]
+if "SPARKLE_EDDSA_PRIVATE_KEY" in reverify:
+    raise SystemExit("Sparkle signing key must not be scoped to candidate executable verification")
+if "SPARKLE_EDDSA_PRIVATE_KEY" not in appcast_generation:
+    raise SystemExit("appcast generation must be the only independent release step with the Sparkle signing key")
+if workflow.find("Publish current Malibu appcast to Pearl") < workflow.find("Publish only the revalidated draft"):
+    raise SystemExit("independent Malibu appcast must publish only after immutable GitHub publication")
+for marker in (
+    'release.get("immutable") is not True',
+    '"appcast_sha256": local["appcast.xml"]',
+    '"sha256_sidecar_sha256"',
+    'checksum_path.name != f"{dmg_name}.sha256"',
+    "verify-malibu-sparkle-signature.py",
+    "verify-malibu-release-artifacts.sh",
+):
+    if marker not in current_verifier:
+        raise SystemExit(f"current Malibu publication verifier omits: {marker}")
+for marker in (
+    "verify-malibu-current-publication-set.sh",
+    "install-malibu-publication.sh",
+    "verify-malibu-bootstrap-publication.sh",
+    '"$tag" "$asset" "$appcast" "$checksum"',
+    "stat -c '%u:%g:%a:%h:%F'",
+):
+    if marker not in independent_publisher:
+        raise SystemExit(f"independent Malibu publisher omits: {marker}")
+for marker in (
+    "release.get(\"immutable\") is not True",
+    "gh release download \"$tag\"",
+    "publish-independent-malibu-latest-dmg.sh",
+    "recovery must run from the exact release commit",
+    "release asset digest mismatch",
+):
+    if marker not in independent_recovery:
+        raise SystemExit(f"independent Malibu recovery omits: {marker}")
+for marker in (
+    "recover-independent-malibu-publication.sh",
+    "versioned SHA-256 sidecar",
+    "one member of the DMG/appcast/checksum set",
+):
+    if marker not in runbook:
+        raise SystemExit(f"release runbook omits independent appcast recovery control: {marker}")
+for stale in (
+    "Later app updates are\nowned by the signed CLI compatibility transaction",
+    "every later Malibu build\nmust omit the key",
+    "version must omit the key again",
+    "the `download.malibu.tech` endpoint is retired",
+    "a retired mutable endpoint",
+):
+    if stale in spec or stale in runbook:
+        raise SystemExit(f"Malibu appcast contract still contains stale v1.8.39-only wording: {stale}")
+PY
 
 echo "release security posture regression checks passed"
