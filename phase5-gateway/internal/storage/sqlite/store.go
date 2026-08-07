@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2103,12 +2104,54 @@ func (tx *immediateTx) QueryRowContext(ctx context.Context, query string, args .
 	return tx.conn.QueryRowContext(ctx, query, args...)
 }
 
+// immediateTxTerminalTimeout bounds each terminal COMMIT/ROLLBACK statement.
+const immediateTxTerminalTimeout = 5 * time.Second
+
+// execTerminal runs a single terminal statement (COMMIT or ROLLBACK) on its own
+// fresh, uncancellable context. It is deliberately NOT derived from tx.ctx (the
+// request/reconcile context): under an already-cancelled tx.ctx the statement
+// would fail without ending the SQLite transaction, and conn.Close() would then
+// return a connection with an OPEN transaction to the MaxOpenConns=1 pool —
+// poisoning every later writer with "cannot start a transaction within a
+// transaction" until restart (the 2026-08-07 gateway quota-reservation outage).
+// Each call gets its OWN context so a COMMIT that consumed its whole deadline on
+// a lock cannot hand an already-expired context to the compensating ROLLBACK.
+func execTerminal(conn *sql.Conn, stmt string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), immediateTxTerminalTimeout)
+	defer cancel()
+	_, err := conn.ExecContext(ctx, stmt)
+	return err
+}
+
+// discardConn destroys the underlying driver connection so the pool opens a
+// fresh one next time instead of reusing this one. Returning driver.ErrBadConn
+// from Raw marks the driver connection bad; database/sql then drops it rather
+// than returning it to the MaxOpenConns=1 pool. Used only when a transaction
+// could not be cleanly terminated, so a connection that may still hold an open
+// transaction is never handed to the next borrower.
+func discardConn(conn *sql.Conn) {
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
+}
+
 func (tx *immediateTx) Commit() error {
 	if tx.done {
 		return nil
 	}
 	tx.done = true
-	_, err := tx.conn.ExecContext(tx.ctx, "COMMIT")
+	err := execTerminal(tx.conn, "COMMIT")
+	if err != nil {
+		// COMMIT failed, so the transaction may still be open. Roll it back on
+		// a FRESH context (execTerminal), so a COMMIT that exhausted its own
+		// deadline cannot leave ROLLBACK unable to run.
+		if rbErr := execTerminal(tx.conn, "ROLLBACK"); rbErr != nil {
+			// Neither COMMIT nor ROLLBACK could end the transaction; the
+			// connection may still be mid-transaction. Discard it rather than
+			// return a poisoned connection to the pool.
+			discardConn(tx.conn)
+			return err
+		}
+	}
 	closeErr := tx.conn.Close()
 	if err != nil {
 		return err
@@ -2121,7 +2164,12 @@ func (tx *immediateTx) Rollback() {
 		return
 	}
 	tx.done = true
-	_, _ = tx.conn.ExecContext(tx.ctx, "ROLLBACK")
+	if err := execTerminal(tx.conn, "ROLLBACK"); err != nil {
+		// ROLLBACK could not end the transaction; do not return a possibly
+		// mid-transaction connection to the pool.
+		discardConn(tx.conn)
+		return
+	}
 	_ = tx.conn.Close()
 }
 
@@ -2131,7 +2179,11 @@ func (s *Store) beginImmediate(ctx context.Context) (*immediateTx, error) {
 		return nil, err
 	}
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		_ = conn.Close()
+		// Discard rather than return the connection to the pool: defends
+		// against a driver/runtime race where BEGIN IMMEDIATE started the
+		// transaction before reporting a cancellation, which a plain Close
+		// would hand back to the next borrower mid-transaction.
+		discardConn(conn)
 		return nil, err
 	}
 	return &immediateTx{ctx: ctx, conn: conn}, nil
