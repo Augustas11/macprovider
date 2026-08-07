@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -118,12 +119,17 @@ type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+type rowScanner interface {
+	Scan(...any) error
+}
+
 type options struct {
-	configPath string
-	dsn        string
-	trustDSN   string
-	dryRun     bool
-	stdout     io.Writer
+	configPath   string
+	dsn          string
+	trustDSN     string
+	requireChips string
+	dryRun       bool
+	stdout       io.Writer
 }
 
 func main() {
@@ -131,6 +137,7 @@ func main() {
 	flag.StringVar(&opts.configPath, "config", defaultConfigPath, "operator hardware inventory YAML")
 	flag.StringVar(&opts.dsn, "dsn", "", "Postgres DSN; defaults to STATS_INVENTORY_DSN")
 	flag.StringVar(&opts.trustDSN, "trust-dsn", "", "Postgres trust-root DSN; defaults to STATS_TRUST_INVENTORY_DSN")
+	flag.StringVar(&opts.requireChips, "require-chips", "", "comma-separated chip_normalized values that must be present in the inventory YAML")
 	flag.BoolVar(&opts.dryRun, "dry-run", false, "validate config and print counts without writing")
 	flag.Parse()
 	opts.stdout = os.Stdout
@@ -151,6 +158,9 @@ func run(parent context.Context, opts options) error {
 		return err
 	}
 	if err := validateInventory(inv); err != nil {
+		return err
+	}
+	if err := validateRequiredChips(inv, opts.requireChips); err != nil {
 		return err
 	}
 	if opts.dryRun {
@@ -210,25 +220,51 @@ func run(parent context.Context, opts options) error {
 		return fmt.Errorf("commit inventory transaction: %w", err)
 	}
 	committed = true
+	queryRow := func(ctx context.Context, query string, args ...any) rowScanner {
+		return db.QueryRowContext(ctx, query, args...)
+	}
+	demoteTrust := func(demotionCtx context.Context) error {
+		return reconcileTrustDemotions(demotionCtx, db)
+	}
+	if err := finishCommittedInventory(parent, ctx, inv, trustDSN, queryRow, reconcileTrustInventory, demoteTrust); err != nil {
+		return err
+	}
 
+	fmt.Fprintf(out, "upserted %d chip profiles, %d provider profiles, and %d trusted hardware identities\n",
+		len(inv.Chips), len(inv.Providers), trustedHardwareCount(inv.TrustedHardware.Entries))
+	return nil
+}
+
+func finishCommittedInventory(
+	parent context.Context,
+	ctx context.Context,
+	inv inventory,
+	trustDSN string,
+	queryRow func(context.Context, string, ...any) rowScanner,
+	reconcileTrust func(context.Context, string, inventory) error,
+	demoteTrust func(context.Context) error,
+) error {
 	// Reconcile trust inventory ONLY when the trusted_hardware section is present
 	// (issue #582 FIX 2). Omitted → skip reconciliation entirely (no DELETE, all
 	// roots preserved — the pre-#582 no-op). Present (populated or explicitly
 	// empty `{}`) → applyTrustInventory upserts the listed roots and its scoped
 	// DELETE removes every other source='inventory' root, so an explicit empty
 	// section revokes them all. operator_api roots are always untouched
-	// (source-scoped).
+	// (source-scoped). This runs before chip verification so a slow catalog read
+	// cannot consume the shared run context and strand explicitly removed trust
+	// roots.
 	var trustErr error
 	if inv.TrustedHardware.Present {
-		trustErr = reconcileTrustInventory(ctx, trustDSN, inv)
+		trustErr = reconcileTrust(ctx, trustDSN, inv)
 	}
+	verifyErr := verifyInventoryApplied(ctx, queryRow, inv)
 
-	// Demotions ALWAYS run, even if the trust-inventory apply above failed
-	// (issue #582 FIX 3): a broken trust-writer DSN must not strand an
-	// API-revoked root as verified. Attempt demotion against the last-committed
-	// trust state and aggregate both errors. An expired or revoked operator_api
-	// trust root (or any stale non-authoritative verified profile — cli_hello or
-	// app_register) is demoted independent of whether the YAML defines
+	// Demotions ALWAYS run, even if chip verification or the trust-inventory apply
+	// above failed (issue #582 FIX 3): a broken catalog read or trust-writer DSN
+	// must not strand an API-revoked root as verified. Attempt demotion against the
+	// last-committed trust state and aggregate every error. An expired or revoked
+	// operator_api trust root (or any stale non-authoritative verified profile —
+	// cli_hello or app_register) is demoted independent of whether the YAML defines
 	// trusted_hardware.
 	//
 	// FIX 5: demotion runs on its OWN budget derived from the parent, not the
@@ -238,14 +274,8 @@ func run(parent context.Context, opts options) error {
 	// root effective forever.
 	demotionCtx, demotionCancel := demotionContext(parent)
 	defer demotionCancel()
-	demoteErr := reconcileTrustDemotions(demotionCtx, db)
-	if err := errors.Join(trustErr, demoteErr); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(out, "upserted %d chip profiles, %d provider profiles, and %d trusted hardware identities\n",
-		len(inv.Chips), len(inv.Providers), trustedHardwareCount(inv.TrustedHardware.Entries))
-	return nil
+	demoteErr := demoteTrust(demotionCtx)
+	return errors.Join(verifyErr, trustErr, demoteErr)
 }
 
 // reconcileTrustInventory opens the trust-writer handle and applies the
@@ -469,6 +499,23 @@ func validateInventory(inv inventory) error {
 	return nil
 }
 
+func validateRequiredChips(inv inventory, required string) error {
+	required = strings.TrimSpace(required)
+	if required == "" {
+		return nil
+	}
+	for _, raw := range strings.Split(required, ",") {
+		key := normalizedChipKey(raw)
+		if key == "" {
+			return errors.New("required chip key is empty")
+		}
+		if _, ok := inv.Chips[key]; !ok {
+			return fmt.Errorf("missing required chip profile %q in inventory YAML; add chips[%q] before retrying hardware trust approval", key, key)
+		}
+	}
+	return nil
+}
+
 func validateChipKey(key string) error {
 	if strings.TrimSpace(key) == "" {
 		return errors.New("chip key is required")
@@ -669,6 +716,39 @@ DELETE FROM chip_hardware_profiles
 		pq.Array(chipKeys),
 	); err != nil {
 		return fmt.Errorf("delete removed chip profiles: %w", err)
+	}
+	return nil
+}
+
+func verifyInventoryApplied(ctx context.Context, queryRow func(context.Context, string, ...any) rowScanner, inv inventory) error {
+	chipKeys := make([]string, 0, len(inv.Chips))
+	for key := range inv.Chips {
+		chipKeys = append(chipKeys, key)
+	}
+	sort.Strings(chipKeys)
+	for _, key := range chipKeys {
+		want := inv.Chips[key]
+		var gotDisplay string
+		var gotBandwidth int64
+		var gotPower float64
+		var gotGPU, gotCPU int
+		err := queryRow(ctx, `
+SELECT display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores
+  FROM chip_hardware_profiles
+ WHERE chip_normalized = $1`, key).Scan(&gotDisplay, &gotBandwidth, &gotPower, &gotGPU, &gotCPU)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("verify chip %q: missing from chip_hardware_profiles after inventory sync", key)
+		}
+		if err != nil {
+			return fmt.Errorf("verify chip %q: %w", key, err)
+		}
+		if gotDisplay != strings.TrimSpace(want.DisplayChip) ||
+			gotBandwidth != want.MemoryBandwidthGBPerS ||
+			math.Abs(gotPower-want.NetworkPowerKW) > 1e-9 ||
+			gotGPU != want.GPUCores ||
+			gotCPU != want.CPUCores {
+			return fmt.Errorf("verify chip %q: database row does not match inventory YAML", key)
+		}
 	}
 	return nil
 }
