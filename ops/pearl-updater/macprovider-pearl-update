@@ -3535,8 +3535,11 @@ class Updater:
                 "sqlite3",
                 "-bail",
                 str(self.gateway_db),
+                # Settlement holds (settlement_hold=1) are post-stream quota finality
+                # state, not in-flight buyer work. Counting them blocked Pearl drain
+                # forever while concurrency was already zero (v1.8.90 apply 2026-08-07).
                 "SELECT (SELECT COUNT(*) FROM concurrency_reservations WHERE status='active') + "
-                "(SELECT COUNT(*) FROM quota_reservations WHERE status='active');",
+                "(SELECT COUNT(*) FROM quota_reservations WHERE status='active' AND settlement_hold = 0);",
             ],
             check=False,
             timeout=10,
