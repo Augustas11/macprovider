@@ -12,7 +12,7 @@ future_version="${app_version%.*}.$((${app_version##*.} + 1))"
 future_build="$((app_build + 1))"
 future_version_pattern="${future_version//./\\.}"
 staged_coordinator_policy="--allow-previous-stable=1.8.82"
-staged_candidate_policy="--staged-candidate=1.8.88"
+staged_candidate_policy="--staged-candidate=1.8.90"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-version-cohesion.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -51,13 +51,13 @@ grep -q "advertises 1.8.82; expected $binary_version" "$work/strict-staging.out"
 base_output="$(bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy")"
 grep -q "staged with previous stable coordinator recommendation 1.8.82" <<<"$base_output"
 
-if bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" --staged-candidate=1.8.89 >"$work/candidate-drift.out" 2>&1; then
+if bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" --staged-candidate=1.8.91 >"$work/candidate-drift.out" 2>&1; then
   echo "version guard accepted a staged exception for a different candidate" >&2
   exit 1
 fi
 grep -q "does not match CLI binary" "$work/candidate-drift.out"
 
-if bash "$version_guard" "v$binary_version" --staged-candidate=1.8.88 >"$work/missing-previous.out" 2>&1; then
+if bash "$version_guard" "v$binary_version" --staged-candidate=1.8.90 >"$work/missing-previous.out" 2>&1; then
   echo "version guard accepted a staged candidate without a previous stable policy" >&2
   exit 1
 fi

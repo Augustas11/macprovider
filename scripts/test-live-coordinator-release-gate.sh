@@ -512,7 +512,7 @@ def require_stable_gate(
         trusted_keys_arg,
         "--coordinator-url https://coordinator.streamvc.live",
         "--openssl \"$OPENSSL_BIN\"",
-        "--expected-previous-recommendation 1.8.82",
+        "--expected-previous-recommendation 1.8.88",
         "env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN",
     ):
         if required not in publish[pre_gate_label:]:

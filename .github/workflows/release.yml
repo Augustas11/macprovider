@@ -116,8 +116,8 @@ jobs:
         run: |
           bash scripts/test-coordinator-advertised-version.sh \
             "${{ steps.release_source.outputs.tag }}" \
-            --allow-previous-stable=1.8.82 \
-            --staged-candidate=1.8.88
+            --allow-previous-stable=1.8.88 \
+            --staged-candidate=1.8.90
 
       - name: Select and verify reviewed release toolchain
         shell: bash
@@ -1329,8 +1329,8 @@ jobs:
               scripts/dist/malibu-v1.8.32-sparkle-public-key
             bash scripts/test-coordinator-advertised-version.sh \
               "$tag" \
-              --allow-previous-stable=1.8.82 \
-              --staged-candidate=1.8.88
+              --allow-previous-stable=1.8.88 \
+              --staged-candidate=1.8.90
           elif [ -e phase3-binary/app/dist/appcast.xml ]; then
             echo "::error::legacy appcast must exist only for v1.8.39" >&2
             exit 1
@@ -1885,7 +1885,7 @@ jobs:
               --trusted-keys trusted-keys.json \
               --coordinator-url https://coordinator.streamvc.live \
               --openssl "$OPENSSL_BIN" \
-              --expected-previous-recommendation 1.8.82 \
+              --expected-previous-recommendation 1.8.88 \
               --publication-phase pre-publication
             echo "::endgroup::"
           fi
@@ -1923,8 +1923,8 @@ jobs:
           MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
           MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
           MALIBU_PUBLICATION_EXPECTED_REPOSITORY: ${{ github.repository }}
-          MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.8.82"
-          MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.8.88"
+          MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.8.88"
+          MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.8.90"
           OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
