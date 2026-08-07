@@ -146,16 +146,18 @@ index 00000000..36ff78fd
 +}
 diff --git a/phase4-coordinator/internal/buyer/receipt_key_route_gate_test.go b/phase4-coordinator/internal/buyer/receipt_key_route_gate_test.go
 new file mode 100644
-index 00000000..668c000b
+index 00000000..05ac0235
 --- /dev/null
 +++ b/phase4-coordinator/internal/buyer/receipt_key_route_gate_test.go
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,41 @@
 +package buyer
 +
 +import (
 +	"testing"
++	"time"
 +
 +	"github.com/augstar/macprovider-coordinator/internal/pool"
++	"github.com/rs/zerolog"
 +)
 +
 +// TestEligibilityCtx_ProviderHasSettlementReceiptKey pins the
@@ -169,8 +171,11 @@ index 00000000..668c000b
 +	t.Parallel()
 +	withKey := pool.Provider{ProviderID: "with", ReceiptPubkey: []byte("k")}
 +	noKey := pool.Provider{ProviderID: "without"}
++	// A real Server is required: the enforce-exclusion path emits a
++	// receipt_key_missing_excluded log via c.s, so c.s must be non-nil.
++	s := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now().UTC())
 +
-+	observe := &eligibilityCtx{settlementEnforce: false}
++	observe := &eligibilityCtx{s: s, settlementEnforce: false}
 +	if !observe.ProviderHasSettlementReceiptKey(noKey) {
 +		t.Error("observe mode must accept a provider with no receipt key (no-op)")
 +	}
@@ -178,7 +183,7 @@ index 00000000..668c000b
 +		t.Error("observe mode must accept a provider with a receipt key")
 +	}
 +
-+	enforce := &eligibilityCtx{settlementEnforce: true}
++	enforce := &eligibilityCtx{s: s, settlementEnforce: true}
 +	if enforce.ProviderHasSettlementReceiptKey(noKey) {
 +		t.Error("enforce mode must reject a provider with an empty active receipt key")
 +	}
@@ -229,7 +234,7 @@ index de67f9f8..39118776 100644
  			if got := routeSnapshotCount(t, dbPath); got != 0 {
  				t.Fatalf("route snapshots=%d want 0", got)
 diff --git a/phase4-coordinator/internal/buyer/server.go b/phase4-coordinator/internal/buyer/server.go
-index 83d82bb8..709d783e 100644
+index 83d82bb8..2f222a7d 100644
 --- a/phase4-coordinator/internal/buyer/server.go
 +++ b/phase4-coordinator/internal/buyer/server.go
 @@ -5487,11 +5487,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string,
@@ -259,7 +264,7 @@ index 83d82bb8..709d783e 100644
  		default:
  			key = "other"
  		}
-@@ -6239,6 +6242,15 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
+@@ -6239,6 +6242,16 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
  			typ:     "server_error",
  		}
  	}
@@ -270,12 +275,13 @@ index 83d82bb8..709d783e 100644
 +	// pre-dispatch (500 route_snapshot_failed) instead of a clean 503.
 +	// Observe mode / nil store => settlementEnforceMode()==false => no-op.
 +	if s.settlementEnforceMode() && len(p.ReceiptPubkey) == 0 {
++		s.logReceiptKeyExcluded(p)
 +		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 +	}
  	if p.MaxContextTokens < estimatedTokens {
  		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
  	}
-@@ -6396,6 +6408,14 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
+@@ -6396,6 +6409,15 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
  		if !s.providerMeetsModelVersionFloor(provider) {
  			return pool.Provider{}, queuedProviderTerminal
  		}
@@ -285,12 +291,13 @@ index 83d82bb8..709d783e 100644
 +		// must not be served off the queue (its route snapshot would fail
 +		// pre-dispatch). Observe / nil store => no-op.
 +		if s.settlementEnforceMode() && len(provider.ReceiptPubkey) == 0 {
++			s.logReceiptKeyExcluded(provider)
 +			return pool.Provider{}, queuedProviderTerminal
 +		}
  		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
  			return pool.Provider{}, queuedProviderTerminal
  		}
-@@ -6429,6 +6449,13 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
+@@ -6429,6 +6451,13 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
  		if !checker.ProviderMeetsModelVersionFloor(provider) {
  			continue
  		}
@@ -304,7 +311,7 @@ index 83d82bb8..709d783e 100644
  		reason, _ := checker.Tier2Decision(provider)
  		if reason != 0 || !checker.QuotaPermits(provider) {
  			continue
-@@ -6546,6 +6573,13 @@ type eligibilityCtx struct {
+@@ -6546,6 +6575,13 @@ type eligibilityCtx struct {
  	class           *config.ModelClassConfig
  	estimatedTokens int
  	tier2Cfg        config.Tier2Config
@@ -318,7 +325,7 @@ index 83d82bb8..709d783e 100644
  }
  
  // ProviderMatchesRequest combines the model/class match and the
-@@ -6598,6 +6632,37 @@ func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
+@@ -6598,6 +6634,58 @@ func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
  	return c.s.checkQuota(p)
  }
  
@@ -335,7 +342,28 @@ index 83d82bb8..709d783e 100644
 +	if !c.settlementEnforce {
 +		return true
 +	}
-+	return len(p.ReceiptPubkey) > 0
++	if len(p.ReceiptPubkey) > 0 {
++		return true
++	}
++	c.s.logReceiptKeyExcluded(p)
++	return false
++}
++
++// logReceiptKeyExcluded is the operator-visible signal that supply exists
++// but is unsettleable under enforce (empty active receipt key), mirroring
++// the model_version_floor_excluded event. It is fired at every exclusion
++// site (main filter, pinned, slot-queue admission, slot-queue poll) so the
++// exclusion is observable even on the all-candidates-filtered 503 path,
++// where the aggregate routing_decision log is not emitted for ANY reason (a
++// pre-existing cross-cutting gap). Per-provider/per-request, hence debug;
++// the request-level aggregate is the 503 no_provider_available envelope.
++func (s *Server) logReceiptKeyExcluded(p pool.Provider) {
++	s.log.Debug().
++		Str("event", "receipt_key_missing_excluded").
++		Str("provider_id", p.ProviderID).
++		Str("assigned_id", p.AssignedID).
++		Str("model_id", p.ModelID).
++		Msg("provider excluded from covered paid routing: no active settlement receipt key")
 +}
 +
 +// settlementEnforceMode reports whether verified-model settlement is in
