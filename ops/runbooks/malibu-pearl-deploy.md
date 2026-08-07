@@ -179,6 +179,14 @@ Only after §4 passes and operator accepts stance **(b) accrual-only**:
 
 **Do not** enable withdrawable MALIBU until C1+C2 lab verification is complete on production data.
 
+### 5.1 Pearl promotion record (prebeta P2)
+
+- **When:** 2026-08-07T13:53:29Z
+- **Action:** `malibu_emission.enabled: false → true` in `/etc/macprovider/coordinator.pearl-overlays.yaml`; coordinator restarted
+- **Evidence:** journal `SPEC-MALIBU-EMISSION-LEDGER accrual runner started`
+- **Backup:** `coordinator.pearl-overlays.yaml.bak-pre-emission-*` on Pearl
+- **Rollback:** set `enabled: false` and restart (keep overlay drop-in)
+
 ---
 
 ## 6. Rollback

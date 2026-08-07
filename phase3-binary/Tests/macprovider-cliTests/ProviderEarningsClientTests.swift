@@ -44,7 +44,11 @@ final class ProviderEarningsClientTests: XCTestCase {
               "malibu_held": 0.5,
               "malibu_hold_reasons": ["per_wallet_daily_cap"],
               "malibu_daily_cap": 25,
-              "malibu_wallet_daily_cap": 100
+              "malibu_wallet_daily_cap": 100,
+              "idle_prewarm": {
+                "events_last_1h": {"idle_prewarm_started": 6, "idle_prewarm_completed": 5},
+                "skips_by_reason_last_1h": {"on_battery": 2}
+              }
             }
             """.utf8)
             return (response, body)
@@ -66,6 +70,8 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(summary.malibuHoldReasons, ["per_wallet_daily_cap"])
         XCTAssertEqual(summary.malibuDailyCap, 25)
         XCTAssertEqual(summary.malibuWalletDailyCap, 100)
+        XCTAssertEqual(summary.idlePrewarm.eventsLast1h["idle_prewarm_started"], 6)
+        XCTAssertEqual(summary.idlePrewarm.skipsByReasonLast1h["on_battery"], 2)
         XCTAssertTrue(summary.earningsProjectionFresh)
         XCTAssertFalse(summary.malibuProjectionFresh)
     }
@@ -87,6 +93,7 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(summary.unpaidLedgerBacklogUSDC, 1.25)
         XCTAssertNil(summary.usdcToday)
         XCTAssertNil(summary.malibuAllTime)
+        XCTAssertEqual(summary.idlePrewarm, .empty)
         XCTAssertFalse(summary.earningsProjectionFresh)
         XCTAssertFalse(summary.malibuProjectionFresh)
     }
@@ -94,7 +101,15 @@ final class ProviderEarningsClientTests: XCTestCase {
     func testAccrualProjectionFillsTrustAndMalibuWithoutInventingUSDC() throws {
         let earnings = try JSONDecoder().decode(
             ProviderEarningsSummary.self,
-            from: Data("{\"unpaid_ledger_backlog_usdc\":2}".utf8)
+            from: Data("""
+            {
+              "unpaid_ledger_backlog_usdc": 2,
+              "idle_prewarm": {
+                "events_last_1h": {},
+                "skips_by_reason_last_1h": {"model_not_loaded": 3}
+              }
+            }
+            """.utf8)
         )
         let accrual = try JSONDecoder().decode(
             MalibuAccrualSummary.self,
@@ -124,6 +139,7 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(merged.malibuHoldReasons, ["trust_tier_provisional"])
         XCTAssertEqual(merged.malibuDailyCap, 25)
         XCTAssertEqual(merged.malibuWalletDailyCap, 100)
+        XCTAssertEqual(merged.idlePrewarm.skipsByReasonLast1h["model_not_loaded"], 3)
         XCTAssertTrue(merged.malibuProjectionFresh)
         XCTAssertFalse(merged.earningsProjectionFresh)
     }

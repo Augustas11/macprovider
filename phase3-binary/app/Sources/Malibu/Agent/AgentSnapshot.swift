@@ -50,6 +50,10 @@ struct AgentSnapshot: Equatable {
     var malibuHoldReasons: [String]
     var malibuDailyCap: Double?
     var malibuWalletDailyCap: Double?
+    /// Last-hour idle-prewarm event/skip counts from the provider earnings
+    /// endpoint. Gated by `providerEarningsFresh`, same as the other fields
+    /// sourced from that projection.
+    var idlePrewarmSummary: ProviderIdlePrewarmSummary = .empty
     /// Freshness for the provider earnings endpoint.
     var providerEarningsFresh: Bool
     /// Reward-specific freshness. It is separate so a partial earnings frame
@@ -456,8 +460,8 @@ enum AgentSnapshotPresenter {
         if isPendingHardwareVerification(s) {
             return PublicStatus(
                 title: "Pending hardware verification",
-                detail: "Network hardware verification is incomplete. Retry provider setup while online so fresh evidence can be submitted; recently submitted evidence may still be awaiting operator approval.",
-                safeNextAction: "Retry provider setup while online.",
+                detail: "Hardware verification pending — usually under an hour. Stay online so fresh evidence can be submitted; recently submitted evidence may still be awaiting network approval.",
+                safeNextAction: "Keep Malibu online · retry setup if this lasts more than an hour.",
                 executableAction: .retryHardwareVerification
             )
         }
@@ -647,7 +651,7 @@ enum AgentSnapshotPresenter {
         case .starting: return "Starting"
         case .serving:
             guard isNetworkReady(s, at: now) else { return "Connected" }
-            if let usdc = s.earningsUsdcToday { return String(format: "$%.2f", usdc) }
+            if let usdc = s.earningsUsdcToday { return formatUSDC(usdc) }
             return "Serving"
         case .paused:         return "Paused"
         case .reconnecting:
@@ -740,7 +744,7 @@ enum AgentSnapshotPresenter {
                 return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
             }
             let usdc = s.providerEarningsFresh
-                ? s.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "n/a"
+                ? s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
                 : "n/a"
             let malibu = s.malibuProjectionFresh
                 ? s.malibuAccruedToday.map { String(format: "%.2f", $0) } ?? "n/a"
@@ -751,12 +755,34 @@ enum AgentSnapshotPresenter {
         case (nil, nil):
             return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
         case let (usdc?, malibu?):
-            return String(format: "Today: $%.2f USDC · %@", usdc, malibuDisplay(malibu, tier: s.trustTier))
+            return "Today: \(formatUSDC(usdc)) USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
         case let (usdc?, nil):
-            return String(format: "Today: $%.2f USDC · n/a MALIBU (reward status unavailable)", usdc)
+            return "Today: \(formatUSDC(usdc)) USDC · n/a MALIBU (reward status unavailable)"
         case let (nil, malibu?):
             return "Today: n/a USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
         }
+    }
+
+    /// Priority-ordered explanation for why a serving provider is not
+    /// currently earning, sourced from the last-hour idle-prewarm skip
+    /// counts. Gated by `providerEarningsFresh` since idle-prewarm data
+    /// arrives on the same projection as the other earnings fields.
+    static func eligibilityLine(_ s: AgentSnapshot) -> String? {
+        guard s.providerEarningsFresh else { return nil }
+        let skips = s.idlePrewarmSummary.skipsByReasonLast1h
+        if (skips["on_battery"] ?? 0) > 0 {
+            return "On battery — plug in to earn"
+        }
+        if (skips["thermal_pressure"] ?? 0) > 0 {
+            return "Thermal throttle — waiting to cool before earning"
+        }
+        if (skips["model_not_loaded"] ?? 0) > 0 {
+            return "Model is preparing — earning starts when ready"
+        }
+        if isNetworkReady(s) || s.state == .serving {
+            return "Eligible, waiting for work"
+        }
+        return nil
     }
 
     static func backlogLine(_ s: AgentSnapshot) -> String? {
@@ -969,7 +995,7 @@ enum AgentSnapshotPresenter {
 
     private static func hardwareOnboardingLifecycleLine(_ s: AgentSnapshot) -> String? {
         if isPendingHardwareVerification(s) {
-            return "Pending hardware verification · Retry provider setup while online"
+            return "Pending hardware verification · Usually under an hour · keep online"
         }
         if isHardwareEvidenceRejected(s) {
             if s.lifecycleReason == "autotune_model_cap_exceeded" {
@@ -1088,21 +1114,28 @@ enum AgentSnapshotPresenter {
     static func usdcFullLine(_ s: AgentSnapshot) -> String {
         if !s.providerEarningsFresh {
             let today = "n/a today"
-            return "\(today) · n/a wk · n/a pending · n/a life"
+            return "\(today) · n/a wk · n/a accrued · n/a life"
         }
         return [
-            s.earningsUsdcToday.map { String(format: "$%.2f today", $0) } ?? "n/a today",
-            s.earningsUsdcWeek.map { String(format: "$%.2f wk", $0) } ?? "n/a wk",
-            s.earningsUsdcPending.map { String(format: "$%.2f pending", $0) } ?? "n/a pending",
-            s.earningsUsdcLifetime.map { String(format: "$%.2f life", $0) } ?? "n/a life"
+            s.earningsUsdcToday.map { "\(formatUSDC($0)) today" } ?? "n/a today",
+            s.earningsUsdcWeek.map { "\(formatUSDC($0)) wk" } ?? "n/a wk",
+            s.earningsUsdcPending.map { "\(formatUSDC($0)) accrued" } ?? "n/a accrued",
+            s.earningsUsdcLifetime.map { "\(formatUSDC($0)) life" } ?? "n/a life"
         ].joined(separator: " · ")
+    }
+
+    /// Caption for the accrued amount in `usdcFullLine`, kept on its own line
+    /// so the full line stays scannable.
+    static func usdcAccrualCaption(_ s: AgentSnapshot) -> String? {
+        guard s.providerEarningsFresh, s.earningsUsdcPending != nil else { return nil }
+        return "Accrued — payouts open in beta"
     }
 
     static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
         guard s.providerEarningsFresh else {
             return "n/a"
         }
-        return s.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "n/a"
+        return s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
     }
 
     static func malibuFullLine(_ s: AgentSnapshot) -> String {
@@ -1373,6 +1406,16 @@ enum AgentSnapshotPresenter {
             return redacted
         }
         return "Details are available in Advanced diagnostics."
+    }
+
+    /// Adaptive USDC precision: sub-cent amounts (e.g. per-token accrual)
+    /// render as `$0.00` at two decimals, hiding real earnings. Show 4
+    /// decimals only for nonzero amounts under a cent; otherwise `$%.2f`.
+    private static func formatUSDC(_ amount: Double) -> String {
+        if amount != 0 && abs(amount) < 0.01 {
+            return String(format: "$%.4f", amount)
+        }
+        return String(format: "$%.2f", amount)
     }
 
     private static func malibuDisplay(_ amount: Double, tier: AgentSnapshot.TrustTier, compact: Bool = false) -> String {

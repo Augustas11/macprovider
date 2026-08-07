@@ -61,6 +61,10 @@ final class ControlFrameCodecTests: XCTestCase {
                 malibuHoldReasons: ["per_wallet_daily_cap"],
                 malibuDailyCap: 25,
                 malibuWalletDailyCap: 100,
+                idlePrewarm: ProviderIdlePrewarmSummary(
+                    eventsLast1h: ["idle_prewarm_started": 4],
+                    skipsByReasonLast1h: ["on_battery": 2]
+                ),
                 malibuProjectionFresh: true,
                 earningsProjectionFresh: true
             ),
@@ -282,6 +286,55 @@ final class ControlFrameCodecTests: XCTestCase {
         )
         XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(agent.snapshot).contains("n/a MALIBU today"))
         XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "Today: reward status unavailable")
+    }
+
+    @MainActor
+    func testMetricsResponseAppliesIdlePrewarmSummaryToSnapshot() {
+        var initialSnapshot = AgentSnapshot.empty
+        initialSnapshot.state = .serving
+        let agent = MalibuAgent(
+            initialSnapshot: initialSnapshot,
+            projectionEligibleForMetrics: true
+        )
+        let providerEarnings = ProviderEarnings(
+            walletBound: false,
+            trustTier: .provisional,
+            unpaidLedgerBacklogUSDC: 0,
+            unpaidLedgerBacklogMALIBU: 0,
+            usdcToday: 4,
+            usdcWeek: nil,
+            usdcPending: nil,
+            usdcLifetime: nil,
+            malibuToday: nil,
+            malibuAllTime: nil,
+            trustCriteriaMet: nil,
+            trustCriteriaRequired: nil,
+            idlePrewarm: ProviderIdlePrewarmSummary(skipsByReasonLast1h: ["on_battery": 1]),
+            malibuProjectionFresh: false,
+            earningsProjectionFresh: true
+        )
+        agent.consume(.metricsResponse(
+            earningsUsdc: 4,
+            malibuAccrued: nil,
+            providerEarnings: providerEarnings,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: 1
+        ))
+
+        XCTAssertTrue(agent.snapshot.providerEarningsFresh)
+        XCTAssertEqual(agent.snapshot.idlePrewarmSummary.skipsByReasonLast1h["on_battery"], 1)
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(agent.snapshot), "On battery — plug in to earn")
     }
 
     func testMetricsResponseDecodesGpuLatencyAndQueueDepth() throws {

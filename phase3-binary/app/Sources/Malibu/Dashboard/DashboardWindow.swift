@@ -81,6 +81,11 @@ private struct DashboardView: View {
                     Text(AgentSnapshotPresenter.usdcFullLine(agent.snapshot))
                         .foregroundStyle(.secondary)
                         .font(.callout)
+                    if let caption = AgentSnapshotPresenter.usdcAccrualCaption(agent.snapshot) {
+                        Text(caption)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot))
                         .foregroundStyle(
                             agent.snapshot.malibuProjectionFresh && agent.snapshot.trustTier == .provisional
@@ -102,6 +107,11 @@ private struct DashboardView: View {
                         Text(backlog)
                             .font(.caption)
                             .foregroundStyle(MalibuBrand.coral)
+                    }
+                    if let eligibility = AgentSnapshotPresenter.eligibilityLine(agent.snapshot) {
+                        Text(eligibility)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if let address = agent.snapshot.payoutRegisteredAddress {
                         Text("Payout wallet \(PayoutWalletFlow.truncateAddress(address))")

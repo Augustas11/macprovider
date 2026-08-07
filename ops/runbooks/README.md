@@ -7,6 +7,9 @@
 | **A — OPoI Pearl** | [`opoi-pearl-deploy.md`](./opoi-pearl-deploy.md) | Pearl canary overlay deploy |
 | **C — $MALIBU bootstrap** | [`malibu-bootstrap-emission.md`](./malibu-bootstrap-emission.md) | Emission ledger, caps, Trusted unlock, Malibu UI |
 | **C — MALIBU Pearl** | [`malibu-pearl-deploy.md`](./malibu-pearl-deploy.md) | Session C4 Pearl migration + overlay |
+| **Prebeta P4 trust alert** | [`hardware-trust-pending-alert.md`](./hardware-trust-pending-alert.md) | Journal/BetterStack alert when waiting_trust parks |
+| **Prebeta P5 demand floor** | [`prebeta-demand-floor.md`](./prebeta-demand-floor.md) | Canary re-enable gated by #584 |
+| **Prebeta P6 stats honesty** | [`prebeta-stats-honesty.md`](./prebeta-stats-honesty.md) | nodes_hardware_attested vs Trusted; download pin |
 | **Catalog release + provider upgrade** | [`catalog-release-provider-upgrade.md`](./catalog-release-provider-upgrade.md) | Signed publication, coordinator activation, provider transaction, rollback |
 | **#608 Llama Tier-2 republish** | [`608-llama-tier2-republish.md`](./608-llama-tier2-republish.md) | Reviewed `stage-tier2-republish` staging for the live Llama-3.2 autotune/Tier-2 CONFLICT; Pearl apply steps not yet executed |
 | **B — Entry 172 referrals** | [`entry-172-referral-activation.md`](./entry-172-referral-activation.md) | Reversible private-prebeta referral activation checklist |

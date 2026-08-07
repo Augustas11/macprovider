@@ -1223,6 +1223,7 @@ final class MalibuAgent: ObservableObject {
                 snapshot.malibuWalletDailyCap = providerEarnings.malibuWalletDailyCap
                 snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
                 snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
+                snapshot.idlePrewarmSummary = providerEarnings.idlePrewarm
             }
         case let .pauseAck(accepted, reason):
             if accepted {

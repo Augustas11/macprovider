@@ -1,5 +1,32 @@
 import Foundation
 
+/// Provider-visible last-hour idle-prewarm projection. Mirrors
+/// `ProviderIdlePrewarmSummary` in
+/// `Sources/macprovider-cli/ProviderEarningsClient.swift` — duplicated for P0
+/// (see the ControlSocketFrame note above on consolidating the wire mirrors).
+struct ProviderIdlePrewarmSummary: Codable, Equatable {
+    let eventsLast1h: [String: Int64]
+    let skipsByReasonLast1h: [String: Int64]
+
+    static let empty = ProviderIdlePrewarmSummary(eventsLast1h: [:], skipsByReasonLast1h: [:])
+
+    enum CodingKeys: String, CodingKey {
+        case eventsLast1h = "events_last_1h"
+        case skipsByReasonLast1h = "skips_by_reason_last_1h"
+    }
+
+    init(eventsLast1h: [String: Int64] = [:], skipsByReasonLast1h: [String: Int64] = [:]) {
+        self.eventsLast1h = eventsLast1h
+        self.skipsByReasonLast1h = skipsByReasonLast1h
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        eventsLast1h = try c.decodeIfPresent([String: Int64].self, forKey: .eventsLast1h) ?? [:]
+        skipsByReasonLast1h = try c.decodeIfPresent([String: Int64].self, forKey: .skipsByReasonLast1h) ?? [:]
+    }
+}
+
 /// Non-secret earnings projection received from the CLI over the same-user
 /// control socket. Malibu never receives or stores the provider bearer.
 struct ProviderEarnings: Codable, Equatable {
@@ -20,6 +47,9 @@ struct ProviderEarnings: Codable, Equatable {
     let malibuHoldReasons: [String]
     let malibuDailyCap: Double?
     let malibuWalletDailyCap: Double?
+    /// Last-hour idle-prewarm event/skip counts, used to explain why a
+    /// serving provider is not currently earning. Display-only.
+    let idlePrewarm: ProviderIdlePrewarmSummary
     /// Set only when the CLI fetched the companion MALIBU accrual projection.
     /// Missing/legacy wire data is intentionally not treated as fresh.
     let malibuProjectionFresh: Bool
@@ -44,6 +74,7 @@ struct ProviderEarnings: Codable, Equatable {
         case malibuHoldReasons = "malibu_hold_reasons"
         case malibuDailyCap = "malibu_daily_cap"
         case malibuWalletDailyCap = "malibu_wallet_daily_cap"
+        case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
     }
@@ -67,6 +98,7 @@ struct ProviderEarnings: Codable, Equatable {
         malibuHoldReasons = try c.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
         malibuDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
         malibuWalletDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
+        idlePrewarm = try c.decodeIfPresent(ProviderIdlePrewarmSummary.self, forKey: .idlePrewarm) ?? .empty
         malibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
         earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
@@ -89,6 +121,7 @@ struct ProviderEarnings: Codable, Equatable {
         malibuHoldReasons: [String] = [],
         malibuDailyCap: Double? = nil,
         malibuWalletDailyCap: Double? = nil,
+        idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
         earningsProjectionFresh: Bool = false
     ) {
@@ -109,6 +142,7 @@ struct ProviderEarnings: Codable, Equatable {
         self.malibuHoldReasons = malibuHoldReasons
         self.malibuDailyCap = malibuDailyCap
         self.malibuWalletDailyCap = malibuWalletDailyCap
+        self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
     }
