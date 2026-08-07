@@ -6249,6 +6249,7 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	// pre-dispatch (500 route_snapshot_failed) instead of a clean 503.
 	// Observe mode / nil store => settlementEnforceMode()==false => no-op.
 	if s.settlementEnforceMode() && len(p.ReceiptPubkey) == 0 {
+		s.logReceiptKeyExcluded(p)
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	if p.MaxContextTokens < estimatedTokens {
@@ -6414,6 +6415,7 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		// must not be served off the queue (its route snapshot would fail
 		// pre-dispatch). Observe / nil store => no-op.
 		if s.settlementEnforceMode() && len(provider.ReceiptPubkey) == 0 {
+			s.logReceiptKeyExcluded(provider)
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
@@ -6645,7 +6647,28 @@ func (c *eligibilityCtx) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
 	if !c.settlementEnforce {
 		return true
 	}
-	return len(p.ReceiptPubkey) > 0
+	if len(p.ReceiptPubkey) > 0 {
+		return true
+	}
+	c.s.logReceiptKeyExcluded(p)
+	return false
+}
+
+// logReceiptKeyExcluded is the operator-visible signal that supply exists
+// but is unsettleable under enforce (empty active receipt key), mirroring
+// the model_version_floor_excluded event. It is fired at every exclusion
+// site (main filter, pinned, slot-queue admission, slot-queue poll) so the
+// exclusion is observable even on the all-candidates-filtered 503 path,
+// where the aggregate routing_decision log is not emitted for ANY reason (a
+// pre-existing cross-cutting gap). Per-provider/per-request, hence debug;
+// the request-level aggregate is the 503 no_provider_available envelope.
+func (s *Server) logReceiptKeyExcluded(p pool.Provider) {
+	s.log.Debug().
+		Str("event", "receipt_key_missing_excluded").
+		Str("provider_id", p.ProviderID).
+		Str("assigned_id", p.AssignedID).
+		Str("model_id", p.ModelID).
+		Msg("provider excluded from covered paid routing: no active settlement receipt key")
 }
 
 // settlementEnforceMode reports whether verified-model settlement is in

@@ -2,8 +2,10 @@ package buyer
 
 import (
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/rs/zerolog"
 )
 
 // TestEligibilityCtx_ProviderHasSettlementReceiptKey pins the
@@ -17,8 +19,11 @@ func TestEligibilityCtx_ProviderHasSettlementReceiptKey(t *testing.T) {
 	t.Parallel()
 	withKey := pool.Provider{ProviderID: "with", ReceiptPubkey: []byte("k")}
 	noKey := pool.Provider{ProviderID: "without"}
+	// A real Server is required: the enforce-exclusion path emits a
+	// receipt_key_missing_excluded log via c.s, so c.s must be non-nil.
+	s := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Now().UTC())
 
-	observe := &eligibilityCtx{settlementEnforce: false}
+	observe := &eligibilityCtx{s: s, settlementEnforce: false}
 	if !observe.ProviderHasSettlementReceiptKey(noKey) {
 		t.Error("observe mode must accept a provider with no receipt key (no-op)")
 	}
@@ -26,7 +31,7 @@ func TestEligibilityCtx_ProviderHasSettlementReceiptKey(t *testing.T) {
 		t.Error("observe mode must accept a provider with a receipt key")
 	}
 
-	enforce := &eligibilityCtx{settlementEnforce: true}
+	enforce := &eligibilityCtx{s: s, settlementEnforce: true}
 	if enforce.ProviderHasSettlementReceiptKey(noKey) {
 		t.Error("enforce mode must reject a provider with an empty active receipt key")
 	}

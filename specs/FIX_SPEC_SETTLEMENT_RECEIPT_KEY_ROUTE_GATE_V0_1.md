@@ -105,7 +105,13 @@ consumes a quota slot.
   `skipOrEnforceError("missing provider receipt key")` guard MUST remain; it is
   now unreachable on the happy path but stays as the fail-closed backstop.
 - **R-F5 (observability):** `routing_decision` `filtered_counts` MUST expose the new
-  `receipt_key_missing` reason so operators can see excluded supply.
+  `receipt_key_missing` reason on the normal candidate path, AND every exclusion
+  site (main filter, pinned, slot-queue admission, slot-queue poll) MUST emit a
+  dedicated `receipt_key_missing_excluded` event (mirroring
+  `model_version_floor_excluded`) so the exclusion stays observable on the
+  all-candidates-filtered 503 path, where the aggregate `routing_decision` log is
+  not emitted for ANY reason (a pre-existing cross-cutting gap, out of scope to
+  restructure here).
 
 ## 6. Non-goals
 
