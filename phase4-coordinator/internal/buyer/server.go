@@ -5487,11 +5487,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		exSet.AddKey(k)
 	}
 	checker := &eligibilityCtx{
-		s:               s,
-		model:           req.Model,
-		class:           class,
-		estimatedTokens: estimatedTokens,
-		tier2Cfg:        tier2Cfg,
+		s:                 s,
+		model:             req.Model,
+		class:             class,
+		estimatedTokens:   estimatedTokens,
+		tier2Cfg:          tier2Cfg,
+		settlementEnforce: s.settlementEnforceMode(),
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
@@ -6011,6 +6012,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "tier2_attestation"
 		case routing.ReasonQuotaBlocked:
 			key = "quota_blocked"
+		case routing.ReasonReceiptKeyMissing:
+			key = "receipt_key_missing"
 		default:
 			key = "other"
 		}
@@ -6546,6 +6549,13 @@ type eligibilityCtx struct {
 	class           *config.ModelClassConfig
 	estimatedTokens int
 	tier2Cfg        config.Tier2Config
+	// settlementEnforce is snapshotted ONCE at checker construction
+	// (like tier2Cfg) so the EligibilityChecker contract "config
+	// snapshots MUST NOT change mid-loop" holds across the per-provider
+	// pass. False (the zero value) means observe / unavailable-store →
+	// the receipt-key gate is a no-op, so any eligibilityCtx built
+	// without setting it keeps pre-fix selection.
+	settlementEnforce bool
 }
 
 // ProviderMatchesRequest combines the model/class match and the
@@ -6596,6 +6606,37 @@ func (c *eligibilityCtx) Tier2Decision(p pool.Provider) (routing.RejectionReason
 
 func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
 	return c.s.checkQuota(p)
+}
+
+// ProviderHasSettlementReceiptKey drops providers that can never have a
+// route snapshot recorded under enforce mode (SPEC-022 R-2.4/R-2.5). It
+// mirrors the pre-dispatch guard in route_snapshot.go
+// (`len(provider.ReceiptPubkey) == 0` under enforce) but at the
+// candidate-eligibility layer, so routing never selects a box whose
+// route snapshot is guaranteed to fail. In observe mode — or whenever
+// the settlement store/config is unavailable, captured as
+// settlementEnforce == false — it returns true for every provider so
+// observe / default selection stays byte-identical to pre-fix.
+func (c *eligibilityCtx) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
+	if !c.settlementEnforce {
+		return true
+	}
+	return len(p.ReceiptPubkey) > 0
+}
+
+// settlementEnforceMode reports whether verified-model settlement is in
+// `enforce` mode right now, reading the SAME (store, SettlementConfig,
+// VerifiedModelSettlementMode) source the pre-dispatch route-snapshot
+// guard uses (route_snapshot.go), so the eligibility filter and the
+// fail-closed backstop cannot diverge. A nil billing store (settlement
+// not wired) reports false — observe-equivalent, no new exclusions.
+func (s *Server) settlementEnforceMode() bool {
+	store, _, _ := s.billingState()
+	if store == nil {
+		return false
+	}
+	settlementCfg := store.SettlementConfig(config.Default().Settlement)
+	return billing.VerifiedModelSettlementMode(settlementCfg) == billing.RouteSnapshotModeEnforce
 }
 
 func modelIDEqual(a, b string) bool {

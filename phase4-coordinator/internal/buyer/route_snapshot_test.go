@@ -805,12 +805,22 @@ func TestRouteSnapshotSkippedForUppercaseModelHash(t *testing.T) {
 }
 
 func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
+	// Both cases MUST fail closed under enforce: no route snapshot, no
+	// ledger credit. The status differs by WHERE the failure happens:
+	//   - "missing" (empty active receipt key) is now excluded at
+	//     candidate eligibility (SPEC-022 R-2.4/R-2.5), so the request
+	//     never selects a provider → 503 no_provider_available (retryable,
+	//     no-charge). This is the routing-gate fix.
+	//   - "malformed" (present but non-canonical key) passes the
+	//     len(ReceiptPubkey)>0 eligibility gate, reaches the pre-dispatch
+	//     route-snapshot guard, and fails there → 500 (defence-in-depth).
 	for _, tc := range []struct {
-		name string
-		key  []byte
+		name       string
+		key        []byte
+		wantStatus int
 	}{
-		{name: "missing", key: nil},
-		{name: "malformed", key: []byte{0x01, 0x02, 0x03}},
+		{name: "missing", key: nil, wantStatus: http.StatusServiceUnavailable},
+		{name: "malformed", key: []byte{0x01, 0x02, 0x03}, wantStatus: http.StatusInternalServerError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tier2.ResetForTest()
@@ -855,8 +865,8 @@ func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
 			)
 
 			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
-			if rr.Code != http.StatusInternalServerError {
-				t.Fatalf("status=%d body=%s, want enforce fail-closed", rr.Code, rr.Body.String())
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status=%d body=%s, want %d (enforce fail-closed)", rr.Code, rr.Body.String(), tc.wantStatus)
 			}
 			if got := routeSnapshotCount(t, dbPath); got != 0 {
 				t.Fatalf("route snapshots=%d want 0", got)
