@@ -17,7 +17,7 @@ complete fix as it will land**, not an incremental slice.
   - `phase4-coordinator/internal/buyer/route_snapshot_test.go` (updated expectation)
 - Governing spec: `specs/SPEC-022-verified-model-settlement.md` (R-2.4, R-2.5, R-2.6);
   receipt-key binding in `specs/SPEC-015-receipts.md`. Write-up:
-  `specs/FIX_SPEC_SETTLEMENT_RECEIPT_KEY_ROUTE_GATE_V0_1.md`.
+  `audits/2026-08-07/FIX_SPEC_SETTLEMENT_RECEIPT_KEY_ROUTE_GATE_V0_1.md`.
 
 ## What the fix does
 
