@@ -41,6 +41,15 @@ const (
 	// coordinator_advertised_version.per_model_required_binary_version,
 	// or is unparseable while such a floor is in force (#768).
 	ReasonModelVersionFloor
+	// ReasonReceiptKeyMissing — verified_model_settlement_mode=enforce
+	// and the provider has no active settlement receipt public key, so a
+	// route snapshot can never be recorded for it (SPEC-022 R-2.4/R-2.5:
+	// providers with missing/empty settlement preconditions MUST be
+	// excluded from covered paid routing). Under observe mode — or when
+	// the settlement store/config is unavailable — the checker returns
+	// true for every provider and this reason never fires, so default /
+	// observe selection stays byte-identical to pre-fix behaviour.
+	ReasonReceiptKeyMissing
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -72,6 +81,19 @@ type EligibilityChecker interface {
 	// configured the implementation MUST return true for every
 	// provider so selection stays byte-identical to pre-#768.
 	ProviderMeetsModelVersionFloor(p pool.Provider) bool
+
+	// ProviderHasSettlementReceiptKey reports whether the provider can
+	// have a route snapshot recorded under the active settlement mode.
+	// A false return is reported as ReasonReceiptKeyMissing (SPEC-022
+	// R-2.4/R-2.5). Implementations MUST return true UNLESS
+	// verified_model_settlement_mode is `enforce` AND the provider's
+	// active receipt public key is empty — the SAME (store, mode) source
+	// the pre-dispatch route-snapshot guard in route_snapshot.go reads,
+	// so the eligibility filter and the fail-closed backstop cannot
+	// diverge. In observe mode, or when the settlement store/config is
+	// unavailable, it MUST return true for every provider so observe /
+	// default selection stays byte-identical.
+	ProviderHasSettlementReceiptKey(p pool.Provider) bool
 
 	// ProviderContextSufficient reports whether the provider's
 	// MaxContextTokens fits the request's estimated token budget.
@@ -142,6 +164,12 @@ type FilterResult struct {
 //     floor is keyed BY model; a no-op when no floors are
 //     configured, so default-config selection stays byte-identical
 //     (AC-SR-1).
+//  3b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
+//     (SPEC-022 R-2.4/R-2.5). A no-op in observe mode / when the
+//     settlement store is unavailable, so default / observe selection
+//     stays byte-identical; under enforce it drops providers with no
+//     active receipt key so routing never selects a box whose route
+//     snapshot is guaranteed to fail pre-dispatch.
 //  4. ProviderContextSufficient — ReasonContextTooSmall
 //  5. Tier2Decision — ReasonTier2HashMismatch / ReasonTier2Hash
 //     Required / ReasonTier2EncryptedLeg / ReasonTier2Attestation
@@ -175,6 +203,10 @@ func EligibleCandidates(
 		}
 		if !checker.ProviderMeetsModelVersionFloor(p) {
 			res.Counts[ReasonModelVersionFloor]++
+			continue
+		}
+		if !checker.ProviderHasSettlementReceiptKey(p) {
+			res.Counts[ReasonReceiptKeyMissing]++
 			continue
 		}
 		if !checker.ProviderContextSufficient(p) {

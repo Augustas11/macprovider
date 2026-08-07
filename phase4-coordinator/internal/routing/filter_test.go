@@ -12,6 +12,7 @@ import (
 type stubChecker struct {
 	matches        map[string]bool
 	versionFloorOK map[string]bool
+	receiptKeyOK   map[string]bool
 	contextOK      map[string]bool
 	tier2          map[string]routing.RejectionReason
 	tier2Hash      map[string]pool.HashStatus
@@ -26,6 +27,12 @@ func (s *stubChecker) ProviderMatchesRequest(p pool.Provider) bool {
 }
 func (s *stubChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
 	if v, ok := s.versionFloorOK[p.ProviderID]; ok {
+		return v
+	}
+	return true
+}
+func (s *stubChecker) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
+	if v, ok := s.receiptKeyOK[p.ProviderID]; ok {
 		return v
 	}
 	return true
@@ -211,6 +218,7 @@ type recordingChecker struct {
 	calls            []string // "providerID/gate"
 	matchFail        map[string]bool
 	versionFloorFail map[string]bool
+	receiptKeyFail   map[string]bool
 	contextFail      map[string]bool
 	tier2Reason      map[string]routing.RejectionReason
 	quotaFail        map[string]bool
@@ -223,6 +231,10 @@ func (r *recordingChecker) ProviderMatchesRequest(p pool.Provider) bool {
 func (r *recordingChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/version_floor")
 	return !r.versionFloorFail[p.ProviderID]
+}
+func (r *recordingChecker) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/receipt_key")
+	return !r.receiptKeyFail[p.ProviderID]
 }
 func (r *recordingChecker) ProviderContextSufficient(p pool.Provider) bool {
 	r.calls = append(r.calls, p.ProviderID+"/context")
@@ -267,14 +279,15 @@ func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T
 
 func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
 	// For a provider that passes every gate, the call sequence MUST
-	// be exactly match → version_floor → context → tier2 → quota.
-	// FR-SR-18 order, with the #768 per-model version floor inserted
-	// right after the model match (it is keyed BY model).
+	// be exactly match → version_floor → receipt_key → context →
+	// tier2 → quota. FR-SR-18 order, with the #768 per-model version
+	// floor inserted right after the model match (keyed BY model) and
+	// the SPEC-022 R-2.4/R-2.5 receipt-key gate immediately after it.
 	t.Parallel()
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/version_floor", "p/context", "p/tier2", "p/quota"}
+	want := []string{"p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
 	}
@@ -290,7 +303,7 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
 	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
-	want := []string{"p/match", "p/version_floor", "p/context"}
+	want := []string{"p/match", "p/version_floor", "p/receipt_key", "p/context"}
 	if len(checker.calls) != len(want) {
 		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
 	}
@@ -298,6 +311,43 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
 		if checker.calls[i] != want[i] {
 			t.Errorf("call[%d]: want %q, got %q", i, want[i], checker.calls[i])
 		}
+	}
+}
+
+func TestEligibleCandidates_ReceiptKeyMissingExcluded(t *testing.T) {
+	// SPEC-022 R-2.4/R-2.5: a provider the checker reports as lacking an
+	// active settlement receipt key (enforce mode, empty key) MUST be
+	// dropped with ReasonReceiptKeyMissing and MUST NOT appear in
+	// Eligible; providers the checker accepts are unaffected.
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("has-key"), mkProvider("no-key")}
+	checker := &stubChecker{receiptKeyOK: map[string]bool{"no-key": false}}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if len(res.Eligible) != 1 || res.Eligible[0].ProviderID != "has-key" {
+		t.Fatalf("want only has-key eligible, got %+v", res.Eligible)
+	}
+	if res.Counts[routing.ReasonReceiptKeyMissing] != 1 {
+		t.Fatalf("want ReasonReceiptKeyMissing==1, got %d (counts=%v)", res.Counts[routing.ReasonReceiptKeyMissing], res.Counts)
+	}
+}
+
+func TestEligibleCandidates_AllReceiptKeyMissing_EmptyPreQuota(t *testing.T) {
+	// When every candidate is dropped for receipt_key_missing, the
+	// pre-quota survivor count is 0, so the caller's 429-vs-503 branch
+	// (PreQuotaCount>0 && all quota-blocked) is NOT taken and the
+	// request surfaces as a retryable 503, not a quota 429.
+	t.Parallel()
+	providers := []pool.Provider{mkProvider("a"), mkProvider("b")}
+	checker := &stubChecker{receiptKeyOK: map[string]bool{"a": false, "b": false}}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if len(res.Eligible) != 0 {
+		t.Fatalf("want 0 eligible, got %d", len(res.Eligible))
+	}
+	if res.PreQuotaCount != 0 {
+		t.Fatalf("want PreQuotaCount 0, got %d", res.PreQuotaCount)
+	}
+	if res.Counts[routing.ReasonReceiptKeyMissing] != 2 {
+		t.Fatalf("want 2 receipt_key_missing, got %d", res.Counts[routing.ReasonReceiptKeyMissing])
 	}
 }
 
