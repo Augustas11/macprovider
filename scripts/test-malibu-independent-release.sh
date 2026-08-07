@@ -135,7 +135,7 @@ valid_cli_version="$(
     "$root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 )"
 valid_cli_tag="v$valid_cli_version"
-staged_coordinator_policy="--allow-previous-stable=1.8.82"
+staged_coordinator_policy="--allow-previous-stable=1.8.88"
 staged_candidate_policy="--staged-candidate=1.8.90"
 
 "$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" \
