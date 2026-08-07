@@ -160,6 +160,13 @@ else:
     }
     if "appcast.xml" in local_assets:
         publication_content["appcast_sha256"] = local_assets["appcast.xml"][1]
+release_sequence = None
+if not runtime_only and "macprovider-release-discovery.json" in local_assets:
+    discovery = json.loads(local_assets["macprovider-release-discovery.json"][0].read_text(encoding="utf-8"))
+    release_sequence = discovery.get("signed", {}).get("release_sequence")
+    if type(release_sequence) is not int or release_sequence <= 0:
+        fail("release discovery sequence is invalid")
+    publication_content["release_sequence"] = release_sequence
 content = json.dumps(
     publication_content,
     sort_keys=True,
@@ -177,6 +184,8 @@ manifest = {
     "publication_id": publication_id,
     "assets": manifest_assets,
 }
+if release_sequence is not None:
+    manifest["release_sequence"] = release_sequence
 if body_sha256 is not None:
     manifest["title"] = expected_title
     manifest["body_sha256"] = body_sha256

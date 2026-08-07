@@ -15,6 +15,7 @@ public_verifier="$root/scripts/verify-malibu-bootstrap-publication.sh"
 ssh_helper="$root/scripts/malibu-download-ssh.sh"
 known_hosts="$root/scripts/dist/malibu-download-known_hosts"
 legacy_key="$root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+frozen_bridge_appcast="$root/scripts/dist/malibu-frozen-bridge-appcast.xml"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -27,7 +28,8 @@ for script in "$generator" "$set_verifier" "$current_set_verifier" "$publisher" 
 done
 PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile \
   "$signature_verifier" "$trust_anchor_helper"
-[[ -f "$known_hosts" && -f "$legacy_key" ]] || fail "bridge trust anchors are missing"
+[[ -f "$known_hosts" && -f "$legacy_key" && -f "$frozen_bridge_appcast" ]] ||
+  fail "bridge trust anchors are missing"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/malibu-bootstrap-test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -222,10 +224,11 @@ grep -q 'verify-malibu-bootstrap-publication.sh' "$publisher" || fail "public by
 grep -q 'verify-malibu-bootstrap-publication.sh' "$independent_publisher" || fail "independent public bytes are not verified"
 grep -q 'verify-malibu-current-publication-set.sh' "$independent_publisher" ||
   fail "independent publication does not verify the current manifest"
-grep -q 'legacy provider-coupled Malibu publisher is frozen to v1.8.39' "$publisher" ||
-  fail "legacy provider-coupled publisher is not frozen"
-grep -q 'legacy provider-coupled Malibu publication is frozen to v1.8.39' "$set_verifier" ||
-  fail "legacy provider-coupled verifier is not frozen"
+grep -q 'frozen-bridge' "$publisher" || fail "current provider publisher lacks frozen appcast mode"
+grep -q 'malibu-frozen-bridge-appcast.xml' "$set_verifier" ||
+  fail "current provider verifier does not pin the frozen bridge appcast"
+grep -q 'current provider publication must not bind a release appcast asset' "$installer" ||
+  fail "current provider installer accepts release appcast drift"
 if grep -q -- '--resolve' "$public_verifier" || grep -q 'MALIBU_DOWNLOAD_RESOLVE_IP' "$publisher" || grep -q 'MALIBU_DOWNLOAD_RESOLVE_IP' "$independent_publisher"; then
   fail "public verification can bypass client DNS resolution"
 fi
@@ -329,6 +332,195 @@ if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
   fail "same-tag publication drift was accepted"
 fi
 grep -q 'same-tag publication drift refused' "$work/drift.out" || fail "drift rejection was unclear"
+
+mkdir -p "$work/provider-current"
+printf 'current provider dmg bytes\n' > "$work/provider-current/Malibu-v1.8.88.dmg"
+cp "$frozen_bridge_appcast" "$work/provider-current/appcast.xml"
+provider_dmg_sha="$(shasum -a 256 "$work/provider-current/Malibu-v1.8.88.dmg" | awk '{print $1}')"
+printf '%s  Malibu-v1.8.88.dmg\n' "$provider_dmg_sha" > "$work/provider-current/Malibu-v1.8.88.dmg.sha256"
+provider_publication_id="$(python3 - "$work/provider-current/publication-manifest.json" \
+  "$work/provider-current/Malibu-v1.8.88.dmg" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, dmg_path = map(pathlib.Path, sys.argv[1:])
+tag = "v1.8.88"
+dmg_sha = hashlib.sha256(dmg_path.read_bytes()).hexdigest()
+identity = hashlib.sha256(json.dumps({
+    "compatibility_artifact_index_sha256": "0" * 64,
+    "dmg_sha256": dmg_sha,
+    "release_sequence": 188,
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+manifest_path.write_text(json.dumps({
+    "schema_version": 1,
+    "repository": "Augustas11/macprovider",
+    "tag": tag,
+    "commit": "c" * 40,
+    "prerelease": False,
+    "release_id": 501,
+    "release_sequence": 188,
+    "publication_id": identity,
+    "assets": {
+        dmg_path.name: {"id": 601, "sha256": dmg_sha},
+    },
+}, sort_keys=True) + "\n")
+print(identity)
+PY
+)"
+
+MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
+  "$work/provider-current-webroot" v1.8.88 "$provider_publication_id" \
+  "$work/provider-current/publication-manifest.json" "$work/provider-current/Malibu-v1.8.88.dmg" \
+  "$work/provider-current/appcast.xml" "$work/provider-current/Malibu-v1.8.88.dmg.sha256"
+[[ "$(cat "$work/provider-current-webroot/latest.dmg")" == 'current provider dmg bytes' ]] ||
+  fail "current provider latest DMG differs"
+cmp -s "$frozen_bridge_appcast" "$work/provider-current-webroot/appcast.xml" ||
+  fail "current provider appcast is not the frozen bridge appcast"
+
+printf 'older provider dmg bytes\n' > "$work/provider-current/Malibu-v1.8.87.dmg"
+older_provider_dmg_sha="$(shasum -a 256 "$work/provider-current/Malibu-v1.8.87.dmg" | awk '{print $1}')"
+printf '%s  Malibu-v1.8.87.dmg\n' "$older_provider_dmg_sha" > "$work/provider-current/Malibu-v1.8.87.dmg.sha256"
+older_provider_publication_id="$(python3 - "$work/provider-current/publication-manifest-older.json" \
+  "$work/provider-current/Malibu-v1.8.87.dmg" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, dmg_path = map(pathlib.Path, sys.argv[1:])
+tag = "v1.8.87"
+dmg_sha = hashlib.sha256(dmg_path.read_bytes()).hexdigest()
+identity = hashlib.sha256(json.dumps({
+    "compatibility_artifact_index_sha256": "0" * 64,
+    "dmg_sha256": dmg_sha,
+    "release_sequence": 187,
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+manifest_path.write_text(json.dumps({
+    "schema_version": 1,
+    "repository": "Augustas11/macprovider",
+    "tag": tag,
+    "commit": "d" * 40,
+    "prerelease": False,
+    "release_id": 500,
+    "release_sequence": 187,
+    "publication_id": identity,
+    "assets": {
+        dmg_path.name: {"id": 600, "sha256": dmg_sha},
+    },
+}, sort_keys=True) + "\n")
+print(identity)
+PY
+)"
+if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
+  "$work/provider-current-webroot" v1.8.87 "$older_provider_publication_id" \
+  "$work/provider-current/publication-manifest-older.json" "$work/provider-current/Malibu-v1.8.87.dmg" \
+  "$work/provider-current/appcast.xml" "$work/provider-current/Malibu-v1.8.87.dmg.sha256" \
+  >"$work/provider-current-replay.out" 2>&1; then
+  fail "current provider installer accepted a sequence rollback"
+fi
+grep -q 'publication sequence did not advance' "$work/provider-current-replay.out" ||
+  fail "current provider sequence rollback rejection was unclear"
+
+mkdir -p "$work/provider-history-webroot/.malibu-tag-manifests"
+printf '{}\n' > "$work/provider-history-webroot/.malibu-tag-manifests/v1.8.87.json"
+if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
+  "$work/provider-history-webroot" v1.8.88 "$provider_publication_id" \
+  "$work/provider-current/publication-manifest.json" "$work/provider-current/Malibu-v1.8.88.dmg" \
+  "$work/provider-current/appcast.xml" "$work/provider-current/Malibu-v1.8.88.dmg.sha256" \
+  >"$work/provider-history.out" 2>&1; then
+  fail "current provider installer accepted history without current pointer"
+fi
+grep -q 'publication history exists without current pointer' "$work/provider-history.out" ||
+  fail "history-without-current rejection was unclear"
+
+mkdir -p "$work/provider-dangling-webroot"
+ln -s .malibu-releases/missing "$work/provider-dangling-webroot/.malibu-current"
+if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
+  "$work/provider-dangling-webroot" v1.8.88 "$provider_publication_id" \
+  "$work/provider-current/publication-manifest.json" "$work/provider-current/Malibu-v1.8.88.dmg" \
+  "$work/provider-current/appcast.xml" "$work/provider-current/Malibu-v1.8.88.dmg.sha256" \
+  >"$work/provider-dangling.out" 2>&1; then
+  fail "current provider installer accepted dangling current pointer"
+fi
+grep -q 'current publication pointer lacks a manifest' "$work/provider-dangling.out" ||
+  fail "dangling-current rejection was unclear"
+
+printf 'current provider appcast drift\n' > "$work/provider-current/appcast-drift.xml"
+if MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
+  "$work/provider-current-drift-webroot" v1.8.88 "$provider_publication_id" \
+  "$work/provider-current/publication-manifest.json" "$work/provider-current/Malibu-v1.8.88.dmg" \
+  "$work/provider-current/appcast-drift.xml" "$work/provider-current/Malibu-v1.8.88.dmg.sha256" \
+  >"$work/provider-current-drift.out" 2>&1; then
+  fail "current provider installer accepted appcast drift"
+fi
+grep -q 'current provider publication must use the committed frozen bridge appcast' \
+  "$work/provider-current-drift.out" || fail "current provider appcast drift rejection was unclear"
+
+mkdir -p "$work/frozen-public-bin"
+cat > "$work/frozen-public-bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+url=""
+while (($#)); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    http*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+printf '%s\n' "$url" >> "$MOCK_CURL_CALLS"
+case "$url" in
+  *appcast.xml*)
+    cp "$FROZEN_APPCAST_FIXTURE" "$out"
+    ;;
+  *Malibu-v1.8.88.dmg.sha256*)
+    cp "$CURRENT_SHA_FIXTURE" "$out"
+    ;;
+  *latest.dmg*|*Malibu-v1.8.88.dmg*)
+    cp "$CURRENT_DMG_FIXTURE" "$out"
+    ;;
+  *Malibu-v1.8.39.dmg*)
+    printf 'legacy bridge dmg bytes\n' > "$out"
+    ;;
+  *)
+    printf 'unexpected URL: %s\n' "$url" >&2
+    exit 1
+    ;;
+esac
+SH
+cat > "$work/frozen-public-bin/python3" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_PYTHON_CALLS"
+[[ "$1" == *verify-malibu-sparkle-signature.py && "$2" == v1.8.39 ]]
+SH
+chmod +x "$work/frozen-public-bin/curl" "$work/frozen-public-bin/python3"
+MOCK_CURL_CALLS="$work/frozen-public-curl.calls" \
+MOCK_PYTHON_CALLS="$work/frozen-public-python.calls" \
+FROZEN_APPCAST_FIXTURE="$work/provider-current/appcast.xml" \
+CURRENT_DMG_FIXTURE="$work/provider-current/Malibu-v1.8.88.dmg" \
+CURRENT_SHA_FIXTURE="$work/provider-current/Malibu-v1.8.88.dmg.sha256" \
+MALIBU_DOWNLOAD_HOST=download.example.invalid \
+PATH="$work/frozen-public-bin:$PATH" \
+  bash "$public_verifier" v1.8.88 \
+    "$work/provider-current/Malibu-v1.8.88.dmg" \
+    "$work/provider-current/appcast.xml" \
+    "$work/provider-current/Malibu-v1.8.88.dmg.sha256"
+grep -q 'Malibu-v1.8.39.dmg' "$work/frozen-public-curl.calls" ||
+  fail "frozen public verifier does not fetch the legacy bridge DMG"
+grep -q ' v1.8.39 ' "$work/frozen-public-python.calls" ||
+  fail "frozen public verifier does not verify the legacy bridge signature"
 
 mkdir -p "$work/current"
 printf 'current signed dmg bytes\n' > "$work/current/Malibu-v1.8.65.dmg"
