@@ -203,6 +203,27 @@ MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == ''
         shell: bash
         run: |
           set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          version="${tag#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release tag does not contain a semantic Malibu version: $tag" >&2
+            exit 1
+          }
+          build="$(awk -v version="$version" '
+            $0 !~ /^[[:space:]]*#/ && NF >= 2 && $1 == version {
+              count += 1
+              value = $2
+            }
+            END {
+              if (count != 1 || value !~ /^[0-9]+$/) {
+                exit 1
+              }
+              print value
+            }
+          ' phase3-binary/app/release-builds.tsv)" || {
+            echo "::error::phase3-binary/app/release-builds.tsv must contain exactly one numeric build for Malibu $version" >&2
+            exit 1
+          }
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           xcodebuild \
@@ -213,9 +234,17 @@ MALIBU_BUILD_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == ''
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
             archive \
             ARCHS=arm64 \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$version" \
+            CURRENT_PROJECT_VERSION="$build"
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
-            "$RUNNER_TEMP/Malibu.app"'''
+            "$RUNNER_TEMP/Malibu.app"
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          [[ "$actual_version" = "$version" && "$actual_build" = "$build" ]] || {
+            echo "::error::Malibu.app Info.plist reports $actual_version/$actual_build, expected $version/$build" >&2
+            exit 1
+          }'''
 MALIBU_CAPTURE_STEP = r'''        if: ${{ github.event.inputs.promote_run_id == '' }}
         shell: bash
         run: |
@@ -314,7 +343,7 @@ PROTECTED_OPENSSL_CONSUMERS = (
     ("Require an advancing immutable discovery head", 2, 2),
     ("Create verified draft GitHub release", 1, 1),
     ("Publish only the revalidated numeric draft", 2, 2),
-    ("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 0, 0),
+    ("Publish Malibu download alias to Pearl", 0, 0),
 )
 
 
@@ -760,32 +789,43 @@ for requirement in (
         raise SystemExit(f"final Malibu artifact verification omits: {requirement}")
 if publish.count("Generate one-time Malibu 1.8.32 bootstrap bridge") != 1:
     raise SystemExit("release workflow must contain exactly one named bootstrap generator")
-if publish.count("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") != 1:
-    raise SystemExit("release workflow must contain exactly one named bootstrap publisher")
+if publish.count("Publish Malibu download alias to Pearl") != 1:
+    raise SystemExit("release workflow must contain exactly one named Malibu alias publisher")
 bridge = publish.split("- name: Generate one-time Malibu 1.8.32 bootstrap bridge", 1)[1].split(
     "\n      - name:", 1
 )[0]
 pearl_bridge = publish.split(
-    "- name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl", 1
+    "- name: Publish Malibu download alias to Pearl", 1
 )[1].split("\n      - name:", 1)[0]
 if "if: needs.build.outputs.tag == 'v1.8.39'" not in bridge:
     raise SystemExit("legacy appcast generation is not frozen to v1.8.39")
 if "SPARKLE_EDDSA_PRIVATE_KEY" not in bridge or "verify-malibu-sparkle-signature.py" not in bridge:
     raise SystemExit("legacy appcast lacks protected signing or frozen-key verification")
-if "if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
-    raise SystemExit("Pearl bridge publication is not frozen to stable v1.8.39")
+if "if: needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication is not stable-only")
+if "MALIBU_PUBLICATION_EXPECTED_REPOSITORY: ${{ github.repository }}" not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication is not bound to the workflow repository")
+if 'MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.8.82"' not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication lacks staged previous-stable policy")
+if 'MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.8.88"' not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication lacks staged candidate policy")
+if 'appcast="scripts/dist/malibu-frozen-bridge-appcast.xml"' not in pearl_bridge:
+    raise SystemExit("current provider publication does not use the frozen bridge appcast")
+if 'current provider release must not publish a generated appcast asset' not in pearl_bridge:
+    raise SystemExit("current provider publication does not reject generated appcast assets")
 for requirement in (
     "publish-malibu-latest-dmg.sh",
     "publication-manifest.json",
     "compatibility-artifact-index.json",
+    "macprovider-release-discovery.json",
     "checksums.txt.sig",
 ):
     if requirement not in pearl_bridge:
         raise SystemExit(f"Pearl bootstrap publication omits {requirement}")
-if publish.find("Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl") < publish.find(
+if publish.find("Publish Malibu download alias to Pearl") < publish.find(
     "cmp final-draft-manifest.json publication-manifest.json"
 ):
-    raise SystemExit("Pearl bridge must publish only after immutable GitHub publication")
+    raise SystemExit("Pearl alias must publish only after immutable GitHub publication")
 team_requirement = (
     '-R="identifier \\"live.streamvc.macprovider.cli\\" and anchor apple generic '
     'and certificate leaf[subject.OU] = \\"$APPLE_NOTARY_TEAM_ID\\""'

@@ -38,6 +38,9 @@ import pathlib
 import stat
 import sys
 
+FROZEN_BRIDGE_APPCAST_SHA256 = "94ecf57584a2a203336d3219ea42dec1945bae2e123cfce0b1b39f8e0231d83c"
+EXPECTED_REPOSITORY = "Augustas11/macprovider"
+
 testing, trusted_uid, manifest_name, dmg_name, appcast_name, sha_name, tag, publication_id = sys.argv[1:]
 trusted_uid = int(trusted_uid)
 paths = [pathlib.Path(value) for value in (manifest_name, dmg_name, appcast_name, sha_name)]
@@ -53,16 +56,33 @@ for path in paths:
 manifest = json.loads(paths[0].read_text(encoding="utf-8"))
 if manifest.get("schema_version") != 1 or manifest.get("tag") != tag or manifest.get("publication_id") != publication_id:
     raise SystemExit("publication manifest identity mismatch")
+if manifest.get("repository") != EXPECTED_REPOSITORY:
+    raise SystemExit("publication repository is not the expected Malibu repository")
 if manifest.get("prerelease") is not False:
     raise SystemExit("prerelease must not publish the stable Malibu feed")
 assets = manifest.get("assets")
-expected_names = [f"Malibu-{tag}.dmg", "appcast.xml"]
-for path, name in zip(paths[1:3], expected_names):
-    row = assets.get(name) if isinstance(assets, dict) else None
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    if not isinstance(row, dict) or row.get("sha256") != digest or type(row.get("id")) is not int:
-        raise SystemExit(f"publication manifest does not bind {name}")
-expected_checksum = f"{hashlib.sha256(paths[1].read_bytes()).hexdigest()}  {expected_names[0]}\n"
+dmg_asset_name = f"Malibu-{tag}.dmg"
+dmg_digest = hashlib.sha256(paths[1].read_bytes()).hexdigest()
+appcast_digest = hashlib.sha256(paths[2].read_bytes()).hexdigest()
+dmg_row = assets.get(dmg_asset_name) if isinstance(assets, dict) else None
+if not isinstance(dmg_row, dict) or dmg_row.get("sha256") != dmg_digest or type(dmg_row.get("id")) is not int:
+    raise SystemExit(f"publication manifest does not bind {dmg_asset_name}")
+if tag == "v1.8.39":
+    appcast_row = assets.get("appcast.xml") if isinstance(assets, dict) else None
+    if not isinstance(appcast_row, dict) or appcast_row.get("sha256") != appcast_digest or type(appcast_row.get("id")) is not int:
+        raise SystemExit("publication manifest does not bind appcast.xml")
+else:
+    version_parts = tuple(int(part) for part in tag[1:].split("."))
+    if version_parts < (1, 8, 40):
+        raise SystemExit("current provider publication tag is below the frozen-appcast floor")
+    release_sequence = manifest.get("release_sequence")
+    if type(release_sequence) is not int or release_sequence <= 0:
+        raise SystemExit("current provider publication requires a release sequence")
+    if isinstance(assets, dict) and "appcast.xml" in assets:
+        raise SystemExit("current provider publication must not bind a release appcast asset")
+    if appcast_digest != FROZEN_BRIDGE_APPCAST_SHA256:
+        raise SystemExit("current provider publication must use the committed frozen bridge appcast")
+expected_checksum = f"{dmg_digest}  {dmg_asset_name}\n"
 if paths[3].read_text(encoding="utf-8") != expected_checksum:
     raise SystemExit("versioned DMG checksum file is invalid")
 PY
@@ -150,6 +170,39 @@ validate_node "$webroot" dir
 validate_node "$releases_dir" dir
 validate_node "$manifests_dir" dir
 
+if [[ -L "$current" ]]; then
+  validate_node "$current" link
+  [[ -f "$current/publication-manifest.json" ]] ||
+    die "current publication pointer lacks a manifest"
+  validate_node "$current/publication-manifest.json" file
+  python3 - "$manifest_source" "$current/publication-manifest.json" <<'PY'
+import json
+import pathlib
+import sys
+
+candidate = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+current = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+if candidate.get("publication_id") == current.get("publication_id"):
+    raise SystemExit(0)
+candidate_sequence = candidate.get("release_sequence")
+current_sequence = current.get("release_sequence")
+if candidate_sequence is None and candidate.get("tag") == current.get("tag") == "v1.8.39":
+    raise SystemExit(0)
+if type(candidate_sequence) is not int or candidate_sequence <= 0:
+    raise SystemExit("candidate publication sequence is invalid")
+if current_sequence is None and current.get("tag") == "v1.8.39":
+    current_sequence = 0
+if type(current_sequence) is not int or current_sequence < 0:
+    raise SystemExit("current publication sequence is invalid")
+if candidate_sequence <= current_sequence:
+    raise SystemExit("publication sequence did not advance")
+PY
+elif [[ -e "$current" ]]; then
+  die "atomic current pointer is not a symlink: $current"
+elif find "$manifests_dir" -mindepth 1 -maxdepth 1 -type f | grep -q .; then
+  die "publication history exists without current pointer"
+fi
+
 replace_symlink() {
   local target="$1" destination="$2" temporary
   temporary="${destination}.next.$$"
@@ -203,10 +256,6 @@ else
   temporary_manifest="${tag_manifest}.next.$$"
   install -o "$trusted_uid" -g "$trusted_gid" -m 0644 "$manifest_source" "$temporary_manifest"
   mv "$temporary_manifest" "$tag_manifest"
-fi
-
-if [[ -e "$current" && ! -L "$current" ]]; then
-  die "atomic current pointer is not a symlink: $current"
 fi
 
 # A legacy pair may be migrated only after an operator has made it part of the

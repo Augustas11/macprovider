@@ -23,8 +23,8 @@ settings:
     SWIFT_VERSION: "5.9"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Manual
-    MARKETING_VERSION: "1.8.50"
-    CURRENT_PROJECT_VERSION: "50"
+    MARKETING_VERSION: "1.8.88"
+    CURRENT_PROJECT_VERSION: "88"
     OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
 
 targets:

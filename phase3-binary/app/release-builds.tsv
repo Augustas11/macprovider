@@ -2,8 +2,8 @@
 #
 # Append one strictly increasing entry for every Malibu release. The baseline
 # records the last correctly versioned release before this ledger was added;
-# releases v1.8.22-v1.8.25 reused stale app metadata and are intentionally not
-# represented as valid Malibu releases.
+# releases v1.8.22-v1.8.25 and v1.8.51-v1.8.87 reused stale app metadata and
+# are intentionally not represented as valid Malibu releases.
 1.8.21	20
 1.8.26	26
 1.8.27	27
@@ -28,3 +28,4 @@
 1.8.46	46
 1.8.47	47
 1.8.50	50
+1.8.88	88
