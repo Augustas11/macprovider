@@ -23,6 +23,8 @@ CATALOG_FILES = (
     "release.json",
     "trusted-keys.json",
     "tier2-catalog.json",
+    "rate-card.json",
+    "rate-card.json.sig",
     "autotune-candidates.json",
     "autotune-candidates.json.sig",
     "demand-rank.json",

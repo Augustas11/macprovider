@@ -2,6 +2,12 @@
 
 **Status:** Prepared, **not armed** on Pearl.
 
+**2026-08-07 go/no-go:** **NO-GO** — see
+[`584-demand-floor-go-nogo-2026-08-07.md`](./584-demand-floor-go-nogo-2026-08-07.md).
+Issue #584 is closed for the redesign package; production exception
+`exc-canary-disabled-enable-gate` remains **active** until physical baselines
+and a signed enable approval land.
+
 ## Why gated
 
 Production exception `exc-canary-disabled-enable-gate` (#584) keeps:

@@ -7,9 +7,9 @@ provider-removal (circuit-breaker degrade, warm-up-gate failure), repeated
 auth/config/liveness failures, and pool-empty / service-down conditions surface
 without a human SSHing into journals.
 
-Zero provider load: it reads /healthz, /poolz, /admin/providers*, /v1/status
-only — it does NOT send inference. (A synthetic canary can be added later if
-desired.)
+Zero provider load: it reads /healthz, /poolz, /admin/providers*,
+/admin/hardware-trust/waiting, /v1/status only — it does NOT send inference.
+(A synthetic canary can be added later if desired.)
 
 Alerts go to stdout (captured by journald) ALWAYS, and to email if
 /etc/macprovider/monitor.env provides Gmail submission creds. Run on a
@@ -34,6 +34,8 @@ Config (/etc/macprovider/monitor.env, optional, KEY=VALUE lines):
   PROVIDER_DIAGNOSTICS_WINDOW_MINUTES=15           # optional #535 window
   PROVIDER_DIAGNOSTICS_MIN_FAILURES=3              # optional burst threshold
   EXPECTED_PROVIDER_IDS=augustass-macbook-air,air5 # optional missing-auth watch
+  HARDWARE_TRUST_WAITING_ENABLED=1                # optional; poll waiting_trust
+  HARDWARE_TRUST_WAITING_STALE_MINUTES=5          # email when backlog persists
 """
 
 import json
@@ -55,6 +57,7 @@ STATE_FILE = os.path.join(
 HEALTHZ = "http://127.0.0.1:8444/healthz"
 POOLZ = "http://127.0.0.1:8444/poolz"
 ADMIN_PROVIDERS = "http://127.0.0.1:8444/admin/providers"
+ADMIN_HARDWARE_TRUST_WAITING = "http://127.0.0.1:8444/admin/hardware-trust/waiting"
 GW_STATUS = "http://127.0.0.1:9443/v1/status"
 ANONYMOUS_PROVIDER_ID = "_anonymous"
 STATIC_FEEDS = (
@@ -79,6 +82,7 @@ KIND_POOL = "pool"                    # pool ready-count emptied / recovered
 KIND_GATEWAY_STATUS = "gateway_status"  # gateway self-reported idle/degraded/down
 KIND_SERVICE = "service"              # coordinator/gateway endpoint unreachable
 KIND_STATIC_FEED = "static_feed"      # SPEC-023 signed static feeds
+KIND_HARDWARE_TRUST = "hardware_trust"  # waiting_trust backlog / new jobs
 ALERT_KINDS = (
     KIND_PROVIDER,
     KIND_PROVIDER_DIAGNOSTICS,
@@ -87,6 +91,7 @@ ALERT_KINDS = (
     KIND_GATEWAY_STATUS,
     KIND_SERVICE,
     KIND_STATIC_FEED,
+    KIND_HARDWARE_TRUST,
 )
 # Provider churn and liveness noise on a small fleet are journal-only by
 # default; the kinds that mean "the Pearl-side services themselves are down"
@@ -152,6 +157,20 @@ def operator_key():
     # of crashing the poll. See macprovider-monitor.service for the
     # EnvironmentFile= directive.
     return os.environ.get("OPERATOR_KEY", "")
+
+
+def hardware_trust_operator_key():
+    """Bearer for /admin/hardware-trust/* (auth-policy dual-control keys).
+
+    Waiting/approve routes use authorizedProviderAuthPolicyOperator, which
+    accepts OPERATOR_AUTH_POLICY_A/B — not the general OPERATOR_KEY used for
+    /poolz and /admin/providers.
+    """
+    for name in ("OPERATOR_AUTH_POLICY_A", "OPERATOR_AUTH_POLICY_B"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def bounded_int(env, key, default, min_value, max_value):
@@ -264,6 +283,95 @@ def diagnostic_dedupe_key(provider_id, key, cursor):
     if provider_id == ANONYMOUS_PROVIDER_ID:
         return f"{key}:active"
     return f"{key}:{cursor or 'no-events'}"
+
+
+def hardware_trust_waiting_alerts(env, prev_state, payload, now=None):
+    """Alert on new waiting_trust jobs and a persistent backlog.
+
+    Returns (alerts, next_state_fragment). Email is intentionally not muted for
+    KIND_HARDWARE_TRUST — trust grants are operator-actionable.
+    """
+    now = now or datetime.now(timezone.utc)
+    alerts = []
+    prev = prev_state.get("hardware_trust_waiting", {}) if isinstance(prev_state, dict) else {}
+    if not isinstance(prev, dict):
+        prev = {}
+
+    jobs = payload.get("waiting_trust", []) if isinstance(payload, dict) else []
+    if not isinstance(jobs, list):
+        jobs = []
+
+    job_ids = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = job.get("job_id")
+        if isinstance(job_id, int) or (isinstance(job_id, str) and job_id.isdigit()):
+            job_ids.append(int(job_id))
+    job_ids = sorted(set(job_ids))
+    prev_ids = []
+    for raw in prev.get("job_ids", []) if isinstance(prev.get("job_ids"), list) else []:
+        try:
+            prev_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    prev_ids_set = set(prev_ids)
+    new_ids = [jid for jid in job_ids if jid not in prev_ids_set]
+
+    by_id = {}
+    for job in jobs:
+        if isinstance(job, dict) and job.get("job_id") is not None:
+            try:
+                by_id[int(job["job_id"])] = job
+            except (TypeError, ValueError):
+                continue
+
+    for jid in new_ids:
+        job = by_id.get(jid, {})
+        provider_id = job.get("provider_id", "?")
+        reason = job.get("decision_reason", "?")
+        approvable = job.get("approvable")
+        alerts.append((
+            "WARN",
+            KIND_HARDWARE_TRUST,
+            f"hardware_trust_waiting_new job_id={jid} provider_id={provider_id} "
+            f"reason={reason} approvable={approvable}",
+        ))
+
+    first_seen_raw = prev.get("first_seen_utc")
+    first_seen = parse_utc(first_seen_raw) if isinstance(first_seen_raw, str) else None
+    if job_ids:
+        if first_seen is None:
+            first_seen = now
+    else:
+        first_seen = None
+
+    stale_minutes = bounded_int(env, "HARDWARE_TRUST_WAITING_STALE_MINUTES", 5, 1, 1440)
+    stale_alerted = bool(prev.get("stale_alerted"))
+    if job_ids and first_seen is not None:
+        age = now - first_seen
+        if age >= timedelta(minutes=stale_minutes) and not stale_alerted:
+            sample = ", ".join(str(jid) for jid in job_ids[:8])
+            more = "" if len(job_ids) <= 8 else f" (+{len(job_ids) - 8} more)"
+            alerts.append((
+                "WARN",
+                KIND_HARDWARE_TRUST,
+                f"hardware_trust_waiting_stale count={len(job_ids)} "
+                f"age_min={int(age.total_seconds() // 60)} job_ids={sample}{more}",
+            ))
+            stale_alerted = True
+        elif not job_ids:
+            stale_alerted = False
+    else:
+        stale_alerted = False
+
+    next_state = {
+        "job_ids": job_ids,
+        "first_seen_utc": first_seen.strftime("%Y-%m-%dT%H:%M:%SZ") if first_seen else None,
+        "stale_alerted": stale_alerted,
+        "count": len(job_ids),
+    }
+    return alerts, next_state
 
 
 def provider_diagnostic_alerts(env, state, admin_provider_list, events_by_provider, now=None, failed_provider_ids=None):
@@ -503,6 +611,31 @@ def main():
     elif coord_up and diagnostics_enabled and not op_key:
         print("[INFO] provider diagnostics alerts disabled until OPERATOR_KEY is available", flush=True)
 
+    # --- hardware trust waiting_trust backlog (prebeta P4) ---
+    hardware_trust_state = prev.get("hardware_trust_waiting", {})
+    hardware_trust_enabled = env.get("HARDWARE_TRUST_WAITING_ENABLED", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    ht_key = hardware_trust_operator_key()
+    if coord_up and hardware_trust_enabled and ht_key:
+        try:
+            waiting = get_json(ADMIN_HARDWARE_TRUST_WAITING, bearer=ht_key)
+            ht_alerts, hardware_trust_state = hardware_trust_waiting_alerts(
+                env, prev, waiting if isinstance(waiting, dict) else {},
+            )
+            alerts.extend(ht_alerts)
+        except Exception as e:  # noqa: BLE001
+            alerts.append(("WARN", KIND_HARDWARE_TRUST, f"hardware-trust waiting read failed: {e}"))
+    elif coord_up and hardware_trust_enabled and not ht_key:
+        print(
+            "[INFO] hardware-trust waiting alerts disabled until "
+            "OPERATOR_AUTH_POLICY_A/B is available",
+            flush=True,
+        )
+
     # --- transition detection vs last poll ---
     prev_pool = prev.get("pool", {})
     prev_ready = prev.get("ready")
@@ -574,6 +707,7 @@ def main():
         "gw_status": gw_status,
         "static_ok": static_ok,
         "provider_diagnostics": diagnostics_state.get("provider_diagnostics", {}),
+        "hardware_trust_waiting": hardware_trust_state,
     }
     # Muted alerts still count as alerting transitions: muting changes where
     # an alert is delivered, not whether the condition happened.
