@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Malibu</title>
+        <item>
+            <title>1.8.39</title>
+            <pubDate>Wed, 15 Jul 2026 17:03:05 +0000</pubDate>
+            <sparkle:version>39</sparkle:version>
+            <sparkle:shortVersionString>1.8.39</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://download.malibu.tech/Malibu-v1.8.39.dmg" length="16255202" type="application/octet-stream" sparkle:edSignature="eal8O0OWZwgJfn0MLtpgonYB/VJbEf1raoVyZjnSBxSVfdnz1LDK6hscPo8TM/g2gHNtVKS+GUfautkXxmwLBw=="/>
+        </item>
+    </channel>
+</rss>

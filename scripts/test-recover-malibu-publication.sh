@@ -17,9 +17,14 @@ fixture="$work/fixture"
 mock_bin="$work/bin"
 named_assets="$work/named-assets"
 api_assets="$work/api-assets"
-mkdir -p "$fixture/scripts" "$mock_bin" "$named_assets" "$api_assets" "$work/home/.ssh"
+current_named_assets="$work/current-named-assets"
+current_api_assets="$work/current-api-assets"
+mkdir -p "$fixture/scripts/dist" "$mock_bin" "$named_assets" "$api_assets" \
+  "$current_named_assets" "$current_api_assets" "$work/home/.ssh"
 cp "$recovery" "$fixture/scripts/recover-malibu-publication.sh"
 cp "$capture" "$fixture/scripts/capture-release-publication.py"
+cp "$root/scripts/dist/malibu-frozen-bridge-appcast.xml" \
+  "$fixture/scripts/dist/malibu-frozen-bridge-appcast.xml"
 
 commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 release_id=701
@@ -99,11 +104,86 @@ release = {
 release_path.write_text(json.dumps(release), encoding="utf-8")
 PY
 
+current_release_json="$work/current-release.json"
+python3 - "$current_named_assets" "$current_api_assets" "$current_release_json" "$commit" "$release_id" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+named, api, release_path = map(pathlib.Path, sys.argv[1:4])
+commit, release_id = sys.argv[4], int(sys.argv[5])
+tag = "v1.8.88"
+base = {
+    f"Malibu-{tag}.dmg": b"signed current provider dmg bytes\n",
+    "compatibility-artifact-index.json": b'{"schema_version":1}\n',
+    "macprovider-release-discovery.json": b'{"signed":{"release_sequence":188}}\n',
+}
+for name, content in base.items():
+    (named / name).write_bytes(content)
+signed_assets = {
+    name: hashlib.sha256(content).hexdigest() for name, content in base.items()
+}
+provenance = {
+    "schema_version": 1,
+    "repository": "Augustas11/macprovider",
+    "tag": tag,
+    "commit": commit,
+    "prerelease": False,
+    "toolchain": {},
+    "assets": signed_assets,
+}
+(named / "release-provenance.json").write_text(
+    json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+checksum_names = [*base, "release-provenance.json"]
+(named / "checksums.txt").write_text(
+    "".join(
+        f"{hashlib.sha256((named / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in checksum_names
+    ),
+    encoding="utf-8",
+)
+(named / "checksums.txt.sig").write_bytes(b"captured signature bytes\n")
+ordered = [
+    f"Malibu-{tag}.dmg",
+    "compatibility-artifact-index.json",
+    "macprovider-release-discovery.json",
+    "checksums.txt",
+    "checksums.txt.sig",
+    "release-provenance.json",
+]
+assets = []
+for asset_id, name in enumerate(ordered, 901):
+    content = (named / name).read_bytes()
+    (api / str(asset_id)).write_bytes(content)
+    assets.append(
+        {
+            "id": asset_id,
+            "name": name,
+            "state": "uploaded",
+            "digest": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        }
+    )
+release = {
+    "id": release_id,
+    "tag_name": tag,
+    "target_commitish": commit,
+    "draft": False,
+    "immutable": True,
+    "prerelease": False,
+    "name": f"macprovider-cli {tag}",
+    "assets": assets,
+}
+release_path.write_text(json.dumps(release), encoding="utf-8")
+PY
+
 cat >"$fixture/scripts/verify-release-tag-target.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$#" == 4 ]]
-[[ "$1" == v1.8.39 ]]
+[[ "$1" == v1.8.39 || "$1" == v1.8.88 ]]
 [[ "$2" == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]]
 [[ "$3" == origin && "$4" == --require-existing ]]
 printf '%s\n' verified >"$MOCK_TAG_MARKER"
@@ -112,26 +192,51 @@ SH
 cat >"$fixture/scripts/publish-malibu-latest-dmg.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$#" == 7 ]]
+[[ "$#" == 7 || "$#" == 8 ]]
 python3 - "$@" <<'PY'
 import json
+import os
 import pathlib
 import sys
 
-manifest_path, dmg, appcast, index, checksums, signature, provenance = map(pathlib.Path, sys.argv[1:])
+paths = list(map(pathlib.Path, sys.argv[1:]))
+manifest_path, dmg, appcast, index, checksums, signature, provenance = paths[:7]
+discovery = paths[7] if len(paths) == 8 else None
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 assert manifest["release_id"] == 701
-assert manifest["tag"] == "v1.8.39"
 assert manifest["commit"] == "a" * 40
-assert [path.name for path in (dmg, appcast, index, checksums, signature, provenance)] == [
-    "Malibu-v1.8.39.dmg",
-    "appcast.xml",
-    "compatibility-artifact-index.json",
-    "checksums.txt",
-    "checksums.txt.sig",
-    "release-provenance.json",
-]
-assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 803
+if manifest["tag"] == "v1.8.39":
+    assert "release_sequence" not in manifest
+    assert discovery is None
+    assert [path.name for path in (dmg, appcast, index, checksums, signature, provenance)] == [
+        "Malibu-v1.8.39.dmg",
+        "appcast.xml",
+        "compatibility-artifact-index.json",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "release-provenance.json",
+    ]
+    assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 803
+    assert "macprovider-release-discovery.json" not in manifest["assets"]
+elif manifest["tag"] == "v1.8.88":
+    assert discovery is not None
+    assert manifest["release_sequence"] == 188
+    assert os.environ["MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE"] == "1.8.82"
+    assert os.environ["MALIBU_PUBLICATION_STAGED_CANDIDATE"] == "1.8.88"
+    assert [path.name for path in (dmg, appcast, index, checksums, signature, provenance, discovery)] == [
+        "Malibu-v1.8.88.dmg",
+        "malibu-frozen-bridge-appcast.xml",
+        "compatibility-artifact-index.json",
+        "checksums.txt",
+        "checksums.txt.sig",
+        "release-provenance.json",
+        "macprovider-release-discovery.json",
+    ]
+    assert "appcast.xml" not in manifest["assets"]
+    assert manifest["assets"]["compatibility-artifact-index.json"]["id"] == 902
+    assert manifest["assets"]["macprovider-release-discovery.json"]["id"] == 903
+else:
+    raise AssertionError(manifest["tag"])
 PY
 printf '%s\n' published >"$MOCK_PUBLISH_MARKER"
 SH
@@ -181,6 +286,9 @@ case "${1:-}" in
     ;;
   merge-base)
     [[ "${2:-}" == --is-ancestor ]] || exit 93
+    if [[ "${MOCK_CONTROL_UNREACHABLE:-0}" == 1 && "${3:-}" == "$MOCK_GIT_HEAD" ]]; then
+      exit 95
+    fi
     ;;
   *)
     printf 'unexpected git command: %s\n' "$*" >&2
@@ -199,6 +307,7 @@ run_recovery() (
   dirty="${4:-0}"
   selected_repo="${5:-Augustas11/macprovider}"
   selected_assets="${6:-$api_assets}"
+  control_unreachable="${7:-0}"
   rm -f "$work/release-call-count" "$work/publish.marker" "$work/tag.marker"
   export PATH="$mock_bin:$PATH"
   export GH_TOKEN=test-token
@@ -212,6 +321,7 @@ run_recovery() (
   export MOCK_ASSET_DIR="$selected_assets"
   export MOCK_GIT_HEAD="$selected_head"
   export MOCK_GIT_DIRTY="$dirty"
+  export MOCK_CONTROL_UNREACHABLE="$control_unreachable"
   if [[ -n "$second_release" ]]; then
     export MOCK_SECOND_RELEASE_JSON="$second_release"
   else
@@ -240,13 +350,20 @@ grep -q 'immutable release 701 republished to Pearl' "$work/success.out" ||
 [[ -f "$work/publish.marker" && -f "$work/tag.marker" ]] ||
   fail "successful recovery skipped tag verification or publication"
 
+run_recovery "$current_release_json" "" "$commit" 0 Augustas11/macprovider \
+  "$current_api_assets" >"$work/current-success.out" 2>&1
+grep -q 'immutable release 701 republished to Pearl' "$work/current-success.out" ||
+  { cat "$work/current-success.out" >&2; fail "current recovery did not report completion"; }
+[[ -f "$work/publish.marker" && -f "$work/tag.marker" ]] ||
+  fail "current recovery skipped tag verification or publication"
+
 python3 - "$release_json" "$work/release-wrong-tag.json" <<'PY'
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 value["tag_name"] = "v1.8.40"
 pathlib.Path(sys.argv[2]).write_text(json.dumps(value))
 PY
-expect_failure wrong-tag 'frozen to v1.8.39' "$work/release-wrong-tag.json"
+expect_failure wrong-tag 'numeric release title differs from the reviewed release' "$work/release-wrong-tag.json"
 
 python3 - "$release_json" "$work/release-mutable.json" <<'PY'
 import json, pathlib, sys
@@ -291,8 +408,8 @@ printf 'tampered dmg bytes\n' >"$tampered_assets/801"
 expect_failure tampered-download 'GitHub digest differs from captured workflow asset' \
   "$release_json" '' "$commit" 0 Augustas11/macprovider "$tampered_assets"
 
-expect_failure wrong-head 'exact release commit' \
-  "$release_json" '' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+expect_failure unreachable-control 'control checkout is not reachable from fresh origin/main' \
+  "$release_json" '' "$commit" 0 Augustas11/macprovider "$api_assets" 1
 expect_failure dirty-worktree 'tracked or staged changes' \
   "$release_json" '' "$commit" 1
 expect_failure wrong-repository 'restricted to Augustas11/macprovider' \

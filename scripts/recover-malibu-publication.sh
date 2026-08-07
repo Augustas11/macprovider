@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Recover only the post-GitHub Pearl publication for the frozen v1.8.39 bridge.
+# Recover only the post-GitHub Pearl publication for a stable Malibu provider release.
 set -euo pipefail
 umask 077
 
@@ -12,9 +12,9 @@ usage() {
   cat >&2 <<'EOF'
 usage: recover-malibu-publication.sh RELEASE_ID
 
-RELEASE_ID must identify the immutable, stable v1.8.39 GitHub release. The
-helper discovers the required numeric asset IDs from that release and republishes
-only the already-signed Malibu bridge bytes to Pearl.
+RELEASE_ID must identify an immutable, stable GitHub release from
+Augustas11/macprovider. The helper discovers the required numeric asset IDs from
+that release and republishes only the already-signed Malibu bytes to Pearl.
 EOF
   exit 2
 }
@@ -59,20 +59,26 @@ import sys
 
 release_path, requested_release_id = pathlib.Path(sys.argv[1]), int(sys.argv[2])
 release = json.loads(release_path.read_text(encoding="utf-8"))
-tag = "v1.8.39"
+tag = release.get("tag_name")
+if not isinstance(tag, str) or not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+    raise SystemExit("numeric release tag is not a stable semantic tag")
+version = tuple(int(part) for part in tag[1:].split("."))
+if tag != "v1.8.39" and version < (1, 8, 40):
+    raise SystemExit("current Malibu publication recovery requires v1.8.40 or later")
 expected_names = [
     f"Malibu-{tag}.dmg",
-    "appcast.xml",
     "compatibility-artifact-index.json",
     "checksums.txt",
     "checksums.txt.sig",
     "release-provenance.json",
 ]
+if tag == "v1.8.39":
+    expected_names.insert(1, "appcast.xml")
+else:
+    expected_names.insert(2, "macprovider-release-discovery.json")
 
 if release.get("id") != requested_release_id:
     raise SystemExit("numeric release id differs from the requested recovery id")
-if release.get("tag_name") != tag:
-    raise SystemExit("legacy Malibu publication recovery is frozen to v1.8.39")
 commit = release.get("target_commitish")
 if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
     raise SystemExit("numeric release target is not a full lowercase commit")
@@ -81,7 +87,7 @@ if release.get("draft") is not False:
 if release.get("immutable") is not True:
     raise SystemExit("numeric release is not immutable")
 if release.get("prerelease") is not False:
-    raise SystemExit("numeric release is not the stable v1.8.39 release")
+    raise SystemExit("numeric release is not stable")
 if release.get("name") != f"macprovider-cli {tag}":
     raise SystemExit("numeric release title differs from the reviewed release")
 
@@ -113,29 +119,38 @@ missing = [name for name in expected_names if name not in by_name]
 if missing:
     raise SystemExit(f"numeric release is missing required asset: {missing[0]}")
 
-print(commit, *(by_name[name]["id"] for name in expected_names))
+print(
+    tag,
+    commit,
+    by_name[f"Malibu-{tag}.dmg"]["id"],
+    by_name["appcast.xml"]["id"] if tag == "v1.8.39" else 0,
+    by_name["compatibility-artifact-index.json"]["id"],
+    by_name["macprovider-release-discovery.json"]["id"] if tag != "v1.8.39" else 0,
+    by_name["checksums.txt"]["id"],
+    by_name["checksums.txt.sig"]["id"],
+    by_name["release-provenance.json"]["id"],
+)
 PY
 }
 
 fetch_release "$release_json"
 validate_release "$release_json" >"$identity"
-read -r commit dmg_asset_id appcast_asset_id artifact_index_asset_id \
-  checksums_asset_id signature_asset_id provenance_asset_id <"$identity" ||
+read -r tag commit dmg_asset_id appcast_asset_id artifact_index_asset_id \
+  discovery_asset_id checksums_asset_id signature_asset_id provenance_asset_id <"$identity" ||
   die "could not read the validated release identity"
 
-[[ "$(git -C "$repo_root" rev-parse HEAD)" == "$commit" ]] ||
-  die "recovery must run from a clean worktree at the exact release commit $commit"
 git -C "$repo_root" fetch --quiet --no-tags origin \
   refs/heads/main:refs/remotes/origin/main ||
   die "could not refresh origin/main"
+git -C "$repo_root" merge-base --is-ancestor "$(git -C "$repo_root" rev-parse HEAD)" refs/remotes/origin/main ||
+  die "recovery control checkout is not reachable from fresh origin/main"
 git -C "$repo_root" merge-base --is-ancestor "$commit" refs/remotes/origin/main ||
   die "release commit is not reachable from fresh origin/main"
 bash "$repo_root/scripts/verify-release-tag-target.sh" \
-  v1.8.39 "$commit" origin --require-existing >/dev/null
+  "$tag" "$commit" origin --require-existing >/dev/null
 
 names=(
-  "Malibu-v1.8.39.dmg"
-  "appcast.xml"
+  "Malibu-${tag}.dmg"
   "compatibility-artifact-index.json"
   "checksums.txt"
   "checksums.txt.sig"
@@ -143,12 +158,18 @@ names=(
 )
 asset_ids=(
   "$dmg_asset_id"
-  "$appcast_asset_id"
   "$artifact_index_asset_id"
   "$checksums_asset_id"
   "$signature_asset_id"
   "$provenance_asset_id"
 )
+if [[ "$tag" == v1.8.39 ]]; then
+  names=("Malibu-${tag}.dmg" "appcast.xml" "${names[@]:1}")
+  asset_ids=("$dmg_asset_id" "$appcast_asset_id" "${asset_ids[@]:1}")
+else
+  names=("Malibu-${tag}.dmg" "compatibility-artifact-index.json" "macprovider-release-discovery.json" "${names[@]:2}")
+  asset_ids=("$dmg_asset_id" "$artifact_index_asset_id" "$discovery_asset_id" "${asset_ids[@]:2}")
+fi
 for index in "${!names[@]}"; do
   target="$work/${names[$index]}"
   gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
@@ -168,16 +189,33 @@ cmp -s "$identity" "$identity_after_download" ||
   die "numeric release identity changed while recovery assets were downloaded"
 
 manifest="$work/publication-manifest.json"
-python3 "$repo_root/scripts/capture-release-publication.py" \
-  "$release_after_download_json" "$work/release-provenance.json" "$manifest" \
-  "$work/Malibu-v1.8.39.dmg" "$work/appcast.xml" \
-  "$work/compatibility-artifact-index.json" "$work/checksums.txt" \
-  "$work/checksums.txt.sig" "$work/release-provenance.json"
+if [[ "$tag" == v1.8.39 ]]; then
+  appcast="$work/appcast.xml"
+  python3 "$repo_root/scripts/capture-release-publication.py" \
+    "$release_after_download_json" "$work/release-provenance.json" "$manifest" \
+    "$work/Malibu-${tag}.dmg" "$work/appcast.xml" \
+    "$work/compatibility-artifact-index.json" \
+    "$work/checksums.txt" "$work/checksums.txt.sig" "$work/release-provenance.json"
+else
+  appcast="$repo_root/scripts/dist/malibu-frozen-bridge-appcast.xml"
+  python3 "$repo_root/scripts/capture-release-publication.py" \
+    "$release_after_download_json" "$work/release-provenance.json" "$manifest" \
+    "$work/Malibu-${tag}.dmg" "$work/compatibility-artifact-index.json" \
+    "$work/macprovider-release-discovery.json" "$work/checksums.txt" \
+    "$work/checksums.txt.sig" "$work/release-provenance.json"
+fi
+if [[ "$tag" == v1.8.88 ]]; then
+  export MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE="${MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE:-1.8.82}"
+  export MALIBU_PUBLICATION_STAGED_CANDIDATE="${MALIBU_PUBLICATION_STAGED_CANDIDATE:-1.8.88}"
+fi
 
-bash "$repo_root/scripts/publish-malibu-latest-dmg.sh" \
-  "$manifest" "$work/Malibu-v1.8.39.dmg" "$work/appcast.xml" \
-  "$work/compatibility-artifact-index.json" "$work/checksums.txt" \
+publish_args=(
+  "$manifest" "$work/Malibu-${tag}.dmg" "$appcast"
+  "$work/compatibility-artifact-index.json" "$work/checksums.txt"
   "$work/checksums.txt.sig" "$work/release-provenance.json"
+)
+[[ "$tag" == v1.8.39 ]] || publish_args+=("$work/macprovider-release-discovery.json")
+bash "$repo_root/scripts/publish-malibu-latest-dmg.sh" "${publish_args[@]}"
 
 printf '[recover-malibu-publication] ok: immutable release %s republished to Pearl\n' \
   "$release_id"

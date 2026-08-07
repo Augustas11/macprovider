@@ -222,6 +222,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          version="${tag#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::release tag does not contain a semantic Malibu version: $tag" >&2
+            exit 1
+          }
+          build="$(awk -v version="$version" '
+            $0 !~ /^[[:space:]]*#/ && NF >= 2 && $1 == version {
+              count += 1
+              value = $2
+            }
+            END {
+              if (count != 1 || value !~ /^[0-9]+$/) {
+                exit 1
+              }
+              print value
+            }
+          ' phase3-binary/app/release-builds.tsv)" || {
+            echo "::error::phase3-binary/app/release-builds.tsv must contain exactly one numeric build for Malibu $version" >&2
+            exit 1
+          }
           cd phase3-binary/app
           "$RUNNER_TEMP/xcodegen-2.45.4/xcodegen/bin/xcodegen" generate
           xcodebuild \
@@ -232,9 +253,17 @@ jobs:
             -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
             archive \
             ARCHS=arm64 \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            MARKETING_VERSION="$version" \
+            CURRENT_PROJECT_VERSION="$build"
           cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
             "$RUNNER_TEMP/Malibu.app"
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$RUNNER_TEMP/Malibu.app/Contents/Info.plist")"
+          [[ "$actual_version" = "$version" && "$actual_build" = "$build" ]] || {
+            echo "::error::Malibu.app Info.plist reports $actual_version/$actual_build, expected $version/$build" >&2
+            exit 1
+          }
 
       - name: Capture unsigned build artifact
         if: ${{ github.event.inputs.promote_run_id == '' }}
@@ -825,6 +854,28 @@ jobs:
             exit 1
           fi
           test -d "$APP"
+          version="${tag#v}"
+          build="$(awk -v version="$version" '
+            $0 !~ /^[[:space:]]*#/ && NF >= 2 && $1 == version {
+              count += 1
+              value = $2
+            }
+            END {
+              if (count != 1 || value !~ /^[0-9]+$/) {
+                exit 1
+              }
+              print value
+            }
+          ' phase3-binary/app/release-builds.tsv)" || {
+            echo "::error::phase3-binary/app/release-builds.tsv must contain exactly one numeric build for Malibu $version" >&2
+            exit 1
+          }
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          actual_build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
+          [[ "$actual_version" = "$version" && "$actual_build" = "$build" ]] || {
+            echo "::error::Malibu.app Info.plist reports $actual_version/$actual_build, expected $version/$build" >&2
+            exit 1
+          }
 
           security list-keychains | grep -q build.keychain || {
             echo "::error::build.keychain absent; CLI signing step cleanup ran too early." >&2
@@ -1866,11 +1917,14 @@ jobs:
             "${release_assets[@]}" checksums.txt checksums.txt.sig
           cmp final-draft-manifest.json publication-manifest.json
 
-      - name: Publish one-time Malibu 1.8.32 bootstrap bridge to Pearl
-        if: needs.build.outputs.tag == 'v1.8.39' && needs.build.outputs.prerelease == 'false'
+      - name: Publish Malibu download alias to Pearl
+        if: needs.build.outputs.prerelease == 'false'
         env:
           MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
           MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
+          MALIBU_PUBLICATION_EXPECTED_REPOSITORY: ${{ github.repository }}
+          MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.8.82"
+          MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.8.88"
           OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
@@ -1885,10 +1939,19 @@ jobs:
           chmod 600 "$key_file"
           export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
           tag="${{ needs.build.outputs.tag }}"
+          if [ "$tag" = v1.8.39 ]; then
+            appcast="appcast.xml"
+          else
+            appcast="scripts/dist/malibu-frozen-bridge-appcast.xml"
+            if [ -e appcast.xml ]; then
+              echo "::error::current provider release must not publish a generated appcast asset" >&2
+              exit 1
+            fi
+          fi
           bash scripts/publish-malibu-latest-dmg.sh \
-            publication-manifest.json "Malibu-${tag}.dmg" appcast.xml \
+            publication-manifest.json "Malibu-${tag}.dmg" "$appcast" \
             compatibility-artifact-index.json checksums.txt checksums.txt.sig \
-            release-provenance.json
+            release-provenance.json macprovider-release-discovery.json
 
       - name: Verify published Tier-2 Release assets
         shell: bash

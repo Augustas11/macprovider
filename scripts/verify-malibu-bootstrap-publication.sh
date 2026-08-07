@@ -29,23 +29,39 @@ sha256_file() {
   fi
 }
 
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+frozen_appcast="$repo_root/scripts/dist/malibu-frozen-bridge-appcast.xml"
+frozen_appcast_sha256="94ecf57584a2a203336d3219ea42dec1945bae2e123cfce0b1b39f8e0231d83c"
 expected_dmg_sha="$(sha256_file "$dmg")"
 expected_appcast_sha="$(sha256_file "$appcast")"
 expected_checksum_sha="$(sha256_file "$checksum")"
 expected_checksum_bytes="${expected_dmg_sha}  Malibu-${tag}.dmg"
 [[ "$(cat "$checksum")" == "$expected_checksum_bytes" ]] ||
   die "versioned DMG checksum file is invalid"
+frozen_mode=false
+if [[ "$tag" != v1.8.39 ]]; then
+  frozen_mode=true
+  [[ "$(sha256_file "$frozen_appcast")" == "$frozen_appcast_sha256" ]] ||
+    die "committed frozen bridge appcast hash changed"
+  cmp -s "$appcast" "$frozen_appcast" ||
+    die "current provider publication must use the committed frozen bridge appcast"
+fi
 curl_args=(
   --fail --show-error --silent --location --proto '=https' --tlsv1.2
   --connect-timeout 20 --max-time 240 --retry 3 --retry-delay 2
 )
 cache_key="publication=${expected_appcast_sha}"
+[[ "$frozen_mode" == false ]] || cache_key="publication=${expected_dmg_sha}"
 curl "${curl_args[@]}" -o "$work/appcast.xml" "${base}/appcast.xml?${cache_key}"
 curl "${curl_args[@]}" -o "$work/latest.dmg" "${base}/latest.dmg?${cache_key}"
 curl "${curl_args[@]}" -o "$work/Malibu-${tag}.dmg" \
   "${base}/Malibu-${tag}.dmg?${cache_key}"
 curl "${curl_args[@]}" -o "$work/Malibu-${tag}.dmg.sha256" \
   "${base}/Malibu-${tag}.dmg.sha256?${cache_key}"
+if [[ "$frozen_mode" == true ]]; then
+  curl "${curl_args[@]}" -o "$work/Malibu-v1.8.39.dmg" \
+    "${base}/Malibu-v1.8.39.dmg?${cache_key}"
+fi
 
 [[ "$(sha256_file "$work/appcast.xml")" == "$expected_appcast_sha" ]] ||
   die "public appcast bytes differ from the immutable release asset"
@@ -58,9 +74,14 @@ done
 [[ "$(cat "$work/Malibu-${tag}.dmg.sha256")" == "$expected_checksum_bytes" ]] ||
   die "public checksum contents do not match the immutable release DMG"
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
-  "$tag" "$work/latest.dmg" "$work/appcast.xml" \
-  "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+if [[ "$frozen_mode" == false ]]; then
+  python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
+    "$tag" "$work/latest.dmg" "$work/appcast.xml" \
+    "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+else
+  python3 "$repo_root/scripts/verify-malibu-sparkle-signature.py" \
+    v1.8.39 "$work/Malibu-v1.8.39.dmg" "$work/appcast.xml" \
+    "$repo_root/scripts/dist/malibu-v1.8.32-sparkle-public-key"
+fi
 
 printf '[verify-malibu-bootstrap-publication] ok: %s serves %s latest/appcast/checksum bytes\n' "$base" "$tag"

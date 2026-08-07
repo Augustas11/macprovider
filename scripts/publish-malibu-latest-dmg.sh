@@ -7,8 +7,8 @@ die() {
   exit 1
 }
 
-[[ "$#" == 7 ]] ||
-  die "usage: $0 MANIFEST DMG APPCAST ARTIFACT_INDEX CHECKSUMS SIGNATURE PROVENANCE"
+[[ "$#" == 7 || "$#" == 8 ]] ||
+  die "usage: $0 MANIFEST DMG APPCAST ARTIFACT_INDEX CHECKSUMS SIGNATURE PROVENANCE [DISCOVERY]"
 
 manifest="$1"
 asset="$2"
@@ -17,13 +17,17 @@ artifact_index="$4"
 checksums="$5"
 signature="$6"
 provenance="$7"
+discovery="${8:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-bash "$SCRIPT_DIR/verify-malibu-publication-set.sh" \
-  "$manifest" "$asset" "$appcast" "$artifact_index" \
+verification_args=(
+  "$manifest" "$asset" "$appcast" "$artifact_index"
   "$checksums" "$signature" "$provenance"
+)
+[[ -z "$discovery" ]] || verification_args+=("$discovery")
+bash "$SCRIPT_DIR/verify-malibu-publication-set.sh" "${verification_args[@]}"
 
-read -r tag commit release_number publication_id dmg_asset_id appcast_asset_id < <(
+read -r repository tag commit release_number publication_id dmg_asset_id appcast_asset_id < <(
   python3 - "$manifest" <<'PY'
 import json
 import pathlib
@@ -32,23 +36,36 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 tag = manifest["tag"]
 assets = manifest["assets"]
+dmg = assets[f"Malibu-{tag}.dmg"]
+appcast = assets.get("appcast.xml")
 print(
+    manifest["repository"],
     tag,
     manifest["commit"],
     manifest["release_id"],
     manifest["publication_id"],
-    assets[f"Malibu-{tag}.dmg"]["id"],
-    assets["appcast.xml"]["id"],
+    dmg["id"],
+    appcast["id"] if isinstance(appcast, dict) and type(appcast.get("id")) is int else "frozen-bridge",
 )
 PY
 )
+expected_publication_repository="${MALIBU_PUBLICATION_EXPECTED_REPOSITORY:-Augustas11/macprovider}"
+[[ "$expected_publication_repository" == "Augustas11/macprovider" ]] ||
+  die "Malibu publication is restricted to Augustas11/macprovider"
+[[ "$repository" == "$expected_publication_repository" ]] || die "manifest repository is invalid"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "manifest tag is invalid"
-[[ "$tag" == v1.8.39 ]] || die "legacy provider-coupled Malibu publisher is frozen to v1.8.39"
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "manifest commit is invalid"
 [[ "$release_number" =~ ^[1-9][0-9]*$ ]] || die "manifest release id is invalid"
 [[ "$publication_id" =~ ^[0-9a-f]{64}$ ]] || die "manifest publication id is invalid"
-[[ "$dmg_asset_id" =~ ^[1-9][0-9]*$ && "$appcast_asset_id" =~ ^[1-9][0-9]*$ ]] ||
-  die "manifest publication asset ids are invalid"
+[[ "$dmg_asset_id" =~ ^[1-9][0-9]*$ ]] || die "manifest DMG asset id is invalid"
+if [[ "$tag" == v1.8.39 ]]; then
+  [[ "$appcast_asset_id" =~ ^[1-9][0-9]*$ ]] ||
+    die "legacy bridge publication requires a signed appcast release asset"
+else
+  [[ "$appcast_asset_id" == frozen-bridge ]] ||
+    die "current provider publication must use the committed frozen bridge appcast"
+  [[ -n "$discovery" ]] || die "current provider publication requires release discovery"
+fi
 
 VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:-159.223.165.194}"
 SSH_KEY="${MALIBU_DOWNLOAD_SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
