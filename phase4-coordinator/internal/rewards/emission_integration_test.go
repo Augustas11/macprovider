@@ -92,6 +92,22 @@ func openRewardsWriter(t *testing.T, fx *pgFixture) *sql.DB {
 	return db
 }
 
+// testEmissionConfig builds a valid rewards.Config for tests that call
+// rewards.New directly with an already-open *sql.DB. WriterDSN and
+// SQLitePayoutDBPath are required by Config.Validate() but unused by
+// RunEmissionTickOnce, which operates on the db passed to rewards.New.
+func testEmissionConfig(tickInterval time.Duration, providerCap, walletCap float64) rewards.Config {
+	return rewards.Config{
+		Enabled:                true,
+		WriterDSN:              "unused-in-test",
+		SQLitePayoutDBPath:     "/dev/null",
+		TickInterval:           tickInterval,
+		ProviderDailyCapMALIBU: providerCap,
+		WalletDailyCapMALIBU:   walletCap,
+		MaxSerializableRetries: 5,
+	}
+}
+
 func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	writerDB := openRewardsWriter(t, fx)
@@ -104,13 +120,7 @@ func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	cfg := rewards.Config{
-		Enabled:                true,
-		TickInterval:           time.Hour,
-		ProviderDailyCapMALIBU: 25,
-		WalletDailyCapMALIBU:   100,
-		MaxSerializableRetries: 5,
-	}
+	cfg := testEmissionConfig(time.Hour, 25, 100)
 	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
@@ -160,13 +170,7 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 		}
 	}
 
-	cfg := rewards.Config{
-		Enabled:                true,
-		TickInterval:           time.Minute,
-		ProviderDailyCapMALIBU: 1000,
-		WalletDailyCapMALIBU:   100,
-		MaxSerializableRetries: 5,
-	}
+	cfg := testEmissionConfig(time.Minute, 1000, 100)
 	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
@@ -225,13 +229,7 @@ func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
 		t.Fatalf("seed held ledger row: %v", err)
 	}
 
-	cfg := rewards.Config{
-		Enabled:                true,
-		TickInterval:           time.Hour,
-		ProviderDailyCapMALIBU: 25,
-		WalletDailyCapMALIBU:   100,
-		MaxSerializableRetries: 5,
-	}
+	cfg := testEmissionConfig(time.Hour, 25, 100)
 	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
