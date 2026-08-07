@@ -6242,6 +6242,15 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 			typ:     "server_error",
 		}
 	}
+	// SPEC-022 R-2.4/R-2.5: like the #768 floor above, the enforce-mode
+	// receipt-key gate must be re-applied on the pinned/self-route path —
+	// it bypasses routing.EligibleCandidates, so without this a hard pin
+	// routes to a provider whose route snapshot is guaranteed to fail
+	// pre-dispatch (500 route_snapshot_failed) instead of a clean 503.
+	// Observe mode / nil store => settlementEnforceMode()==false => no-op.
+	if s.settlementEnforceMode() && len(p.ReceiptPubkey) == 0 {
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
+	}
 	if p.MaxContextTokens < estimatedTokens {
 		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
 	}
@@ -6399,6 +6408,14 @@ func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *con
 		if !s.providerMeetsModelVersionFloor(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
+		// SPEC-022 R-2.4/R-2.5: re-check the enforce-mode receipt-key gate at
+		// poll time. Like the #768 floor above, the waiter stores only
+		// providerID, so a same-ID reconnect that lost its active receipt key
+		// must not be served off the queue (its route snapshot would fail
+		// pre-dispatch). Observe / nil store => no-op.
+		if s.settlementEnforceMode() && len(provider.ReceiptPubkey) == 0 {
+			return pool.Provider{}, queuedProviderTerminal
+		}
 		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
@@ -6430,6 +6447,13 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		// still be queued for (and eventually served) the model it is too old
 		// to run.
 		if !checker.ProviderMeetsModelVersionFloor(provider) {
+			continue
+		}
+		// SPEC-022 R-2.4/R-2.5: re-apply the enforce-mode receipt-key gate
+		// here too — the slot queue re-derives the routing gate by hand, so
+		// without this an empty-receipt-key provider would be queued for and
+		// eventually served a model whose route snapshot cannot be recorded.
+		if !checker.ProviderHasSettlementReceiptKey(provider) {
 			continue
 		}
 		reason, _ := checker.Tier2Decision(provider)

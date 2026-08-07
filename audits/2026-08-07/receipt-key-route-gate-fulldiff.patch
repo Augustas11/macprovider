@@ -1,0 +1,348 @@
+diff --git a/phase4-coordinator/internal/buyer/receipt_key_route_gate_test.go b/phase4-coordinator/internal/buyer/receipt_key_route_gate_test.go
+new file mode 100644
+index 00000000..668c000b
+--- /dev/null
++++ b/phase4-coordinator/internal/buyer/receipt_key_route_gate_test.go
+@@ -0,0 +1,36 @@
++package buyer
++
++import (
++	"testing"
++
++	"github.com/augstar/macprovider-coordinator/internal/pool"
++)
++
++// TestEligibilityCtx_ProviderHasSettlementReceiptKey pins the
++// SPEC-022 R-2.4/R-2.5 candidate-eligibility gate logic: observe mode
++// (settlementEnforce == false) is a no-op that accepts every provider,
++// while enforce mode drops providers whose active receipt public key is
++// empty and keeps those that present one. This mirrors the pre-dispatch
++// route-snapshot guard in route_snapshot.go so the eligibility filter
++// and the fail-closed backstop cannot diverge.
++func TestEligibilityCtx_ProviderHasSettlementReceiptKey(t *testing.T) {
++	t.Parallel()
++	withKey := pool.Provider{ProviderID: "with", ReceiptPubkey: []byte("k")}
++	noKey := pool.Provider{ProviderID: "without"}
++
++	observe := &eligibilityCtx{settlementEnforce: false}
++	if !observe.ProviderHasSettlementReceiptKey(noKey) {
++		t.Error("observe mode must accept a provider with no receipt key (no-op)")
++	}
++	if !observe.ProviderHasSettlementReceiptKey(withKey) {
++		t.Error("observe mode must accept a provider with a receipt key")
++	}
++
++	enforce := &eligibilityCtx{settlementEnforce: true}
++	if enforce.ProviderHasSettlementReceiptKey(noKey) {
++		t.Error("enforce mode must reject a provider with an empty active receipt key")
++	}
++	if !enforce.ProviderHasSettlementReceiptKey(withKey) {
++		t.Error("enforce mode must accept a provider with a non-empty active receipt key")
++	}
++}
+diff --git a/phase4-coordinator/internal/buyer/route_snapshot_test.go b/phase4-coordinator/internal/buyer/route_snapshot_test.go
+index de67f9f8..39118776 100644
+--- a/phase4-coordinator/internal/buyer/route_snapshot_test.go
++++ b/phase4-coordinator/internal/buyer/route_snapshot_test.go
+@@ -805,12 +805,22 @@ func TestRouteSnapshotSkippedForUppercaseModelHash(t *testing.T) {
+ }
+ 
+ func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
++	// Both cases MUST fail closed under enforce: no route snapshot, no
++	// ledger credit. The status differs by WHERE the failure happens:
++	//   - "missing" (empty active receipt key) is now excluded at
++	//     candidate eligibility (SPEC-022 R-2.4/R-2.5), so the request
++	//     never selects a provider → 503 no_provider_available (retryable,
++	//     no-charge). This is the routing-gate fix.
++	//   - "malformed" (present but non-canonical key) passes the
++	//     len(ReceiptPubkey)>0 eligibility gate, reaches the pre-dispatch
++	//     route-snapshot guard, and fails there → 500 (defence-in-depth).
+ 	for _, tc := range []struct {
+-		name string
+-		key  []byte
++		name       string
++		key        []byte
++		wantStatus int
+ 	}{
+-		{name: "missing", key: nil},
+-		{name: "malformed", key: []byte{0x01, 0x02, 0x03}},
++		{name: "missing", key: nil, wantStatus: http.StatusServiceUnavailable},
++		{name: "malformed", key: []byte{0x01, 0x02, 0x03}, wantStatus: http.StatusInternalServerError},
+ 	} {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			tier2.ResetForTest()
+@@ -855,8 +865,8 @@ func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
+ 			)
+ 
+ 			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+-			if rr.Code != http.StatusInternalServerError {
+-				t.Fatalf("status=%d body=%s, want enforce fail-closed", rr.Code, rr.Body.String())
++			if rr.Code != tc.wantStatus {
++				t.Fatalf("status=%d body=%s, want %d (enforce fail-closed)", rr.Code, rr.Body.String(), tc.wantStatus)
+ 			}
+ 			if got := routeSnapshotCount(t, dbPath); got != 0 {
+ 				t.Fatalf("route snapshots=%d want 0", got)
+diff --git a/phase4-coordinator/internal/buyer/server.go b/phase4-coordinator/internal/buyer/server.go
+index 83d82bb8..efcc140d 100644
+--- a/phase4-coordinator/internal/buyer/server.go
++++ b/phase4-coordinator/internal/buyer/server.go
+@@ -5487,11 +5487,12 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string,
+ 		exSet.AddKey(k)
+ 	}
+ 	checker := &eligibilityCtx{
+-		s:               s,
+-		model:           req.Model,
+-		class:           class,
+-		estimatedTokens: estimatedTokens,
+-		tier2Cfg:        tier2Cfg,
++		s:                 s,
++		model:             req.Model,
++		class:             class,
++		estimatedTokens:   estimatedTokens,
++		tier2Cfg:          tier2Cfg,
++		settlementEnforce: s.settlementEnforceMode(),
+ 	}
+ 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
+ 	candidates := result.Eligible
+@@ -6011,6 +6012,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
+ 			key = "tier2_attestation"
+ 		case routing.ReasonQuotaBlocked:
+ 			key = "quota_blocked"
++		case routing.ReasonReceiptKeyMissing:
++			key = "receipt_key_missing"
+ 		default:
+ 			key = "other"
+ 		}
+@@ -6546,6 +6549,13 @@ type eligibilityCtx struct {
+ 	class           *config.ModelClassConfig
+ 	estimatedTokens int
+ 	tier2Cfg        config.Tier2Config
++	// settlementEnforce is snapshotted ONCE at checker construction
++	// (like tier2Cfg) so the EligibilityChecker contract "config
++	// snapshots MUST NOT change mid-loop" holds across the per-provider
++	// pass. False (the zero value) means observe / unavailable-store →
++	// the receipt-key gate is a no-op, so any eligibilityCtx built
++	// without setting it keeps pre-fix selection.
++	settlementEnforce bool
+ }
+ 
+ // ProviderMatchesRequest combines the model/class match and the
+@@ -6598,6 +6608,37 @@ func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
+ 	return c.s.checkQuota(p)
+ }
+ 
++// ProviderHasSettlementReceiptKey drops providers that can never have a
++// route snapshot recorded under enforce mode (SPEC-022 R-2.4/R-2.5). It
++// mirrors the pre-dispatch guard in route_snapshot.go
++// (`len(provider.ReceiptPubkey) == 0` under enforce) but at the
++// candidate-eligibility layer, so routing never selects a box whose
++// route snapshot is guaranteed to fail. In observe mode — or whenever
++// the settlement store/config is unavailable, captured as
++// settlementEnforce == false — it returns true for every provider so
++// observe / default selection stays byte-identical to pre-fix.
++func (c *eligibilityCtx) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
++	if !c.settlementEnforce {
++		return true
++	}
++	return len(p.ReceiptPubkey) > 0
++}
++
++// settlementEnforceMode reports whether verified-model settlement is in
++// `enforce` mode right now, reading the SAME (store, SettlementConfig,
++// VerifiedModelSettlementMode) source the pre-dispatch route-snapshot
++// guard uses (route_snapshot.go), so the eligibility filter and the
++// fail-closed backstop cannot diverge. A nil billing store (settlement
++// not wired) reports false — observe-equivalent, no new exclusions.
++func (s *Server) settlementEnforceMode() bool {
++	store, _, _ := s.billingState()
++	if store == nil {
++		return false
++	}
++	settlementCfg := store.SettlementConfig(config.Default().Settlement)
++	return billing.VerifiedModelSettlementMode(settlementCfg) == billing.RouteSnapshotModeEnforce
++}
++
+ func modelIDEqual(a, b string) bool {
+ 	// Catalog-key ↔ served HF-id equivalence via rate-card normalization
+ 	// (issue #900). EqualFold alone rejects openai/gpt-oss-20b against
+diff --git a/phase4-coordinator/internal/routing/filter.go b/phase4-coordinator/internal/routing/filter.go
+index c39e9223..d3425a92 100644
+--- a/phase4-coordinator/internal/routing/filter.go
++++ b/phase4-coordinator/internal/routing/filter.go
+@@ -41,6 +41,15 @@ const (
+ 	// coordinator_advertised_version.per_model_required_binary_version,
+ 	// or is unparseable while such a floor is in force (#768).
+ 	ReasonModelVersionFloor
++	// ReasonReceiptKeyMissing — verified_model_settlement_mode=enforce
++	// and the provider has no active settlement receipt public key, so a
++	// route snapshot can never be recorded for it (SPEC-022 R-2.4/R-2.5:
++	// providers with missing/empty settlement preconditions MUST be
++	// excluded from covered paid routing). Under observe mode — or when
++	// the settlement store/config is unavailable — the checker returns
++	// true for every provider and this reason never fires, so default /
++	// observe selection stays byte-identical to pre-fix behaviour.
++	ReasonReceiptKeyMissing
+ )
+ 
+ // EligibilityChecker is the cross-package boundary between the
+@@ -73,6 +82,19 @@ type EligibilityChecker interface {
+ 	// provider so selection stays byte-identical to pre-#768.
+ 	ProviderMeetsModelVersionFloor(p pool.Provider) bool
+ 
++	// ProviderHasSettlementReceiptKey reports whether the provider can
++	// have a route snapshot recorded under the active settlement mode.
++	// A false return is reported as ReasonReceiptKeyMissing (SPEC-022
++	// R-2.4/R-2.5). Implementations MUST return true UNLESS
++	// verified_model_settlement_mode is `enforce` AND the provider's
++	// active receipt public key is empty — the SAME (store, mode) source
++	// the pre-dispatch route-snapshot guard in route_snapshot.go reads,
++	// so the eligibility filter and the fail-closed backstop cannot
++	// diverge. In observe mode, or when the settlement store/config is
++	// unavailable, it MUST return true for every provider so observe /
++	// default selection stays byte-identical.
++	ProviderHasSettlementReceiptKey(p pool.Provider) bool
++
+ 	// ProviderContextSufficient reports whether the provider's
+ 	// MaxContextTokens fits the request's estimated token budget.
+ 	// Implementation MUST use the same token-estimation function
+@@ -142,6 +164,12 @@ type FilterResult struct {
+ //     floor is keyed BY model; a no-op when no floors are
+ //     configured, so default-config selection stays byte-identical
+ //     (AC-SR-1).
++//  3b. ProviderHasSettlementReceiptKey — ReasonReceiptKeyMissing
++//     (SPEC-022 R-2.4/R-2.5). A no-op in observe mode / when the
++//     settlement store is unavailable, so default / observe selection
++//     stays byte-identical; under enforce it drops providers with no
++//     active receipt key so routing never selects a box whose route
++//     snapshot is guaranteed to fail pre-dispatch.
+ //  4. ProviderContextSufficient — ReasonContextTooSmall
+ //  5. Tier2Decision — ReasonTier2HashMismatch / ReasonTier2Hash
+ //     Required / ReasonTier2EncryptedLeg / ReasonTier2Attestation
+@@ -177,6 +205,10 @@ func EligibleCandidates(
+ 			res.Counts[ReasonModelVersionFloor]++
+ 			continue
+ 		}
++		if !checker.ProviderHasSettlementReceiptKey(p) {
++			res.Counts[ReasonReceiptKeyMissing]++
++			continue
++		}
+ 		if !checker.ProviderContextSufficient(p) {
+ 			res.Counts[ReasonContextTooSmall]++
+ 			continue
+diff --git a/phase4-coordinator/internal/routing/filter_test.go b/phase4-coordinator/internal/routing/filter_test.go
+index baa95981..0d8baabe 100644
+--- a/phase4-coordinator/internal/routing/filter_test.go
++++ b/phase4-coordinator/internal/routing/filter_test.go
+@@ -12,6 +12,7 @@ import (
+ type stubChecker struct {
+ 	matches        map[string]bool
+ 	versionFloorOK map[string]bool
++	receiptKeyOK   map[string]bool
+ 	contextOK      map[string]bool
+ 	tier2          map[string]routing.RejectionReason
+ 	tier2Hash      map[string]pool.HashStatus
+@@ -30,6 +31,12 @@ func (s *stubChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool {
+ 	}
+ 	return true
+ }
++func (s *stubChecker) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
++	if v, ok := s.receiptKeyOK[p.ProviderID]; ok {
++		return v
++	}
++	return true
++}
+ func (s *stubChecker) ProviderContextSufficient(p pool.Provider) bool {
+ 	if v, ok := s.contextOK[p.ProviderID]; ok {
+ 		return v
+@@ -211,6 +218,7 @@ type recordingChecker struct {
+ 	calls            []string // "providerID/gate"
+ 	matchFail        map[string]bool
+ 	versionFloorFail map[string]bool
++	receiptKeyFail   map[string]bool
+ 	contextFail      map[string]bool
+ 	tier2Reason      map[string]routing.RejectionReason
+ 	quotaFail        map[string]bool
+@@ -224,6 +232,10 @@ func (r *recordingChecker) ProviderMeetsModelVersionFloor(p pool.Provider) bool
+ 	r.calls = append(r.calls, p.ProviderID+"/version_floor")
+ 	return !r.versionFloorFail[p.ProviderID]
+ }
++func (r *recordingChecker) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
++	r.calls = append(r.calls, p.ProviderID+"/receipt_key")
++	return !r.receiptKeyFail[p.ProviderID]
++}
+ func (r *recordingChecker) ProviderContextSufficient(p pool.Provider) bool {
+ 	r.calls = append(r.calls, p.ProviderID+"/context")
+ 	return !r.contextFail[p.ProviderID]
+@@ -267,14 +279,15 @@ func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T
+ 
+ func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
+ 	// For a provider that passes every gate, the call sequence MUST
+-	// be exactly match → version_floor → context → tier2 → quota.
+-	// FR-SR-18 order, with the #768 per-model version floor inserted
+-	// right after the model match (it is keyed BY model).
++	// be exactly match → version_floor → receipt_key → context →
++	// tier2 → quota. FR-SR-18 order, with the #768 per-model version
++	// floor inserted right after the model match (keyed BY model) and
++	// the SPEC-022 R-2.4/R-2.5 receipt-key gate immediately after it.
+ 	t.Parallel()
+ 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
+ 	checker := &recordingChecker{t: t}
+ 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+-	want := []string{"p/match", "p/version_floor", "p/context", "p/tier2", "p/quota"}
++	want := []string{"p/match", "p/version_floor", "p/receipt_key", "p/context", "p/tier2", "p/quota"}
+ 	if len(checker.calls) != len(want) {
+ 		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
+ 	}
+@@ -290,7 +303,7 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
+ 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
+ 	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
+ 	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+-	want := []string{"p/match", "p/version_floor", "p/context"}
++	want := []string{"p/match", "p/version_floor", "p/receipt_key", "p/context"}
+ 	if len(checker.calls) != len(want) {
+ 		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
+ 	}
+@@ -301,6 +314,43 @@ func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *tes
+ 	}
+ }
+ 
++func TestEligibleCandidates_ReceiptKeyMissingExcluded(t *testing.T) {
++	// SPEC-022 R-2.4/R-2.5: a provider the checker reports as lacking an
++	// active settlement receipt key (enforce mode, empty key) MUST be
++	// dropped with ReasonReceiptKeyMissing and MUST NOT appear in
++	// Eligible; providers the checker accepts are unaffected.
++	t.Parallel()
++	providers := []pool.Provider{mkProvider("has-key"), mkProvider("no-key")}
++	checker := &stubChecker{receiptKeyOK: map[string]bool{"no-key": false}}
++	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
++	if len(res.Eligible) != 1 || res.Eligible[0].ProviderID != "has-key" {
++		t.Fatalf("want only has-key eligible, got %+v", res.Eligible)
++	}
++	if res.Counts[routing.ReasonReceiptKeyMissing] != 1 {
++		t.Fatalf("want ReasonReceiptKeyMissing==1, got %d (counts=%v)", res.Counts[routing.ReasonReceiptKeyMissing], res.Counts)
++	}
++}
++
++func TestEligibleCandidates_AllReceiptKeyMissing_EmptyPreQuota(t *testing.T) {
++	// When every candidate is dropped for receipt_key_missing, the
++	// pre-quota survivor count is 0, so the caller's 429-vs-503 branch
++	// (PreQuotaCount>0 && all quota-blocked) is NOT taken and the
++	// request surfaces as a retryable 503, not a quota 429.
++	t.Parallel()
++	providers := []pool.Provider{mkProvider("a"), mkProvider("b")}
++	checker := &stubChecker{receiptKeyOK: map[string]bool{"a": false, "b": false}}
++	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
++	if len(res.Eligible) != 0 {
++		t.Fatalf("want 0 eligible, got %d", len(res.Eligible))
++	}
++	if res.PreQuotaCount != 0 {
++		t.Fatalf("want PreQuotaCount 0, got %d", res.PreQuotaCount)
++	}
++	if res.Counts[routing.ReasonReceiptKeyMissing] != 2 {
++		t.Fatalf("want 2 receipt_key_missing, got %d", res.Counts[routing.ReasonReceiptKeyMissing])
++	}
++}
++
+ func TestEligibleCandidates_OrderingTier2RejectStopsBeforeQuota(t *testing.T) {
+ 	t.Parallel()
+ 	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
