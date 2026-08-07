@@ -199,6 +199,8 @@ Extend `pool.Provider` (non-breaking JSON fields):
 
 ### 2.1 Prerequisites (ops — start in parallel)
 
+**Partner handoff (ABM + push identity):** [`docs/runbooks/apple-mdm-partner-registration.md`](./apple-mdm-partner-registration.md)
+
 | Step | Link |
 |------|------|
 | Apple Business Manager org | https://business.apple.com/ |
@@ -289,6 +291,7 @@ Script auto-restores config backup on verification failure. Manual: set `require
 | 2026-07-08 | All three tracks landed in worktree; focused tests pass (Go SE+Liveness, Swift SEAttestation 12/12). Swift liveness unit tests still TODO. Entitlements blocker documented. |
 | 2026-07-09 | **Phase 1 merged** — PR #477 squash-merged to main (`001fb405`). Augustas11 approved (PR author was antfleet-ops). |
 | 2026-07-09 | **Phase 2 started** — worktree `/Users/augstar/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
+| 2026-08-07 | Partner ABM + identity.apple.com instructions added: `docs/runbooks/apple-mdm-partner-registration.md`. P2-A/P2-C already on main via PR #509. |
 
 ## Phase 2 — IN PROGRESS
 
