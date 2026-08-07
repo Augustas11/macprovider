@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DEPLOY_SH="$DIST_DIR/deploy-pearl-vps.sh"
 SERVICE="$DIST_DIR/stats-inventory-sync.service"
 TIMER="$DIST_DIR/stats-inventory-sync.timer"
@@ -14,13 +15,14 @@ INVENTORY_EXAMPLE="$DIST_DIR/stats-hardware-inventory.yaml.example"
 ROLE_SQL="$DIST_DIR/stats-inventory-writer.sql"
 AUTH_POLICY_BOOTSTRAP="$DIST_DIR/provider-auth-policy-roles-bootstrap.sql"
 HARDWARE_TRUST_BOOTSTRAP="$DIST_DIR/hardware-trust-roles-bootstrap.sql"
+HARDWARE_TRUST_RUNBOOK="$REPO_ROOT/ops/runbooks/582-stranger-hardware-trust-onboarding.md"
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
 
-for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$ROLE_SQL" "$AUTH_POLICY_BOOTSTRAP" "$HARDWARE_TRUST_BOOTSTRAP"; do
+for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$ROLE_SQL" "$AUTH_POLICY_BOOTSTRAP" "$HARDWARE_TRUST_BOOTSTRAP" "$HARDWARE_TRUST_RUNBOOK"; do
   [ -f "$f" ] || fail "missing required file: $f"
 done
 
@@ -315,6 +317,10 @@ fi
 if grep -qF 'apple m' "$INVENTORY_EXAMPLE"; then
   fail "inventory example must not ship copyable Apple capacity guesses"
 fi
+grep -qF 'IFS= read -r CHIP_NORMALIZED' "$HARDWARE_TRUST_RUNBOOK" ||
+  fail "hardware trust runbook must read provider-originated chip_normalized as data"
+grep -qF -- '--require-chips "$CHIP_NORMALIZED"' "$HARDWARE_TRUST_RUNBOOK" ||
+  fail "hardware trust runbook must quote chip_normalized when passing it to stats-inventory-sync"
 
 # Issue #582 MIGRATION-019 ORDERING: the pre-019 stats-inventory-sync binary
 # reconciles with a 2-column ON CONFLICT that migration 019's 3-column PRIMARY

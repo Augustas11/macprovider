@@ -52,6 +52,24 @@ API path.
 # .../waiting?limit=50&after_id=<next_after_id> until the cursor is absent.
 ```
 
+Before retrying a non-approvable row, preflight the exact `chip_normalized`
+shown by the waiting endpoint. Dry-run catches a missing YAML catalog row; the
+normal service run writes the catalog and verifies the committed
+`chip_hardware_profiles` rows before reporting success.
+
+```bash
+printf 'chip_normalized from waiting endpoint: ' >&2
+IFS= read -r CHIP_NORMALIZED
+
+sudo -u macprovider-stats /opt/macprovider-stats/stats-inventory-sync \
+  --config /etc/macprovider-stats/stats-hardware-inventory.yaml \
+  --dry-run \
+  --require-chips "$CHIP_NORMALIZED"
+
+sudo systemctl start stats-inventory-sync.service
+sudo journalctl -u stats-inventory-sync.service -n 50 --no-pager
+```
+
 Dual-control approve (requester ≠ approver). The approve-confirm endpoint
 requires a JSON body (`{}` is valid). Use `printf '%s\n'` so JSON quotes are
 not consumed by bash `printf` escapes.

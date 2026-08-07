@@ -2180,6 +2180,71 @@ func TestHardwareTrustSameActorRejection(t *testing.T) {
 	}
 }
 
+func TestHardwareTrustApproveRequiresChipProfileThenSucceedsAfterInventorySync(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	rotateHardwareTrustLoginRoles(t, adminDB)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	requesterDB := openRoleDB(t, fx, roleHWTrustRequester)
+	approverDB := openRoleDB(t, fx, roleHWTrustApprover)
+
+	const providerID = "p-missing-chip"
+	const hash = "hash-missing-chip"
+	generatedAt := time.Now().UTC()
+	evidence := fmt.Sprintf(
+		`{"provider_id":%q,"hardware":{"hardware_identity_hash":%q},"benchmarks":[{"model_key":"x","sustained_tps":42,"generated_at":%q}]}`,
+		providerID, hash, generatedAt.Format(time.RFC3339Nano))
+	var jobID int64
+	if err := adminDB.QueryRowContext(ctx, `
+        INSERT INTO hardware_verification_jobs
+            (provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+             bandwidth_tier, os_version, binary_version, benchmark_count, max_sustained_tps,
+             generated_at, decision_reason, evidence, evidence_sha256)
+        VALUES
+            ($1, 'autotune', 'waiting_trust', 'Apple M4 Pro', 'apple m4 pro', 24,
+             'B', '15.0', '1.0.0', 1, 42,
+             $2, 'hardware-verifier.v2:missing_trusted_hardware_identity', $3::jsonb, 'sha-missing-chip')
+        RETURNING id`, providerID, generatedAt, evidence).Scan(&jobID); err != nil {
+		t.Fatalf("seed waiting_trust job without chip profile: %v", err)
+	}
+
+	pendingID := "33333333-3333-3333-3333-333333333333"
+	requestedUntil := time.Now().UTC().Add(2 * time.Hour)
+	if err := requesterDB.QueryRowContext(ctx, `
+        SELECT out_provider_id
+          FROM request_hardware_trust_approval($1::uuid, $2, $3, $4, $5)`,
+		pendingID, jobID, "operator:alice", requestedUntil, "missing-chip profile regression").Scan(new(string)); err != nil {
+		t.Fatalf("request approval: %v", err)
+	}
+
+	var ignored string
+	err := approverDB.QueryRowContext(ctx, `
+        SELECT out_source FROM approve_hardware_trust_approval($1::uuid, $2)`,
+		pendingID, "operator:bob").Scan(&ignored)
+	if err == nil || !contains(err.Error(), "hardware_trust_chip_profile_missing") {
+		t.Fatalf("approve without chip profile err = %v, want hardware_trust_chip_profile_missing", err)
+	}
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m4 pro', 'Apple M4 Pro', 273, 0.065, 20, 14)`); err != nil {
+		t.Fatalf("insert chip profile after failed approval: %v", err)
+	}
+
+	if err := approverDB.QueryRowContext(ctx, `
+        SELECT out_source FROM approve_hardware_trust_approval($1::uuid, $2)`,
+		pendingID, "operator:bob").Scan(&ignored); err != nil {
+		t.Fatalf("approve after chip profile sync: %v", err)
+	}
+	if ignored != "operator_api" {
+		t.Fatalf("approve source = %q, want operator_api", ignored)
+	}
+}
+
 // TestHardwareTrustRequestApproveRevokeHappyPath drives the full lifecycle end to
 // end against real Postgres: request -> approve (writes an active operator_api
 // trust root) -> verifier promotes the profile -> revoke (expires the root and

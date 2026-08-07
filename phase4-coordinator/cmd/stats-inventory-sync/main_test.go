@@ -28,6 +28,56 @@ type fakeResult struct{}
 func (fakeResult) LastInsertId() (int64, error) { return 0, nil }
 func (fakeResult) RowsAffected() (int64, error) { return 1, nil }
 
+type fakeRow struct {
+	values []any
+	err    error
+}
+
+func (r fakeRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) != len(r.values) {
+		return sql.ErrNoRows
+	}
+	for i := range dest {
+		switch d := dest[i].(type) {
+		case *string:
+			*d = r.values[i].(string)
+		case *int64:
+			*d = r.values[i].(int64)
+		case *float64:
+			*d = r.values[i].(float64)
+		case *int:
+			*d = r.values[i].(int)
+		default:
+			return sql.ErrNoRows
+		}
+	}
+	return nil
+}
+
+type fakeRowQueryer struct {
+	rows map[string]fakeRow
+}
+
+func (f fakeRowQueryer) queryRow(_ context.Context, _ string, args ...any) rowScanner {
+	key, _ := args[0].(string)
+	if row, ok := f.rows[key]; ok {
+		return row
+	}
+	return fakeRow{err: sql.ErrNoRows}
+}
+
+type contextDoneRow struct {
+	ctx context.Context
+}
+
+func (r contextDoneRow) Scan(...any) error {
+	<-r.ctx.Done()
+	return r.ctx.Err()
+}
+
 const fixtureHardwareIdentityHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func validInventory() inventory {
@@ -192,6 +242,21 @@ func TestValidateInventoryAcceptsOnboardingNormalizedChipKey(t *testing.T) {
 
 	if err := validateInventory(inv); err != nil {
 		t.Fatalf("validateInventory() error = %v", err)
+	}
+}
+
+func TestValidateRequiredChipsCatchesMissingOperatorCatalogRows(t *testing.T) {
+	inv := validInventory()
+	err := validateRequiredChips(inv, "Apple M4 Pro, operator fixture chip")
+	if err == nil || !strings.Contains(err.Error(), `missing required chip profile "apple m4 pro"`) {
+		t.Fatalf("validateRequiredChips() error = %v, want missing apple m4 pro", err)
+	}
+}
+
+func TestValidateRequiredChipsNormalizesConfiguredRows(t *testing.T) {
+	inv := validInventory()
+	if err := validateRequiredChips(inv, " Operator   Fixture Chip "); err != nil {
+		t.Fatalf("validateRequiredChips() error = %v", err)
 	}
 }
 
@@ -459,6 +524,122 @@ func TestApplyInventoryReconcilesRemovedOperatorRows(t *testing.T) {
 	}
 	if !strings.Contains(db.calls[3].query, "NOT (chip_normalized = ANY($1))") {
 		t.Fatalf("fourth query = %q, want authoritative chip list", db.calls[3].query)
+	}
+}
+
+func TestVerifyInventoryAppliedRequiresEveryConfiguredChipInPostgres(t *testing.T) {
+	inv := validInventory()
+	db := fakeRowQueryer{rows: map[string]fakeRow{}}
+	err := verifyInventoryApplied(context.Background(), db.queryRow, inv)
+	if err == nil || !strings.Contains(err.Error(), "missing from chip_hardware_profiles after inventory sync") {
+		t.Fatalf("verifyInventoryApplied() error = %v, want missing chip failure", err)
+	}
+}
+
+func TestVerifyInventoryAppliedRejectsDriftedCommittedRows(t *testing.T) {
+	inv := validInventory()
+	db := fakeRowQueryer{rows: map[string]fakeRow{
+		"operator fixture chip": {
+			values: []any{"Operator Fixture", int64(999), 0.035, 10, 10},
+		},
+	}}
+	err := verifyInventoryApplied(context.Background(), db.queryRow, inv)
+	if err == nil || !strings.Contains(err.Error(), "database row does not match inventory YAML") {
+		t.Fatalf("verifyInventoryApplied() error = %v, want drift failure", err)
+	}
+}
+
+func TestVerifyInventoryAppliedAcceptsMatchingCommittedRows(t *testing.T) {
+	inv := validInventory()
+	db := fakeRowQueryer{rows: map[string]fakeRow{
+		"operator fixture chip": {
+			values: []any{"Operator Fixture", int64(120), 0.035, 10, 10},
+		},
+	}}
+	if err := verifyInventoryApplied(context.Background(), db.queryRow, inv); err != nil {
+		t.Fatalf("verifyInventoryApplied() error = %v", err)
+	}
+}
+
+func TestFinishCommittedInventoryRunsTrustAndDemotionAfterVerificationFailure(t *testing.T) {
+	inv := validInventory()
+	db := fakeRowQueryer{rows: map[string]fakeRow{}}
+	trustCalled := false
+	reconcileTrust := func(_ context.Context, gotDSN string, gotInv inventory) error {
+		trustCalled = true
+		if gotDSN != "postgres://trust.example/db" {
+			t.Fatalf("trust DSN = %q, want postgres://trust.example/db", gotDSN)
+		}
+		if !gotInv.TrustedHardware.Present {
+			t.Fatal("trust inventory was not passed through")
+		}
+		return nil
+	}
+	demotionCalled := false
+	demoteTrust := func(context.Context) error {
+		demotionCalled = true
+		return nil
+	}
+
+	err := finishCommittedInventory(
+		context.Background(),
+		context.Background(),
+		inv,
+		"postgres://trust.example/db",
+		db.queryRow,
+		reconcileTrust,
+		demoteTrust,
+	)
+	if err == nil || !strings.Contains(err.Error(), "missing from chip_hardware_profiles after inventory sync") {
+		t.Fatalf("finishCommittedInventory() error = %v, want verification failure", err)
+	}
+	if !trustCalled {
+		t.Fatal("trust reconciliation did not run after verification failure")
+	}
+	if !demotionCalled {
+		t.Fatal("trust demotion did not run after verification failure")
+	}
+}
+
+func TestFinishCommittedInventoryRunsTrustBeforeVerificationCanExhaustContext(t *testing.T) {
+	inv := validInventory()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	trustCalled := false
+	reconcileTrust := func(gotCtx context.Context, _ string, _ inventory) error {
+		trustCalled = true
+		if gotCtx.Err() != nil {
+			t.Fatalf("trust reconciliation received cancelled context: %v", gotCtx.Err())
+		}
+		cancel()
+		return nil
+	}
+	demotionCalled := false
+	demoteTrust := func(context.Context) error {
+		demotionCalled = true
+		return nil
+	}
+	queryRow := func(gotCtx context.Context, _ string, _ ...any) rowScanner {
+		return contextDoneRow{ctx: gotCtx}
+	}
+
+	err := finishCommittedInventory(
+		context.Background(),
+		ctx,
+		inv,
+		"postgres://trust.example/db",
+		queryRow,
+		reconcileTrust,
+		demoteTrust,
+	)
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("finishCommittedInventory() error = %v, want context canceled verification error", err)
+	}
+	if !trustCalled {
+		t.Fatal("trust reconciliation did not run before verification exhausted the context")
+	}
+	if !demotionCalled {
+		t.Fatal("trust demotion did not run after verification exhausted the context")
 	}
 }
 

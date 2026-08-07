@@ -247,6 +247,36 @@ func TestHardwareTrustApproveMapsDualControlToConflict(t *testing.T) {
 	}
 }
 
+func TestHardwareTrustApproveReportsMissingChipProfileAction(t *testing.T) {
+	store := &fakeHardwareTrustAdminStore{approveErr: &pq.Error{Code: "P0001", Message: "hardware_trust_chip_profile_missing"}}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithHardwareTrustAdminStore(store),
+	}, func(cfg *config.Config) {
+		cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
+	})
+	defer h.HTTP.Close()
+
+	resp := postAuthPolicyOperatorJSON(t, h.HTTP.URL+"/admin/hardware-trust/approve/4d2644a7-fc82-4750-b43f-2d9f73abc62a/approve", "alice-secret", map[string]string{})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	if errObj["code"] != "hardware_trust_chip_profile_missing" {
+		t.Fatalf("error = %#v", out["error"])
+	}
+	action, _ := errObj["action"].(string)
+	if !strings.Contains(action, "missing backend chip catalog row") ||
+		!strings.Contains(action, "stats-inventory-sync") {
+		t.Fatalf("action = %q, want backend chip catalog remediation", action)
+	}
+}
+
 // TestHardwareTrustWaitingRoutesStoreErrorThrough503 confirms the waiting-list
 // endpoint shares the hardware-trust mapper so a store outage is a 503, not a
 // flat 500 (issue #582 FIX G).

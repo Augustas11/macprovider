@@ -476,7 +476,11 @@ func (s *Server) disconnectProviderForTrustRevocation(providerID, actor string) 
 // to 503 so a DB outage never masquerades as a 400 client error.
 func writeHardwareTrustError(w http.ResponseWriter, err error) {
 	status, code := hardwareTrustErrorStatus(err)
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error(), "code": code}})
+	body := map[string]any{"message": err.Error(), "code": code}
+	if code == "hardware_trust_chip_profile_missing" {
+		body["action"] = "missing backend chip catalog row for this job's chip_normalized; restore the row in chip_hardware_profiles via stats-inventory-sync, then retry the existing approve-confirm request unless it expired or was cancelled"
+	}
+	writeJSON(w, status, map[string]any{"error": body})
 }
 
 func hardwareTrustErrorStatus(err error) (int, string) {
@@ -572,7 +576,8 @@ func classifyHardwareTrustRaise(message string) (int, string) {
 		// The bound job's chip profile was removed after the job was evaluated (or the
 		// job lacked one all along); approving on the stored identity reason would let
 		// the verifier re-park it for missing_trusted_chip_profile (round-8 FIX 3). 409
-		// signals the operator to restore the chip profile, then re-request.
+		// signals the operator to restore the chip profile, then retry the existing
+		// approve-confirm unless the pending approval expired or was cancelled.
 		return http.StatusConflict, "hardware_trust_chip_profile_missing"
 	case strings.Contains(msg, "hardware_trust_promotion_runway_insufficient"):
 		// The requested expiry or the 7-day evidence boundary is within ~5 minutes
