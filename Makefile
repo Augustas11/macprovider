@@ -25,7 +25,7 @@ test-coordinator:
 # Each stats case owns an isolated Postgres container; keep the package
 # deadline above the observed hosted-runner setup/teardown envelope.
 test-coordinator-integration:
-	cd phase4-coordinator && go test -tags=integration -timeout 10m ./internal/stats/... ./internal/onboarding/... ./cmd/coordinator/...
+	cd phase4-coordinator && go test -tags=integration -timeout 10m ./internal/stats/... ./internal/onboarding/... ./internal/rewards/... ./cmd/coordinator/...
 
 # SPEC-017 AC-16 — golangci-lint with depguard + forbidigo.
 # Pinned version so the target is hermetic on a fresh checkout.
