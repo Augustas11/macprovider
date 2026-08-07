@@ -92,6 +92,22 @@ func openRewardsWriter(t *testing.T, fx *pgFixture) *sql.DB {
 	return db
 }
 
+// testEmissionConfig builds a valid rewards.Config for tests that call
+// rewards.New directly with an already-open *sql.DB. WriterDSN and
+// SQLitePayoutDBPath are required by Config.Validate() but unused by
+// RunEmissionTickOnce, which operates on the db passed to rewards.New.
+func testEmissionConfig(tickInterval time.Duration, providerCap, walletCap float64) rewards.Config {
+	return rewards.Config{
+		Enabled:                true,
+		WriterDSN:              "unused-in-test",
+		SQLitePayoutDBPath:     "/dev/null",
+		TickInterval:           tickInterval,
+		ProviderDailyCapMALIBU: providerCap,
+		WalletDailyCapMALIBU:   walletCap,
+		MaxSerializableRetries: 5,
+	}
+}
+
 func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 	fx, adminDB := startPostgres(t)
 	writerDB := openRewardsWriter(t, fx)
@@ -104,13 +120,7 @@ func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	cfg := rewards.Config{
-		Enabled:                true,
-		TickInterval:           time.Hour,
-		ProviderDailyCapMALIBU: 25,
-		WalletDailyCapMALIBU:   100,
-		MaxSerializableRetries: 5,
-	}
+	cfg := testEmissionConfig(time.Hour, 25, 100)
 	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
@@ -160,13 +170,7 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 		}
 	}
 
-	cfg := rewards.Config{
-		Enabled:                true,
-		TickInterval:           time.Minute,
-		ProviderDailyCapMALIBU: 1000,
-		WalletDailyCapMALIBU:   100,
-		MaxSerializableRetries: 5,
-	}
+	cfg := testEmissionConfig(time.Minute, 1000, 100)
 	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
@@ -187,5 +191,85 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 	}
 	if sum > 100.0001 {
 		t.Fatalf("wallet aggregate %v exceeds cap 100", sum)
+	}
+}
+
+// TestCapReplayPendingDoesNotDesyncConnection is a regression test for the
+// hardware-track (mp-*) accrual failure: `pq: unexpected Parse response
+// "(C) CommandComplete"`. That error surfaced whenever a Trusted provider's
+// wallet had cap_replay_pending=true (set by the SPEC-016 payout-address
+// wallet mirror — a path mp-* providers exercise routinely) and an
+// already-held ledger row qualified for replay during an accrual tick.
+// replayCapPending used to run tx.ExecContext while its own tx.QueryContext
+// *sql.Rows was still open, which desyncs the lib/pq wire protocol (lib/pq
+// does not buffer results like libpq) and aborts the whole tick transaction
+// for that provider — silently, since runEmissionTick only logs a Warn.
+func TestCapReplayPendingDoesNotDesyncConnection(t *testing.T) {
+	fx, adminDB := startPostgres(t)
+	writerDB := openRewardsWriter(t, fx)
+	ctx := context.Background()
+
+	providerID := "mp-hw-test-1"
+	wallet := "0xdeadbeef"
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_emission_state
+            (provider_id, trust_tier, bound_wallet, cap_replay_pending, provider_day_malibu)
+        VALUES ($1, 'trusted', $2, TRUE, 0)
+    `, providerID, wallet); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	heldUnixTS := time.Now().UTC().Add(-time.Hour).Unix()
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO provider_rewards_ledger
+            (provider_id, unix_ts, amount_malibu, withdrawal_hold_reason, reason)
+        VALUES ($1, $2, 10, $3, 'malibu_bootstrap_tick')
+    `, providerID, heldUnixTS, rewards.HoldPerWalletDailyCap); err != nil {
+		t.Fatalf("seed held ledger row: %v", err)
+	}
+
+	cfg := testEmissionConfig(time.Hour, 25, 100)
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
+	if err != nil {
+		t.Fatalf("new runner: %v", err)
+	}
+	if err := runner.RunEmissionTickOnce(ctx); err != nil {
+		t.Fatalf("emission tick: %v", err)
+	}
+
+	// The tick transaction must have committed (not silently rolled back
+	// by a desynced connection): a new ledger row for this tick exists.
+	var rowCount int
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM provider_rewards_ledger WHERE provider_id = $1
+    `, providerID).Scan(&rowCount); err != nil {
+		t.Fatalf("count ledger rows: %v", err)
+	}
+	if rowCount != 2 {
+		t.Fatalf("ledger rows for %s = %d, want 2 (pre-existing held row + new tick row)", providerID, rowCount)
+	}
+
+	// The pre-existing held row must have been replayed (hold cleared)
+	// since running(0) + 10 <= walletCap(100).
+	var holdReason sql.NullString
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT withdrawal_hold_reason FROM provider_rewards_ledger
+         WHERE provider_id = $1 AND unix_ts = $2
+    `, providerID, heldUnixTS).Scan(&holdReason); err != nil {
+		t.Fatalf("query held row: %v", err)
+	}
+	if holdReason.Valid {
+		t.Fatalf("held row hold_reason = %q, want cleared (NULL)", holdReason.String)
+	}
+
+	var capReplayPending bool
+	if err := adminDB.QueryRowContext(ctx, `
+        SELECT cap_replay_pending FROM provider_emission_state WHERE provider_id = $1
+    `, providerID).Scan(&capReplayPending); err != nil {
+		t.Fatalf("query state: %v", err)
+	}
+	if capReplayPending {
+		t.Fatal("cap_replay_pending should be cleared after successful replay")
 	}
 }

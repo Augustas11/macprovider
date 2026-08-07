@@ -248,9 +248,22 @@ func bumpWalletDaily(ctx context.Context, tx *sql.Tx, wallet string, day time.Ti
 	return err
 }
 
+type pendingReplayRow struct {
+	id   int64
+	amt  float64
+	tier string
+}
+
 func replayCapPending(ctx context.Context, tx *sql.Tx, wallet string, walletCap float64) error {
 	// Oldest-first replay: for trusted providers, clear per_wallet_daily_cap
 	// holds where aggregate now permits withdrawal.
+	//
+	// The candidate rows are read to completion and the *sql.Rows is closed
+	// BEFORE any further statement runs on this tx/connection. lib/pq does
+	// not buffer query results like libpq does; issuing an Exec on the same
+	// connection while a Rows result set from an earlier Query is still
+	// open desyncs the wire protocol (surfaces as
+	// `pq: unexpected Parse response "(C) CommandComplete"`).
 	rows, err := tx.QueryContext(ctx, `
         SELECT prl.id, prl.amount_malibu::FLOAT8, pes.trust_tier
           FROM provider_rewards_ledger prl
@@ -264,39 +277,43 @@ func replayCapPending(ctx context.Context, tx *sql.Tx, wallet string, walletCap 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	day := utcDay(time.Now().UTC())
-	var running float64
-	if s, err := walletDaySum(ctx, tx, wallet, day); err != nil {
-		return err
-	} else {
-		running = s
-	}
-
+	var pending []pendingReplayRow
 	for rows.Next() {
-		var id int64
-		var amt float64
-		var tier string
-		if err := rows.Scan(&id, &amt, &tier); err != nil {
+		var row pendingReplayRow
+		if err := rows.Scan(&row.id, &row.amt, &row.tier); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		if tier != TierTrusted {
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	day := utcDay(time.Now().UTC())
+	running, err := walletDaySum(ctx, tx, wallet, day)
+	if err != nil {
+		return err
+	}
+
+	for _, row := range pending {
+		if row.tier != TierTrusted {
 			continue
 		}
-		if running+amt <= walletCap {
+		if running+row.amt <= walletCap {
 			if _, err := tx.ExecContext(ctx, `
                 UPDATE provider_rewards_ledger
                    SET withdrawal_hold_reason = NULL
                  WHERE id = $1
-            `, id); err != nil {
+            `, row.id); err != nil {
 				return err
 			}
 		}
-		running += amt
-	}
-	if err := rows.Err(); err != nil {
-		return err
+		running += row.amt
 	}
 
 	_, err = tx.ExecContext(ctx, `
