@@ -87,15 +87,19 @@ final class AgentSnapshotPresenterTests: XCTestCase {
 
         let pendingStatus = AgentSnapshotPresenter.publicStatus(pending)
         XCTAssertEqual(pendingStatus.title, "Pending hardware verification")
-        XCTAssertEqual(pendingStatus.safeNextAction, "Retry provider setup while online.")
+        XCTAssertEqual(
+            pendingStatus.safeNextAction,
+            "Keep Malibu online · retry setup if this lasts more than an hour."
+        )
         XCTAssertEqual(pendingStatus.executableAction, .retryHardwareVerification)
         XCTAssertFalse(pendingStatus.safeNextAction?.contains("macprovider-cli") == true)
+        XCTAssertTrue(pendingStatus.detail?.contains("usually under an hour") == true)
         XCTAssertFalse(pendingStatus.detail?.contains("wait for operator approval") == true)
         XCTAssertEqual(AgentSnapshotPresenter.short(pending), "Pending")
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(pending), "llama")
         XCTAssertEqual(
             AgentSnapshotPresenter.lifecycleLine(pending),
-            "Pending hardware verification · Retry provider setup while online"
+            "Pending hardware verification · Usually under an hour · keep online"
         )
 
         var rejected = AgentSnapshot.empty

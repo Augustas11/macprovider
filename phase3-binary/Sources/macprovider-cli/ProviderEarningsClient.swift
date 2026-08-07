@@ -1,5 +1,34 @@
 import Foundation
 
+/// Provider-visible last-hour idle-prewarm projection, mirrored from
+/// `statsprewarm.Summary` (phase4-coordinator/internal/stats/prewarm/reader.go)
+/// as returned under `idle_prewarm` on GET /providers/{provider_id}/earnings.
+public struct ProviderIdlePrewarmSummary: Codable, Equatable, Sendable {
+    public let eventsLast1h: [String: Int64]
+    public let skipsByReasonLast1h: [String: Int64]
+
+    public static let empty = ProviderIdlePrewarmSummary(eventsLast1h: [:], skipsByReasonLast1h: [:])
+
+    enum CodingKeys: String, CodingKey {
+        case eventsLast1h = "events_last_1h"
+        case skipsByReasonLast1h = "skips_by_reason_last_1h"
+    }
+
+    public init(eventsLast1h: [String: Int64] = [:], skipsByReasonLast1h: [String: Int64] = [:]) {
+        self.eventsLast1h = eventsLast1h
+        self.skipsByReasonLast1h = skipsByReasonLast1h
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        eventsLast1h = try container.decodeIfPresent([String: Int64].self, forKey: .eventsLast1h) ?? [:]
+        skipsByReasonLast1h = try container.decodeIfPresent(
+            [String: Int64].self,
+            forKey: .skipsByReasonLast1h
+        ) ?? [:]
+    }
+}
+
 /// Provider-facing read model returned by GET /providers/{provider_id}/earnings.
 /// The CLI owns the provider bearer and exposes this non-secret projection to
 /// same-user local clients over the 0600 control socket.
@@ -21,6 +50,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     public let malibuHoldReasons: [String]
     public let malibuDailyCap: Double?
     public let malibuWalletDailyCap: Double?
+    /// Last-hour idle-prewarm event/skip counts, used to explain why a
+    /// serving provider is not currently earning (on battery, thermal
+    /// throttle, model not loaded). Display-only.
+    public let idlePrewarm: ProviderIdlePrewarmSummary
     /// True only when GET /providers/{id}/earnings returned this projection.
     public let earningsProjectionFresh: Bool
     /// True only when the companion MALIBU accrual projection was fetched in
@@ -46,6 +79,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case malibuHoldReasons = "malibu_hold_reasons"
         case malibuDailyCap = "malibu_daily_cap"
         case malibuWalletDailyCap = "malibu_wallet_daily_cap"
+        case idlePrewarm = "idle_prewarm"
         case malibuProjectionFresh = "malibu_projection_fresh"
         case earningsProjectionFresh = "earnings_projection_fresh"
     }
@@ -75,6 +109,10 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
         malibuDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
         malibuWalletDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
+        idlePrewarm = try container.decodeIfPresent(
+            ProviderIdlePrewarmSummary.self,
+            forKey: .idlePrewarm
+        ) ?? .empty
         malibuProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
         earningsProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
@@ -97,6 +135,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuHoldReasons: [String] = [],
         malibuDailyCap: Double? = nil,
         malibuWalletDailyCap: Double? = nil,
+        idlePrewarm: ProviderIdlePrewarmSummary = .empty,
         malibuProjectionFresh: Bool = false,
         earningsProjectionFresh: Bool = false
     ) {
@@ -117,6 +156,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.malibuHoldReasons = malibuHoldReasons
         self.malibuDailyCap = malibuDailyCap
         self.malibuWalletDailyCap = malibuWalletDailyCap
+        self.idlePrewarm = idlePrewarm
         self.malibuProjectionFresh = malibuProjectionFresh
         self.earningsProjectionFresh = earningsProjectionFresh
     }
@@ -140,6 +180,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: malibuHoldReasons,
             malibuDailyCap: malibuDailyCap,
             malibuWalletDailyCap: malibuWalletDailyCap,
+            idlePrewarm: idlePrewarm,
             malibuProjectionFresh: false,
             earningsProjectionFresh: true
         )
@@ -164,6 +205,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: accrual.withdrawalHoldReasons,
             malibuDailyCap: accrual.dailyCapMALIBU,
             malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
+            idlePrewarm: idlePrewarm,
             malibuProjectionFresh: true,
             earningsProjectionFresh: earningsProjectionFresh
         )
@@ -188,6 +230,7 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuHoldReasons: accrual.withdrawalHoldReasons,
             malibuDailyCap: accrual.dailyCapMALIBU,
             malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
+            idlePrewarm: .empty,
             malibuProjectionFresh: true,
             earningsProjectionFresh: false
         )

@@ -246,6 +246,14 @@ SELECT j.id, j.provider_id, j.chip, j.chip_normalized, j.unified_memory_gb,
 				return Processed{}, err
 			}
 			processed.Waiting++
+			// Structured line for BetterStack / journald operator paging (prebeta P4).
+			// Dedup alerts on job_id in the ingest rule.
+			fmt.Printf(
+				"hardware_trust_waiting_new job_id=%d provider_id=%s reason=%s\n",
+				job.ID,
+				job.ProviderID,
+				decision.Reason,
+			)
 			continue
 		}
 		if err := rejectJob(ctx, tx, job.ID, decision.Reason); err != nil {

@@ -5,6 +5,7 @@
 # (e.g. OPoI canaries) before install — deploy script does this automatically.
 #
 # Promotion (after C4 verification): set enabled: true and restart coordinator.
+# Pearl production: enabled:true as of 2026-08-07 (prebeta P2 — accrual ticks on).
 # Rollback: set enabled: false or remove this overlay block.
 
 malibu_emission:
