@@ -11,11 +11,24 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
         XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("0 today"))
         XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).contains("0 in / 0 out today"))
-        XCTAssertTrue(AgentSnapshotPresenter.usdcFullLine(snapshot).contains("$0.00 today"))
-        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.00")
+        XCTAssertEqual(AgentSnapshotPresenter.usdcFullLine(snapshot), "n/a today · n/a wk · n/a pending · n/a life")
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "n/a")
         XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "0 queued")
         XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Thermal OK")
         XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Provider is ready")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            "Ready for customer work · earnings unavailable"
+        )
+    }
+
+    func testFreshServingWithoutEarningsWaitsForFirstPaidJob() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.coordinatorConnected = true
+        snapshot.networkState = "buyer_serving"
+        snapshot.providerEarningsFresh = true
+
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(snapshot),
             "Ready for customer work · waiting for the first paid job"
@@ -57,6 +70,8 @@ final class DashboardViewTests: XCTestCase {
         snapshot.malibuAccruedToday = 12
         snapshot.malibuAccruedAllTime = 50
         snapshot.trustTier = .provisional
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
         snapshot.gpuUtilizationPct = 62
         snapshot.latencyP50Ms = 42
         snapshot.latencyP99Ms = 180

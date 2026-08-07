@@ -39,7 +39,12 @@ final class ProviderEarningsClientTests: XCTestCase {
               "malibu_today": 4,
               "malibu_all_time": 200,
               "trust_criteria_met": 4,
-              "trust_criteria_required": 4
+              "trust_criteria_required": 4,
+              "malibu_withdrawable": 3.5,
+              "malibu_held": 0.5,
+              "malibu_hold_reasons": ["per_wallet_daily_cap"],
+              "malibu_daily_cap": 25,
+              "malibu_wallet_daily_cap": 100
             }
             """.utf8)
             return (response, body)
@@ -56,6 +61,13 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(summary.trustTier, "trusted")
         XCTAssertEqual(summary.usdcToday, 3)
         XCTAssertEqual(summary.malibuAllTime, 200)
+        XCTAssertEqual(summary.malibuWithdrawable, 3.5)
+        XCTAssertEqual(summary.malibuHeld, 0.5)
+        XCTAssertEqual(summary.malibuHoldReasons, ["per_wallet_daily_cap"])
+        XCTAssertEqual(summary.malibuDailyCap, 25)
+        XCTAssertEqual(summary.malibuWalletDailyCap, 100)
+        XCTAssertTrue(summary.earningsProjectionFresh)
+        XCTAssertFalse(summary.malibuProjectionFresh)
     }
 
     func testCurrentCoordinatorPayloadDefaultsAbsentPresentationFields() throws {
@@ -75,6 +87,8 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(summary.unpaidLedgerBacklogUSDC, 1.25)
         XCTAssertNil(summary.usdcToday)
         XCTAssertNil(summary.malibuAllTime)
+        XCTAssertFalse(summary.earningsProjectionFresh)
+        XCTAssertFalse(summary.malibuProjectionFresh)
     }
 
     func testAccrualProjectionFillsTrustAndMalibuWithoutInventingUSDC() throws {
@@ -92,7 +106,10 @@ final class ProviderEarningsClientTests: XCTestCase {
               "trust_tier": "provisional",
               "trust_criteria_met": 2,
               "trust_criteria_required": 4,
-              "wallet_bound": true
+              "wallet_bound": true,
+              "daily_cap_malibu": "25",
+              "wallet_daily_cap_malibu": "100",
+              "withdrawal_hold_reasons": ["trust_tier_provisional"]
             }
             """.utf8)
         )
@@ -102,6 +119,13 @@ final class ProviderEarningsClientTests: XCTestCase {
         XCTAssertEqual(merged.malibuAllTime, 12.5)
         XCTAssertEqual(merged.trustCriteriaMet, 2)
         XCTAssertNil(merged.usdcToday)
+        XCTAssertEqual(merged.malibuWithdrawable, 0)
+        XCTAssertEqual(merged.malibuHeld, 12.5)
+        XCTAssertEqual(merged.malibuHoldReasons, ["trust_tier_provisional"])
+        XCTAssertEqual(merged.malibuDailyCap, 25)
+        XCTAssertEqual(merged.malibuWalletDailyCap, 100)
+        XCTAssertTrue(merged.malibuProjectionFresh)
+        XCTAssertFalse(merged.earningsProjectionFresh)
     }
 }
 

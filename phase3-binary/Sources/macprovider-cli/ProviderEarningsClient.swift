@@ -16,6 +16,17 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
     public let malibuAllTime: Double?
     public let trustCriteriaMet: Int?
     public let trustCriteriaRequired: Int?
+    public let malibuWithdrawable: Double?
+    public let malibuHeld: Double?
+    public let malibuHoldReasons: [String]
+    public let malibuDailyCap: Double?
+    public let malibuWalletDailyCap: Double?
+    /// True only when GET /providers/{id}/earnings returned this projection.
+    public let earningsProjectionFresh: Bool
+    /// True only when the companion MALIBU accrual projection was fetched in
+    /// the same metrics cycle. A provider-earnings response alone must not
+    /// authorize reward availability or trust copy.
+    public let malibuProjectionFresh: Bool
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -30,6 +41,13 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case malibuWithdrawable = "malibu_withdrawable"
+        case malibuHeld = "malibu_held"
+        case malibuHoldReasons = "malibu_hold_reasons"
+        case malibuDailyCap = "malibu_daily_cap"
+        case malibuWalletDailyCap = "malibu_wallet_daily_cap"
+        case malibuProjectionFresh = "malibu_projection_fresh"
+        case earningsProjectionFresh = "earnings_projection_fresh"
     }
 
     public init(from decoder: Decoder) throws {
@@ -52,6 +70,13 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuAllTime = try container.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try container.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        malibuWithdrawable = try container.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
+        malibuHeld = try container.decodeIfPresent(Double.self, forKey: .malibuHeld)
+        malibuHoldReasons = try container.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
+        malibuDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
+        malibuWalletDailyCap = try container.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
+        malibuProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        earningsProjectionFresh = try container.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
 
     public init(
@@ -66,7 +91,14 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         malibuToday: Double?,
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
-        trustCriteriaRequired: Int?
+        trustCriteriaRequired: Int?,
+        malibuWithdrawable: Double? = nil,
+        malibuHeld: Double? = nil,
+        malibuHoldReasons: [String] = [],
+        malibuDailyCap: Double? = nil,
+        malibuWalletDailyCap: Double? = nil,
+        malibuProjectionFresh: Bool = false,
+        earningsProjectionFresh: Bool = false
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -80,6 +112,37 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet
         self.trustCriteriaRequired = trustCriteriaRequired
+        self.malibuWithdrawable = malibuWithdrawable
+        self.malibuHeld = malibuHeld
+        self.malibuHoldReasons = malibuHoldReasons
+        self.malibuDailyCap = malibuDailyCap
+        self.malibuWalletDailyCap = malibuWalletDailyCap
+        self.malibuProjectionFresh = malibuProjectionFresh
+        self.earningsProjectionFresh = earningsProjectionFresh
+    }
+
+    func markingEarningsProjectionFresh() -> ProviderEarningsSummary {
+        ProviderEarningsSummary(
+            walletBound: walletBound,
+            trustTier: trustTier,
+            unpaidLedgerBacklogUSDC: unpaidLedgerBacklogUSDC,
+            unpaidLedgerBacklogMALIBU: unpaidLedgerBacklogMALIBU,
+            usdcToday: usdcToday,
+            usdcWeek: usdcWeek,
+            usdcPending: usdcPending,
+            usdcLifetime: usdcLifetime,
+            malibuToday: malibuToday,
+            malibuAllTime: malibuAllTime,
+            trustCriteriaMet: trustCriteriaMet,
+            trustCriteriaRequired: trustCriteriaRequired,
+            malibuWithdrawable: malibuWithdrawable,
+            malibuHeld: malibuHeld,
+            malibuHoldReasons: malibuHoldReasons,
+            malibuDailyCap: malibuDailyCap,
+            malibuWalletDailyCap: malibuWalletDailyCap,
+            malibuProjectionFresh: false,
+            earningsProjectionFresh: true
+        )
     }
 
     func merging(accrual: MalibuAccrualSummary) -> ProviderEarningsSummary {
@@ -95,7 +158,14 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuToday: malibuToday,
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet ?? trustCriteriaMet,
-            trustCriteriaRequired: accrual.trustCriteriaRequired ?? trustCriteriaRequired
+            trustCriteriaRequired: accrual.trustCriteriaRequired ?? trustCriteriaRequired,
+            malibuWithdrawable: accrual.withdrawableMALIBU,
+            malibuHeld: accrual.heldMALIBU,
+            malibuHoldReasons: accrual.withdrawalHoldReasons,
+            malibuDailyCap: accrual.dailyCapMALIBU,
+            malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
+            malibuProjectionFresh: true,
+            earningsProjectionFresh: earningsProjectionFresh
         )
     }
 
@@ -112,7 +182,14 @@ public struct ProviderEarningsSummary: Codable, Equatable, Sendable {
             malibuToday: nil,
             malibuAllTime: accrual.accruedMALIBU,
             trustCriteriaMet: accrual.trustCriteriaMet,
-            trustCriteriaRequired: accrual.trustCriteriaRequired
+            trustCriteriaRequired: accrual.trustCriteriaRequired,
+            malibuWithdrawable: accrual.withdrawableMALIBU,
+            malibuHeld: accrual.heldMALIBU,
+            malibuHoldReasons: accrual.withdrawalHoldReasons,
+            malibuDailyCap: accrual.dailyCapMALIBU,
+            malibuWalletDailyCap: accrual.walletDailyCapMALIBU,
+            malibuProjectionFresh: true,
+            earningsProjectionFresh: false
         )
     }
 }
@@ -192,6 +269,8 @@ struct ProviderEarningsClient: Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw ProviderEarningsClientError.httpStatus(http.statusCode)
         }
-        return try JSONDecoder().decode(ProviderEarningsSummary.self, from: data)
+        return try JSONDecoder()
+            .decode(ProviderEarningsSummary.self, from: data)
+            .markingEarningsProjectionFresh()
     }
 }

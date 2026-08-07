@@ -28,6 +28,8 @@ final class MenuBarBadgeThresholdTests: XCTestCase {
         snapshot.walletBound = false
         snapshot.unpaidLedgerBacklogUSDC = 0.50
         snapshot.unpaidLedgerBacklogMALIBU = 0.50
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
 
         XCTAssertEqual(AgentSnapshotPresenter.unclaimedBacklogTotal(snapshot), 1.0)
         XCTAssertEqual(AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: nil), "$1+")

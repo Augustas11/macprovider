@@ -55,7 +55,14 @@ final class ControlFrameCodecTests: XCTestCase {
                 malibuToday: 3.5,
                 malibuAllTime: 42,
                 trustCriteriaMet: 4,
-                trustCriteriaRequired: 4
+                trustCriteriaRequired: 4,
+                malibuWithdrawable: 3,
+                malibuHeld: 0.5,
+                malibuHoldReasons: ["per_wallet_daily_cap"],
+                malibuDailyCap: 25,
+                malibuWalletDailyCap: 100,
+                malibuProjectionFresh: true,
+                earningsProjectionFresh: true
             ),
             gpuC: 48.2,
             gpuUtilizationPct: 62,
@@ -123,6 +130,158 @@ final class ControlFrameCodecTests: XCTestCase {
         } else {
             XCTFail("expected metricsResponse")
         }
+    }
+
+    @MainActor
+    func testMetricsFrameWithoutProviderEarningsHidesPriorRewardProjection() {
+        var initial = AgentSnapshot.empty
+        initial.providerEarningsFresh = true
+        initial.malibuProjectionFresh = true
+        initial.earningsUsdcToday = 4.12
+        initial.earningsUsdcWeek = 18.4
+        initial.earningsUsdcPending = 6.9
+        initial.earningsUsdcLifetime = 211
+        initial.malibuAccruedToday = 12
+        initial.malibuAccruedAllTime = 50
+        initial.unpaidLedgerBacklogUSDC = 1
+        initial.unpaidLedgerBacklogMALIBU = 2
+        initial.trustTier = .provisional
+        initial.trustCriteriaMet = 4
+        initial.trustCriteriaRequired = 4
+        initial.malibuWithdrawable = 3
+        initial.malibuHeld = 0.5
+        initial.malibuHoldReasons = ["per_wallet_daily_cap"]
+
+        let agent = MalibuAgent(initialSnapshot: initial)
+        agent.consume(.metricsResponse(
+            earningsUsdc: nil,
+            malibuAccrued: 7,
+            providerEarnings: nil,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: nil
+        ))
+
+        XCTAssertFalse(agent.snapshot.providerEarningsFresh)
+        XCTAssertFalse(agent.snapshot.malibuProjectionFresh)
+        XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
+        XCTAssertNil(AgentSnapshotPresenter.malibuHoldLine(agent.snapshot))
+        XCTAssertFalse(AgentSnapshotPresenter.usdcFullLine(agent.snapshot).contains("$18.40"))
+        XCTAssertEqual(AgentSnapshotPresenter.malibuFullLine(agent.snapshot), "n/a MALIBU today · n/a all-time")
+        XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("[locked]"))
+        XCTAssertFalse(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("Trusted"))
+        XCTAssertEqual(AgentSnapshotPresenter.trustLine(agent.snapshot), "Trust status unavailable")
+        XCTAssertNil(AgentSnapshotPresenter.backlogLine(agent.snapshot))
+    }
+
+    @MainActor
+    func testPartialProviderProjectionsKeepFreshnessSourceSpecific() {
+        let earningsOnly = ProviderEarnings(
+            walletBound: false,
+            trustTier: .provisional,
+            unpaidLedgerBacklogUSDC: 1,
+            unpaidLedgerBacklogMALIBU: 2,
+            usdcToday: 4,
+            usdcWeek: 8,
+            usdcPending: nil,
+            usdcLifetime: 20,
+            malibuToday: nil,
+            malibuAllTime: 30,
+            trustCriteriaMet: 2,
+            trustCriteriaRequired: 4,
+            malibuWithdrawable: nil,
+            malibuHeld: nil,
+            malibuProjectionFresh: false,
+            earningsProjectionFresh: true
+        )
+        var initialSnapshot = AgentSnapshot.empty
+        initialSnapshot.state = .serving
+        let agent = MalibuAgent(
+            initialSnapshot: initialSnapshot,
+            projectionEligibleForMetrics: true
+        )
+        agent.consume(.metricsResponse(
+            earningsUsdc: 4,
+            malibuAccrued: 9,
+            providerEarnings: earningsOnly,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: 1
+        ))
+
+        XCTAssertTrue(agent.snapshot.providerEarningsFresh)
+        XCTAssertFalse(agent.snapshot.malibuProjectionFresh)
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "$4.00")
+        XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("$4.00 USDC"))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("n/a MALIBU"))
+
+        let accrualOnly = ProviderEarnings(
+            walletBound: false,
+            trustTier: .provisional,
+            unpaidLedgerBacklogUSDC: 0,
+            unpaidLedgerBacklogMALIBU: 0,
+            usdcToday: nil,
+            usdcWeek: nil,
+            usdcPending: nil,
+            usdcLifetime: nil,
+            malibuToday: nil,
+            malibuAllTime: 30,
+            trustCriteriaMet: 2,
+            trustCriteriaRequired: 4,
+            malibuWithdrawable: 1,
+            malibuHeld: 8,
+            malibuProjectionFresh: true,
+            earningsProjectionFresh: false
+        )
+        agent.consume(.metricsResponse(
+            earningsUsdc: nil,
+            malibuAccrued: 9,
+            providerEarnings: accrualOnly,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: 1
+        ))
+
+        XCTAssertFalse(agent.snapshot.providerEarningsFresh)
+        XCTAssertTrue(agent.snapshot.malibuProjectionFresh)
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "n/a")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
+            "MALIBU: 1.00 available · 8.00 held"
+        )
+        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(agent.snapshot).contains("n/a MALIBU today"))
+        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "Today: reward status unavailable")
     }
 
     func testMetricsResponseDecodesGpuLatencyAndQueueDepth() throws {

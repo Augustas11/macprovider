@@ -317,6 +317,13 @@
     .fiat-card h3 { margin:0 0 6px 0; font-size:13px; color:var(--muted); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
     .fiat-card .fiat-body { font-size:14px; }
     .fiat-card .fiat-cite { font-size:11px; color:var(--hint); margin-top:8px; }
+    .rewards-card { margin-top:18px; }
+    .rewards-card .reward-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px; margin-top:12px; }
+    .rewards-card .reward-label { color:var(--muted); font-size:12px; }
+    .rewards-card .reward-value { font-size:18px; margin-top:3px; }
+    .rewards-card .reward-hold { color:var(--bad); margin-top:12px; font-size:13px; line-height:1.45; }
+    .rewards-card .reward-next { margin-top:6px; font-size:13px; line-height:1.45; }
+    @media (max-width: 620px) { .rewards-card .reward-grid { grid-template-columns:1fr; } }
     .monitor-card { background:var(--surface); border:1px dashed var(--border2); border-radius:10px; padding:16px 18px; }
     .monitor-card h3 { margin:0 0 10px 0; font-size:14px; }
     .monitor-card ul { margin:0; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.6; }
@@ -370,6 +377,7 @@
     function earningsPath(providerId) {
       return "/providers/" + encodeURIComponent(providerId) + "/earnings";
     }
+    var MALIBU_ACCRUAL_PATH = "/v1/provider/malibu-accrual";
 
     var RELEASES_HOST = "https://api.github.com";
     var RELEASES_TTL_MS = 5 * 60 * 1000;
@@ -381,9 +389,11 @@
     var state = {
       cfg: null,
       session: null,
+      sessionGeneration: 0,
       route: "machine",
       pool: { data: null, ts: 0, err: null, inflight: false },
       earn: { data: null, ts: 0, err: null, inflight: false },
+      malibu: { data: null, ts: 0, err: null, inflight: false },
       authFailBySurface: {},
       proxyMissing: false,
       sidebarOpen: false,
@@ -538,11 +548,15 @@
       })
         .then(function (resp) {
           var surface = opts.surface;
+          var isCurrentSession = opts.sessionGeneration === undefined ||
+            opts.sessionGeneration === state.sessionGeneration;
           if (resp.ok) {
-            if (opts.auth && surface) state.authFailBySurface[surface] = 0;
+            if (isCurrentSession && opts.auth && surface) state.authFailBySurface[surface] = 0;
             return resp.json().then(function (j) { return { ok: true, status: resp.status, body: j }; });
           }
-          if (opts.auth && surface && (resp.status === 401 || resp.status === 403 || resp.status === 404)) {
+          if (isCurrentSession && opts.auth && surface &&
+              (resp.status === 401 || resp.status === 403 || resp.status === 404) &&
+              resp.status !== opts.ignoreAuthFailureStatus) {
             state.authFailBySurface[surface] = (state.authFailBySurface[surface] || 0) + 1;
           }
           return { ok: false, status: resp.status, body: null };
@@ -616,12 +630,14 @@
       state.pool.inflight = true;
       render();
       var pid = state.session.provider_id;
+      var sessionGeneration = state.sessionGeneration;
       var url = POOL_PATH + "?provider_id=" + encodeURIComponent(pid);
       var fetchResult = state.cfg && state.cfg.github_oauth_enabled
         ? cookieJSON(url, { method: "GET" })
-        : coordFetch(url, { auth: false });
+        : coordFetch(url, { auth: false, sessionGeneration: sessionGeneration });
       return fetchResult
         .then(function (r) {
+          if (sessionGeneration !== state.sessionGeneration) return;
           state.pool.inflight = false;
           if (r.ok) {
             state.pool.data = r.body;
@@ -633,6 +649,7 @@
           render();
         })
         .catch(function () {
+          if (sessionGeneration !== state.sessionGeneration) return;
           state.pool.inflight = false;
           render();
         });
@@ -652,11 +669,17 @@
       state.earn.inflight = true;
       render();
       var pid = state.session.provider_id;
+      var sessionGeneration = state.sessionGeneration;
       var fetchResult = state.cfg && state.cfg.github_oauth_enabled
         ? cookieJSON(earningsPath(pid), { method: "GET" })
-        : coordFetch(earningsPath(pid), { auth: true, surface: surface || "machine" });
+        : coordFetch(earningsPath(pid), {
+            auth: true,
+            surface: surface || "machine",
+            sessionGeneration: sessionGeneration
+          });
       return fetchResult
         .then(function (r) {
+          if (sessionGeneration !== state.sessionGeneration) return;
           state.earn.inflight = false;
           if (r.ok) {
             state.earn.data = r.body;
@@ -677,7 +700,56 @@
           render();
         })
         .catch(function () {
+          if (sessionGeneration !== state.sessionGeneration) return;
           state.earn.inflight = false;
+          render();
+        });
+    }
+
+    function malibuFetch(surface, opts) {
+      opts = opts || {};
+      if (!state.session || (state.cfg && state.cfg.github_oauth_enabled)) return Promise.resolve();
+      var sessionGeneration = state.sessionGeneration;
+      var now = Date.now();
+      if (!opts.force && state.malibu.data && (now - state.malibu.ts) < EARN_CACHE_TTL_MS) {
+        return Promise.resolve();
+      }
+      if (state.malibu.inflight) return Promise.resolve();
+      state.malibu.inflight = true;
+      render();
+      return coordFetch(MALIBU_ACCRUAL_PATH, {
+        auth: true,
+        surface: surface || "machine",
+        ignoreAuthFailureStatus: 404,
+        sessionGeneration: sessionGeneration
+      })
+        .then(function (r) {
+          if (sessionGeneration !== state.sessionGeneration) return;
+          state.malibu.inflight = false;
+          if (r.ok) {
+            state.malibu.data = r.body;
+            state.malibu.ts = Date.now();
+            state.malibu.err = null;
+            render();
+            return;
+          }
+          state.malibu.data = null;
+          state.malibu.ts = 0;
+          if (r.status === 401 || r.status === 403) {
+            handleAuthRejection(r.status, surface || "machine");
+            return;
+          }
+          state.malibu.err = {
+            status: r.status,
+            unavailable: r.status === 404
+          };
+          render();
+        })
+        .catch(function () {
+          if (sessionGeneration !== state.sessionGeneration) return;
+          state.malibu.inflight = false;
+          state.malibu.data = null;
+          state.malibu.ts = 0;
           render();
         });
     }
@@ -739,11 +811,13 @@
      * Auth rejection handling (§2.2 + §2.3 stale-config guard)
      * ===================================================================== */
     function handleAuthRejection(status, surface) {
+      state.sessionGeneration += 1;
       var failCount = state.authFailBySurface[surface] || 0;
       var misconfig = failCount >= 2;
       stopPollers();
       state.session = null;
       state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.malibu = { data: null, ts: 0, err: null, inflight: false };
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       if (status === 401) {
         state.signinErr = signInRejectedCopy();
@@ -766,10 +840,14 @@
     function startPollers() {
       stopPollers();
       timers.pool = setInterval(function () { poolCheck(); }, POOL_POLL_MS);
-      timers.earn = setInterval(function () { earnFetch("machine"); }, EARN_POLL_MS);
+      timers.earn = setInterval(function () {
+        earnFetch("machine");
+        malibuFetch("machine");
+      }, EARN_POLL_MS);
       timers.stamp = setInterval(function () { renderStampOnly(); }, STAMP_TICK_MS);
       poolCheck();
       earnFetch("machine", { force: true });
+      malibuFetch("machine", { force: true });
     }
     function stopPollers() {
       if (timers.pool) { clearInterval(timers.pool); timers.pool = null; }
@@ -781,8 +859,22 @@
      * Sign-out
      * ===================================================================== */
     function signOut() {
+      state.sessionGeneration += 1;
       if (state.cfg && state.cfg.github_oauth_enabled) {
         stopPollers();
+        state.session = null;
+        state.githubAuthState = "signin";
+        state.pool = { data: null, ts: 0, err: null, inflight: false };
+        state.earn = { data: null, ts: 0, err: null, inflight: false };
+        state.malibu = { data: null, ts: 0, err: null, inflight: false };
+        state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
+        state.authFailBySurface = {};
+        state.proxyMissing = false;
+        state.signinErr = null;
+        state.signinMisconfigNotice = null;
+        state.route = "machine";
+        state.sidebarOpen = false;
+        render();
         cookieJSON("/v1/auth/logout", { method: "POST", body: "{}" })
           .catch(function () { return null; })
           .then(function () { location.reload(); });
@@ -792,6 +884,7 @@
       state.session = null;
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.malibu = { data: null, ts: 0, err: null, inflight: false };
       state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
       state.authFailBySurface = {};
       state.proxyMissing = false;
@@ -813,6 +906,7 @@
         render();
         return;
       }
+      state.sessionGeneration += 1;
       state.session = { provider_id: pid, provider_token: tok };
       state.signinErr = null;
       state.signinMisconfigNotice = null;
@@ -892,11 +986,13 @@
     }
 
     function selectGitHubProvider(providerId, pushRoute) {
+      state.sessionGeneration += 1;
       state.session = { provider_id: providerId, provider_token: null };
       state.githubAuthState = "dashboard";
       state.route = "machine";
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.malibu = { data: null, ts: 0, err: null, inflight: false };
       if (pushRoute) {
         history.pushState({}, "", "/?p=" + encodeURIComponent(providerId));
       }
@@ -905,6 +1001,7 @@
     }
 
     function githubSessionExpired(returnTo) {
+      state.sessionGeneration += 1;
       stopPollers();
       state.session = null;
       state.githubAuthState = "signin";
@@ -1337,6 +1434,8 @@
         " and ",
         el("code", null, "/providers/{id}/earnings"),
         ", plus ",
+        el("code", null, "/v1/provider/malibu-accrual"),
+        ", ",
         el("code", null, "/v1/auth/github/*"),
         ", ",
         el("code", null, "/v1/auth/me/*"),
@@ -1512,6 +1611,77 @@
       return el("div", { class: "release-card" }, cardKids);
     }
 
+    function formatMalibuAmount(value) {
+      if (value === null || value === undefined) return "n/a";
+      var n = Number(value);
+      return typeof n === "number" && isFinite(n) ? n.toFixed(2) + " MALIBU" : "n/a";
+    }
+
+    function malibuReasonCopy(reason) {
+      switch (reason) {
+        case "trust_tier_provisional": return "Trust verification is incomplete";
+        case "per_wallet_daily_cap": return "the wallet daily limit has been reached";
+        case "demotion_cooldown": return "a Trust cooldown is active";
+        default: return "payout eligibility is still being verified";
+      }
+    }
+
+    function malibuNextAction(data, reasons) {
+      var hasHoldReasons = Array.isArray(data.withdrawal_hold_reasons);
+      if (reasons.indexOf("trust_tier_provisional") !== -1 &&
+          typeof data.trust_criteria_met === "number" &&
+          typeof data.trust_criteria_required === "number" &&
+          data.trust_criteria_required > data.trust_criteria_met) {
+        return "Complete " + (data.trust_criteria_required - data.trust_criteria_met) + " more trust criteria to unlock withdrawals.";
+      }
+      if (reasons.indexOf("per_wallet_daily_cap") !== -1) return "The wallet cap resets at the next UTC day.";
+      if (reasons.indexOf("demotion_cooldown") !== -1) return "Re-qualify for Trusted to clear the cooldown.";
+      if (!hasHoldReasons) return "Hold status is unavailable; try again later.";
+      if (typeof data.held_malibu === "number" && isFinite(data.held_malibu) && data.held_malibu <= 0) {
+        return "No action needed; no withdrawal hold is reported.";
+      }
+      return "Review the hold reason above before withdrawing.";
+    }
+
+    function renderMalibuRewardsCard() {
+      var d = state.malibu.data;
+      var loading = state.malibu.inflight && !d;
+      if (!d && !loading && !state.malibu.err) return null;
+      if (!d) {
+        return el("div", { class: "fiat-card rewards-card" },
+          el("h3", null, "MALIBU rewards"),
+          el("div", { class: "fiat-body" }, loading ? "Loading reward availability…" : "MALIBU rewards unavailable."),
+          state.malibu.err ? el("div", { class: "fiat-cite" }, state.malibu.err.unavailable
+            ? "Reward availability is temporarily unavailable while the MALIBU projection route is being deployed."
+            : "Read-only projection returned HTTP " + state.malibu.err.status + ".") : null);
+      }
+      var reasons = Array.isArray(d.withdrawal_hold_reasons) ? d.withdrawal_hold_reasons : [];
+      var held = Number(d.held_malibu);
+      var hasHeld = typeof d.held_malibu === "number" && isFinite(d.held_malibu);
+      var holdText = reasons.length
+        ? reasons.map(malibuReasonCopy).join("; ")
+        : (hasHeld ? (held > 0 ? "A payout eligibility hold is active." : "No active hold.") : "Hold status unavailable.");
+      var capParts = [];
+      if (d.daily_cap_malibu !== null && d.daily_cap_malibu !== undefined) {
+        capParts.push("provider cap " + formatMalibuAmount(d.daily_cap_malibu) + "/day");
+      }
+      if (d.wallet_daily_cap_malibu !== null && d.wallet_daily_cap_malibu !== undefined) {
+        capParts.push("wallet cap " + formatMalibuAmount(d.wallet_daily_cap_malibu) + "/day");
+      }
+      return el("div", { class: "fiat-card rewards-card" },
+        el("h3", null, "MALIBU rewards"),
+        el("div", { class: "fiat-body" }, "Read-only reward availability"),
+        el("div", { class: "reward-grid" },
+          el("div", null, el("div", { class: "reward-label" }, "Accrued"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.accrued_malibu))),
+          el("div", null, el("div", { class: "reward-label" }, "Withdrawable"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.withdrawable_malibu))),
+          el("div", null, el("div", { class: "reward-label" }, "Held"), el("div", { class: "reward-value mono" }, formatMalibuAmount(d.held_malibu)))),
+        el("div", { class: "reward-next" }, "Trust tier: ",
+          typeof d.trust_tier === "string" && d.trust_tier.trim() ? d.trust_tier : "n/a"),
+        el("div", { class: "reward-hold" }, "Held because: ", holdText),
+        el("div", { class: "reward-next" }, "Next: ", malibuNextAction(d, reasons)),
+        capParts.length ? el("div", { class: "fiat-cite" }, capParts.join(" · ")) : null);
+    }
+
     /* ---- Surface C — Earn ---- */
     function renderEarn() {
       var d = state.earn.data;
@@ -1549,6 +1719,7 @@
         el("h1", { class: "surface-title" }, "Earn"),
         el("h2", { class: "section-h" }, "Credit totals"),
         creditsRow,
+        renderMalibuRewardsCard(),
         el("div", { style: "margin-top:18px;" },
           el("h2", { class: "section-h" }, "Payout status"),
           fiatCard));

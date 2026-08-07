@@ -35,9 +35,12 @@ per [SPEC-014](../../specs/SPEC-014-provider-portal.md).
      fails loud per SPEC-014 v0.2 §10.
    The loader rejects any unknown top-level key.
 2. Host `index.html` alongside an operator-owned reverse proxy on the
-   SAME origin that forwards `/v1/pool/check` and
-   `/providers/{id}/earnings` to the coordinator (SPEC-014 §3 +
-   Open Q9). For GitHub auth mode, also forward `/v1/auth/github/*`,
+   SAME origin that forwards `/v1/pool/check`,
+   `/v1/provider/malibu-accrual`, and `/providers/{id}/earnings` to the
+   coordinator (SPEC-014 §3 + Open Q9). The MALIBU accrual route must
+   preserve the provider `Authorization` header and use the buyer-mux
+   coordinator port, as shown in `dist/nginx-portal.streamvc.live.conf`.
+   For GitHub auth mode, also forward `/v1/auth/github/*`,
    `/v1/auth/me/*`, `/v1/auth/logout`, and
    `/v1/install/pair/refresh`. If the proxy is missing, the portal
    renders a loud red banner naming §3 / Open Q9 and refuses to fall
