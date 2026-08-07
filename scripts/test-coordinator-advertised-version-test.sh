@@ -11,7 +11,7 @@ app_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION: "?([0-9]+)"?.*$/\1
 future_version="${app_version%.*}.$((${app_version##*.} + 1))"
 future_build="$((app_build + 1))"
 future_version_pattern="${future_version//./\\.}"
-staged_coordinator_policy="--allow-previous-stable=1.8.82"
+staged_coordinator_policy="--allow-previous-stable=1.8.88"
 staged_candidate_policy="--staged-candidate=1.8.90"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-version-cohesion.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -47,9 +47,9 @@ if bash "$version_guard" "v$binary_version" >"$work/strict-staging.out" 2>&1; th
   echo "strict version guard accepted an unpublished candidate against the previous recommendation" >&2
   exit 1
 fi
-grep -q "advertises 1.8.82; expected $binary_version" "$work/strict-staging.out"
+grep -q "advertises 1.8.88; expected $binary_version" "$work/strict-staging.out"
 base_output="$(bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy")"
-grep -q "staged with previous stable coordinator recommendation 1.8.82" <<<"$base_output"
+grep -q "staged with previous stable coordinator recommendation 1.8.88" <<<"$base_output"
 
 if bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" --staged-candidate=1.8.91 >"$work/candidate-drift.out" 2>&1; then
   echo "version guard accepted a staged exception for a different candidate" >&2
