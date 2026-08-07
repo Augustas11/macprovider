@@ -9,6 +9,9 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
     let trustCriteriaMet: Int?
     let trustCriteriaRequired: Int?
     let walletBound: Bool?
+    let dailyCapMALIBU: Double?
+    let walletDailyCapMALIBU: Double?
+    let withdrawalHoldReasons: [String]
 
     enum CodingKeys: String, CodingKey {
         case accruedMALIBU = "accrued_malibu"
@@ -18,28 +21,75 @@ struct MalibuAccrualSummary: Decodable, Equatable, Sendable {
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
         case walletBound = "wallet_bound"
+        case dailyCapMALIBU = "daily_cap_malibu"
+        case walletDailyCapMALIBU = "wallet_daily_cap_malibu"
+        case withdrawalHoldReasons = "withdrawal_hold_reasons"
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        accruedMALIBU = try Self.decodeDecimal(c, key: .accruedMALIBU)
-        withdrawableMALIBU = try Self.decodeDecimal(c, key: .withdrawableMALIBU)
-        heldMALIBU = try Self.decodeDecimal(c, key: .heldMALIBU)
-        trustTier = try c.decodeIfPresent(String.self, forKey: .trustTier) ?? "provisional"
+        accruedMALIBU = try Self.decodeRequiredDecimal(c, key: .accruedMALIBU)
+        withdrawableMALIBU = try Self.decodeRequiredDecimal(c, key: .withdrawableMALIBU)
+        heldMALIBU = try Self.decodeRequiredDecimal(c, key: .heldMALIBU)
+        let rawTrustTier = try c.decode(String.self, forKey: .trustTier).lowercased()
+        guard rawTrustTier == "provisional" || rawTrustTier == "trusted" else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .trustTier,
+                in: c,
+                debugDescription: "Invalid MALIBU trust tier"
+            )
+        }
+        trustTier = rawTrustTier
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
         walletBound = try c.decodeIfPresent(Bool.self, forKey: .walletBound)
+        dailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .dailyCapMALIBU)
+        walletDailyCapMALIBU = try Self.decodeOptionalDecimal(c, key: .walletDailyCapMALIBU)
+        withdrawalHoldReasons = try c.decodeIfPresent([String].self, forKey: .withdrawalHoldReasons) ?? []
     }
 
-    private static func decodeDecimal(_ c: KeyedDecodingContainer<CodingKeys>, key: CodingKeys) throws -> Double {
-        guard c.contains(key) else { return 0 }
-        if let value = try? c.decode(Double.self, forKey: key) {
+    private static func decodeRequiredDecimal(
+        _ c: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) throws -> Double {
+        guard c.contains(key) else {
+            throw DecodingError.keyNotFound(
+                key,
+                DecodingError.Context(
+                    codingPath: c.codingPath,
+                    debugDescription: "Missing required MALIBU amount"
+                )
+            )
+        }
+        if let value = try? c.decode(Double.self, forKey: key), value.isFinite {
             return value
         }
-        if let text = try? c.decode(String.self, forKey: key) {
-            return Double(text) ?? 0
+        if let text = try? c.decode(String.self, forKey: key),
+           let value = Double(text),
+           value.isFinite {
+            return value
         }
-        return 0
+        throw DecodingError.dataCorruptedError(
+            forKey: key,
+            in: c,
+            debugDescription: "Invalid MALIBU amount"
+        )
+    }
+
+    private static func decodeOptionalDecimal(
+        _ c: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) throws -> Double? {
+        guard c.contains(key) else { return nil }
+        if let value = try? c.decode(Double.self, forKey: key), value.isFinite {
+            return value
+        }
+        if let text = try? c.decode(String.self, forKey: key),
+           let value = Double(text),
+           value.isFinite {
+            return value
+        }
+        return nil
     }
 }
 

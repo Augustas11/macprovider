@@ -15,6 +15,16 @@ struct ProviderEarnings: Codable, Equatable {
     let malibuAllTime: Double?
     let trustCriteriaMet: Int?
     let trustCriteriaRequired: Int?
+    let malibuWithdrawable: Double?
+    let malibuHeld: Double?
+    let malibuHoldReasons: [String]
+    let malibuDailyCap: Double?
+    let malibuWalletDailyCap: Double?
+    /// Set only when the CLI fetched the companion MALIBU accrual projection.
+    /// Missing/legacy wire data is intentionally not treated as fresh.
+    let malibuProjectionFresh: Bool
+    /// True only when the CLI fetched the provider earnings endpoint.
+    let earningsProjectionFresh: Bool
 
     enum CodingKeys: String, CodingKey {
         case walletBound = "wallet_bound"
@@ -29,6 +39,13 @@ struct ProviderEarnings: Codable, Equatable {
         case malibuAllTime = "malibu_all_time"
         case trustCriteriaMet = "trust_criteria_met"
         case trustCriteriaRequired = "trust_criteria_required"
+        case malibuWithdrawable = "malibu_withdrawable"
+        case malibuHeld = "malibu_held"
+        case malibuHoldReasons = "malibu_hold_reasons"
+        case malibuDailyCap = "malibu_daily_cap"
+        case malibuWalletDailyCap = "malibu_wallet_daily_cap"
+        case malibuProjectionFresh = "malibu_projection_fresh"
+        case earningsProjectionFresh = "earnings_projection_fresh"
     }
 
     init(from decoder: Decoder) throws {
@@ -45,6 +62,13 @@ struct ProviderEarnings: Codable, Equatable {
         malibuAllTime = try c.decodeIfPresent(Double.self, forKey: .malibuAllTime)
         trustCriteriaMet = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaMet)
         trustCriteriaRequired = try c.decodeIfPresent(Int.self, forKey: .trustCriteriaRequired)
+        malibuWithdrawable = try c.decodeIfPresent(Double.self, forKey: .malibuWithdrawable)
+        malibuHeld = try c.decodeIfPresent(Double.self, forKey: .malibuHeld)
+        malibuHoldReasons = try c.decodeIfPresent([String].self, forKey: .malibuHoldReasons) ?? []
+        malibuDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuDailyCap)
+        malibuWalletDailyCap = try c.decodeIfPresent(Double.self, forKey: .malibuWalletDailyCap)
+        malibuProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .malibuProjectionFresh) ?? false
+        earningsProjectionFresh = try c.decodeIfPresent(Bool.self, forKey: .earningsProjectionFresh) ?? false
     }
 
     init(
@@ -59,7 +83,14 @@ struct ProviderEarnings: Codable, Equatable {
         malibuToday: Double?,
         malibuAllTime: Double?,
         trustCriteriaMet: Int?,
-        trustCriteriaRequired: Int?
+        trustCriteriaRequired: Int?,
+        malibuWithdrawable: Double? = nil,
+        malibuHeld: Double? = nil,
+        malibuHoldReasons: [String] = [],
+        malibuDailyCap: Double? = nil,
+        malibuWalletDailyCap: Double? = nil,
+        malibuProjectionFresh: Bool = false,
+        earningsProjectionFresh: Bool = false
     ) {
         self.walletBound = walletBound
         self.trustTier = trustTier
@@ -73,6 +104,13 @@ struct ProviderEarnings: Codable, Equatable {
         self.malibuAllTime = malibuAllTime
         self.trustCriteriaMet = trustCriteriaMet
         self.trustCriteriaRequired = trustCriteriaRequired
+        self.malibuWithdrawable = malibuWithdrawable
+        self.malibuHeld = malibuHeld
+        self.malibuHoldReasons = malibuHoldReasons
+        self.malibuDailyCap = malibuDailyCap
+        self.malibuWalletDailyCap = malibuWalletDailyCap
+        self.malibuProjectionFresh = malibuProjectionFresh
+        self.earningsProjectionFresh = earningsProjectionFresh
     }
 }
 

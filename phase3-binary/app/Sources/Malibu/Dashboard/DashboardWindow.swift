@@ -82,8 +82,22 @@ private struct DashboardView: View {
                         .foregroundStyle(.secondary)
                         .font(.callout)
                     Text(AgentSnapshotPresenter.malibuFullLine(agent.snapshot))
-                        .foregroundStyle(agent.snapshot.trustTier == .provisional ? MalibuBrand.coral : .secondary)
+                        .foregroundStyle(
+                            agent.snapshot.malibuProjectionFresh && agent.snapshot.trustTier == .provisional
+                                ? MalibuBrand.coral
+                                : .secondary
+                        )
                         .font(.callout)
+                    if let availability = AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot) {
+                        Text(availability)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let hold = AgentSnapshotPresenter.malibuHoldLine(agent.snapshot) {
+                        Text(hold)
+                            .font(.caption)
+                            .foregroundStyle(MalibuBrand.coral)
+                    }
                     if let backlog = AgentSnapshotPresenter.backlogLine(agent.snapshot) {
                         Text(backlog)
                             .font(.caption)

@@ -40,6 +40,9 @@ final class MalibuAgent: ObservableObject {
     private var isShuttingDown: Bool = false
     private var healthPollTask: Task<Void, Never>?
     private var monitorsLaunchdProvider = false
+    /// Reward projections may become fresh only after the current provider
+    /// passes both the local readiness and service-identity checks.
+    private var providerProjectionEligible = false
     private var lastRequestsRateSample: (total: Int, date: Date)?
     private var latestReleaseFetchedAt: Date?
     private var cliUpdateTask: Task<Void, Never>?
@@ -54,8 +57,12 @@ final class MalibuAgent: ObservableObject {
     private var lastReferralRefreshRequestedAt: Date?
     private let latestReleaseTTL: TimeInterval = 3600
 
-    init(initialSnapshot: AgentSnapshot = .empty) {
+    init(
+        initialSnapshot: AgentSnapshot = .empty,
+        projectionEligibleForMetrics: Bool = false
+    ) {
         snapshot = initialSnapshot
+        providerProjectionEligible = projectionEligibleForMetrics
         thermalMonitor.$state
             .sink { [weak self] state in
                 self?.snapshot.thermalState = state
@@ -68,6 +75,7 @@ final class MalibuAgent: ObservableObject {
 
     func start() async {
         guard !isShuttingDown else { return }
+        invalidateProviderProjectionFreshness()
 
         guard ProviderConfig.readProviderID() != nil else {
             snapshot.state = .error
@@ -530,23 +538,30 @@ final class MalibuAgent: ObservableObject {
     /// this, onboarding can leave two macprovider-cli processes (different
     /// ports, same provider_id) running concurrently.
     private func releaseSpawnedChildForLaunchdMonitor() async {
-        guard child != nil else { return }
+        invalidateProviderProjectionFreshness()
         reconnectTask?.cancel()
         reconnectTask = nil
-        child?.markStopping()
-        try? await control?.send(.shutdownRequest(graceSeconds: 5))
-        await child?.stop(gracePeriod: 5)
+        let oldControl = control
         metricsPoller?.cancel()
         metricsPoller = nil
         eventStreamTask?.cancel()
         eventStreamTask = nil
-        await control?.close()
-        child = nil
         control = nil
+        if child != nil {
+            child?.markStopping()
+            try? await oldControl?.send(.shutdownRequest(graceSeconds: 5))
+            await child?.stop(gracePeriod: 5)
+        }
+        await oldControl?.close()
+        child = nil
+        invalidateProviderProjectionFreshness()
     }
 
     private func applyProviderSnapshot(port: Int) async {
         let localReady = await applyHealthSnapshot(port: port)
+        if !localReady {
+            invalidateProviderProjectionFreshness()
+        }
         if let status = await InstalledProviderMonitor.fetchStatus(port: port),
            let expectedProviderID = ProviderConfig.readProviderID(),
            InstalledProviderMonitor.serviceIdentityMatches(
@@ -609,6 +624,7 @@ final class MalibuAgent: ObservableObject {
             snapshot.coordinatorIdentityAdmissionMode = status.coordinatorIdentityAdmissionMode
             snapshot.coordinatorConnected = status.coordinatorConnected
             snapshot.networkState = status.networkState
+            providerProjectionEligible = localReady
             snapshot.advertisedMaxConcurrency = status.advertisedMaxConcurrency
             snapshot.catalogState = status.catalogState
             snapshot.catalogReleaseID = status.catalogReleaseID
@@ -639,6 +655,7 @@ final class MalibuAgent: ObservableObject {
             // Never carry a prior authoritative serving verdict across a
             // failed status/readiness refresh.
             snapshot.invalidateLocalStatusObservation()
+            invalidateProviderProjectionFreshness()
         }
         reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
@@ -835,6 +852,7 @@ final class MalibuAgent: ObservableObject {
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
                         self.snapshot.invalidateLocalStatusObservation()
+                        self.invalidateProviderProjectionFreshness()
                         if let failure = self.diagnosedProviderFailure() {
                             self.providerStartFailure = failure
                             self.snapshot.state = .error
@@ -871,6 +889,7 @@ final class MalibuAgent: ObservableObject {
             // unexpected exit so the user (or model-load recovery) can retry.
             snapshot.state = .error
             snapshot.lastError = "Control socket: \(error)"
+            invalidateProviderProjectionFreshness()
             child?.markStopping()
             await child?.stop(gracePeriod: 5)
             child = nil
@@ -886,7 +905,8 @@ final class MalibuAgent: ObservableObject {
 
         eventStreamTask = Task { [weak self] in
             for await frame in client.stream {
-                self?.consume(frame)
+                guard let self, !Task.isCancelled, self.control === client else { return }
+                self.consume(frame)
             }
             await client.close()
             guard let self, self.control === client else { return }
@@ -931,7 +951,8 @@ final class MalibuAgent: ObservableObject {
         eventStreamTask?.cancel()
         eventStreamTask = Task { [weak self] in
             for await frame in client.stream {
-                self?.consume(frame)
+                guard let self, !Task.isCancelled, self.control === client else { return }
+                self.consume(frame)
             }
             await client.close()
             guard let self, self.control === client else { return }
@@ -1100,6 +1121,7 @@ final class MalibuAgent: ObservableObject {
 
     private func markReferralControlDisconnected() {
         finishReferralAction()
+        invalidateProviderProjectionFreshness()
         referralStatusExpiryTask?.cancel()
         referralStatusExpiryTask = nil
         lastReferralRefreshRequestedAt = nil
@@ -1108,6 +1130,12 @@ final class MalibuAgent: ObservableObject {
         if snapshot.hasTrustedReferralBoundary() {
             snapshot.referralLastError = "Invite status is unavailable while Malibu reconnects to the provider."
         }
+    }
+
+    private func invalidateProviderProjectionFreshness() {
+        snapshot.providerEarningsFresh = false
+        snapshot.malibuProjectionFresh = false
+        providerProjectionEligible = false
     }
 
     func consume(_ frame: ControlFrame) {
@@ -1173,6 +1201,10 @@ final class MalibuAgent: ObservableObject {
                 snapshot.inputTokensAllTime = inputTokensAllTime
                 snapshot.outputTokensAllTime = outputTokensAllTime
             }
+            snapshot.malibuProjectionFresh = providerProjectionEligible
+                && providerEarnings?.malibuProjectionFresh == true
+            snapshot.providerEarningsFresh = providerProjectionEligible
+                && providerEarnings?.earningsProjectionFresh == true
             if let providerEarnings {
                 snapshot.walletBound = providerEarnings.walletBound
                 snapshot.trustTier = providerEarnings.trustTier
@@ -1184,6 +1216,11 @@ final class MalibuAgent: ObservableObject {
                 snapshot.earningsUsdcLifetime = providerEarnings.usdcLifetime
                 snapshot.malibuAccruedToday = providerEarnings.malibuToday
                 snapshot.malibuAccruedAllTime = providerEarnings.malibuAllTime
+                snapshot.malibuWithdrawable = providerEarnings.malibuWithdrawable
+                snapshot.malibuHeld = providerEarnings.malibuHeld
+                snapshot.malibuHoldReasons = providerEarnings.malibuHoldReasons
+                snapshot.malibuDailyCap = providerEarnings.malibuDailyCap
+                snapshot.malibuWalletDailyCap = providerEarnings.malibuWalletDailyCap
                 snapshot.trustCriteriaMet = providerEarnings.trustCriteriaMet
                 snapshot.trustCriteriaRequired = providerEarnings.trustCriteriaRequired
             }

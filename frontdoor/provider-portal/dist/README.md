@@ -23,7 +23,7 @@ spec-owned doc.
 ## Two deploy gotchas worth remembering
 
 1. **Coordinator backend runs on TWO localhost ports.** `/v1/pool/check`
-   is on buyer-mux **port 8443** (per
+   and `/v1/provider/malibu-accrual` are on buyer-mux **port 8443** (per
    `phase4-coordinator/internal/buyer/server.go:397`).
    `/providers/{id}/earnings` is on ws-mux **port 8444** (billing
    endpoints registered on the ws-side http handler). The site config

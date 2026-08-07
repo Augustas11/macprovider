@@ -45,6 +45,16 @@ struct AgentSnapshot: Equatable {
     var earningsUsdcPending: Double?
     var earningsUsdcLifetime: Double?
     var malibuAccruedAllTime: Double?
+    var malibuWithdrawable: Double?
+    var malibuHeld: Double?
+    var malibuHoldReasons: [String]
+    var malibuDailyCap: Double?
+    var malibuWalletDailyCap: Double?
+    /// Freshness for the provider earnings endpoint.
+    var providerEarningsFresh: Bool
+    /// Reward-specific freshness. It is separate so a partial earnings frame
+    /// cannot authorize held/withdrawable/trust copy.
+    var malibuProjectionFresh: Bool
     var gpuUtilizationPct: Double?
     var gpuTemperatureC: Double?
     var latencyP50Ms: Int?
@@ -294,6 +304,13 @@ struct AgentSnapshot: Equatable {
         earningsUsdcPending: nil,
         earningsUsdcLifetime: nil,
         malibuAccruedAllTime: nil,
+        malibuWithdrawable: nil,
+        malibuHeld: nil,
+        malibuHoldReasons: [],
+        malibuDailyCap: nil,
+        malibuWalletDailyCap: nil,
+        providerEarningsFresh: false,
+        malibuProjectionFresh: false,
         gpuUtilizationPct: nil,
         gpuTemperatureC: nil,
         latencyP50Ms: nil,
@@ -669,6 +686,8 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .serving where !isNetworkReady(s):
             return status.detail
+        case .serving where !s.providerEarningsFresh:
+            return "Ready for customer work · earnings unavailable"
         case .serving where s.earningsUsdcToday == nil:
             return "Ready for customer work · waiting for the first paid job"
         case .serving:
@@ -716,23 +735,34 @@ enum AgentSnapshotPresenter {
     }
 
     static func earningsLine(_ s: AgentSnapshot) -> String {
+        if !s.providerEarningsFresh || !s.malibuProjectionFresh {
+            if s.earningsUsdcToday == nil, s.malibuAccruedToday == nil {
+                return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
+            }
+            let usdc = s.providerEarningsFresh
+                ? s.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "n/a"
+                : "n/a"
+            let malibu = s.malibuProjectionFresh
+                ? s.malibuAccruedToday.map { String(format: "%.2f", $0) } ?? "n/a"
+                : "n/a"
+            return "Today: \(usdc) USDC · \(malibu) MALIBU (reward status unavailable)"
+        }
         switch (s.earningsUsdcToday, s.malibuAccruedToday) {
         case (nil, nil):
-            if isActive(s) {
-                return "Today: $0.00 USDC · 0.00 MALIBU (no jobs yet)"
-            }
-            return "Today: not running"
+            return isActive(s) ? "Today: reward status unavailable" : "Today: not running"
         case let (usdc?, malibu?):
             return String(format: "Today: $%.2f USDC · %@", usdc, malibuDisplay(malibu, tier: s.trustTier))
         case let (usdc?, nil):
-            return String(format: "Today: $%.2f USDC · 0.00 MALIBU", usdc)
+            return String(format: "Today: $%.2f USDC · n/a MALIBU (reward status unavailable)", usdc)
         case let (nil, malibu?):
-            return "Today: $0.00 USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
+            return "Today: n/a USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
         }
     }
 
     static func backlogLine(_ s: AgentSnapshot) -> String? {
-        guard s.walletBound == false,
+        guard s.providerEarningsFresh,
+              s.malibuProjectionFresh,
+              s.walletBound == false,
               let usdc = s.unpaidLedgerBacklogUSDC,
               let malibu = s.unpaidLedgerBacklogMALIBU,
               usdc + malibu > 0 else {
@@ -1056,24 +1086,34 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcFullLine(_ s: AgentSnapshot) -> String {
-        let unset = isActive(s) ? "$0.00" : "n/a"
+        if !s.providerEarningsFresh {
+            let today = "n/a today"
+            return "\(today) · n/a wk · n/a pending · n/a life"
+        }
         return [
-            s.earningsUsdcToday.map { String(format: "$%.2f today", $0) } ?? "\(unset) today",
-            s.earningsUsdcWeek.map { String(format: "$%.2f wk", $0) } ?? "\(unset) wk",
-            s.earningsUsdcPending.map { String(format: "$%.2f pending", $0) } ?? "\(unset) pending",
-            s.earningsUsdcLifetime.map { String(format: "$%.2f life", $0) } ?? "\(unset) life"
+            s.earningsUsdcToday.map { String(format: "$%.2f today", $0) } ?? "n/a today",
+            s.earningsUsdcWeek.map { String(format: "$%.2f wk", $0) } ?? "n/a wk",
+            s.earningsUsdcPending.map { String(format: "$%.2f pending", $0) } ?? "n/a pending",
+            s.earningsUsdcLifetime.map { String(format: "$%.2f life", $0) } ?? "n/a life"
         ].joined(separator: " · ")
     }
 
     static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
-        s.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? (isActive(s) ? "$0.00" : "n/a")
+        guard s.providerEarningsFresh else {
+            return "n/a"
+        }
+        return s.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "n/a"
     }
 
     static func malibuFullLine(_ s: AgentSnapshot) -> String {
+        if !s.malibuProjectionFresh {
+            let today = "n/a MALIBU today"
+            return "\(today) · n/a all-time"
+        }
         let today = s.malibuAccruedToday.map { malibuDisplay($0, tier: s.trustTier, compact: true) }
-            ?? (isActive(s) ? "0.00 MALIBU today" : "n/a MALIBU today")
+            ?? "n/a MALIBU today"
         let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
-            ?? (isActive(s) ? "0.00 all-time" : "n/a all-time")
+            ?? "n/a all-time"
         switch s.trustTier {
         case .trusted:
             return "\(today) · \(allTime)"
@@ -1082,7 +1122,35 @@ enum AgentSnapshotPresenter {
         }
     }
 
+    static func malibuAvailabilityLine(_ s: AgentSnapshot) -> String? {
+        guard s.malibuProjectionFresh,
+              s.malibuWithdrawable != nil || s.malibuHeld != nil else { return nil }
+        let withdrawable = s.malibuWithdrawable.map { String(format: "%.2f available", $0) } ?? "n/a available"
+        let held = s.malibuHeld.map { String(format: "%.2f held", $0) } ?? "n/a held"
+        return "MALIBU: \(withdrawable) · \(held)"
+    }
+
+    static func malibuHoldLine(_ s: AgentSnapshot) -> String? {
+        guard s.malibuProjectionFresh, !s.malibuHoldReasons.isEmpty else { return nil }
+        let reasons = s.malibuHoldReasons.map { malibuHoldReasonCopy($0) }
+        let nextAction: String
+        if s.malibuHoldReasons.contains("trust_tier_provisional"),
+           let met = s.trustCriteriaMet,
+           let required = s.trustCriteriaRequired,
+           required > met {
+            nextAction = "Complete \(required - met) more trust criteria to unlock withdrawals."
+        } else if s.malibuHoldReasons.contains("per_wallet_daily_cap") {
+            nextAction = "The wallet cap resets at the next UTC day."
+        } else if s.malibuHoldReasons.contains("demotion_cooldown") {
+            nextAction = "Re-qualify for Trusted to clear the cooldown."
+        } else {
+            nextAction = "Review the hold reason above before withdrawing."
+        }
+        return "Held because: \(reasons.joined(separator: "; ")) Next: \(nextAction)"
+    }
+
     static func trustLine(_ s: AgentSnapshot) -> String {
+        guard s.malibuProjectionFresh else { return "Trust status unavailable" }
         let tier = s.trustTier.rawValue.capitalized
         if let met = s.trustCriteriaMet, let required = s.trustCriteriaRequired {
             return "\(tier) — \(met) of \(required) criteria met · Unlock Trusted →"
@@ -1151,7 +1219,7 @@ enum AgentSnapshotPresenter {
     }
 
     static func unclaimedBacklogTotal(_ s: AgentSnapshot) -> Double? {
-        guard s.walletBound == false else { return nil }
+        guard s.providerEarningsFresh, s.malibuProjectionFresh, s.walletBound == false else { return nil }
         let total = (s.unpaidLedgerBacklogUSDC ?? 0) + (s.unpaidLedgerBacklogMALIBU ?? 0)
         return total > 0 ? total : nil
     }
@@ -1316,6 +1384,19 @@ enum AgentSnapshotPresenter {
                 return String(format: "%.2f MALIBU today (locked)", amount)
             }
             return String(format: "[locked] %.2f MALIBU (unlocks at Trusted)", amount)
+        }
+    }
+
+    private static func malibuHoldReasonCopy(_ reason: String) -> String {
+        switch reason {
+        case "trust_tier_provisional":
+            return "Trust verification is incomplete"
+        case "per_wallet_daily_cap":
+            return "the wallet's daily limit has been reached"
+        case "demotion_cooldown":
+            return "a Trust cooldown is active"
+        default:
+            return "payout eligibility is still being verified"
         }
     }
 

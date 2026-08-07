@@ -23,11 +23,10 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         "referral_bootstrap_v1",
     ]
 
-    func testEarningsLineShowsZeroWhenBothMetricsMissingWhileServing() {
+    func testEarningsLineShowsUnavailableWhenBothMetricsMissingWhileServing() {
         var s = AgentSnapshot.empty
         s.state = .serving
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("$0.00"))
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("no jobs yet"))
+        XCTAssertEqual(AgentSnapshotPresenter.earningsLine(s), "Today: reward status unavailable")
     }
 
     func testShortShowsServingWhenNoEarningsYet() {
@@ -282,6 +281,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.earningsUsdcToday = 1
         s.malibuAccruedToday = 2
         s.trustTier = .provisional
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
         XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("[locked] 2.00 MALIBU"))
         XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("unlocks at Trusted"))
     }
@@ -291,6 +292,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.unpaidLedgerBacklogUSDC = 10
         s.unpaidLedgerBacklogMALIBU = 5
         s.walletBound = false
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
         XCTAssertNotNil(AgentSnapshotPresenter.backlogLine(s))
         s.walletBound = true
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(s))
@@ -795,6 +798,8 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.walletBound = false
         s.unpaidLedgerBacklogUSDC = 9
         s.unpaidLedgerBacklogMALIBU = 0
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
         XCTAssertEqual(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: nil), "$1+")
         XCTAssertNil(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: 10))
 
@@ -812,7 +817,12 @@ final class AgentSnapshotPresenterTests: XCTestCase {
           "wallet_bound": false,
           "trust_tier": "Trusted",
           "unpaid_ledger_backlog_usdc": 12.5,
-          "unpaid_ledger_backlog_malibu": 7.25
+          "unpaid_ledger_backlog_malibu": 7.25,
+          "malibu_withdrawable": 3.5,
+          "malibu_held": 0.5,
+          "malibu_hold_reasons": ["per_wallet_daily_cap"],
+          "malibu_daily_cap": 25,
+          "malibu_wallet_daily_cap": 100
         }
         """.utf8)
         let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
@@ -820,6 +830,37 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(decoded.trustTier, .trusted)
         XCTAssertEqual(decoded.unpaidLedgerBacklogUSDC, 12.5)
         XCTAssertEqual(decoded.unpaidLedgerBacklogMALIBU, 7.25)
+        XCTAssertEqual(decoded.malibuWithdrawable, 3.5)
+        XCTAssertEqual(decoded.malibuHeld, 0.5)
+        XCTAssertEqual(decoded.malibuHoldReasons, ["per_wallet_daily_cap"])
+        XCTAssertEqual(decoded.malibuDailyCap, 25)
+        XCTAssertEqual(decoded.malibuWalletDailyCap, 100)
+        XCTAssertFalse(decoded.malibuProjectionFresh)
+        XCTAssertFalse(decoded.earningsProjectionFresh)
+    }
+
+    func testMalibuAvailabilityAndHoldCopyExplainWithdrawalState() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.trustTier = .provisional
+        snapshot.providerEarningsFresh = true
+        snapshot.malibuProjectionFresh = true
+        snapshot.malibuWithdrawable = 0
+        snapshot.malibuHeld = 12.5
+        snapshot.malibuHoldReasons = ["trust_tier_provisional"]
+        snapshot.trustCriteriaMet = 2
+        snapshot.trustCriteriaRequired = 4
+
+        XCTAssertEqual(AgentSnapshotPresenter.malibuAvailabilityLine(snapshot), "MALIBU: 0.00 available · 12.50 held")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuHoldLine(snapshot),
+            "Held because: Trust verification is incomplete Next: Complete 2 more trust criteria to unlock withdrawals."
+        )
+
+        snapshot.malibuHoldReasons = ["per_wallet_daily_cap"]
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuHoldLine(snapshot),
+            "Held because: the wallet's daily limit has been reached Next: The wallet cap resets at the next UTC day."
+        )
     }
 
     func testDefaultPresenterStringsDoNotExposeInternalTerms() {

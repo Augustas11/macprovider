@@ -22,7 +22,10 @@ final class MalibuAccrualClientTests: XCTestCase {
           "trust_tier": "provisional",
           "trust_criteria_met": 2,
           "trust_criteria_required": 4,
-          "wallet_bound": true
+          "wallet_bound": true,
+          "daily_cap_malibu": "25",
+          "wallet_daily_cap_malibu": 100,
+          "withdrawal_hold_reasons": ["trust_tier_provisional"]
         }
         """.data(using: .utf8)!
         let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
@@ -33,6 +36,30 @@ final class MalibuAccrualClientTests: XCTestCase {
         XCTAssertEqual(summary.trustCriteriaMet, 2)
         XCTAssertEqual(summary.trustCriteriaRequired, 4)
         XCTAssertEqual(summary.walletBound, true)
+        XCTAssertEqual(summary.dailyCapMALIBU, 25)
+        XCTAssertEqual(summary.walletDailyCapMALIBU, 100)
+        XCTAssertEqual(summary.withdrawalHoldReasons, ["trust_tier_provisional"])
+    }
+
+    func testMissingRequiredAmountFailsClosed() {
+        let json = Data(#"{"accrued_malibu":1.25,"withdrawable_malibu":0,"trust_tier":"provisional"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: json))
+    }
+
+    func testMissingTrustTierFailsClosed() {
+        let json = Data(#"{"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":1.25}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: json))
+    }
+
+    func testNonFiniteAmountFailsClosed() {
+        let json = Data(#"{"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":"NaN","trust_tier":"provisional"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(MalibuAccrualSummary.self, from: json))
+    }
+
+    func testNonFiniteOptionalCapFailsClosed() throws {
+        let json = Data(#"{"accrued_malibu":1.25,"withdrawable_malibu":0,"held_malibu":1.25,"trust_tier":"provisional","daily_cap_malibu":"NaN"}"#.utf8)
+        let summary = try JSONDecoder().decode(MalibuAccrualSummary.self, from: json)
+        XCTAssertNil(summary.dailyCapMALIBU)
     }
 
     func testFetchUsesBearerToken() async throws {

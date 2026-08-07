@@ -244,8 +244,9 @@ explicit reason rooted in upstream specs:
 - Surface B static requirements grid + sizing card + setup steps +
   GitHub Releases-driven version feed (no installed-version
   overlay).
-- Surface C three aggregate credit cards + payout-rail-deferred
-  status card (no withdrawal UX).
+- Surface C three aggregate credit cards + a read-only MALIBU
+  availability card + payout-rail-deferred status card (no
+  withdrawal UX).
 - Surface D single placeholder card naming the deferred sub-cards
   and the Open Q each lives behind. Zero API calls.
 - Surface E identity card: `provider_id` (paste-bearer: pasted;
@@ -1196,6 +1197,19 @@ disposition as C.3; covered by Open Q4.
   `provider_id` (SPEC-005 §11.5).
 - Deployment-mode dependency: §2.4 above.
 
+**C.6 MALIBU reward availability projection (read-only).** The
+portal renders a provider-facing card from
+GET /v1/provider/malibu-accrual in paste-bearer mode. It uses
+the same FR-P12 bearer as C.1 and MUST render only accrued,
+withdrawable, held, trust, hold-reason, next-action, and cap
+information. It MUST NOT include a withdrawal, wallet mutation,
+or token-rotation action. GitHub-OAuth mode does not call this
+route because it has no provider bearer; completing that mode's
+economics access remains the §2.5.0 ownership/auth gap. A 401 or
+403 follows the normal sign-in rejection path; a 404 is treated
+as a temporarily unavailable optional projection and MUST NOT
+clear an otherwise valid portal session.
+
 ### 4.4 Surface D — Monitoring (placeholder)
 
 Every D-class signal (uptime ribbon, per-provider routing weight,
@@ -1292,6 +1306,12 @@ exactly one of them.
 | B.3 | rate-limit fallback notice | derived from the B.3 release-list response header `X-RateLimit-Remaining: 0` | n/a (header-derived); rendered as static notice text "GitHub API rate limit reached — release feed paused; refresh later." | re-evaluated on each B.3 fetch | in-memory; cleared on next non-zero remaining | GitHub Releases API rate-limit posture (Open Q2 records the 60 req/IP/hr cap) |
 | B.3 | CORS / fetch-failure notice | derived from a rejected B.3 release-list `fetch()` (TypeError / opaque response / other CORS-failure pathway) | n/a (fetch-rejection-derived); rendered as static notice text "GitHub Releases unavailable — release feed disabled; see SPEC-014 Open Q2." | re-evaluated on each B.3 fetch | in-memory; surfaced as a loud, user-visible failure (NOT silently hidden) | GitHub Releases CORS posture (Open Q2) |
 | C.1 | lifetime / window / last-payout credit cards | `GET /providers/{id}/earnings` | `total_credits`, `current_window_credits`, `last_payout_ready.{window_start_utc, window_end_utc, provider_credits}` | 60 s | in-memory; 60 s TTL | SPEC-005 §11.4 |
+| C.6 | accrued MALIBU | `GET /v1/provider/malibu-accrual` | `accrued_malibu` | 60 s | in-memory; 60 s TTL | SPEC-021 emission-ledger read model |
+| C.6 | withdrawable MALIBU | `GET /v1/provider/malibu-accrual` | `withdrawable_malibu` | 60 s | in-memory; 60 s TTL | SPEC-021 emission-ledger read model |
+| C.6 | held MALIBU | `GET /v1/provider/malibu-accrual` | `held_malibu` | 60 s | in-memory; 60 s TTL | SPEC-021 emission-ledger read model |
+| C.6 | trust tier | `GET /v1/provider/malibu-accrual` | `trust_tier` | 60 s | in-memory; 60 s TTL | SPEC-021 emission-ledger read model |
+| C.6 | hold reason copy and next action | `GET /v1/provider/malibu-accrual` | `withdrawal_hold_reasons`, `trust_criteria_met`, `trust_criteria_required` | 60 s | in-memory; 60 s TTL | SPEC-021 emission-ledger hold reasons; derived provider copy |
+| C.6 | provider and wallet daily caps | `GET /v1/provider/malibu-accrual` | `daily_cap_malibu`, `wallet_daily_cap_malibu` | 60 s | in-memory; 60 s TTL | SPEC-021 emission-ledger cap projection |
 | E.1 | tier badge | `GET /v1/pool/check?provider_id=<id>` | `tier` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | E.1 | state | `GET /v1/pool/check?provider_id=<id>` | `state` | 30 s + manual refresh | in-memory; invalidated on refresh | SPEC-002 §7.4 |
 | OAuth chooser (§2.5.5) | owned-provider rows: `provider_id`, `claimed_at`, `last_seen_at` | `GET /v1/auth/me/providers` (cookie) | `body.providers[]` (object-root `{"providers": <array \| null>}` envelope, NOT a bare array; empty owns → `null`, portal normalizes to `[]`, §2.5.2): `provider_id`, `claimed_at`, `last_seen_at` | on OAuth home load / popstate | in-memory | §2.5.2 SPEC-014 transport (reconciled v0.9); GitHub-OAuth mode only |
@@ -1371,6 +1391,7 @@ stale `unknown`/200 text — that spec needs its own reconciliation (§10.2). Th
 |---|---|---|---|---|
 | `/v1/pool/check` poll cadence | 30 s | new (portal-side; not configurable in v0.1) | portal author | not configurable in v0.1 — operator edits source if needed |
 | `/providers/{id}/earnings` poll cadence | 60 s | new (portal-side; not configurable in v0.1) | portal author | not configurable in v0.1 — operator edits source if needed |
+| `/v1/provider/malibu-accrual` poll cadence | 60 s | new (portal-side; not configurable in v0.1) | portal author | not configurable in v0.1 — operator edits source if needed |
 | Earnings cache TTL | 60 s | new (portal-side; not configurable in v0.1) | portal author | not configurable in v0.1 |
 | `/providers/{id}/earnings` rate-limit per provider | 60 / min | `endpoints.provider_earnings.rate_limit_per_minute` (SPEC-005 §13) | operator | coordinator config |
 | Releases-feed GitHub API cache TTL | 5 min | new (portal-side; not configurable in v0.1) | portal author | not configurable in v0.1 |
@@ -1512,6 +1533,13 @@ Layered, NOT a flat checklist. Six required groups.
 - [ ] C.2 contains no country selector, no "Link bank", no
       account-type picker, no Stripe button, no payout-now CTA.
 - [ ] C.3 and C.4 are not rendered.
+- [ ] C.6 renders the read-only MALIBU availability projection in
+      paste-bearer mode: accrued, withdrawable, held, trust tier,
+      provider-safe hold/next-action copy, and daily caps. It
+      renders no withdrawal or wallet mutation CTA. A 404 from
+      /v1/provider/malibu-accrual leaves the session signed in
+      and shows an unavailable projection notice; 401/403 follow
+      the sign-in rejection path.
 
 **Surface D (Monitoring).**
 
@@ -1540,23 +1568,28 @@ Layered, NOT a flat checklist. Six required groups.
       `/portal-config.json` fetch (verified by a network-panel
       observation or a spy on the fetch layer that asserts no
       calls to `/v1/pool/check`, `/providers/{id}/earnings`,
+      `/v1/provider/malibu-accrual`,
       `/v1/auth/*`, or the GitHub Releases host). This fail-closed check runs
       before mode selection, so it holds regardless of `github_oauth_enabled`.
 - [ ] On load with `portal-config.json.require_provider_tokens =
       false`, portal renders the unavailable-mode page AND makes
       ZERO network calls after the `/portal-config.json` fetch
       (verified by the same spy targets: `/v1/pool/check`,
-      `/providers/{id}/earnings`, `/v1/auth/*`, GitHub Releases). The public
+      `/providers/{id}/earnings`, `/v1/provider/malibu-accrual`,
+      `/v1/auth/*`, GitHub Releases). The public
       `/v1/pool/check` and the unauthenticated GitHub Releases
       endpoint MUST NOT be polled in either of the two
       unavailable-mode entry points.
 - [ ] **Paste-bearer mode** — authenticated call returning 401 → portal returns
       to the sign-in prompt; error message does not distinguish "missing"
       vs "malformed".
-- [ ] **Paste-bearer mode** — 403 → portal renders a
+- [ ] **Paste-bearer mode** — existing pool/earnings calls returning 403 → portal renders a
       "sign-in rejected" message identical to the 404 case; 404 → the same
       "sign-in rejected" message (does NOT reveal that the `provider_id` is
       unknown).
+      The optional C.6 MALIBU projection is the exception: its 404 remains
+      an in-session unavailable notice, while 401/403 still follow sign-in
+      rejection.
 - [ ] In `require_provider_tokens: true` **paste-bearer** mode, after **two
       consecutive authenticated provider-endpoint failures on
       the same surface** (the `authFailBySurface` counter resets on
@@ -1573,7 +1606,8 @@ Layered, NOT a flat checklist. Six required groups.
       `/admin/ledger` (matches the §10 dependency table). The check governs
       **network-call targets**, not informational literals: the only coordinator
       paths the bundle may **call** are the paste-mode data paths
-      (`/v1/pool/check`, `/providers/{id}/earnings`) and, for GitHub-OAuth mode,
+      (`/v1/pool/check`, `/providers/{id}/earnings`,
+      `/v1/provider/malibu-accrual`) and, for GitHub-OAuth mode,
       the §2.5.2 `/v1/auth/*` allowlist — no other `/v1/auth/*` or `/admin/*`. A
       **non-called informational literal** is permitted: the shipped misconfig
       banner mentions `/v1/install/pair/refresh` as text (reconciled v0.9), which the
@@ -1804,7 +1838,7 @@ not yet available.
 - **Who decides:** SPEC-005 author.
 - **Spec assumes:** no breakdown in v0.1.
 - **Portal renders if unanswered:** C.3 + C.4 not rendered;
-  Surface C is C.1 + C.2 only.
+  Surface C is C.1 + C.2 + C.6; C.3 + C.4 remain deferred.
 
 ### Q5 — Upstream-spec amendments omnibus
 
@@ -1990,9 +2024,12 @@ The user shared screenshots from a competitor seller portal
   diffs `portal-config.json.require_provider_tokens` against the
   coordinator's deploy config; both MUST match.
 - Reverse-proxy step (Open Q9 option a): operator nginx config
-  proxies the portal origin's `/v1/pool/check` and
-  `/providers/{id}/earnings` to the coordinator. Bundle MUST
-  fail loudly when the proxy is absent.
+  proxies the portal origin's `/v1/pool/check`,
+  `/providers/{id}/earnings`, and
+  `/v1/provider/malibu-accrual` to the coordinator. Bundle
+  MUST fail loudly when the proxy is absent; the optional
+  MALIBU projection renders an unavailable notice when its
+  route returns 404.
 - **GitHub-OAuth deployment prerequisites (reconciled v0.9 — required to
   turn `github_oauth_enabled:true` into a working mode; the reference
   `dist/nginx-portal.streamvc.live.conf` does NOT yet include these):**
@@ -2093,6 +2130,7 @@ this spec-only reconciliation.
 
 - Surface C.1 credit totals row.
 - Surface C.2 deferred-payout status card.
+- Surface C.6 read-only MALIBU reward availability projection.
 - Surface D placeholder card (zero API calls).
 - Surface E.1 identity card.
 - Sidebar nav + sign-out + mobile collapse.
