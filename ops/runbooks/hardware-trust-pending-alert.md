@@ -18,7 +18,7 @@ BetterStack is **not** the live Pearl page path. Pearl pages via
 `macprovider-monitor` → Gmail (`/etc/macprovider/monitor.env`, timer every 3 min).
 
 `phase4-coordinator/dist/monitor/macprovider-monitor.py` polls
-`GET /admin/hardware-trust/waiting` with `OPERATOR_KEY` and emails kind
+`GET /admin/hardware-trust/waiting` with `OPERATOR_AUTH_POLICY_A` (or `_B`) and emails kind
 `hardware_trust` (not in the default mute list) when:
 
 1. A **new** `job_id` appears → `hardware_trust_waiting_new …`

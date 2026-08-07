@@ -159,6 +159,20 @@ def operator_key():
     return os.environ.get("OPERATOR_KEY", "")
 
 
+def hardware_trust_operator_key():
+    """Bearer for /admin/hardware-trust/* (auth-policy dual-control keys).
+
+    Waiting/approve routes use authorizedProviderAuthPolicyOperator, which
+    accepts OPERATOR_AUTH_POLICY_A/B — not the general OPERATOR_KEY used for
+    /poolz and /admin/providers.
+    """
+    for name in ("OPERATOR_AUTH_POLICY_A", "OPERATOR_AUTH_POLICY_B"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def bounded_int(env, key, default, min_value, max_value):
     raw = env.get(key)
     if raw is None or raw.strip() == "":
@@ -605,17 +619,22 @@ def main():
         "no",
         "off",
     )
-    if coord_up and hardware_trust_enabled and op_key:
+    ht_key = hardware_trust_operator_key()
+    if coord_up and hardware_trust_enabled and ht_key:
         try:
-            waiting = get_json(ADMIN_HARDWARE_TRUST_WAITING, bearer=op_key)
+            waiting = get_json(ADMIN_HARDWARE_TRUST_WAITING, bearer=ht_key)
             ht_alerts, hardware_trust_state = hardware_trust_waiting_alerts(
                 env, prev, waiting if isinstance(waiting, dict) else {},
             )
             alerts.extend(ht_alerts)
         except Exception as e:  # noqa: BLE001
             alerts.append(("WARN", KIND_HARDWARE_TRUST, f"hardware-trust waiting read failed: {e}"))
-    elif coord_up and hardware_trust_enabled and not op_key:
-        print("[INFO] hardware-trust waiting alerts disabled until OPERATOR_KEY is available", flush=True)
+    elif coord_up and hardware_trust_enabled and not ht_key:
+        print(
+            "[INFO] hardware-trust waiting alerts disabled until "
+            "OPERATOR_AUTH_POLICY_A/B is available",
+            flush=True,
+        )
 
     # --- transition detection vs last poll ---
     prev_pool = prev.get("pool", {})
