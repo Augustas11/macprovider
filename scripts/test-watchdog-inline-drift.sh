@@ -25,11 +25,11 @@ INSTALLER="$REPO_ROOT/phase3-binary/dist/install.sh"
 [ -f "$INSTALLER" ] || { echo "missing $INSTALLER" >&2; exit 1; }
 
 # Extract the heredoc body. The marker pair is
-#   cat <<'WATCHDOG_EOF' > "$WATCHDOG_PATH"
+#   write_atomic_install_file "$WATCHDOG_PATH" <<'WATCHDOG_EOF'
 #   ...body...
 #   WATCHDOG_EOF
 extracted_inline="$(awk '
-  /cat <<.WATCHDOG_EOF. > "\$WATCHDOG_PATH"/ { inside=1; next }
+  /WATCHDOG_EOF/ && /WATCHDOG_PATH/ && (/cat/ || /write_atomic_install_file/) { inside=1; next }
   inside && /^WATCHDOG_EOF$/ { exit }
   inside { print }
 ' "$INSTALLER")"

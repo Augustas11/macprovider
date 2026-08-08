@@ -89,6 +89,39 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testRepairExistingInstallRunsInstallerWithoutReferralWhenBinaryIsMissing() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.restartSafeIncumbentPresent = false
+        let controller = LaunchProviderController(
+            repairExistingInstall: true,
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertFalse(harness.installedReplacingIncumbentProvider)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testRepairExistingInstallIgnoresMalformedReferralInput() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(
+            repairExistingInstall: true,
+            dependencies: harness.dependencies()
+        )
+        controller.referralInput = "not-an-invite"
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
     func testReferralOnRestartSafeIncumbentDoesNotReplaceWithoutConfirmation() async {
         let harness = Harness()
         harness.restartSafeIncumbentPresent = true

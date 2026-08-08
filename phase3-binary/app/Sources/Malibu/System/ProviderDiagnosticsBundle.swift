@@ -122,12 +122,14 @@ enum ProviderDiagnosticsBundle {
     }
 
     static func readRedactedTail(_ url: URL) -> [String] {
-        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else { return [] }
         defer { close(descriptor) }
         var info = stat()
         guard fstat(descriptor, &info) == 0,
               (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              Int(info.st_nlink) == 1,
               info.st_size >= 0 else {
             return []
         }

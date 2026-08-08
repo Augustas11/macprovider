@@ -9,11 +9,13 @@ enum OnboardingWindow {
     static func make(
         agent: MalibuAgent,
         replacementConfirmed: Bool = false,
+        repairExistingInstall: Bool = false,
         onDone: @escaping () -> Void
     ) -> NSWindow {
         let root = OnboardingRootView(
             agent: agent,
             replacementConfirmed: replacementConfirmed,
+            repairExistingInstall: repairExistingInstall,
             onDone: onDone
         )
         let hosting = NSHostingController(rootView: root)
@@ -31,6 +33,7 @@ enum OnboardingCopy {
     static let intro = "Launch Provider installs and configures provider software on this Mac."
     static let introDetail = "Malibu monitors the background provider and shows earnings here while setup continues."
     static let idleDetail = "Installs provider software, picks a model, and registers this Mac for customer work."
+    static let repairDetail = "Repairs the background service while preserving your provider identity and downloaded model files."
     static let installingFallback = "Installing provider software. First model download and local checks can take 10-30 minutes with little visible progress."
     static let importingProviderAccess = "Confirming saved provider access before Malibu attaches."
     static let liveDetailPrefix = "Using"
@@ -52,16 +55,24 @@ enum OnboardingCopy {
 
 private struct OnboardingRootView: View {
     @ObservedObject var agent: MalibuAgent
+    let repairExistingInstall: Bool
     let onDone: () -> Void
     @StateObject private var controller: LaunchProviderController
 
-    init(agent: MalibuAgent, replacementConfirmed: Bool, onDone: @escaping () -> Void) {
+    init(
+        agent: MalibuAgent,
+        replacementConfirmed: Bool,
+        repairExistingInstall: Bool,
+        onDone: @escaping () -> Void
+    ) {
         self.agent = agent
+        self.repairExistingInstall = repairExistingInstall
         self.onDone = onDone
         _controller = StateObject(
             wrappedValue: LaunchProviderController(
                 agent: agent,
-                replacementConfirmed: replacementConfirmed
+                replacementConfirmed: replacementConfirmed,
+                repairExistingInstall: repairExistingInstall
             )
         )
     }
@@ -92,7 +103,9 @@ private struct OnboardingRootView: View {
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
         .task {
-            await controller.refreshReferralInputAvailability()
+            if !repairExistingInstall {
+                await controller.refreshReferralInputAvailability()
+            }
             await controller.refreshFromExistingInstall()
         }
     }
@@ -101,13 +114,20 @@ private struct OnboardingRootView: View {
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: OnboardingCopy.idleDetail) {
+            stageRow(
+                title: repairExistingInstall ? "Repair ready" : "Ready",
+                detail: repairExistingInstall ? OnboardingCopy.repairDetail : OnboardingCopy.idleDetail
+            ) {
                 VStack(alignment: .leading, spacing: 8) {
-                    referralAvailability
-                    launchButton(title: "Launch Provider")
-                    Text("No wallet needed to start — add one anytime after.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    if !repairExistingInstall {
+                        referralAvailability
+                        launchButton(title: "Launch Provider")
+                        Text("No wallet needed to start — add one anytime after.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        launchButton(title: "Repair Provider")
+                    }
                 }
             }
         case .runningCLIInstall:
@@ -172,7 +192,7 @@ private struct OnboardingRootView: View {
                     ?? "Details are available in Advanced diagnostics."
             ) {
                 VStack(alignment: .leading, spacing: 8) {
-                    if stage == "referral" {
+                    if stage == "referral", !repairExistingInstall {
                         referralAvailability
                     }
                     if retryable {

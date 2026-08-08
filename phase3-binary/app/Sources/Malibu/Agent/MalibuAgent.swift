@@ -31,6 +31,8 @@ final class MalibuAgent: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var providerLogTail: ProviderLogTail?
     private var providerLogTailCancellable: AnyCancellable?
+    private var watchdogLogTailCancellable: AnyCancellable?
+    private var watchdogLogLines: [String] = []
     private var reconnect = ReconnectPolicy()
     private let thermalMonitor = ThermalMonitor()
     private var cancellables: Set<AnyCancellable> = []
@@ -109,7 +111,7 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { return }
 
-        if let failure = diagnosedProviderFailure() {
+        if let failure = diagnosedProviderFailure(includingLaunchdState: true) {
             providerStartFailure = failure
             snapshot.state = .error
             snapshot.lastError = failure
@@ -525,7 +527,7 @@ final class MalibuAgent: ObservableObject {
             let sleep = min(pollInterval, remaining)
             try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
         }
-        let failure = diagnosedProviderFailure()
+        let failure = diagnosedProviderFailure(includingLaunchdState: true)
             ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
         providerStartFailure = failure
         snapshot.state = .error
@@ -853,7 +855,7 @@ final class MalibuAgent: ObservableObject {
                     await MainActor.run {
                         self.snapshot.invalidateLocalStatusObservation()
                         self.invalidateProviderProjectionFreshness()
-                        if let failure = self.diagnosedProviderFailure() {
+                        if let failure = self.diagnosedProviderFailure(includingLaunchdState: true) {
                             self.providerStartFailure = failure
                             self.snapshot.state = .error
                             self.snapshot.lastError = failure
@@ -1418,11 +1420,16 @@ final class MalibuAgent: ObservableObject {
 
     private func startProviderLogTail(paths: ProviderPaths = .current) {
         providerLogTailCancellable?.cancel()
+        watchdogLogTailCancellable?.cancel()
         providerLogTail?.stop()
         let tail = ProviderLogTail()
         providerLogTailCancellable = tail.$lines
             .sink { [weak self] lines in
                 self?.logLines = lines
+            }
+        watchdogLogTailCancellable = tail.$watchdogLines
+            .sink { [weak self] lines in
+                self?.watchdogLogLines = lines
             }
         providerLogTail = tail
         tail.start(paths: paths)
@@ -1431,12 +1438,28 @@ final class MalibuAgent: ObservableObject {
     private func stopProviderLogTail() {
         providerLogTailCancellable?.cancel()
         providerLogTailCancellable = nil
+        watchdogLogTailCancellable?.cancel()
+        watchdogLogTailCancellable = nil
         providerLogTail?.stop()
         providerLogTail = nil
+        watchdogLogLines = []
     }
 
-    private func diagnosedProviderFailure() -> String? {
-        ProviderLogDiagnostics.diagnose(lines: logLines)?.userMessage
+    private func diagnosedProviderFailure(includingLaunchdState: Bool = false) -> String? {
+        let launchdNeedsRepair = StartupState.launchdInstallEvidenceExists()
+            && InstalledProviderMonitor.launchdServiceRepairState().needsRepair
+        if let finding = ProviderLogDiagnostics.diagnose(
+            providerLines: logLines,
+            watchdogLines: watchdogLogLines,
+            launchdNeedsRepair: launchdNeedsRepair
+        ), ProviderLogDiagnostics.isActionable(finding, launchdNeedsRepair: launchdNeedsRepair) {
+            return finding.userMessage
+        }
+        guard includingLaunchdState,
+              launchdNeedsRepair else {
+            return nil
+        }
+        return ProviderLogDiagnostics.staleLaunchAgentMessage
     }
 
     private func scheduleReconnect() async {

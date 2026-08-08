@@ -118,11 +118,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // in-App via LaunchProviderController (SPEC-026 §7.2, follow-up impl
     // in this same PR).
 
-    private func presentOnboarding(replacementConfirmed: Bool = false) {
+    private func presentOnboarding(
+        replacementConfirmed: Bool = false,
+        repairExistingInstall: Bool = false
+    ) {
         if onboardingWindow == nil {
             onboardingWindow = OnboardingWindow.make(
                 agent: agent,
-                replacementConfirmed: replacementConfirmed
+                replacementConfirmed: replacementConfirmed,
+                repairExistingInstall: repairExistingInstall
             ) { [weak self] in
                 self?.onboardingWindow?.close()
                 self?.onboardingWindow = nil
@@ -144,8 +148,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch route {
         case .startAgent:
             await agent.start()
+        case .startAgentAndRepairWatchdog:
+            await agent.start()
+            // Starting a healthy provider is safe to do automatically, but
+            // reinstalling it can replace the running binary and launchd
+            // identity. Keep that mutation behind the explicit repair action.
+            presentOnboarding(repairExistingInstall: true)
+        case .repairExistingInstall:
+            presentOnboarding(repairExistingInstall: true)
         case .showOnboarding:
             presentOnboarding(replacementConfirmed: replacementConfirmed)
+        case .showLaunchdConflict:
+            presentLaunchdConflict()
         case .quit:
             NSApp.terminate(nil)
         case .showImportDialog:
@@ -208,6 +222,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: StartFreshConfirmationCopy.cancelButton)
         alert.addButton(withTitle: StartFreshConfirmationCopy.startFreshButton)
         return StartFreshConfirmationCopy.confirms(alert.runModal())
+    }
+
+    private func presentLaunchdConflict() {
+        let alert = NSAlert()
+        alert.messageText = LaunchdConflictCopy.title
+        alert.informativeText = LaunchdConflictCopy.message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: LaunchdConflictCopy.dismissButton)
+        alert.runModal()
     }
 
     private func presentMigrationError(_ error: Error) -> Bool {
@@ -350,6 +373,12 @@ enum StartFreshConfirmationCopy {
     static func confirms(_ response: NSApplication.ModalResponse) -> Bool {
         response == .alertSecondButtonReturn
     }
+}
+
+enum LaunchdConflictCopy {
+    static let title = "Another background service needs attention"
+    static let message = "Malibu found a background service in the provider slot that it does not own. Automatic repair is disabled so Malibu will not replace another program. Disable or remove that service, then reopen Malibu."
+    static let dismissButton = "OK"
 }
 
 enum MigrationErrorCopy {

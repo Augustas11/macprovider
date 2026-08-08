@@ -30,6 +30,7 @@ final class LaunchProviderController: ObservableObject {
 
     private var installProgressTask: Task<Void, Never>?
     private let replacementConfirmed: Bool
+    private let repairExistingInstall: Bool
     private let dependencies: Dependencies
 
     struct Dependencies {
@@ -95,13 +96,20 @@ final class LaunchProviderController: ObservableObject {
     init(
         agent: MalibuAgent? = nil,
         replacementConfirmed: Bool = false,
+        repairExistingInstall: Bool = false,
         dependencies: Dependencies? = nil
     ) {
         self.replacementConfirmed = replacementConfirmed
+        self.repairExistingInstall = repairExistingInstall
         self.dependencies = dependencies ?? .live(agent: agent)
     }
 
     func launch() async {
+        if repairExistingInstall && !replacementConfirmed {
+            await launchViaCLIInstall(referralCode: nil, replacingIncumbentProvider: false)
+            return
+        }
+
         let referralCode: String?
         do {
             referralCode = try ReferralOnboardingInput.normalize(referralInput)
@@ -185,7 +193,7 @@ final class LaunchProviderController: ObservableObject {
     }
 
     func refreshFromExistingInstall() async {
-        guard !replacementConfirmed else { return }
+        guard !replacementConfirmed, !repairExistingInstall else { return }
         switch stage {
         case .idle, .failed(stage: "cliInstall", _, _), .failed(stage: "identityImport", _, _):
             break
@@ -445,7 +453,10 @@ final class LaunchProviderController: ObservableObject {
 
 enum StartupRoute: Equatable {
     case startAgent
+    case startAgentAndRepairWatchdog
+    case repairExistingInstall
     case showOnboarding
+    case showLaunchdConflict
     case showImportDialog
     case quit
 }
@@ -467,15 +478,50 @@ struct StartupState: Equatable {
     let appIdentityConfigured: Bool
     let launchdInstallEvidenceExists: Bool
     let backgroundProviderHealthy: Bool
+    let launchdJobNeedsRepair: Bool
+    let launchdJobNeedsManualIntervention: Bool
+    let providerLaunchdJobNeedsRepair: Bool
+    let watchdogJobNeedsRepair: Bool
+
+    init(
+        configExists: Bool,
+        appMarkerExists: Bool,
+        appIdentityConfigured: Bool,
+        launchdInstallEvidenceExists: Bool,
+        backgroundProviderHealthy: Bool,
+        launchdJobNeedsRepair: Bool = false,
+        launchdJobNeedsManualIntervention: Bool = false,
+        providerLaunchdJobNeedsRepair: Bool? = nil,
+        watchdogJobNeedsRepair: Bool = false
+    ) {
+        self.configExists = configExists
+        self.appMarkerExists = appMarkerExists
+        self.appIdentityConfigured = appIdentityConfigured
+        self.launchdInstallEvidenceExists = launchdInstallEvidenceExists
+        self.backgroundProviderHealthy = backgroundProviderHealthy
+        self.launchdJobNeedsRepair = launchdJobNeedsRepair
+        self.launchdJobNeedsManualIntervention = launchdJobNeedsManualIntervention
+        self.providerLaunchdJobNeedsRepair = providerLaunchdJobNeedsRepair ?? launchdJobNeedsRepair
+        self.watchdogJobNeedsRepair = watchdogJobNeedsRepair
+    }
 
     @MainActor
-    static func detect(paths: ProviderPaths = .current) async -> StartupState {
-        let fm = FileManager.default
+    static func detect(
+        paths: ProviderPaths = .current,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
+        fileManager: FileManager = .default
+    ) async -> StartupState {
+        let fm = fileManager
         try? await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
         let configExists = fm.fileExists(atPath: paths.configFile.path)
         let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
         let identityConfigured = await ProviderConfig.isConfigured(paths: paths)
-        let launchdInstallEvidenceExists = Self.launchdInstallEvidenceExists(paths: paths)
+        let launchdInstallEvidenceExists = Self.launchdInstallEvidenceExists(
+            paths: paths,
+            homeDirectory: homeDirectory,
+            fileManager: fm
+        )
 
         var backgroundProviderHealthy = false
         if ProviderConfig.readProviderID(paths: paths) != nil,
@@ -483,19 +529,55 @@ struct StartupState: Equatable {
            launchdInstallEvidenceExists {
             backgroundProviderHealthy = await InstalledProviderMonitor.isHealthy(port: port)
         }
+        let providerRepairState = InstalledProviderMonitor.launchdServiceRepairState(
+                launchctlURL: launchctlURL,
+                homeDirectory: homeDirectory,
+                fileManager: fm
+            )
+        let launchdJobNeedsRepair = launchdInstallEvidenceExists && providerRepairState.needsRepair
+        let providerNeedsManualIntervention = launchdInstallEvidenceExists
+            && providerRepairState.requiresManualIntervention
+        let watchdogRepairState = InstalledProviderMonitor.launchdServiceRepairState(
+                label: InstalledProviderMonitor.watchdogLaunchdLabel,
+                launchctlURL: launchctlURL,
+                homeDirectory: homeDirectory,
+                expectedProgram: homeDirectory
+                    .appendingPathComponent(".local/share/macprovider-watchdog/macprovider-health-monitor"),
+                alternateProgram: homeDirectory
+                    .appendingPathComponent(".local/share/macprovider-watchdog/watchdog.sh"),
+                fileManager: fm
+            )
+        // Do not gate watchdog inspection on a readable plist. A loaded job
+        // whose plist disappeared or became unsafe is itself a manual
+        // conflict; suppressing that state creates an endless repair loop.
+        let watchdogJobNeedsRepair = watchdogRepairState.needsRepair
+        let watchdogNeedsManualIntervention = watchdogRepairState.requiresManualIntervention
 
         return StartupState(
             configExists: configExists,
             appMarkerExists: markerExists,
             appIdentityConfigured: identityConfigured,
             launchdInstallEvidenceExists: launchdInstallEvidenceExists,
-            backgroundProviderHealthy: backgroundProviderHealthy
+            backgroundProviderHealthy: backgroundProviderHealthy,
+            launchdJobNeedsRepair: launchdJobNeedsRepair || watchdogJobNeedsRepair,
+            launchdJobNeedsManualIntervention: providerNeedsManualIntervention || watchdogNeedsManualIntervention,
+            providerLaunchdJobNeedsRepair: launchdJobNeedsRepair,
+            watchdogJobNeedsRepair: watchdogJobNeedsRepair
         )
     }
 
     func route() -> StartupRoute {
         if configExists && !appMarkerExists {
             return .showImportDialog
+        }
+        if launchdJobNeedsManualIntervention {
+            return .showLaunchdConflict
+        }
+        if providerLaunchdJobNeedsRepair {
+            return .repairExistingInstall
+        }
+        if watchdogJobNeedsRepair {
+            return backgroundProviderHealthy ? .startAgentAndRepairWatchdog : .repairExistingInstall
         }
         if configExists && appMarkerExists && !appIdentityConfigured {
             return .showOnboarding
@@ -515,12 +597,26 @@ struct StartupState: Equatable {
         return .showOnboarding
     }
 
-    static func launchdInstallEvidenceExists(paths: ProviderPaths = .current) -> Bool {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
+    static func launchdInstallEvidenceExists(
+        paths: ProviderPaths = .current,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let fm = fileManager
+        let home = homeDirectory
         let manifest = home.appendingPathComponent("Library/Application Support/macprovider/install_manifest.json")
         let launchd = home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
-        return fm.isReadableFile(atPath: manifest.path) || fm.isReadableFile(atPath: launchd.path)
+        func trusted(_ url: URL) -> Bool {
+            InstalledProviderMonitor.isSafePrivateDirectoryChain(
+                url.deletingLastPathComponent(),
+                under: home
+            ) && InstalledProviderMonitor.hasTrustedPrivateFile(
+                at: url,
+                maxBytes: 64 * 1024,
+                fileManager: fm
+            )
+        }
+        return trusted(manifest) || trusted(launchd)
     }
 
     static func applyMigrationDecision(
@@ -528,10 +624,23 @@ struct StartupState: Equatable {
         paths: ProviderPaths = .current,
         now: Date = Date(),
         deferStartFreshBackup: Bool = false,
-        importCredentialIntoCLI: (@Sendable (URL) async throws -> Void)? = nil
+        importCredentialIntoCLI: (@Sendable (URL) async throws -> Void)? = nil,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl")
     ) async throws -> MigrationResult {
         switch decision {
         case .importExisting:
+            let preImportState = await StartupState.detect(
+                paths: paths,
+                homeDirectory: homeDirectory,
+                launchctlURL: launchctlURL
+            )
+            if preImportState.launchdJobNeedsManualIntervention {
+                return MigrationResult(route: .showLaunchdConflict, backupPath: nil)
+            }
+            if preImportState.launchdJobNeedsRepair {
+                return MigrationResult(route: .repairExistingInstall, backupPath: nil)
+            }
             if let importCredentialIntoCLI {
                 try await ProviderConfig.importExistingCLIConfig(
                     paths: paths,
@@ -540,7 +649,11 @@ struct StartupState: Equatable {
             } else {
                 try await ProviderConfig.importExistingCLIConfig(paths: paths)
             }
-            let state = await StartupState.detect(paths: paths)
+            let state = await StartupState.detect(
+                paths: paths,
+                homeDirectory: homeDirectory,
+                launchctlURL: launchctlURL
+            )
             return MigrationResult(route: state.route(), backupPath: nil)
         case .startFresh:
             if deferStartFreshBackup {

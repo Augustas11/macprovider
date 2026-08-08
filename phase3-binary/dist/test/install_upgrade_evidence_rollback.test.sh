@@ -29,8 +29,9 @@ trap cleanup_test_processes EXIT
 python3 - "$INSTALL_SH" > "$TMP/functions.sh" <<'PY'
 import sys
 names = {
-    "cleanup", "install_tx_path_matches", "stage_install_tx_path",
+    "cleanup", "install_tx_path_matches", "stage_install_tx_path", "stage_install_tx_plist",
     "stage_lifecycle_snapshot",
+    "secure_private_directory", "write_atomic_install_file", "write_install_tx_marker",
     "write_install_recovery_artifacts", "begin_install_transaction",
     "mark_install_cutover_started", "discard_install_transaction_before_cutover",
     "rollback_install_transaction", "commit_install_transaction",
@@ -38,7 +39,7 @@ names = {
     "release_install_lock",
     "launchd_label_is_disabled", "capture_manual_provider_for_recovery",
     "pid_is_live_non_zombie", "stop_owned_manual_provider",
-    "validate_port_value", "ensure_port_free",
+    "validate_port_value", "ensure_port_free", "reclaim_launchd_service",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 i = 0
@@ -495,9 +496,23 @@ make_case() {
   printf 'model: old-model\nprovider_id: upgrade-provider\n' > "$home/.config/macprovider/config.yaml"
   printf 'upgrade-provider\n' > "$home/.config/macprovider/provider_id"
   printf '{"model_id":"old-model","generated_at":"old"}\n' > "$home/.config/macprovider/last-recommendation.json"
-  printf '<plist>old</plist>\n' > "$home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+  printf '%s\n' \
+    '<?xml version="1.0" encoding="UTF-8"?>' \
+    '<plist version="1.0"><dict>' \
+    '<key>Label</key><string>live.streamvc.macprovider</string>' \
+    '<key>ProgramArguments</key><array>' \
+    "<string>$home/macprovider/macprovider-cli</string>" \
+    '</array><key>Comment</key><string>old-provider-plist</string>' \
+    '</dict></plist>' > "$home/Library/LaunchAgents/live.streamvc.macprovider.plist"
   printf 'old-watchdog\n' > "$home/.local/share/macprovider-watchdog/macprovider-health-monitor"
-  printf '<plist>old-watchdog</plist>\n' > "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+  printf '%s\n' \
+    '<?xml version="1.0" encoding="UTF-8"?>' \
+    '<plist version="1.0"><dict>' \
+    '<key>Label</key><string>live.streamvc.macprovider-watchdog</string>' \
+    '<key>ProgramArguments</key><array>' \
+    "<string>$home/.local/share/macprovider-watchdog/macprovider-health-monitor</string>" \
+    '</array><key>Comment</key><string>old-watchdog-plist</string>' \
+    '</dict></plist>' > "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
   printf '{"version":"old"}\n' > "$home/Library/Application Support/macprovider/install_manifest.json"
   # Seed a prior lifecycle-state file by default so rollback must restore its
   # exact prior contents; the lifecycle_absent_* cases delete it to exercise the
@@ -536,6 +551,18 @@ esac
 case "$1" in
   print)
     [ -f "$service_file" ] || exit 1
+    case "$*" in
+      *macprovider-watchdog*)
+        printf 'program = %s\npath = %s\n' \
+          "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
+          "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+        ;;
+      *)
+        printf 'program = %s\npath = %s\n' \
+          "$CASE_ROOT/home/macprovider/macprovider-cli" \
+          "$CASE_ROOT/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+        ;;
+    esac
     ;;
   print-disabled)
     printf 'disabled services = {\n'
@@ -869,8 +896,10 @@ run_case() {
       INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
       INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"
       INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
+      PROVIDER_LABEL="live.streamvc.macprovider"
       PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
       WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
+      WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
       WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
       WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
       MANIFEST_PATH="$HOME/Library/Application Support/macprovider/install_manifest.json"
@@ -1027,6 +1056,8 @@ MANUAL
           launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || true
           launchctl enable "gui/$UID/live.streamvc.macprovider"
           launchctl enable "gui/$UID/$WATCHDOG_LABEL"
+          printf "transaction-created\n" > "$INSTALL_TX_BACKUP/provider-service-created"
+          printf "transaction-created\n" > "$INSTALL_TX_BACKUP/watchdog-service-created"
           launchctl bootstrap "gui/$UID" "$PLIST_PATH"
           launchctl kickstart -k "gui/$UID/live.streamvc.macprovider"
           launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH"
@@ -1071,9 +1102,9 @@ assert_old_install_files() {
   grep -F 'model: old-model' "$home/.config/macprovider/config.yaml" >/dev/null
   grep -F 'upgrade-provider' "$home/.config/macprovider/provider_id" >/dev/null
   grep -F '"model_id":"old-model"' "$home/.config/macprovider/last-recommendation.json" >/dev/null
-  grep -F '<plist>old</plist>' "$home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
+  grep -F 'old-provider-plist' "$home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
   grep -F 'old-watchdog' "$home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
-  grep -F '<plist>old-watchdog</plist>' "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null
+  grep -F 'old-watchdog-plist' "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null
   grep -F '"version":"old"' "$home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
   [ "$(readlink "$home/.local/bin/macprovider-cli")" = "$home/macprovider/macprovider-cli" ]
 }
@@ -1301,7 +1332,7 @@ grep -F 'provider_id: "mp-0123456789abcdef0123456789abcdef"' \
 grep -F 'provider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
   "$root/home/.config/macprovider/config.yaml" >/dev/null
 [ "$(cat "$root/home/.config/macprovider/provider_id")" = 'mp-0123456789abcdef0123456789abcdef' ]
-grep -F '<plist>old</plist>' "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
+grep -F 'old-provider-plist' "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
 grep -F 'old-watchdog' "$root/home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
 grep -F '"version":"old"' "$root/home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
 [ -z "$(recovery_dir "$root")" ]

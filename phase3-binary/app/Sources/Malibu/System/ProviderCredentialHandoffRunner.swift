@@ -150,9 +150,11 @@ enum ProviderCredentialHandoffRunner {
 
     private struct InstallManifest: Decodable {
         let binaryPath: String
+        let installPrefix: String?
 
         enum CodingKeys: String, CodingKey {
             case binaryPath = "binary_path"
+            case installPrefix = "install_prefix"
         }
     }
 
@@ -864,21 +866,46 @@ enum ProviderCredentialHandoffRunner {
         if fileManager.fileExists(atPath: manifestURL.path) {
             let manifest: InstallManifest
             do {
-                manifest = try JSONDecoder().decode(InstallManifest.self, from: Data(contentsOf: manifestURL))
+                guard let data = InstalledProviderMonitor.readOwnerPrivateRegularFile(
+                    manifestURL,
+                    maxBytes: 64 * 1024,
+                    fileManager: fileManager
+                ) else {
+                    throw Error.invalidCLI("install manifest is not a trusted private file")
+                }
+                manifest = try JSONDecoder().decode(InstallManifest.self, from: data)
             } catch {
                 throw Error.invalidCLI("install manifest is malformed")
             }
-            guard manifest.binaryPath.hasPrefix("/") else {
+            guard manifest.binaryPath.hasPrefix("/"),
+                  let installPrefix = manifest.installPrefix,
+                  installPrefix.hasPrefix("/") else {
                 throw Error.invalidCLI("install manifest binary_path is not absolute")
             }
-            candidate = URL(fileURLWithPath: manifest.binaryPath).standardizedFileURL
+            let prefix = URL(fileURLWithPath: installPrefix).standardizedFileURL
+            let manifestDirectory = manifestURL.deletingLastPathComponent()
+            guard InstalledProviderMonitor.isSafePrivateDirectoryChain(
+                manifestDirectory,
+                under: home
+            ), InstalledProviderMonitor.isSupportedProviderInstallDirectory(
+                prefix,
+                under: home
+            ) else {
+                throw Error.invalidCLI("install manifest install_prefix is not trusted")
+            }
+            let resolved = URL(fileURLWithPath: manifest.binaryPath).standardizedFileURL
+            guard resolved.deletingLastPathComponent().path == prefix.path else {
+                throw Error.invalidCLI("install manifest binary_path does not match install_prefix")
+            }
+            candidate = resolved
         } else {
             candidate = home.appendingPathComponent("macprovider/macprovider-cli").standardizedFileURL
         }
         guard candidate.lastPathComponent == "macprovider-cli" else {
             throw Error.invalidCLI("unexpected executable name")
         }
-        guard fileManager.isExecutableFile(atPath: candidate.path) else {
+        guard InstalledProviderMonitor.isOwnerPrivateExecutable(atPath: candidate.path),
+              fileManager.isExecutableFile(atPath: candidate.path) else {
             throw Error.cliNotFound
         }
         return candidate

@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 
 struct LogTailBuffer: Equatable {
@@ -139,9 +140,23 @@ final class LogTailReader: ObservableObject {
         maxReadBytes: UInt64,
         maxPendingFragmentCharacters: Int
     ) -> ReadResult? {
-        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
-        defer { try? handle.close() }
-        let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? UInt64) ?? 0
+        guard maxReadBytes <= UInt64(Int.max) else { return nil }
+        let descriptor = fileURL.path.withCString {
+            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        }
+        guard descriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(descriptor) }
+
+        var fileInfo = stat()
+        guard Darwin.fstat(descriptor, &fileInfo) == 0,
+              (fileInfo.st_mode & S_IFMT) == S_IFREG,
+              fileInfo.st_uid == getuid(),
+              Int(fileInfo.st_nlink) == 1,
+              fileInfo.st_size >= 0 else {
+            return nil
+        }
+
+        let size = UInt64(fileInfo.st_size)
         var offset = previousOffset
         var pendingFragment = previousFragment
         var startedInsideExistingFile = false
@@ -160,25 +175,28 @@ final class LogTailReader: ObservableObject {
             startedInsideExistingFile = true
         }
 
-        do {
-            try handle.seek(toOffset: offset)
-            let data = try handle.read(upToCount: Int(maxReadBytes)) ?? Data()
-            let nextOffset = offset + UInt64(data.count)
-            guard !data.isEmpty, var chunk = String(data: data, encoding: .utf8) else {
-                return ReadResult(offset: nextOffset, pendingFragment: pendingFragment, lines: [])
-            }
-            if startedInsideExistingFile, let newline = chunk.firstIndex(where: \.isNewline) {
-                chunk = String(chunk[chunk.index(after: newline)...])
-            }
-            let parsed = parseChunk(
-                chunk,
-                pendingFragment: pendingFragment,
-                maxPendingFragmentCharacters: maxPendingFragmentCharacters
-            )
-            return ReadResult(offset: nextOffset, pendingFragment: parsed.pendingFragment, lines: parsed.lines)
-        } catch {
-            return nil
+        guard Darwin.lseek(descriptor, off_t(offset), SEEK_SET) != -1 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: Int(maxReadBytes))
+        let bytesRead = bytes.withUnsafeMutableBytes { buffer in
+            Darwin.read(descriptor, buffer.baseAddress, buffer.count)
         }
+        guard bytesRead >= 0 else { return nil }
+
+        let nextOffset = offset + UInt64(bytesRead)
+        guard bytesRead > 0,
+              let data = String(bytes: bytes.prefix(bytesRead), encoding: .utf8) else {
+            return ReadResult(offset: nextOffset, pendingFragment: pendingFragment, lines: [])
+        }
+        var chunk = data
+        if startedInsideExistingFile, let newline = chunk.firstIndex(where: \.isNewline) {
+            chunk = String(chunk[chunk.index(after: newline)...])
+        }
+        let parsed = parseChunk(
+            chunk,
+            pendingFragment: pendingFragment,
+            maxPendingFragmentCharacters: maxPendingFragmentCharacters
+        )
+        return ReadResult(offset: nextOffset, pendingFragment: parsed.pendingFragment, lines: parsed.lines)
     }
 
     nonisolated private static func parseChunk(

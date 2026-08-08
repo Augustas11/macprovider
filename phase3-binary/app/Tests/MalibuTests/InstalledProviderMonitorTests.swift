@@ -316,6 +316,140 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertNil(InstalledProviderMonitor.parseLaunchdServicePID("pid = 4321\npid = 9999"))
     }
 
+    func testParseLaunchdServiceProgramPath() {
+        let output = """
+        gui/501/live.streamvc.macprovider = {
+            program = /Users/provider/macprovider/macprovider-cli
+            pid = 123
+        }
+        """
+
+        XCTAssertEqual(
+            InstalledProviderMonitor.parseLaunchdServiceProgramPath(output),
+            "/Users/provider/macprovider/macprovider-cli"
+        )
+        XCTAssertNil(InstalledProviderMonitor.parseLaunchdServiceProgramPath("pid = 123"))
+    }
+
+    func testParseLaunchdServiceIdentityRequiresOneProgramAndCanonicalPathField() {
+        let output = """
+        gui/501/live.streamvc.macprovider = {
+            program = /Users/provider/macprovider/macprovider-cli
+            path = /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist
+        }
+        """
+
+        XCTAssertEqual(
+            InstalledProviderMonitor.parseLaunchdServiceIdentity(output),
+            InstalledProviderMonitor.LaunchdServiceIdentity(
+                program: "/Users/provider/macprovider/macprovider-cli",
+                path: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+            )
+        )
+        XCTAssertNil(
+            InstalledProviderMonitor.parseLaunchdServiceIdentity(
+                "program = /Users/provider/macprovider/macprovider-cli"
+            )
+        )
+        XCTAssertNil(
+            InstalledProviderMonitor.parseLaunchdServiceIdentity(
+                "program = /Users/provider/macprovider/macprovider-cli\n"
+                    + "program = /Users/other/macprovider-cli\n"
+                    + "path = /Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+            )
+        )
+    }
+
+    func testLaunchdRepairStateSeparatesManagedRepairFromForeignIdentity() {
+        XCTAssertFalse(InstalledProviderMonitor.LaunchdServiceRepairState.unavailable.needsRepair)
+        XCTAssertFalse(InstalledProviderMonitor.LaunchdServiceRepairState.notLoaded.needsRepair)
+        XCTAssertFalse(InstalledProviderMonitor.LaunchdServiceRepairState.validExecutable.needsRepair)
+        XCTAssertTrue(
+            InstalledProviderMonitor.LaunchdServiceRepairState.missingExecutable(path: "/missing").needsRepair
+        )
+        XCTAssertFalse(
+            InstalledProviderMonitor.LaunchdServiceRepairState.unexpectedExecutable(path: "/other").needsRepair
+        )
+        XCTAssertTrue(
+            InstalledProviderMonitor.LaunchdServiceRepairState.unexpectedExecutable(path: "/other").requiresManualIntervention
+        )
+        XCTAssertFalse(
+            InstalledProviderMonitor.LaunchdServiceRepairState.unexpectedPlist(path: "/other.plist").needsRepair
+        )
+        XCTAssertTrue(
+            InstalledProviderMonitor.LaunchdServiceRepairState.unexpectedPlist(path: "/other.plist").requiresManualIntervention
+        )
+    }
+
+    func testLaunchdRepairRejectsSymlinkAndDirectoryAtManagedExecutablePath() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-launchd-executable-tests-(UUID().uuidString)")
+        let providerDirectory = root.appendingPathComponent("macprovider")
+        let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
+        let program = providerDirectory.appendingPathComponent("macprovider-cli")
+        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(at: providerDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+        <key>Label</key><string>live.streamvc.macprovider</string>
+        <key>ProgramArguments</key><array><string>\(program.path)</string></array>
+        </dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(program.path)' '\(plist.path)'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        for replacement in ["symlink", "directory"] {
+            try? FileManager.default.removeItem(at: program)
+            if replacement == "symlink" {
+                let target = root.appendingPathComponent("foreign-provider")
+                try "#!/bin/sh\n".write(to: target, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+                try FileManager.default.createSymbolicLink(at: program, withDestinationURL: target)
+            } else {
+                try FileManager.default.createDirectory(at: program, withIntermediateDirectories: false)
+            }
+
+            let state = InstalledProviderMonitor.launchdServiceRepairState(
+                launchctlURL: launchctl,
+                homeDirectory: root
+            )
+            XCTAssertEqual(state, .missingExecutable(path: program.path), replacement)
+        }
+    }
+
+    func testLaunchdRepairInspectsManagedPlistWhenServiceIsNotLoaded() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-launchd-unloaded-tests-\(UUID().uuidString)")
+        let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
+        let program = root.appendingPathComponent("macprovider/macprovider-cli")
+        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>ProgramArguments</key><array><string>\(program.path)</string></array>
+        </dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = InstalledProviderMonitor.launchdServiceRepairState(
+            launchctlURL: launchctl,
+            homeDirectory: root
+        )
+
+        XCTAssertEqual(state, .missingExecutable(path: program.path))
+    }
+
     func testStatusSnapshotKeepsOlderCLIReadableWithoutTrustFields() throws {
         let json = """
         {

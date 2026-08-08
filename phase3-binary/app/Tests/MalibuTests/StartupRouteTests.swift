@@ -22,6 +22,10 @@ final class StartupRouteTests: XCTestCase {
         let cases: [(String, StartupState, StartupRoute)] = [
             ("healthy-launchd", state(config: true, marker: true, launchd: true, healthy: true), .startAgent),
             ("launchd-config-starting", state(config: true, marker: true, launchd: true, healthy: false), .startAgent),
+            ("stale-launchd-repair", state(config: true, marker: true, launchd: true, healthy: false, needsRepair: true), .repairExistingInstall),
+            ("stale-launchd-repair-before-import", state(config: true, marker: false, launchd: true, healthy: false, needsRepair: true), .showImportDialog),
+            ("healthy-provider-repairs-watchdog-in-background", state(config: true, marker: true, launchd: true, healthy: true, needsRepair: true, providerNeedsRepair: false, watchdogNeedsRepair: true), .startAgentAndRepairWatchdog),
+            ("foreign-launchd-conflict", state(config: true, marker: true, launchd: true, healthy: false, manualIntervention: true), .showLaunchdConflict),
             ("legacy-app-config", state(config: true, marker: true, launchd: false, healthy: false), .showOnboarding),
             ("cli-owned", state(config: true, marker: false, launchd: false, healthy: false), .showImportDialog),
             ("launchd-cli-owned-healthy", state(config: true, marker: false, launchd: true, healthy: true), .showImportDialog),
@@ -37,9 +41,135 @@ final class StartupRouteTests: XCTestCase {
         }
     }
 
+    func testDetectRoutesForeignWatchdogToManualConflictWithoutUsingRealHome() async throws {
+        let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let watchdogPlist = root.appendingPathComponent(
+            "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+        )
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(
+            at: watchdogPlist.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "<plist/>\n".write(to: watchdogPlist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(root.path)/unexpected-watchdog' '\(watchdogPlist.path)'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: launchctl.path
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = await StartupState.detect(
+            paths: paths,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
+
+        XCTAssertTrue(state.launchdJobNeedsManualIntervention)
+        XCTAssertEqual(state.route(), .showLaunchdConflict)
+    }
+
+    func testDetectAcceptsLegacyWatchdogIdentityWithoutRepair() async throws {
+        let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let watchdogPlist = root.appendingPathComponent(
+            "Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+        )
+        let legacyWatchdog = root.appendingPathComponent(
+            ".local/share/macprovider-watchdog/watchdog.sh"
+        )
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(
+            at: watchdogPlist.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: legacyWatchdog.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "<plist/>\n".write(to: watchdogPlist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\n".write(to: legacyWatchdog, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: legacyWatchdog.path
+        )
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(legacyWatchdog.path)' '\(watchdogPlist.path)'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: launchctl.path
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = await StartupState.detect(
+            paths: paths,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
+
+        XCTAssertFalse(state.launchdJobNeedsRepair)
+    }
+
+    func testDetectAcceptsManifestSelectedCustomProviderIdentityWithoutRepair() async throws {
+        let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let providerPlist = root.appendingPathComponent(
+            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+        )
+        let customProgram = root.appendingPathComponent("macprovider/provider-support/macprovider-cli")
+        let manifest = root.appendingPathComponent(
+            "Library/Application Support/macprovider/install_manifest.json"
+        )
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(
+            at: providerPlist.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: customProgram.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "<plist/>\n".write(to: providerPlist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\n".write(to: customProgram, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: customProgram.path
+        )
+        try JSONSerialization.data(withJSONObject: [
+            "install_prefix": customProgram.deletingLastPathComponent().path,
+            "binary_path": customProgram.path,
+        ])
+            .write(to: manifest)
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(customProgram.path)' '\(providerPlist.path)'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: launchctl.path
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = await StartupState.detect(
+            paths: paths,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
+
+        XCTAssertFalse(state.launchdJobNeedsRepair)
+    }
+
     func testMigrationImportWithoutLaunchdRoutesToOnboarding() async throws {
         let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let launchctl = root.appendingPathComponent("launchctl")
         try paths.ensureDirectories()
+        try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
         try "provider_id: p_import\nprovider_token: secret-token\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
         defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
@@ -50,9 +180,15 @@ final class StartupRouteTests: XCTestCase {
             paths: paths,
             importCredentialIntoCLI: { snapshot in
                 XCTAssertTrue(try String(contentsOf: snapshot).contains("provider_token: secret-token"))
-            }
+            },
+            homeDirectory: root,
+            launchctlURL: launchctl
         )
-        let state = await StartupState.detect(paths: paths)
+        let state = await StartupState.detect(
+            paths: paths,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
         let expectedRoute: StartupRoute = state.launchdInstallEvidenceExists ? .startAgent : .showOnboarding
         XCTAssertEqual(result.route, expectedRoute)
         XCTAssertNil(result.backupPath)
@@ -267,14 +403,22 @@ final class StartupRouteTests: XCTestCase {
         marker: Bool,
         configured: Bool? = nil,
         launchd: Bool,
-        healthy: Bool
+        healthy: Bool,
+        needsRepair: Bool = false,
+        manualIntervention: Bool = false,
+        providerNeedsRepair: Bool? = nil,
+        watchdogNeedsRepair: Bool = false
     ) -> StartupState {
         StartupState(
             configExists: config,
             appMarkerExists: marker,
             appIdentityConfigured: configured ?? marker,
             launchdInstallEvidenceExists: launchd,
-            backgroundProviderHealthy: healthy
+            backgroundProviderHealthy: healthy,
+            launchdJobNeedsRepair: needsRepair,
+            launchdJobNeedsManualIntervention: manualIntervention,
+            providerLaunchdJobNeedsRepair: providerNeedsRepair,
+            watchdogJobNeedsRepair: watchdogNeedsRepair
         )
     }
 

@@ -154,6 +154,38 @@ final class ReferralOnboardingTests: XCTestCase {
         XCTAssertNil(noReferralEnvironment["MACPROVIDER_REFERRAL_REPLACE_INCUMBENT"])
     }
 
+    func testInstallerEnvironmentCarriesManifestSelectedInstallDirectory() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("installer-custom-home-\(UUID().uuidString)")
+        let manifest = home.appendingPathComponent(
+            "Library/Application Support/macprovider/install_manifest.json"
+        )
+        try FileManager.default.createDirectory(
+            at: manifest.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let customProgram = home.appendingPathComponent("macprovider/provider-support/macprovider-cli")
+        try JSONSerialization.data(withJSONObject: [
+            "install_prefix": customProgram.deletingLastPathComponent().path,
+            "binary_path": customProgram.path,
+        ])
+            .write(to: manifest)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let environment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: [:],
+            installPort: nil,
+            pinnedVersion: nil,
+            homeDirectory: home
+        )
+
+        XCTAssertEqual(
+            environment["MACPROVIDER_INSTALL_DIR"],
+            customProgram.deletingLastPathComponent().path
+        )
+        XCTAssertEqual(environment["HOME"], home.path)
+    }
+
     func testBundledInstallerEnablesReceiptsOnlyForFreshReferralBootstrap() throws {
         let scriptURL = try CLIInstallRunner.resolveInstallScriptURL()
         let script = try String(contentsOf: scriptURL, encoding: .utf8)

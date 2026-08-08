@@ -978,6 +978,15 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(LogTailBuffer.redacted(raw), raw)
     }
 
+    func testStaleLaunchAgentRecoveryMessageRemainsUserVisible() {
+        let message =
+            "Provider setup is blocked by a previous installation. "
+            + "Click Launch Provider to repair the background service. "
+            + "Your provider identity and model files will be kept."
+
+        XCTAssertEqual(AgentSnapshotPresenter.publicErrorDetail(message), message)
+    }
+
     func testOnboardingAdvancedFailureDiagnosticsKeepsRedactedDetails() {
         let details = OnboardingCopy.advancedFailureDiagnostics(
             message: "coordinator join requires model_artifact_sha256 in /tmp/macprovider.err.log",

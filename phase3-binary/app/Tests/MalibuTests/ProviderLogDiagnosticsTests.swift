@@ -2,6 +2,17 @@ import XCTest
 @testable import Malibu
 
 final class ProviderLogDiagnosticsTests: XCTestCase {
+    func testDiagnoseStaleLaunchAgent() {
+        let finding = ProviderLogDiagnostics.diagnose(lines: [
+            "provider process unhealthy: launchd service live.streamvc.macprovider has no validated PID at /Users/provider/macprovider-cli",
+        ])
+
+        XCTAssertEqual(finding?.id, "stale_launch_agent")
+        XCTAssertTrue(finding?.userMessage.hasPrefix("Provider setup is blocked") == true)
+        XCTAssertTrue(finding?.userMessage.contains("Click Launch Provider") == true)
+        XCTAssertTrue(finding?.userMessage.contains("identity and model files") == true)
+    }
+
     func testDiagnoseStaleCatalogProvenance() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
             "loading config",
@@ -22,6 +33,41 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
         ])
 
         XCTAssertEqual(finding?.id, "stale_model_catalog")
+    }
+
+    func testDiagnoseProviderLogsBeforeWatchdogLogs() {
+        let finding = ProviderLogDiagnostics.diagnose(
+            providerLines: ["model artifact hash mismatch for /tmp/current"],
+            watchdogLines: [
+                "provider process unhealthy: launchd service live.streamvc.macprovider has no validated PID at /Users/provider/macprovider-cli"
+            ]
+        )
+
+        XCTAssertEqual(finding?.id, "artifact_hash_mismatch")
+    }
+
+    func testCurrentLaunchdRepairTakesPrecedenceOverGenericProviderFinding() {
+        let finding = ProviderLogDiagnostics.diagnose(
+            providerLines: [
+                "provider process unhealthy: launchd service live.streamvc.macprovider has no validated PID at /Users/provider/macprovider-cli",
+                "model artifact hash mismatch for /tmp/current"
+            ],
+            watchdogLines: [],
+            launchdNeedsRepair: true
+        )
+
+        XCTAssertEqual(finding?.id, "stale_launch_agent")
+    }
+
+    func testHistoricalStaleLaunchAgentFindingRequiresCurrentRepairState() {
+        let finding = ProviderLogDiagnostics.Finding(
+            id: "stale_launch_agent",
+            userMessage: ProviderLogDiagnostics.staleLaunchAgentMessage,
+            matchedLine: "historical stale launchd evidence"
+        )
+
+        XCTAssertFalse(ProviderLogDiagnostics.isActionable(finding, launchdNeedsRepair: false))
+        XCTAssertTrue(ProviderLogDiagnostics.isActionable(finding, launchdNeedsRepair: true))
     }
 
     func testDiagnoseReturnsNilForUnrecognizedLines() {
@@ -47,5 +93,12 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
 
         XCTAssertTrue(message.contains("/tmp/macprovider.err.log"))
         XCTAssertTrue(message.contains("/tmp/macprovider.out.log"))
+        XCTAssertTrue(message.contains("/tmp/watchdog.log"))
+    }
+
+    func testStaleRuleDoesNotMatchUnrelatedPIDValidation() {
+        XCTAssertNil(ProviderLogDiagnostics.diagnose(lines: [
+            "unrelated component has no validated PID",
+        ]))
     }
 }

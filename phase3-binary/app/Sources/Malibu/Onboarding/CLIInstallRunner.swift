@@ -147,7 +147,9 @@ enum CLIInstallRunner {
         installPort: Int?,
         pinnedVersion: String?,
         referralCodeFile: URL? = nil,
-        replacingIncumbentProvider: Bool = false
+        replacingIncumbentProvider: Bool = false,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
     ) throws -> [String: String] {
         // Deliberately do not inherit the parent environment. install.sh has
         // authority-changing knobs for repositories, public keys, acceptance
@@ -157,11 +159,19 @@ enum CLIInstallRunner {
         _ = parentEnvironment
         var explicit = [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": NSHomeDirectory(),
+            "HOME": homeDirectory.path,
             "TMPDIR": "/tmp",
             "LC_ALL": "C",
             "MACPROVIDER_NO_PROMPT": "1",
         ]
+        let configuredProgram = InstalledProviderMonitor.configuredProviderProgram(
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        )
+        let defaultProgram = homeDirectory.appendingPathComponent("macprovider/macprovider-cli").standardizedFileURL
+        if configuredProgram != defaultProgram {
+            explicit["MACPROVIDER_INSTALL_DIR"] = configuredProgram.deletingLastPathComponent().path
+        }
         if let installPort {
             explicit["MACPROVIDER_PORT"] = String(installPort)
         }
@@ -197,6 +207,9 @@ enum CLIInstallRunner {
             atPath: NSHomeDirectory() + "/Library/LaunchAgents/live.streamvc.macprovider.plist"
         )
         guard hasManifest || launchdPlist else { return false }
+        guard InstalledProviderMonitor.launchdServiceRepairState() == .validExecutable else {
+            return false
+        }
         return await InstalledProviderMonitor.isHealthy(port: port)
     }
 

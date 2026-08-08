@@ -125,7 +125,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("credential-handoff-home-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }
-        let executable = home.appendingPathComponent("custom/bin/macprovider-cli")
+        let executable = home.appendingPathComponent("macprovider/custom/bin/macprovider-cli")
         try FileManager.default.createDirectory(
             at: executable.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -139,7 +139,10 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             at: manifest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try JSONSerialization.data(withJSONObject: ["binary_path": executable.path])
+        try JSONSerialization.data(withJSONObject: [
+            "install_prefix": executable.deletingLastPathComponent().path,
+            "binary_path": executable.path,
+        ])
             .write(to: manifest)
 
         XCTAssertEqual(
