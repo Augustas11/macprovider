@@ -1,5 +1,9 @@
 # #584 demand-floor go/no-go — 2026-08-07
 
+> **Superseded 2026-08-08** by
+> [`584-demand-floor-go-2026-08-08.md`](./584-demand-floor-go-2026-08-08.md)
+> (**GO — liveness-only, provider-continuity first**). Kept for history.
+
 **Verdict: NO-GO** — leave canary disabled; do not arm the demand floor.
 
 ## Decision

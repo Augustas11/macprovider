@@ -1,23 +1,27 @@
 # Prebeta demand floor (P5) — gated by #584
 
-**Status:** Prepared, **not armed** on Pearl.
+**Status:** Prepared, **not armed** on Pearl until the arm checklist is run.
 
-**2026-08-07 go/no-go:** **NO-GO** — see
-[`584-demand-floor-go-nogo-2026-08-07.md`](./584-demand-floor-go-nogo-2026-08-07.md).
-Issue #584 is closed for the redesign package; production exception
-`exc-canary-disabled-enable-gate` remains **active** until physical baselines
-and a signed enable approval land.
+**2026-08-08 go/no-go:** **GO — liveness-only, provider-continuity first** — see
+[`584-demand-floor-go-2026-08-08.md`](./584-demand-floor-go-2026-08-08.md).
+(Supersedes 2026-08-07 NO-GO.)
 
-## Why gated
+**Hard rule:** outside providers must keep running during prebeta. If canary
+threatens continuity or UX, emergency-disable and leave it off.
 
-Production exception `exc-canary-disabled-enable-gate` (#584) keeps:
+## Why still not armed until checklist
+
+Production exception `exc-canary-disabled-enable-gate` (#584) still describes the
+**current** Pearl posture until the re-enable checklist runs:
 
 - `/var/lib/macprovider-canary-buyer/DISABLED` present
 - `/etc/macprovider-canary-buyer/enabled` absent
 - `pool.canary_enabled: false`
 - `canary-buyer.timer` disabled
 
-Until #584 physical baselines + signed go/no-go land, do **not** remove `DISABLED` or create the enable gate.
+Signed GO (2026-08-08) authorizes **liveness-only** arm under
+provider-continuity rules. Do **not** arm without following the checklist below
+and staying ready to emergency-disable.
 
 ## What “demand floor” means for provider UX
 
