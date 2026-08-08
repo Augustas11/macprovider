@@ -3156,10 +3156,12 @@
         "phase4-coordinator/internal/payout/addresses.go:AddressesService",
         "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
         "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress",
+        "phase4-coordinator/internal/payout/registration_only.go:BuildRegistrationOnly",
         "phase3-binary/Sources/macprovider-cli/PayoutAddressClient.swift:PayoutAddressClient",
         "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift:PayoutWalletFlow"
       ],
       "tests": [
+        "phase4-coordinator/internal/payout/registration_only_test.go:TestBuildRegistrationOnly_MountsChallengeRegisterAndPause",
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_HappyPath_FirstRegistration",
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_AntiReplay_SecondNonceRejected",
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_RotationPreservesPayoutAllowed_Zero",
@@ -3192,10 +3194,10 @@
       ],
       "evidence": [
         {
-          "artifact": "commit:57d9813957b1421199b59e5b3f09488f7c9644cd",
+          "artifact": "commit:9d92c02c294381b5987f320795a158e03e377e9c",
           "source": null,
-          "captured_at": "2026-08-05",
-          "expires_at": "2026-09-05"
+          "captured_at": "2026-08-08",
+          "expires_at": "2026-09-08"
         },
         {
           "artifact": "sha256:cce4916a7a89b4edccb350b53cb6c1d48bb0a0e0d4479446d63634d4c8f8c90d",
