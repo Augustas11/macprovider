@@ -26,6 +26,23 @@ The commands are noninteractive and have useful exit codes, so an operator can
 schedule `fetch` and then `compute` externally. Do not schedule an apply step:
 there is intentionally no apply mode in this tool.
 
+## Refresh and archive operations
+
+Run the workflow once per day after the UTC ranking window closes. Archive
+successful outputs under `docs/research/openrouter-snapshots/`; its README
+defines the durable artifact contract. Retain timestamped snapshots and
+proposals such as `openrouter-pricing-snapshot-<YYYYMMDDTHHMMSSZ>.json` and
+`openrouter-rate-card-proposal-<YYYYMMDDTHHMMSSZ>-<digest8>.json`. Preserve
+each artifact's content digest and review notes; never hand-edit an artifact.
+
+Treat artifacts older than 48 hours as stale for a pricing decision. A stale
+artifact may be used for historical research, but must not be promoted or used
+as the current market basis without a successful refresh. An unattended job may
+run `fetch` and, only after a successful validated snapshot, `compute`; persist
+stdout, stderr, and exit status separately. A failed-closed fetch stops the
+chain, emits no snapshot, and must not be followed by compute against raw,
+partial, or manually repaired data. There is no unattended apply step.
+
 ## Sources and normalization
 
 The fetcher uses documented OpenRouter API endpoints:
@@ -164,8 +181,7 @@ Candidates must be in a complete snapshot covering the mandatory documented
 daily top-50 demand cohort (aggregated total tokens over the fetch window), have a
 verified MLX/MLX-Swift/production GGUF-Metal path, and have a commercially
 permitted license. Broad-fleet models require active parameters at or below
-8B, 4-bit residency at or below 18 GB, and projected M-base TPS of at least
-30. Coding-dense rows require a coding-specialist flag, residency at or below
+8B, 4-bit residency at or below 18 GB, and projected M-base TPS of at least 30. Coding-dense rows require a coding-specialist flag, residency at or below
 45 GB, and projected M-Max TPS of at least 20.
 
 The policy's target rules are from `RESEARCH_227_RATE_CARD_V3_PROMPT.md`:
