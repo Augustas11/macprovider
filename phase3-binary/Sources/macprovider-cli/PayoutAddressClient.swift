@@ -256,6 +256,7 @@ struct PayoutAddressClient: Sendable {
             case (400, let c): return "Registration rejected (\(c ?? "bad_request"))."
             case (401, _): return "Provider access token was rejected. Repair saved access."
             case (403, _): return "This provider token cannot register a wallet for that identity."
+            case (404, _): return "Wallet changes are temporarily unavailable — try again later."
             case (409, _): return "Payouts are not yet enabled by the operator for this provider."
             case (429, _): return "Too many registration attempts. Wait and try again."
             case (503, _): return "Hot-wallet rotation is in progress. Retry later."

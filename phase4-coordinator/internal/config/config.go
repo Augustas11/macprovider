@@ -1755,6 +1755,15 @@ func (c *Config) resolveEnv() error {
 	// fields must honor the env:NAME indirection rule. The deploy gate
 	// already validates env: presence; without this resolver the
 	// coordinator boots with literal "env:..." RPC/wallet strings.
+	// #954: resolve hot_wallet_address whenever non-empty so
+	// registration-only mode can use env:NAME too.
+	if strings.TrimSpace(c.Payout.Security.HotWalletAddress) != "" {
+		if v, err := resolveEnvValue("payout.security.hot_wallet_address", c.Payout.Security.HotWalletAddress); err != nil {
+			return err
+		} else {
+			c.Payout.Security.HotWalletAddress = strings.TrimSpace(v)
+		}
+	}
 	if c.Payout.Enabled {
 		if v, err := resolveEnvValue("payout.security.rpc_url_primary", c.Payout.Security.RPCURLPrimary); err != nil {
 			return err
@@ -1765,11 +1774,6 @@ func (c *Config) resolveEnv() error {
 			return err
 		} else {
 			c.Payout.Security.RPCURLSecondary = v
-		}
-		if v, err := resolveEnvValue("payout.security.hot_wallet_address", c.Payout.Security.HotWalletAddress); err != nil {
-			return err
-		} else {
-			c.Payout.Security.HotWalletAddress = v
 		}
 		if v, err := resolveEnvValue("payout.security.encrypted_wallet_path", c.Payout.Security.EncryptedWalletPath); err != nil {
 			return err
@@ -2301,6 +2305,25 @@ func (c Config) Validate() error {
 		if p.EndpointURL != "" {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
+			}
+		}
+	}
+	// Registration-only (#954 / SPEC-016 v0.1.26): hot_wallet_address
+	// without payout.enabled still mounts §3.3 handlers, so the pin
+	// must be a real EIP-55 address (not a template placeholder) and
+	// cooling-off bounds apply. Full pipeline validation remains
+	// behind Enabled.
+	if !c.Payout.Enabled {
+		hot := strings.TrimSpace(c.Payout.Security.HotWalletAddress)
+		if hot != "" {
+			if err := validatePayoutHotWalletAddress(hot); err != nil {
+				return fmt.Errorf("payout.security.hot_wallet_address: %w (set a valid EIP-55 address for registration-only, or leave empty to keep §3.3 unmounted)", err)
+			}
+			if c.Payout.Tuning.AddressCoolingOffPeriod < time.Hour {
+				return fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h when payout.security.hot_wallet_address is set (SPEC-016 §3.1 registration-only)")
+			}
+			if c.Payout.Security.PauseResumeMinInterval < time.Second {
+				return fmt.Errorf("payout.security.pause_resume_min_interval must be >= 1s when payout.security.hot_wallet_address is set (SPEC-016 §6.4.1 registration-only)")
 			}
 		}
 	}
@@ -3022,6 +3045,34 @@ func validateSPKIPin(value, name string) error {
 			continue
 		}
 		return fmt.Errorf("%s must be empty or a valid 64-hex-char SHA-256", name)
+	}
+	return nil
+}
+
+// validatePayoutHotWalletAddress rejects placeholders and non-EIP-55
+// shapes without importing the payout package (avoids a config↔payout
+// cycle). Full checksum enforcement still runs in payout.LoadSecurityConfig
+// at setup time.
+func validatePayoutHotWalletAddress(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("empty")
+	}
+	if strings.HasPrefix(raw, "<") || strings.Contains(raw, "...") || strings.Contains(strings.ToLower(raw), "placeholder") {
+		return fmt.Errorf("looks like a template placeholder %q", raw)
+	}
+	if len(raw) != 42 {
+		return fmt.Errorf("must be 42-char 0x-prefixed EIP-55 address (got len %d)", len(raw))
+	}
+	if !strings.HasPrefix(raw, "0x") && !strings.HasPrefix(raw, "0X") {
+		return fmt.Errorf("must start with 0x")
+	}
+	for _, c := range raw[2:] {
+		isDigit := c >= '0' && c <= '9'
+		isLower := c >= 'a' && c <= 'f'
+		isUpper := c >= 'A' && c <= 'F'
+		if !isDigit && !isLower && !isUpper {
+			return fmt.Errorf("contains non-hex character")
+		}
 	}
 	return nil
 }

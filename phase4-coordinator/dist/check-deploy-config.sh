@@ -842,86 +842,104 @@ def g_payout(sub, key):
 
 payout_enabled_raw = g_section(coord, "payout", "enabled")
 payout_enabled = (payout_enabled_raw or "").strip().lower() == "true"
-if not payout_enabled:
-    print("  note: payout.enabled is false -> SPEC-016 payout gate SKIPPED")
-else:
-    def get_sec(k): return g_payout("security", k)
-    def get_tun(k): return g_payout("tuning", k)
+hot_wallet_raw = (g_payout("security", "hot_wallet_address") or "").strip()
+registration_only = (not payout_enabled) and hot_wallet_raw != ""
 
-    def check_payout_field(label, raw, *, hex_64=False, allow_empty=False, is_rpc_url=False):
-        """Validate a payout config field: present-with-value or env:NAME.
+def get_sec(k): return g_payout("security", k)
+def get_tun(k): return g_payout("tuning", k)
 
-        - missing                              -> HARD fail
-        - "env:NAME", NAME unset               -> ok (deferred to runtime)
-        - "env:NAME", NAME set to placeholder  -> HARD fail
-        - "env:" / "env:1bad"                  -> HARD fail (malformed)
-        - inline literal placeholder           -> HARD fail
-        - inline literal value                 -> ok (hex-validated if hex_64;
-                                                  https / non-internal target
-                                                  if is_rpc_url -- FULL-r1
-                                                  [full-sec:r1-1] closure)
-        """
-        if raw is None or raw == "":
-            if allow_empty:
-                ok(f"{label} empty -> default applies")
-                return
-            hard(f"{label} is MISSING — payout.enabled=true requires every payout.* key")
-            return
-        raw_s = str(raw)
-        src = ""
-        if raw_s.startswith("env:"):
-            m = ENV_REF.match(raw_s)
-            if not m:
-                hard(f"{label} malformed env indirection {raw_s!r}")
-                return
-            name = m.group(1)
-            resolved = os.environ.get(name)
-            if not resolved:
-                ok(f"{label} deferred to runtime via env:{name}")
-                return
-            raw_s = resolved
-            src = f" (resolved from env:{name})"
-        if PLACEHOLDER.search(raw_s) or raw_s.startswith("<"):
-            hard(f"{label} is a PLACEHOLDER{src} -> payout pipeline would fail at startup")
-            return
-        if hex_64 and not re.fullmatch(r"[0-9a-fA-F]{64}", raw_s):
-            hard(f"{label} is not 64-hex (len {len(raw_s)}){src}; expected SHA-256 SPKI pin")
-            return
-        if is_rpc_url:
-            err = validate_payout_rpc_url(raw_s)
-            if err is not None:
-                hard(f"{label} invalid{src}: {err}")
-                return
-        ok(f"{label} present{src}")
-
+def validate_payout_rpc_url(raw):
     # FULL-r1 [full-sec:r1-1] HIGH closure: payout RPC URLs are the
     # trust root for the §4.4 two-RPC discipline. Mirror the runtime
     # validation in internal/config/config.go::validatePayoutRPCURL —
     # reject non-https, userinfo, loopback / private / link-local /
     # unspecified IPs. Hostnames pass through (DNS not resolved in
     # the deploy gate); the SPKI pin is the runtime trust root.
-    def validate_payout_rpc_url(raw):
-        from urllib.parse import urlparse
-        import ipaddress
-        try:
-            u = urlparse(raw.strip())
-        except Exception as exc:
-            return f"unparseable URL ({exc})"
-        if not u.hostname:
-            return "missing hostname"
-        if u.scheme != "https":
-            return f"scheme {u.scheme!r} must be https (SPKI pin only fires on https)"
-        if u.username or u.password:
-            return "must not contain userinfo (credentials in URL leak into logs)"
-        host = u.hostname
-        try:
-            ip = ipaddress.ip_address(host)
-        except ValueError:
-            return None  # hostname literal: defer trust to SPKI pin
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
-            return f"IP literal {host} is loopback / private / link-local / unspecified (SSRF defense)"
-        return None
+    from urllib.parse import urlparse
+    import ipaddress
+    try:
+        u = urlparse(raw.strip())
+    except Exception as exc:
+        return f"unparseable URL ({exc})"
+    if not u.hostname:
+        return "missing hostname"
+    if u.scheme != "https":
+        return f"scheme {u.scheme!r} must be https (SPKI pin only fires on https)"
+    if u.username or u.password:
+        return "must not contain userinfo (credentials in URL leak into logs)"
+    host = u.hostname
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return None  # hostname literal: defer trust to SPKI pin
+    if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
+        return f"IP literal {host} is loopback / private / link-local / unspecified (SSRF defense)"
+    return None
 
+def check_payout_field(label, raw, *, hex_64=False, allow_empty=False, is_rpc_url=False):
+    """Validate a payout config field: present-with-value or env:NAME.
+
+    - missing                              -> HARD fail
+    - "env:NAME", NAME unset               -> ok (deferred to runtime)
+    - "env:NAME", NAME set to placeholder  -> HARD fail
+    - "env:" / "env:1bad"                  -> HARD fail (malformed)
+    - inline literal placeholder           -> HARD fail
+    - inline literal value                 -> ok (hex-validated if hex_64;
+                                              https / non-internal target
+                                              if is_rpc_url -- FULL-r1
+                                              [full-sec:r1-1] closure)
+    """
+    if raw is None or raw == "":
+        if allow_empty:
+            ok(f"{label} empty -> default applies")
+            return
+        hard(f"{label} is MISSING — payout.enabled=true requires every payout.* key")
+        return
+    raw_s = str(raw)
+    src = ""
+    if raw_s.startswith("env:"):
+        m = ENV_REF.match(raw_s)
+        if not m:
+            hard(f"{label} malformed env indirection {raw_s!r}")
+            return
+        name = m.group(1)
+        resolved = os.environ.get(name)
+        if not resolved:
+            ok(f"{label} deferred to runtime via env:{name}")
+            return
+        raw_s = resolved
+        src = f" (resolved from env:{name})"
+    if PLACEHOLDER.search(raw_s) or raw_s.startswith("<"):
+        hard(f"{label} is a PLACEHOLDER{src} -> payout pipeline would fail at startup")
+        return
+    if hex_64 and not re.fullmatch(r"[0-9a-fA-F]{64}", raw_s):
+        hard(f"{label} is not 64-hex (len {len(raw_s)}){src}; expected SHA-256 SPKI pin")
+        return
+    if is_rpc_url:
+        err = validate_payout_rpc_url(raw_s)
+        if err is not None:
+            hard(f"{label} invalid{src}: {err}")
+            return
+    ok(f"{label} present{src}")
+
+if registration_only:
+    # SPEC-016 v0.1.26 §4.1 — §3.3 mounts with payout.enabled=false.
+    # Validate the hot-wallet pin + cooling-off floor; skip execution-only keys.
+    print("  note: payout.enabled=false with hot_wallet_address set -> registration-only gate")
+    check_payout_field("payout.security.hot_wallet_address", hot_wallet_raw)
+    cooling = get_tun("address_cooling_off_period")
+    if cooling is None or cooling == "":
+        hard("payout.tuning.address_cooling_off_period is MISSING — required in registration-only (SPEC-016 §3.1)")
+    else:
+        ok("payout.tuning.address_cooling_off_period present")
+    pause_min = get_sec("pause_resume_min_interval")
+    if pause_min is None or pause_min == "":
+        hard("payout.security.pause_resume_min_interval is MISSING — required in registration-only (SPEC-016 §6.4.1)")
+    else:
+        ok("payout.security.pause_resume_min_interval present")
+elif not payout_enabled:
+    print("  note: payout.enabled is false and no hot wallet -> SPEC-016 payout gate SKIPPED")
+else:
     # security namespace (required when enabled=true)
     check_payout_field("payout.security.hot_wallet_address", get_sec("hot_wallet_address"))
     check_payout_field("payout.security.rpc_url_primary",   get_sec("rpc_url_primary"),   is_rpc_url=True)

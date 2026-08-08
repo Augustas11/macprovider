@@ -17,7 +17,6 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -83,7 +82,7 @@ func TestPayoutAddressRegistrationJourneyEvidence(t *testing.T) {
 	svc := newJourneyServiceForTest(t, db, hotWallet, authStore, &fakePause{})
 	svc.Log = logger
 	svc.Now = func() time.Time { return startClock }
-	router := journeyRouter(svc)
+	router := journeyRouter(t, db, svc)
 
 	assertions := []journeyAssertion{}
 	addAssertionStatus := func(id, status, assertion string, details map[string]any) {
@@ -432,11 +431,38 @@ func journeyResultSteps(assertions []journeyAssertion, artifactID string) []map[
 	return steps
 }
 
-func journeyRouter(svc *AddressesService) http.Handler {
-	r := chi.NewRouter()
-	r.Get("/providers/{provider_id}/payout-address/challenge", svc.ServePayoutChallenge)
-	r.Post("/providers/{provider_id}/payout-address", svc.ServePayoutAddress)
-	return r
+func journeyRouter(t *testing.T, db *sql.DB, svc *AddressesService) http.Handler {
+	t.Helper()
+	logger, _ := quietLogger()
+	flagWriter, err := NewRuntimeFlagWriter(db, logger)
+	if err != nil {
+		t.Fatalf("journey flag writer: %v", err)
+	}
+	pauseSvc, err := NewPauseResumeService(PauseResumeOptions{
+		Writer:      flagWriter,
+		MinInterval: time.Second,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("journey pause service: %v", err)
+	}
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	// Exercise the shipped registration-only mux (#954), not a
+	// hand-rolled chi router, so journey evidence covers the
+	// production composition (SPEC v0.1.26).
+	mux, err := NewMuxRegistrationOnly(RegistrationOnlyMuxOptions{
+		Addresses:   svc,
+		Pause:       pauseSvc,
+		OperatorKey: "journey-operator-key-32bytes-long!!!",
+		Actor:       "operator_key:journey",
+		Fallback:    fallback,
+	})
+	if err != nil {
+		t.Fatalf("journey registration-only mux: %v", err)
+	}
+	return mux
 }
 
 func serveJourneyRequest(handler http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
@@ -635,7 +661,7 @@ func exerciseInvalidJourneyCases(t *testing.T, hotWallet, providerID string, pri
 		svc := newJourneyServiceForTest(t, db, hotWallet, authStore, &fakePause{})
 		svc.Log = logger
 		svc.Now = func() time.Time { return now }
-		rec := serveJourneyRequest(journeyRouter(svc), http.MethodPost, path, body, runToken)
+		rec := serveJourneyRequest(journeyRouter(t, db, svc), http.MethodPost, path, body, runToken)
 		requireStatus(t, rec, want, name)
 		if wantBody != "" && !strings.Contains(rec.Body.String(), wantBody) {
 			t.Fatalf("%s body=%s missing %s", name, rec.Body.String(), wantBody)
@@ -681,7 +707,7 @@ VALUES (?, 'base-mainnet', '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa',
 	svc.Log = logger
 	svc.Now = func() time.Time { return now }
 	body := buildRequestBody(t, priv, providerID, providerAddr, hotWallet, uint64(now.Unix()), [32]byte{0x09, 0x09})
-	rec := serveJourneyRequest(journeyRouter(svc), http.MethodPost, "/providers/"+providerID+"/payout-address", body, disabledToken)
+	rec := serveJourneyRequest(journeyRouter(t, db, svc), http.MethodPost, "/providers/"+providerID+"/payout-address", body, disabledToken)
 	requireStatus(t, rec, http.StatusConflict, "disabled rotation")
 	if !strings.Contains(rec.Body.String(), "payout_not_allowed") {
 		t.Fatalf("disabled rotation body=%s missing payout_not_allowed", rec.Body.String())
@@ -718,7 +744,7 @@ func exercisePauseCases(t *testing.T, hotWallet, providerID string, priv *secp25
 	pausedSvc := newJourneyServiceForTest(t, pausedDB, hotWallet, pausedAuth, &fakePause{paused: true})
 	pausedSvc.Log = pausedLogger
 	pausedSvc.Now = func() time.Time { return now }
-	pausedRouter := journeyRouter(pausedSvc)
+	pausedRouter := journeyRouter(t, pausedDB, pausedSvc)
 	challengeNoAuth := serveJourneyRequest(pausedRouter, http.MethodGet, "/providers/"+providerID+"/payout-address/challenge", "", "")
 	challengeAuth := serveJourneyRequest(pausedRouter, http.MethodGet, "/providers/"+providerID+"/payout-address/challenge", "", pausedToken)
 	body := buildRequestBody(t, priv, providerID, providerAddr, hotWallet, uint64(now.Unix()), [32]byte{0x0a})
@@ -739,7 +765,7 @@ func exercisePauseCases(t *testing.T, hotWallet, providerID string, priv *secp25
 	toctouSvc := newJourneyServiceForTest(t, toctouDB, hotWallet, toctouAuth, &toctouPause{db: toctouDB})
 	toctouSvc.Log = toctouLogger
 	toctouSvc.Now = func() time.Time { return now }
-	toctouRec := serveJourneyRequest(journeyRouter(toctouSvc), http.MethodPost, "/providers/"+providerID+"/payout-address", body, toctouToken)
+	toctouRec := serveJourneyRequest(journeyRouter(t, toctouDB, toctouSvc), http.MethodPost, "/providers/"+providerID+"/payout-address", body, toctouToken)
 	requireStatus(t, toctouRec, http.StatusServiceUnavailable, "toctou pause")
 	requireLogEventCount(t, toctouLogs.String(), "provider_payout_address_change_rejected", map[string]string{"provider_id": providerID, "reason": "registration_paused"}, 1)
 	out["toctou_status"] = toctouRec.Code
@@ -754,7 +780,7 @@ func exercisePauseCases(t *testing.T, hotWallet, providerID string, priv *secp25
 	rateSvc := newJourneyServiceForTest(t, rateDB, hotWallet, rateAuth, &fakePause{})
 	rateSvc.Log = rateLogger
 	rateSvc.Now = func() time.Time { return now }
-	rateRouter := journeyRouter(rateSvc)
+	rateRouter := journeyRouter(t, rateDB, rateSvc)
 	for i := 0; i < registrationRateLimitDefault; i++ {
 		rec := serveJourneyRequest(rateRouter, http.MethodPost, "/providers/rate-provider/payout-address", "{}", rateToken)
 		if rec.Code == http.StatusTooManyRequests {

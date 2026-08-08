@@ -296,3 +296,29 @@ func loadConfigFromYAML(t *testing.T, fragment string) (Config, error) {
 	}
 	return Load(path)
 }
+
+// TestLoadResolvesHotWalletEnvInRegistrationOnly covers #954:
+// env:NAME for hot_wallet_address must resolve even when
+// payout.enabled=false so registration-only can use secret indirection.
+func TestLoadResolvesHotWalletEnvInRegistrationOnly(t *testing.T) {
+	t.Setenv("S954_TEST_OP_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("S954_PAYOUT_HOT_WALLET", "0x8ba1f109551bD432803012645Ac136ddd64DBA72")
+
+	cfg := writeMinimalConfig(t, `
+auth:
+  operator_key: env:S954_TEST_OP_KEY
+  gateway_service_token: fedcba9876543210PONMLKJIHGFEDCBA
+payout:
+  enabled: false
+  security:
+    hot_wallet_address: env:S954_PAYOUT_HOT_WALLET
+  tuning:
+    address_cooling_off_period: 24h
+`)
+	if cfg.Payout.Security.HotWalletAddress != "0x8ba1f109551bD432803012645Ac136ddd64DBA72" {
+		t.Errorf("HotWalletAddress=%q, want resolved value in registration-only", cfg.Payout.Security.HotWalletAddress)
+	}
+	if cfg.Payout.Enabled {
+		t.Fatal("enabled must stay false")
+	}
+}

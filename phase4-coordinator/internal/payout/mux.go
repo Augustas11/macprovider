@@ -50,6 +50,14 @@ var step1PathTable = []PathTableEntry{
 	{Method: http.MethodGet, Path: "/providers/{provider_id}/payout-address/challenge", Realm: RealmProviderToken},
 }
 
+// registrationOnlyPathTable is the #954 / SPEC v0.1.26 surface:
+// §3.3 challenge/register plus the §6.4.1 pause/resume kill
+// switch. Execution-only admin routes stay off.
+var registrationOnlyPathTable = append([]PathTableEntry{
+	{Method: http.MethodPost, Path: "/admin/payout/pause-registration", Realm: RealmOperatorKey},
+	{Method: http.MethodPost, Path: "/admin/payout/resume-registration", Realm: RealmOperatorKey},
+}, step1PathTable...)
+
 // step2PathTable extends step1PathTable with the Step 2 admin
 // routes. The wildcard fallback /providers/* remains anchored to
 // step1; Step 2 adds operator-key surfaces under /admin/payout/*.
@@ -112,6 +120,60 @@ func NewMux(addresses *AddressesService, fallback http.Handler) (http.Handler, e
 	// SPEC §3.3 path-table verification. Walk chi's routes and
 	// confirm parity with step1PathTable.
 	if err := verifyPathTable(r, step1PathTable); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// RegistrationOnlyMuxOptions wires §3.3 + §6.4.1 without the
+// execution pipeline (runner/signer/RPC/lease).
+type RegistrationOnlyMuxOptions struct {
+	Addresses   *AddressesService
+	Pause       *PauseResumeService
+	OperatorKey string
+	Actor       string
+	Fallback    http.Handler
+}
+
+// NewMuxRegistrationOnly mounts provider-token §3.3 routes and
+// operator-key pause/resume. Path-table parity is asserted against
+// registrationOnlyPathTable.
+func NewMuxRegistrationOnly(opts RegistrationOnlyMuxOptions) (http.Handler, error) {
+	if opts.Addresses == nil {
+		return nil, fmt.Errorf("payout.NewMuxRegistrationOnly: AddressesService required")
+	}
+	if opts.Pause == nil {
+		return nil, fmt.Errorf("payout.NewMuxRegistrationOnly: Pause required")
+	}
+	if opts.OperatorKey == "" {
+		return nil, fmt.Errorf("payout.NewMuxRegistrationOnly: OperatorKey required")
+	}
+	if opts.Actor == "" {
+		return nil, fmt.Errorf("payout.NewMuxRegistrationOnly: Actor required")
+	}
+	if opts.Fallback == nil {
+		return nil, fmt.Errorf("payout.NewMuxRegistrationOnly: Fallback required")
+	}
+	r := chi.NewRouter()
+	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
+	r.Get("/providers/{provider_id}/payout-address/challenge", opts.Addresses.ServePayoutChallenge)
+	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
+
+	auth := operatorKeyMiddleware(opts.OperatorKey)
+	// runner is nil — withHaltObservability is a pass-through in
+	// registration-only (no halt state without a runner).
+	r.With(auth).Post("/admin/payout/pause-registration", withHaltObservability(
+		"pause-registration", nil,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Pause.ServePause(w, req, opts.Actor)
+		}))
+	r.With(auth).Post("/admin/payout/resume-registration", withHaltObservability(
+		"resume-registration", nil,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Pause.ServeResume(w, req, opts.Actor)
+		}))
+
+	if err := verifyPathTable(r, registrationOnlyPathTable); err != nil {
 		return nil, err
 	}
 	return r, nil
