@@ -409,7 +409,7 @@ def verify_root():
                 raise RuntimeError(f"not_directory:{path}")
 
 def read_marker():
-    fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         raw = os.read(fd, 65536)
     finally:
@@ -508,7 +508,7 @@ def current_binary_version(path):
 
 def read_success_sentinel(path):
     reject_path(path)
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         payload = json.loads(os.read(fd, 65536).decode("utf-8"))
     finally:
@@ -569,7 +569,7 @@ def process_success_sentinel(marker):
 
 def sha256(path):
     h = hashlib.sha256()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         while True:
             chunk = os.read(fd, 1024 * 1024)
@@ -1038,7 +1038,7 @@ def validate_malibu_app_backup(release_backup):
     state_st = reject_path(state_path)
     if not stat.S_ISREG(archive_st.st_mode) or not stat.S_ISREG(state_st.st_mode):
         raise RuntimeError("malibu_backup_not_regular")
-    fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         raw = os.read(fd, 65537)
     finally:
@@ -1150,7 +1150,7 @@ def fsync_release_tree(root_path):
         directories.append(current)
         for name in file_names:
             path = os.path.join(current, name)
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
             try:
                 os.fsync(fd)
             finally:
@@ -1165,7 +1165,7 @@ def fsync_release_tree(root_path):
 def atomic_copy_binary(source, target, mode):
     temporary = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-restore-{uuid.uuid4()}")
     try:
-        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
             destination_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), mode)
             try:

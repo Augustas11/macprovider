@@ -536,6 +536,11 @@ struct StartupState: Equatable {
             homeDirectory: homeDirectory,
             fileManager: fm
         )
+        let launchdRepairEvidenceExists = Self.launchdRepairEvidenceExists(
+            paths: paths,
+            homeDirectory: homeDirectory,
+            fileManager: fm
+        )
 
         var backgroundProviderHealthy = false
         if ProviderConfig.readProviderID(paths: paths) != nil,
@@ -548,7 +553,7 @@ struct StartupState: Equatable {
                 homeDirectory: homeDirectory,
                 fileManager: fm
         )
-        let launchdJobNeedsRepair = launchdInstallEvidenceExists && providerRepairState.needsRepair
+        let launchdJobNeedsRepair = launchdRepairEvidenceExists && providerRepairState.needsRepair
         // A loaded provider label with an unexpected executable/plist is a
         // conflict even when the on-disk evidence is missing or unsafe. The
         // installer intentionally refuses label-only reclamation without a
@@ -568,7 +573,7 @@ struct StartupState: Equatable {
         // Do not gate watchdog inspection on a readable plist. A loaded job
         // whose plist disappeared or became unsafe is itself a manual
         // conflict; suppressing that state creates an endless repair loop.
-        let watchdogJobNeedsRepair = watchdogRepairState.needsRepair
+        let watchdogJobNeedsRepair = launchdRepairEvidenceExists && watchdogRepairState.needsRepair
         let watchdogNeedsManualIntervention = watchdogRepairState.requiresManualIntervention
 
         return StartupState(
@@ -635,6 +640,91 @@ struct StartupState: Equatable {
             )
         }
         return trusted(manifest) || trusted(launchd)
+    }
+
+    /// Repair is admitted only when Malibu can present the same durable
+    /// incumbent identity that install.sh requires before bypassing referral
+    /// admission. A stale plist or manifest by itself is onboarding evidence,
+    /// not proof that the existing provider can be safely repaired in place.
+    static func launchdRepairEvidenceExists(
+        paths: ProviderPaths = .current,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        let fm = fileManager
+        let configDirectory = paths.configFile.deletingLastPathComponent()
+        let providerIDURL = configDirectory.appendingPathComponent("provider_id")
+        let manifest = homeDirectory.appendingPathComponent(
+            "Library/Application Support/macprovider/install_manifest.json"
+        )
+        let launchd = homeDirectory.appendingPathComponent(
+            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+        )
+        func trusted(_ url: URL, maxBytes: Int = 1024 * 1024) -> Bool {
+            InstalledProviderMonitor.isSafePrivateDirectoryChain(
+                url.deletingLastPathComponent(),
+                under: homeDirectory
+            ) && InstalledProviderMonitor.hasTrustedPrivateFile(
+                at: url,
+                maxBytes: maxBytes,
+                fileManager: fm
+            )
+        }
+        guard let configuredProviderID = ProviderConfig.readProviderID(paths: paths),
+              trusted(paths.configFile),
+              let savedProviderID = InstalledProviderMonitor.readOwnerPrivateRegularFile(
+                  providerIDURL,
+                  maxBytes: 64 * 1024,
+                  fileManager: fm
+              ),
+              String(decoding: savedProviderID, as: UTF8.self)
+                  .trimmingCharacters(in: .whitespacesAndNewlines) == configuredProviderID,
+              trusted(providerIDURL, maxBytes: 64 * 1024),
+              trusted(manifest),
+              trusted(launchd),
+              let manifestData = InstalledProviderMonitor.readOwnerPrivateRegularFile(
+                  manifest,
+                  maxBytes: 64 * 1024,
+                  fileManager: fm
+              ),
+              let manifestObject = try? JSONSerialization.jsonObject(with: manifestData),
+              let manifestValues = manifestObject as? [String: Any],
+              let installPrefix = manifestValues["install_prefix"] as? String,
+              let binaryPath = manifestValues["binary_path"] as? String,
+              let launchdLabels = manifestValues["launchd_labels"] as? [String],
+              let launchdPlists = manifestValues["launchd_plists"] as? [String] else {
+            return false
+        }
+        let installDirectory = URL(fileURLWithPath: installPrefix).standardizedFileURL
+        let expectedBinaryPath = installDirectory.appendingPathComponent("macprovider-cli").path
+        guard installPrefix == installDirectory.path,
+              InstalledProviderMonitor.isSupportedProviderInstallDirectory(
+                  installDirectory,
+                  under: homeDirectory
+              ),
+              binaryPath == expectedBinaryPath,
+              launchdLabels.contains(InstalledProviderMonitor.providerLaunchdLabel),
+              launchdPlists.contains(launchd.path),
+              let plistData = InstalledProviderMonitor.readOwnerPrivateRegularFile(
+                  launchd,
+                  maxBytes: 64 * 1024,
+                  fileManager: fm
+              ),
+              let plistObject = try? PropertyListSerialization.propertyList(
+                  from: plistData,
+                  options: [],
+                  format: nil
+              ),
+              let plistValues = plistObject as? [String: Any],
+              plistValues["Label"] as? String == InstalledProviderMonitor.providerLaunchdLabel else {
+            return false
+        }
+        let plistProgram = (plistValues["Program"] as? String)
+            ?? (plistValues["ProgramArguments"] as? [String])?.first
+        let legacyBinaryPath = homeDirectory
+            .appendingPathComponent(".local/bin/macprovider-cli")
+            .path
+        return plistProgram == binaryPath || plistProgram == legacyBinaryPath
     }
 
     static func applyMigrationDecision(

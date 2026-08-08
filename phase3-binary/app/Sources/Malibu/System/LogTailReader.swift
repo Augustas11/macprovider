@@ -152,6 +152,8 @@ final class LogTailReader: ObservableObject {
               (fileInfo.st_mode & S_IFMT) == S_IFREG,
               fileInfo.st_uid == getuid(),
               Int(fileInfo.st_nlink) == 1,
+              fileInfo.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              hasNoExtendedACL(descriptor),
               fileInfo.st_size >= 0 else {
             return nil
         }
@@ -197,6 +199,15 @@ final class LogTailReader: ObservableObject {
             maxPendingFragmentCharacters: maxPendingFragmentCharacters
         )
         return ReadResult(offset: nextOffset, pendingFragment: parsed.pendingFragment, lines: parsed.lines)
+    }
+
+    private nonisolated static func hasNoExtendedACL(_ descriptor: Int32) -> Bool {
+        errno = 0
+        guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+            return errno == 0 || errno == ENOENT
+        }
+        _ = acl_free(UnsafeMutableRawPointer(acl))
+        return false
     }
 
     nonisolated private static func parseChunk(

@@ -145,7 +145,12 @@ cat > "$REPAIR_PLIST_PATH" <<EOF
 </dict></plist>
 EOF
 chmod 600 "$REPAIR_CONFIG_PATH" "$REPAIR_PROVIDER_ID_PATH" "$REPAIR_MANIFEST_PATH" "$REPAIR_PLIST_PATH"
+# Legacy standalone installers commonly left LaunchAgent plists owner-writable
+# but group/world-readable under umask 022. Repair admission rejects writes and
+# ACLs, not harmless read bits, so Malibu's accepted evidence can be reclaimed.
+chmod 644 "$REPAIR_PLIST_PATH"
 (
+  HOME="$REPAIR_HOME"
   INSTALL_DIR="$REPAIR_INSTALL_DIR"
   BINARY_PATH="$REPAIR_BINARY_PATH"
   CONFIG_PATH="$REPAIR_CONFIG_PATH"
@@ -166,8 +171,34 @@ chmod 600 "$REPAIR_CONFIG_PATH" "$REPAIR_PROVIDER_ID_PATH" "$REPAIR_MANIFEST_PAT
   [ -z "$REFERRAL_CODE_SOURCE_FILE" ]
   [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
 )
+chmod 664 "$REPAIR_PLIST_PATH"
+if (
+  HOME="$REPAIR_HOME"
+  INSTALL_DIR="$REPAIR_INSTALL_DIR"
+  BINARY_PATH="$REPAIR_BINARY_PATH"
+  CONFIG_PATH="$REPAIR_CONFIG_PATH"
+  PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
+  MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
+  PLIST_PATH="$REPAIR_PLIST_PATH"
+  PROVIDER_LABEL="live.streamvc.macprovider"
+  DRY_RUN=0
+  EMERGENCY_ROLLBACK=0
+  REFERRAL_REPLACE_INCUMBENT=0
+  REPAIR_EXISTING_INSTALL=1
+  REFERRAL_CODE_SOURCE_FILE=""
+  FRESH_REFERRAL_BOOTSTRAP=0
+  NO_PROMPT=1
+  log() { :; }
+  die() { exit "$1"; }
+  prepare_fresh_referral_code
+); then
+  echo "repair accepted a writable LaunchAgent plist" >&2
+  exit 1
+fi
+chmod 644 "$REPAIR_PLIST_PATH"
 rm -f "$REPAIR_MANIFEST_PATH"
 if (
+  HOME="$REPAIR_HOME"
   INSTALL_DIR="$REPAIR_INSTALL_DIR"
   BINARY_PATH="$REPAIR_BINARY_PATH"
   CONFIG_PATH="$REPAIR_CONFIG_PATH"
@@ -377,6 +408,21 @@ if (
   echo "prefetch stopped a live launchd provider for a blind re-tune with no pinned model" >&2
   exit 1
 fi
+
+# Malibu repair may encounter a stale loaded label after the provider binary
+# was removed. Trusted repair evidence plus no serving CLI must not be blocked
+# by the ordinary-upgrade live-label guard before launchd reclaim runs.
+(
+  lsof() { return 1; }
+  EXISTING_INSTALL_WAS_PRESENT=1
+  AUTOTUNE_UPGRADE_CANDIDATE_MODEL_ID=""
+  INSTALL_TX_SERVICE_WAS_ACTIVE=1
+  REPAIR_EXISTING_INSTALL=1
+  prefetch_upgrade_autotune_model
+) || {
+  echo "repair dead-ended on a stale loaded provider label without a live CLI" >&2
+  exit 1
+}
 
 # And when a MANUALLY started macprovider-cli holds the live port (no launchd
 # service, so INSTALL_TX_SERVICE_WAS_ACTIVE=0), prefetch must ALSO fail closed --

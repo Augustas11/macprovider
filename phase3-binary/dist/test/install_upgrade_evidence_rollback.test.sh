@@ -16,11 +16,31 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 INSTALL_SH="$REPO_ROOT/phase3-binary/dist/install.sh"
 TMP="$(mktemp -d)"
+terminate_test_process() {
+  test_pid="$1"
+  case "$test_pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if ! kill -0 "$test_pid" >/dev/null 2>&1; then
+    wait "$test_pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+  kill -TERM "$test_pid" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$test_pid" >/dev/null 2>&1; then
+      wait "$test_pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  kill -KILL "$test_pid" >/dev/null 2>&1 || true
+  wait "$test_pid" >/dev/null 2>&1 || true
+}
 cleanup_test_processes() {
   while IFS= read -r log_path; do
-    awk -F'|' '{print $1}' "$log_path" | while read -r pid; do
-      kill "$pid" >/dev/null 2>&1 || true
-    done
+    while IFS= read -r pid; do
+      terminate_test_process "$pid"
+    done < <(awk -F'|' '{print $1}' "$log_path")
   done < <(find "$TMP" -name manual-fixture.log -type f -print 2>/dev/null)
   rm -rf "$TMP"
 }
@@ -29,9 +49,13 @@ trap cleanup_test_processes EXIT
 python3 - "$INSTALL_SH" > "$TMP/functions.sh" <<'PY'
 import sys
 names = {
-    "cleanup", "install_tx_path_matches", "stage_install_tx_path", "stage_install_tx_plist",
+    "cleanup", "transaction_path_exists", "transaction_file_or_absent",
+    "transaction_directory_or_absent", "transaction_binary_or_absent",
+    "validate_transaction_path_kinds", "validate_transaction_filesystems", "install_tx_path_matches",
+    "stage_install_tx_symlink", "stage_install_tx_path", "stage_install_tx_plist",
     "stage_lifecycle_snapshot",
     "secure_private_directory", "write_atomic_install_file", "write_install_tx_marker",
+    "fsync_directory_path",
     "write_install_recovery_artifacts", "begin_install_transaction",
     "mark_install_cutover_started", "discard_install_transaction_before_cutover",
     "rollback_install_transaction", "commit_install_transaction",
@@ -850,6 +874,15 @@ run_case() {
         '33333333-3333-4333-8333-333333333333'
       chmod 600 "$lifecycle_state_file"
       ;;
+    missing-provider-plist)
+      # A loaded provider without a recoverable plist must fail before durable
+      # recovery is published; rollback cannot safely recreate that service.
+      rm -f "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist"
+      ;;
+    missing-watchdog-plist)
+      # Apply the same pre-publication invariant to a loaded watchdog.
+      rm -f "$root/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+      ;;
     serve-snapshot)
       # A-01: a serve-written snapshot restores byte-exact (serve can always
       # leave its own state; no fencing risk, no translation).
@@ -880,7 +913,8 @@ run_case() {
   PATH="$root/bin:/usr/bin:/bin" \
     LAUNCHCTL_LOG="$root/launchctl.log" CASE_ROOT="$root" FAIL_ACTION="$fail_action" FAIL_ONCE_ACTION="" \
     FUNCTIONS_PATH="$TMP/functions.sh" \
-    PRE_BEGIN_FAULT="$pre_begin_fault" ROLLBACK_FAULT="$rollback_fault" INSTALL_PHASE="$install_phase" \
+    PRE_BEGIN_FAULT="$pre_begin_fault" ROLLBACK_FAULT="$rollback_fault" INSTALL_TX_TEST_RESTORE_COPY_FAULT="$rollback_fault" INSTALL_PHASE="$install_phase" \
+    INSTALL_TX_DIRECTORY_COPY_FAULT="$pre_begin_fault" \
     MANUAL_BEHAVIOR="$manual_behavior" \
     MUTATION_LIFECYCLE_STATE="${MUTATION_LIFECYCLE_STATE:-}" \
     MUTATION_LIFECYCLE_WRITER="${MUTATION_LIFECYCLE_WRITER:-}" \
@@ -1437,6 +1471,21 @@ assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_wrong_mode" lifecycle_state
 run_case lifecycle_oversized "" "" "" self-test active bind oversized
 assert_snapshot_aborted_pre_mutation "$TMP/lifecycle_oversized" lifecycle_state_oversized
 
+# A loaded service without its owner-safe plist cannot be reclaimed and cannot
+# be restored by recovery. The transaction must reject both variants before
+# publishing or arming any durable recovery state, leaving the incumbent live.
+run_case loaded_provider_without_plist "" "" "" self-test active bind missing-provider-plist
+root="$TMP/loaded_provider_without_plist"
+assert_snapshot_aborted_pre_mutation "$root" 'loaded provider has no recoverable launchd plist'
+[ ! -e "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist" ]
+[ -z "$(find "$root/home/.config/macprovider" -maxdepth 1 -type d -name 'install-recovery-*.staging' -print -quit)" ]
+
+run_case loaded_watchdog_without_plist "" "" "" self-test active bind missing-watchdog-plist
+root="$TMP/loaded_watchdog_without_plist"
+assert_snapshot_aborted_pre_mutation "$root" 'loaded watchdog has no recoverable launchd plist'
+[ ! -e "$root/home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" ]
+[ -z "$(find "$root/home/.config/macprovider" -maxdepth 1 -type d -name 'install-recovery-*.staging' -print -quit)" ]
+
 # ---------------------------------------------------------------------------
 # A-01(a): a stale-valid updater-written snapshot with a dead operation id is
 # NOT raw-restored (that would fence a restored lifecycle-aware CLI). Rollback
@@ -1566,6 +1615,50 @@ if [ -f "$snap_meta" ] && grep -qx 'had=1' "$snap_meta" 2>/dev/null; then
   echo "short-write snapshot published had=1 despite a truncated destination" >&2
   exit 1
 fi
+
+# S-M3: mixed-content install directories may contain ordinary support files,
+# but special files cannot be copied safely by the snapshot/restore pair. The
+# transaction must reject them before any live mutation or durable snapshot is
+# published, rather than creating a recovery bundle that can never be restored.
+special_root="$TMP/special-install-entry"
+mkdir -p "$special_root/install"
+mkfifo "$special_root/install/stray.fifo"
+set +e
+(
+  set -euo pipefail
+  . "$TMP/functions.sh"
+  stage_install_tx_path "$special_root/install" "$special_root/staged" directory
+)
+special_rc=$?
+set -e
+[ "$special_rc" -ne 0 ] || {
+  echo "special install-directory entry was accepted into the transaction snapshot" >&2
+  exit 1
+}
+[ ! -e "$special_root/staged" ] || {
+  echo "special install-directory entry left a published snapshot" >&2
+  exit 1
+}
+
+binary_fifo_root="$TMP/special-binary-entry"
+mkdir -p "$binary_fifo_root"
+mkfifo "$binary_fifo_root/macprovider-cli"
+set +e
+(
+  set -euo pipefail
+  . "$TMP/functions.sh"
+  stage_install_tx_path "$binary_fifo_root/macprovider-cli" "$binary_fifo_root/staged" file
+)
+binary_fifo_rc=$?
+set -e
+[ "$binary_fifo_rc" -ne 0 ] || {
+  echo "FIFO at the standalone CLI path was accepted into the transaction snapshot" >&2
+  exit 1
+}
+[ ! -e "$binary_fifo_root/staged" ] || {
+  echo "FIFO at the standalone CLI path left a published snapshot" >&2
+  exit 1
+}
 
 # A-01(c): a durable operator pause set DURING the transaction (live file
 # operator_paused true while the snapshot was unpaused) survives rollback. The
@@ -2320,7 +2413,7 @@ PY
 [ "$(shasum -a 256 "$root/home/macprovider/macprovider-cli" | awk '{print $1}')" = "$(cat "$root/manual-old.sha256")" ]
 grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
 [ -z "$(recovery_dir "$root")" ]
-kill "$restored_pid"
+terminate_test_process "$restored_pid"
 
 # A restored process that remains alive but never binds is not a successful
 # rollback. It ignores TERM to exercise the KILL fallback; recovery must prove
@@ -2367,7 +2460,7 @@ if kill -0 "$failed_restored_pid" >/dev/null 2>&1; then
   echo "failed restored provider was orphaned after successful retry" >&2
   exit 1
 fi
-kill "$retry_pid"
+terminate_test_process "$retry_pid"
 }
 
 # The A-05 lease-reconciliation cases and the manual-provider argv-replay cases

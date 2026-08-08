@@ -365,6 +365,12 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertFalse(InstalledProviderMonitor.LaunchdServiceRepairState.notLoaded.needsRepair)
         XCTAssertFalse(InstalledProviderMonitor.LaunchdServiceRepairState.validExecutable.needsRepair)
         XCTAssertTrue(
+            InstalledProviderMonitor.LaunchdServiceRepairState.legacyExecutable(path: "/legacy").needsRepair
+        )
+        XCTAssertFalse(
+            InstalledProviderMonitor.LaunchdServiceRepairState.legacyExecutable(path: "/legacy").requiresManualIntervention
+        )
+        XCTAssertTrue(
             InstalledProviderMonitor.LaunchdServiceRepairState.missingExecutable(path: "/missing").needsRepair
         )
         XCTAssertFalse(
@@ -519,6 +525,71 @@ final class InstalledProviderMonitorTests: XCTestCase {
         )
 
         XCTAssertEqual(state, .missingExecutable(path: program.path))
+    }
+
+    func testLaunchdRepairMarksExistingLegacyExecutableForRepairWhenUnloaded() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-legacy-unloaded-tests-\(UUID().uuidString)")
+        let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
+        let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
+        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyProgram.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\n".write(to: legacyProgram, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: legacyProgram.path)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>ProgramArguments</key><array><string>\(legacyProgram.path)</string></array>
+        </dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nexit 1\n".write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = InstalledProviderMonitor.launchdServiceRepairState(
+            launchctlURL: launchctl,
+            homeDirectory: root
+        )
+
+        XCTAssertEqual(state, .legacyExecutable(path: legacyProgram.path))
+        XCTAssertTrue(state.needsRepair)
+        XCTAssertFalse(state.requiresManualIntervention)
+    }
+
+    func testLaunchdRepairMarksExistingLegacyExecutableForRepairWhenLoaded() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-legacy-loaded-tests-\(UUID().uuidString)")
+        let launchAgents = root.appendingPathComponent("Library/LaunchAgents")
+        let legacyProgram = root.appendingPathComponent(".local/bin/macprovider-cli")
+        let plist = launchAgents.appendingPathComponent("live.streamvc.macprovider.plist")
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyProgram.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\n".write(to: legacyProgram, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: legacyProgram.path)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0"><dict>
+          <key>Label</key><string>live.streamvc.macprovider</string>
+          <key>ProgramArguments</key><array><string>\(legacyProgram.path)</string></array>
+        </dict></plist>
+        """.write(to: plist, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(legacyProgram.path)' '\(plist.path)'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = InstalledProviderMonitor.launchdServiceRepairState(
+            launchctlURL: launchctl,
+            homeDirectory: root
+        )
+
+        XCTAssertEqual(state, .legacyExecutable(path: legacyProgram.path))
+        XCTAssertTrue(state.needsRepair)
+        XCTAssertFalse(state.requiresManualIntervention)
     }
 
     func testStatusSnapshotKeepsOlderCLIReadableWithoutTrustFields() throws {

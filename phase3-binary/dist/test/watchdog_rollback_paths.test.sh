@@ -9,7 +9,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 extract_inline_watchdog() {
   awk '
-    /cat <<.WATCHDOG_EOF. > "\$WATCHDOG_PATH"/ { inside=1; next }
+    /write_atomic_install_file "\$WATCHDOG_PATH" 0755 <<.WATCHDOG_EOF./ { inside=1; next }
     inside && /^WATCHDOG_EOF$/ { exit }
     inside { print }
   ' "$INSTALLER"

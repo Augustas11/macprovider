@@ -23,22 +23,92 @@ enum ProviderConfig {
     }
 
     static func readProviderID(paths: ProviderPaths = .current) -> String? {
-        guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
+        guard let contents = readTrustedConfigContents(paths: paths) else { return nil }
         return parseTopLevelValue(named: "provider_id", from: contents)
     }
 
+    /// Read the shared config through a nonblocking, no-follow descriptor so a
+    /// malformed or replaced config path cannot wedge startup before the
+    /// caller's trust checks run. The installer applies the same owner/private
+    /// regular-file contract before using this identity for repair.
+    private static func readTrustedConfigContents(paths: ProviderPaths) -> String? {
+        let maxBytes = 1024 * 1024
+        let configDirectory = paths.configFile.deletingLastPathComponent()
+        let homeDirectory = configDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        guard InstalledProviderMonitor.isSafePrivateDirectoryChain(
+            configDirectory,
+            under: homeDirectory
+        ) else {
+            return nil
+        }
+        let descriptor = paths.configFile.path.withCString {
+            Darwin.open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(descriptor) }
+
+        var before = stat()
+        guard Darwin.fstat(descriptor, &before) == 0,
+              (before.st_mode & S_IFMT) == S_IFREG,
+              before.st_uid == getuid(),
+              before.st_nlink == 1,
+              before.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              before.st_size >= 0,
+              before.st_size <= off_t(maxBytes),
+              hasNoExtendedACL(descriptor) else {
+            return nil
+        }
+        var data = Data()
+        data.reserveCapacity(Int(before.st_size))
+        var buffer = [UInt8](repeating: 0, count: min(64 * 1024, maxBytes))
+        while data.count < Int(before.st_size) {
+            let count = buffer.withUnsafeMutableBytes { storage in
+                Darwin.read(descriptor, storage.baseAddress, storage.count)
+            }
+            guard count > 0 else { return nil }
+            data.append(buffer, count: count)
+        }
+        var after = stat()
+        var pathInfo = stat()
+        guard Darwin.fstat(descriptor, &after) == 0,
+              Darwin.lstat(paths.configFile.path, &pathInfo) == 0,
+              after.st_dev == before.st_dev,
+              after.st_ino == before.st_ino,
+              after.st_size == before.st_size,
+              after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec,
+              after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
+              after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec,
+              after.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec,
+              (pathInfo.st_dev, pathInfo.st_ino) == (before.st_dev, before.st_ino),
+              hasNoExtendedACL(descriptor),
+              data.count == Int(before.st_size) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func hasNoExtendedACL(_ descriptor: Int32) -> Bool {
+        guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+            return errno == 0 || errno == ENOENT
+        }
+        acl_free(UnsafeMutableRawPointer(acl))
+        return false
+    }
+
     static func hasProviderToken(paths: ProviderPaths = .current) -> Bool {
-        guard let contents = try? String(contentsOf: paths.configFile) else { return false }
+        guard let contents = readTrustedConfigContents(paths: paths) else { return false }
         return parseTopLevelValue(named: "provider_token", from: contents) != nil
     }
 
     static func readModel(paths: ProviderPaths = .current) -> String? {
-        guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
+        guard let contents = readTrustedConfigContents(paths: paths) else { return nil }
         return parseTopLevelValue(named: "model", from: contents)
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
-        guard let contents = try? String(contentsOf: paths.configFile),
+        guard let contents = readTrustedConfigContents(paths: paths),
               let value = parseTopLevelValue(named: "port", from: contents),
               let port = Int(value),
               (1024...65535).contains(port) else {
@@ -48,7 +118,7 @@ enum ProviderConfig {
     }
 
     static func readLinkState(paths: ProviderPaths = .current) -> LinkState? {
-        guard let contents = try? String(contentsOf: paths.configFile),
+        guard let contents = readTrustedConfigContents(paths: paths),
               let value = parseTopLevelValue(named: "link_state", from: contents)
         else {
             return nil
@@ -63,7 +133,7 @@ enum ProviderConfig {
         paths: ProviderPaths = .current,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
-        let contents = try? String(contentsOf: paths.configFile)
+        let contents = readTrustedConfigContents(paths: paths)
         return automaticUpdatesEnabled(configContents: contents, environment: environment)
     }
 
@@ -187,7 +257,7 @@ enum ProviderConfig {
     }
 
     static func validateServeConfigShape(paths: ProviderPaths = .current) throws {
-        guard let contents = try? String(contentsOf: paths.configFile) else {
+        guard let contents = readTrustedConfigContents(paths: paths) else {
             throw ServeConfigError.missingField("config.yaml")
         }
         let config = try AutotuneServeConfig(

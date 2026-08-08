@@ -164,13 +164,14 @@ enum InstalledProviderMonitor {
         case unavailable
         case notLoaded
         case validExecutable
+        case legacyExecutable(path: String)
         case missingExecutable(path: String)
         case unexpectedExecutable(path: String)
         case unexpectedPlist(path: String)
 
         var needsRepair: Bool {
             switch self {
-            case .missingExecutable:
+            case .legacyExecutable, .missingExecutable:
                 return true
             case .unavailable, .notLoaded, .validExecutable, .unexpectedExecutable, .unexpectedPlist:
                 return false
@@ -181,14 +182,15 @@ enum InstalledProviderMonitor {
             switch self {
             case .unexpectedExecutable, .unexpectedPlist:
                 return true
-            case .unavailable, .notLoaded, .validExecutable, .missingExecutable:
+            case .unavailable, .notLoaded, .validExecutable, .legacyExecutable, .missingExecutable:
                 return false
             }
         }
     }
 
-    /// A readable plist is not enough to attach Malibu to a loaded job. Repair
-    /// is reserved for a managed job whose executable is missing; an unloaded
+    /// A readable plist is not enough to attach Malibu to a loaded job. Legacy
+    /// standalone executables are repairable stale ownership, while unknown
+    /// executable/plist identities remain manual conflicts. An unloaded
     /// managed plist is still inspected so a stale binary cannot dead-end startup.
     static func launchdServiceRepairState(
         uid: uid_t = getuid(),
@@ -233,6 +235,9 @@ enum InstalledProviderMonitor {
             guard isOwnerPrivateExecutable(atPath: plistIdentity.program) else {
                 return .missingExecutable(path: plistIdentity.program)
             }
+            if plistIdentity.program == legacyProgram {
+                return .legacyExecutable(path: plistIdentity.program)
+            }
             return .notLoaded
         }
         guard let identity = parseLaunchdServiceIdentity(inspection.output) else {
@@ -263,6 +268,9 @@ enum InstalledProviderMonitor {
         guard isOwnerPrivateExecutable(atPath: identity.program) else {
             return .missingExecutable(path: identity.program)
         }
+        if identity.program == legacyProgram {
+            return .legacyExecutable(path: identity.program)
+        }
         return .validExecutable
     }
 
@@ -292,7 +300,7 @@ enum InstalledProviderMonitor {
         fileManager: FileManager
     ) -> Data? {
         let descriptor = url.path.withCString {
-            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            Darwin.open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
         }
         guard descriptor >= 0 else { return nil }
         defer { _ = Darwin.close(descriptor) }
@@ -354,7 +362,7 @@ enum InstalledProviderMonitor {
 
     static func isOwnerPrivateExecutable(atPath path: String) -> Bool {
         let descriptor = path.withCString {
-            Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            Darwin.open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
         }
         guard descriptor >= 0 else { return false }
         defer { _ = Darwin.close(descriptor) }
