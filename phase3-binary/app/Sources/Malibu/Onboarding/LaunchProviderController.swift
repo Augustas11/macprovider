@@ -41,6 +41,7 @@ final class LaunchProviderController: ObservableObject {
         var runCLIInstall: @MainActor (
             String?,
             Bool,
+            Bool,
             @escaping @Sendable @MainActor (String) -> Void
         ) async throws -> Void
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
@@ -61,10 +62,11 @@ final class LaunchProviderController: ObservableObject {
                     await LaunchProviderController.referralInputAvailableForCurrentInstall()
                 },
                 registerLoginItem: { try AppLoginItem.register() },
-                runCLIInstall: { referralCode, replacingIncumbentProvider, onLogLine in
+                runCLIInstall: { referralCode, replacingIncumbentProvider, repairExistingInstall, onLogLine in
                     try await CLIInstallRunner.run(
                         referralCode: referralCode,
                         replacingIncumbentProvider: replacingIncumbentProvider,
+                        repairExistingInstall: repairExistingInstall,
                         onLogLine: onLogLine
                     )
                 },
@@ -106,7 +108,11 @@ final class LaunchProviderController: ObservableObject {
 
     func launch() async {
         if repairExistingInstall && !replacementConfirmed {
-            await launchViaCLIInstall(referralCode: nil, replacingIncumbentProvider: false)
+            await launchViaCLIInstall(
+                referralCode: nil,
+                replacingIncumbentProvider: false,
+                repairExistingInstall: true
+            )
             return
         }
 
@@ -204,13 +210,21 @@ final class LaunchProviderController: ObservableObject {
         await finalizeExistingInstall(logLine: "Background provider is already running locally.")
     }
 
-    private func launchViaCLIInstall(referralCode: String?, replacingIncumbentProvider: Bool) async {
+    private func launchViaCLIInstall(
+        referralCode: String?,
+        replacingIncumbentProvider: Bool,
+        repairExistingInstall: Bool = false
+    ) async {
         beginInstallProgressWatch()
         defer { endInstallProgressWatch() }
         do {
             stage = .runningCLIInstall
             installLogLines = []
-            try await dependencies.runCLIInstall(referralCode, replacingIncumbentProvider) { [weak self] line in
+            try await dependencies.runCLIInstall(
+                referralCode,
+                replacingIncumbentProvider,
+                repairExistingInstall
+            ) { [weak self] line in
                 guard let self else { return }
                 self.installLogLines.append(LogTailBuffer.redacted(line))
                 if self.installLogLines.count > 200 {

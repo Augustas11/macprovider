@@ -21,6 +21,9 @@ extract_function() {
 
 for function_name in \
   validate_install_dir validate_port_value \
+  read_config_provider_id read_config_provider_token_line \
+  installed_provider_binary_path restart_safe_incumbent_present \
+  repair_safe_incumbent_present prepare_fresh_referral_code \
   prepare_staged_config activate_staged_config select_autotune_benchmark_port \
   semantic_merge_config restore_existing_provider_if_start_skipped \
   prefetch_upgrade_autotune_model own_macprovider_cli_holds_live_port \
@@ -99,6 +102,91 @@ mkdir -m 777 "$HOME/shared"
 chmod 777 "$HOME/shared"
 if (INSTALL_DIR="$HOME/shared/provider"; validate_install_dir); then
   echo "world-writable install ancestor unexpectedly passed" >&2
+  exit 1
+fi
+
+# Malibu repair must be able to recover the exact #941 state where the old
+# provider executable is gone but owner-private identity/configuration and
+# launchd evidence remain. The evidence gate must suppress referral admission
+# only for that validated state, and must fail closed when the manifest is
+# missing.
+REPAIR_HOME="$TMP/repair-home"
+mkdir -m 700 -p \
+  "$REPAIR_HOME/.config/macprovider" \
+  "$REPAIR_HOME/Library/Application Support/macprovider" \
+  "$REPAIR_HOME/Library/LaunchAgents"
+REPAIR_INSTALL_DIR="$REPAIR_HOME/macprovider"
+REPAIR_CONFIG_PATH="$REPAIR_HOME/.config/macprovider/config.yaml"
+REPAIR_PROVIDER_ID_PATH="$REPAIR_HOME/.config/macprovider/provider_id"
+REPAIR_MANIFEST_PATH="$REPAIR_HOME/Library/Application Support/macprovider/install_manifest.json"
+REPAIR_PLIST_PATH="$REPAIR_HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+REPAIR_BINARY_PATH="$REPAIR_HOME/.local/bin/macprovider-cli"
+REPAIR_PROVIDER_ID="mp-0123456789abcdef0123456789abcdef"
+cat > "$REPAIR_CONFIG_PATH" <<EOF
+model: "seed"
+provider_id: "$REPAIR_PROVIDER_ID"
+coordinator_url: "wss://coordinator.example/ws/provider"
+EOF
+printf '%s\n' "$REPAIR_PROVIDER_ID" > "$REPAIR_PROVIDER_ID_PATH"
+cat > "$REPAIR_MANIFEST_PATH" <<EOF
+{
+  "install_prefix": "$REPAIR_INSTALL_DIR",
+  "binary_path": "$REPAIR_INSTALL_DIR/macprovider-cli",
+  "launchd_labels": ["live.streamvc.macprovider"],
+  "launchd_plists": ["$REPAIR_PLIST_PATH"]
+}
+EOF
+cat > "$REPAIR_PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>live.streamvc.macprovider</string>
+<key>Program</key><string>$REPAIR_INSTALL_DIR/macprovider-cli</string>
+</dict></plist>
+EOF
+chmod 600 "$REPAIR_CONFIG_PATH" "$REPAIR_PROVIDER_ID_PATH" "$REPAIR_MANIFEST_PATH" "$REPAIR_PLIST_PATH"
+(
+  INSTALL_DIR="$REPAIR_INSTALL_DIR"
+  BINARY_PATH="$REPAIR_BINARY_PATH"
+  CONFIG_PATH="$REPAIR_CONFIG_PATH"
+  PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
+  MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
+  PLIST_PATH="$REPAIR_PLIST_PATH"
+  PROVIDER_LABEL="live.streamvc.macprovider"
+  DRY_RUN=0
+  EMERGENCY_ROLLBACK=0
+  REFERRAL_REPLACE_INCUMBENT=0
+  REPAIR_EXISTING_INSTALL=1
+  REFERRAL_CODE_SOURCE_FILE=""
+  FRESH_REFERRAL_BOOTSTRAP=0
+  NO_PROMPT=1
+  log() { :; }
+  die() { exit "$1"; }
+  prepare_fresh_referral_code
+  [ -z "$REFERRAL_CODE_SOURCE_FILE" ]
+  [ "$FRESH_REFERRAL_BOOTSTRAP" -eq 0 ]
+)
+rm -f "$REPAIR_MANIFEST_PATH"
+if (
+  INSTALL_DIR="$REPAIR_INSTALL_DIR"
+  BINARY_PATH="$REPAIR_BINARY_PATH"
+  CONFIG_PATH="$REPAIR_CONFIG_PATH"
+  PROVIDER_ID_PATH="$REPAIR_PROVIDER_ID_PATH"
+  MANIFEST_PATH="$REPAIR_MANIFEST_PATH"
+  PLIST_PATH="$REPAIR_PLIST_PATH"
+  PROVIDER_LABEL="live.streamvc.macprovider"
+  DRY_RUN=0
+  EMERGENCY_ROLLBACK=0
+  REFERRAL_REPLACE_INCUMBENT=0
+  REPAIR_EXISTING_INSTALL=1
+  REFERRAL_CODE_SOURCE_FILE=""
+  FRESH_REFERRAL_BOOTSTRAP=0
+  NO_PROMPT=1
+  log() { :; }
+  die() { exit "$1"; }
+  prepare_fresh_referral_code
+); then
+  echo "repair bypassed referral admission without complete evidence" >&2
   exit 1
 fi
 

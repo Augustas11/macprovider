@@ -18,9 +18,11 @@ REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
 FRESH_REFERRAL_BOOTSTRAP=0
 REFERRAL_REPLACE_INCUMBENT="${MACPROVIDER_REFERRAL_REPLACE_INCUMBENT:-0}"
+REPAIR_EXISTING_INSTALL="${MACPROVIDER_REPAIR_EXISTING_INSTALL:-0}"
 REFERRAL_BOOTSTRAP_COMPLETED=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
 unset MACPROVIDER_REFERRAL_REPLACE_INCUMBENT
+unset MACPROVIDER_REPAIR_EXISTING_INSTALL
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
@@ -4870,6 +4872,139 @@ restart_safe_incumbent_present() {
   [ -f "$MANIFEST_PATH" ] && [ -f "$PLIST_PATH" ]
 }
 
+# Malibu may request repair after the provider executable was removed while
+# the owner-private config, provider identity, manifest, and LaunchAgent plist
+# survived. This bypasses only referral admission; the evidence itself is
+# revalidated descriptor-first and must identify this install's provider label
+# and executable paths. The later transaction snapshots the same files again
+# before any live mutation.
+repair_safe_incumbent_present() {
+  existing_provider_id="$(read_config_provider_id || true)"
+  [ -n "$existing_provider_id" ] || return 1
+  [ -f "$PROVIDER_ID_PATH" ] || return 1
+  saved_provider_id="$(cat "$PROVIDER_ID_PATH" 2>/dev/null || true)"
+  [ "$saved_provider_id" = "$existing_provider_id" ] || return 1
+  python3 - \
+    "$CONFIG_PATH" \
+    "$PROVIDER_ID_PATH" \
+    "$MANIFEST_PATH" \
+    "$PLIST_PATH" \
+    "$INSTALL_DIR" \
+    "$BINARY_PATH" \
+    "$PROVIDER_LABEL" \
+    "$existing_provider_id" <<'PY' 2>/dev/null
+import ctypes
+import errno
+import json
+import os
+import plistlib
+import re
+import stat
+import sys
+
+config_path, provider_id_path, manifest_path, plist_path, install_dir, binary_path, label, expected_provider_id = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+max_bytes = 1024 * 1024
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def read_owned(path):
+    fd = os.open(path, os.O_RDONLY | nofollow)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & 0o077
+            or before.st_size < 0
+            or before.st_size > max_bytes
+            or not no_acl(fd)
+        ):
+            raise RuntimeError("unsafe repair evidence")
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise RuntimeError("repair evidence truncated")
+            payload.extend(chunk)
+        after = os.fstat(fd)
+        path_info = os.lstat(path)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeError("repair evidence changed during read")
+        return bytes(payload)
+    finally:
+        os.close(fd)
+
+
+config = read_owned(config_path).decode("utf-8")
+provider_id = read_owned(provider_id_path).decode("utf-8").strip()
+if provider_id != expected_provider_id:
+    raise SystemExit(1)
+config_ids = []
+for line in config.splitlines():
+    match = re.match(r'^provider_id:\s*"?([^"\s]+)"?\s*$', line)
+    if match:
+        config_ids.append(match.group(1))
+if config_ids != [expected_provider_id]:
+    raise SystemExit(1)
+
+manifest = json.loads(read_owned(manifest_path).decode("utf-8"))
+labels = manifest.get("launchd_labels") if isinstance(manifest, dict) else None
+plists = manifest.get("launchd_plists") if isinstance(manifest, dict) else None
+if (
+    not isinstance(manifest, dict)
+    or manifest.get("install_prefix") != install_dir
+    or manifest.get("binary_path") != os.path.join(install_dir, "macprovider-cli")
+    or not isinstance(labels, list)
+    or not all(isinstance(value, str) for value in labels)
+    or label not in labels
+    or not isinstance(plists, list)
+    or not all(isinstance(value, str) for value in plists)
+    or plist_path not in plists
+):
+    raise SystemExit(1)
+
+plist = plistlib.loads(read_owned(plist_path))
+if not isinstance(plist, dict) or plist.get("Label") != label:
+    raise SystemExit(1)
+program = plist.get("Program")
+arguments = plist.get("ProgramArguments")
+if program is None:
+    if not isinstance(arguments, list) or not arguments:
+        raise SystemExit(1)
+    program = arguments[0]
+if program not in (os.path.join(install_dir, "macprovider-cli"), binary_path):
+    raise SystemExit(1)
+PY
+}
+
 validate_supplied_referral_code_file() {
   referral_source_rc=0
   python3 - "$REFERRAL_CODE_SOURCE_FILE" <<'PY' || referral_source_rc=$?
@@ -4935,6 +5070,16 @@ prepare_fresh_referral_code() {
   case "$REFERRAL_REPLACE_INCUMBENT" in
     0|1) ;;
     *) die 7 "MACPROVIDER_REFERRAL_REPLACE_INCUMBENT must be 0 or 1" ;;
+  esac
+  case "$REPAIR_EXISTING_INSTALL" in
+    0) ;;
+    1)
+      repair_safe_incumbent_present \
+        || die 20 "trusted existing-install evidence is required for Malibu repair"
+      log "Trusted existing-install evidence found; repairing without a referral code."
+      return 0
+      ;;
+    *) die 7 "MACPROVIDER_REPAIR_EXISTING_INSTALL must be 0 or 1" ;;
   esac
   if restart_safe_incumbent_present; then
     if [ "$REFERRAL_REPLACE_INCUMBENT" != "1" ]; then

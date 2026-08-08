@@ -154,6 +154,23 @@ final class ReferralOnboardingTests: XCTestCase {
         XCTAssertNil(noReferralEnvironment["MACPROVIDER_REFERRAL_REPLACE_INCUMBENT"])
     }
 
+    func testInstallerEnvironmentPassesRepairIntentOnlyWhenRequested() throws {
+        let repairEnvironment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
+            installPort: nil,
+            pinnedVersion: nil,
+            repairExistingInstall: true
+        )
+        XCTAssertEqual(repairEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"], "1")
+
+        let normalEnvironment = try CLIInstallRunner.installerEnvironment(
+            parentEnvironment: ["MACPROVIDER_REPAIR_EXISTING_INSTALL": "1"],
+            installPort: nil,
+            pinnedVersion: nil
+        )
+        XCTAssertNil(normalEnvironment["MACPROVIDER_REPAIR_EXISTING_INSTALL"])
+    }
+
     func testInstallerEnvironmentCarriesManifestSelectedInstallDirectory() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("installer-custom-home-\(UUID().uuidString)")
