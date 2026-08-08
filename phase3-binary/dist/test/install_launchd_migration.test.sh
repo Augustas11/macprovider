@@ -37,6 +37,22 @@ for name in names:
 PY
 
 mkdir -p "$TMP/bin"
+cat > "$TMP/bin/plutil" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-}" in
+  -lint)
+    [ -f "${2:-}" ]
+    ;;
+  *)
+    echo "unsupported plutil mode in launchd migration fixture" >&2
+    exit 2
+    ;;
+esac
+EOF
+chmod 0755 "$TMP/bin/plutil"
+
 cat > "$TMP/bin/launchctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
