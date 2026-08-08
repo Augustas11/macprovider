@@ -610,12 +610,21 @@ for arg in "$@"; do last="$arg"; done
 if [ -f "$CASE_ROOT/fail-backup-cp" ] && printf '%s' "$last" | grep -q '\.staging/install-dir$'; then
   exit 51
 fi
-if [ -f "$CASE_ROOT/fail-restore-cp" ] && printf '%s' "$last" | grep -q '\.macprovider-restore\.'; then
-  exit 52
-fi
 exec /bin/cp "$@"
 EOF
   chmod +x "$root/bin/cp"
+
+  cat > "$root/bin/cmp" <<'EOF'
+#!/usr/bin/env bash
+if [ -f "$CASE_ROOT/fail-restore-cp" ] && printf '%s' "$*" | grep -Eq '/restore\.[A-Za-z0-9]+/'; then
+  # Recovery now stages through descriptor-backed Python copies, so inject the
+  # legacy restore-copy failure at candidate byte verification instead of
+  # relying on an obsolete predictable temporary path.
+  exit 52
+fi
+exec /usr/bin/cmp "$@"
+EOF
+  chmod +x "$root/bin/cmp"
 
   cat > "$root/bin/mv" <<'EOF'
 #!/usr/bin/env bash

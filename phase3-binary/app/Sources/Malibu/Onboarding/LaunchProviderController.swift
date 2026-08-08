@@ -533,10 +533,14 @@ struct StartupState: Equatable {
                 launchctlURL: launchctlURL,
                 homeDirectory: homeDirectory,
                 fileManager: fm
-            )
+        )
         let launchdJobNeedsRepair = launchdInstallEvidenceExists && providerRepairState.needsRepair
-        let providerNeedsManualIntervention = launchdInstallEvidenceExists
-            && providerRepairState.requiresManualIntervention
+        // A loaded provider label with an unexpected executable/plist is a
+        // conflict even when the on-disk evidence is missing or unsafe. The
+        // installer intentionally refuses label-only reclamation without a
+        // durable recovery plist, so routing this state to onboarding would
+        // create a retry loop instead of exposing the required manual action.
+        let providerNeedsManualIntervention = providerRepairState.requiresManualIntervention
         let watchdogRepairState = InstalledProviderMonitor.launchdServiceRepairState(
                 label: InstalledProviderMonitor.watchdogLaunchdLabel,
                 launchctlURL: launchctlURL,

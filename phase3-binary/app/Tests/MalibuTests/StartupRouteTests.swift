@@ -71,6 +71,34 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertEqual(state.route(), .showLaunchdConflict)
     }
 
+    func testDetectRoutesLoadedProviderWithMissingPlistToManualConflict() async throws {
+        let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let expectedPlist = root.appendingPathComponent(
+            "Library/LaunchAgents/live.streamvc.macprovider.plist"
+        )
+        let expectedProgram = root.appendingPathComponent("macprovider/macprovider-cli")
+        let launchctl = root.appendingPathComponent("launchctl")
+        try FileManager.default.createDirectory(at: launchctl.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(expectedProgram.path)' '\(expectedPlist.path)'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: launchctl.path
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let state = await StartupState.detect(
+            paths: paths,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
+
+        XCTAssertFalse(state.launchdInstallEvidenceExists)
+        XCTAssertTrue(state.launchdJobNeedsManualIntervention)
+        XCTAssertEqual(state.route(), .showLaunchdConflict)
+    }
+
     func testDetectAcceptsLegacyWatchdogIdentityWithoutRepair() async throws {
         let paths = try makeTempPaths()
         let root = paths.appSupport.deletingLastPathComponent()
