@@ -585,11 +585,11 @@ struct StartupState: Equatable {
     }
 
     func route() -> StartupRoute {
-        if configExists && !appMarkerExists {
-            return .showImportDialog
-        }
         if launchdJobNeedsManualIntervention {
             return .showLaunchdConflict
+        }
+        if configExists && !appMarkerExists {
+            return .showImportDialog
         }
         if providerLaunchdJobNeedsRepair {
             return .repairExistingInstall
@@ -674,6 +674,14 @@ struct StartupState: Equatable {
             )
             return MigrationResult(route: state.route(), backupPath: nil)
         case .startFresh:
+            let preStartFreshState = await StartupState.detect(
+                paths: paths,
+                homeDirectory: homeDirectory,
+                launchctlURL: launchctlURL
+            )
+            if preStartFreshState.launchdJobNeedsManualIntervention {
+                return MigrationResult(route: .showLaunchdConflict, backupPath: nil)
+            }
             if deferStartFreshBackup {
                 return MigrationResult(route: .showOnboarding, backupPath: nil)
             }

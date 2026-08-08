@@ -26,6 +26,7 @@ final class StartupRouteTests: XCTestCase {
             ("stale-launchd-repair-before-import", state(config: true, marker: false, launchd: true, healthy: false, needsRepair: true), .showImportDialog),
             ("healthy-provider-repairs-watchdog-in-background", state(config: true, marker: true, launchd: true, healthy: true, needsRepair: true, providerNeedsRepair: false, watchdogNeedsRepair: true), .startAgentAndRepairWatchdog),
             ("foreign-launchd-conflict", state(config: true, marker: true, launchd: true, healthy: false, manualIntervention: true), .showLaunchdConflict),
+            ("foreign-launchd-conflict-before-import", state(config: true, marker: false, launchd: true, healthy: false, manualIntervention: true), .showLaunchdConflict),
             ("legacy-app-config", state(config: true, marker: true, launchd: false, healthy: false), .showOnboarding),
             ("cli-owned", state(config: true, marker: false, launchd: false, healthy: false), .showImportDialog),
             ("launchd-cli-owned-healthy", state(config: true, marker: false, launchd: true, healthy: true), .showImportDialog),
@@ -247,6 +248,30 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!))
         let attrs = try FileManager.default.attributesOfItem(atPath: result.backupPath!)
         XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testMigrationStartFreshStopsOnManualLaunchdConflict() async throws {
+        let paths = try makeTempPaths()
+        let root = paths.appSupport.deletingLastPathComponent()
+        let launchctl = root.appendingPathComponent("launchctl")
+        try paths.ensureDirectories()
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nprintf 'program = %s\\npath = %s\\n' '\(root.path)/unexpected-provider' '\(root.path)/Library/LaunchAgents/live.streamvc.macprovider.plist'\n"
+            .write(to: launchctl, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launchctl.path)
+        defer { try? FileManager.default.removeItem(atPath: root.path) }
+
+        let result = try await StartupState.applyMigrationDecision(
+            .startFresh,
+            paths: paths,
+            deferStartFreshBackup: true,
+            homeDirectory: root,
+            launchctlURL: launchctl
+        )
+
+        XCTAssertEqual(result.route, .showLaunchdConflict)
+        XCTAssertNil(result.backupPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.configFile.path))
     }
 
     func testConfirmedReplacementDefersConfigBackupToInstallerTransaction() async throws {
