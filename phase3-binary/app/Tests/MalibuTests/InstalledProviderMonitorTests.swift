@@ -400,6 +400,27 @@ final class InstalledProviderMonitorTests: XCTestCase {
         )
     }
 
+    func testSafePrivateDirectoryChainRejectsDirectoryWriteGrantACL() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-launchd-acl-write-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer {
+            _ = Self.runChmod(arguments: ["-a", "group:everyone allow add_file,add_subdirectory", root.path])
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        guard Self.runChmod(
+            arguments: ["+a", "group:everyone allow add_file,add_subdirectory", root.path]
+        ) else {
+            throw XCTSkip("macOS ACL mutation is unavailable in this test environment")
+        }
+
+        XCTAssertFalse(
+            InstalledProviderMonitor.isSafePrivateDirectoryChain(root, under: root),
+            "a directory ACL granting everyone file creation must fail closed"
+        )
+    }
+
     func testSupportedProviderInstallDirectoryAllowsSafeCustomHomePath() throws {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-custom-install-home-\(UUID().uuidString)")

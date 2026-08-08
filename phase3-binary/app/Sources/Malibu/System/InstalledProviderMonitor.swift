@@ -451,6 +451,7 @@ enum InstalledProviderMonitor {
             // owner, no-follow, and mode checks above. Files carrying
             // authoritative launchd/configuration data stay strict below.
             && info.st_mode & (S_IWGRP | S_IWOTH) == 0
+            && hasSafeDirectoryACL(descriptor)
     }
 
     private static func sameFileIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
@@ -475,6 +476,37 @@ enum InstalledProviderMonitor {
         var entry: acl_entry_t?
         guard acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry) == 0 else { return false }
         return entry == nil
+    }
+
+    private static func hasSafeDirectoryACL(_ descriptor: Int32) -> Bool {
+        errno = 0
+        guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+            return errno == 0 || errno == ENOENT
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+
+        guard let everyone = getgrnam("everyone") else { return false }
+        var textLength: ssize_t = 0
+        guard let text = acl_to_text(acl, &textLength) else { return false }
+        defer { _ = acl_free(UnsafeMutableRawPointer(text)) }
+
+        let lines = String(cString: text)
+            .split(whereSeparator: \.isNewline)
+        guard lines.count >= 2, lines[0] == "!#acl 1" else { return false }
+        let everyoneGroupID = String(everyone.pointee.gr_gid)
+        return lines.dropFirst().allSatisfy { line in
+            let fields = line.split(separator: ":", omittingEmptySubsequences: false)
+            guard fields.count == 6,
+                  fields[0] == "group",
+                  UUID(uuidString: String(fields[1])) != nil,
+                  fields[2] == "everyone",
+                  fields[3] == everyoneGroupID,
+                  fields[4] == "deny",
+                  fields[5] == "delete" else {
+                return false
+            }
+            return true
+        }
     }
 
     static func parseLaunchdServiceIdentity(_ output: String) -> LaunchdServiceIdentity? {

@@ -169,6 +169,10 @@ validate_install_dir() {
 import os
 import stat
 import sys
+import ctypes
+import errno
+import grp
+import re
 
 raw, raw_home = sys.argv[1:]
 if not raw.startswith("/"):
@@ -187,6 +191,70 @@ except ValueError:
     raise SystemExit("install directory must be inside HOME")
 
 uid = os.getuid()
+
+def safe_directory_acl(path):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_to_text = libc.acl_to_text
+        acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        acl_to_text.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+
+    directory_fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(directory_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if not acl:
+            return ctypes.get_errno() in (0, errno.ENOENT)
+        try:
+            text_length = ctypes.c_long()
+            text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+            if not text_pointer:
+                return False
+            try:
+                lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                    "utf-8", errors="strict"
+                ).splitlines()
+            finally:
+                acl_free(text_pointer)
+
+            everyone_gid = grp.getgrnam("everyone").gr_gid
+            if len(lines) < 2 or lines[0] != "!#acl 1":
+                return False
+            uuid_pattern = re.compile(
+                r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+                r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+            )
+            for line in lines[1:]:
+                fields = line.split(":")
+                if (
+                    len(fields) != 6
+                    or fields[0] != "group"
+                    or not uuid_pattern.fullmatch(fields[1])
+                    or fields[2] != "everyone"
+                    or fields[3] != str(everyone_gid)
+                    or fields[4] != "deny"
+                    or fields[5] != "delete"
+                ):
+                    return False
+            return True
+        finally:
+            acl_free(acl)
+    finally:
+        os.close(directory_fd)
+
 current = home
 relative = os.path.relpath(target, home)
 for component in ["."] + relative.split(os.sep):
@@ -203,6 +271,8 @@ for component in ["."] + relative.split(os.sep):
         raise SystemExit(f"install path component is not owned by the installing user: {current}")
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise SystemExit(f"install path component is group/world-writable: {current}")
+    if not safe_directory_acl(current):
+        raise SystemExit(f"install path component has an unsafe ACL: {current}")
 
 print(target)
 PY
