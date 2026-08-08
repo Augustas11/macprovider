@@ -125,7 +125,7 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         let home = FileManager.default.temporaryDirectory
             .appendingPathComponent("credential-handoff-home-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: home) }
-        let executable = home.appendingPathComponent("macprovider/custom/bin/macprovider-cli")
+        let executable = home.appendingPathComponent("custom/bin/macprovider-cli")
         try FileManager.default.createDirectory(
             at: executable.deletingLastPathComponent(),
             withIntermediateDirectories: true

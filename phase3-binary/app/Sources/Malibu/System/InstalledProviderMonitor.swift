@@ -421,11 +421,16 @@ enum InstalledProviderMonitor {
         under home: URL
     ) -> Bool {
         let homePath = home.standardizedFileURL.path
-        let providerRoot = home.appendingPathComponent("macprovider", isDirectory: true)
-            .standardizedFileURL.path
+        let rawComponents = directory.path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !rawComponents.contains(where: { $0 == "." || $0 == ".." }) else {
+            return false
+        }
         let directoryPath = directory.standardizedFileURL.path
-        return directoryPath == providerRoot || directoryPath.hasPrefix(providerRoot + "/")
-            && directoryPath != homePath
+        guard directoryPath != homePath,
+              directoryPath.hasPrefix(homePath + "/") else {
+            return false
+        }
+        return isSafePrivateDirectoryChainAllowingMissingLeaf(directory, under: home)
     }
 
     private static func isSafePrivateDirectory(atPath path: String) -> Bool {
@@ -440,8 +445,12 @@ enum InstalledProviderMonitor {
             && (info.st_mode & S_IFMT) == S_IFDIR
             && info.st_uid == getuid()
             && info.st_nlink >= 1
+            // macOS commonly adds a deny-delete ACL to user directory
+            // ancestors (including $HOME and ~/Library). It does not grant
+            // write access, so directory-chain trust remains based on the
+            // owner, no-follow, and mode checks above. Files carrying
+            // authoritative launchd/configuration data stay strict below.
             && info.st_mode & (S_IWGRP | S_IWOTH) == 0
-            && hasNoExtendedACL(descriptor)
     }
 
     private static func sameFileIdentity(_ lhs: stat, _ rhs: stat) -> Bool {

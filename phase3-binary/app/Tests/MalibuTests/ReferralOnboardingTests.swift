@@ -164,7 +164,7 @@ final class ReferralOnboardingTests: XCTestCase {
             at: manifest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let customProgram = home.appendingPathComponent("macprovider/provider-support/macprovider-cli")
+        let customProgram = home.appendingPathComponent("provider-support/macprovider-cli")
         try JSONSerialization.data(withJSONObject: [
             "install_prefix": customProgram.deletingLastPathComponent().path,
             "binary_path": customProgram.path,

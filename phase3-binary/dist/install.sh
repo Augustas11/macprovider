@@ -180,14 +180,11 @@ home = os.path.normpath(raw_home)
 target = os.path.normpath(raw)
 if target == home:
     raise SystemExit("install directory must not be HOME itself")
-provider_root = os.path.join(home, "macprovider")
 try:
     if os.path.commonpath([home, target]) != home:
         raise SystemExit("install directory must be inside HOME")
-    if os.path.commonpath([provider_root, target]) != provider_root:
-        raise SystemExit("install directory must be under HOME/macprovider")
 except ValueError:
-    raise SystemExit("install directory must be under HOME/macprovider")
+    raise SystemExit("install directory must be inside HOME")
 
 uid = os.getuid()
 current = home

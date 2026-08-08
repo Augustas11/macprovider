@@ -381,6 +381,43 @@ final class InstalledProviderMonitorTests: XCTestCase {
         )
     }
 
+    func testSafePrivateDirectoryChainAllowsMacOSDenyDeleteACL() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-launchd-acl-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer {
+            _ = Self.runChmod(arguments: ["-a", "group:everyone deny delete", root.path])
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        guard Self.runChmod(arguments: ["+a", "group:everyone deny delete", root.path]) else {
+            throw XCTSkip("macOS ACL mutation is unavailable in this test environment")
+        }
+
+        XCTAssertTrue(
+            InstalledProviderMonitor.isSafePrivateDirectoryChain(root, under: root),
+            "a deny-delete ACL on an owned ancestor must not turn managed launchd state into a conflict"
+        )
+    }
+
+    func testSupportedProviderInstallDirectoryAllowsSafeCustomHomePath() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-custom-install-home-\(UUID().uuidString)")
+        let prefix = home.appendingPathComponent("provider-support/bin")
+        try FileManager.default.createDirectory(at: prefix, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        XCTAssertTrue(
+            InstalledProviderMonitor.isSupportedProviderInstallDirectory(prefix, under: home)
+        )
+        XCTAssertFalse(
+            InstalledProviderMonitor.isSupportedProviderInstallDirectory(
+                home.appendingPathComponent("../outside"),
+                under: home
+            )
+        )
+    }
+
     func testLaunchdRepairRejectsSymlinkAndDirectoryAtManagedExecutablePath() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-launchd-executable-tests-(UUID().uuidString)")
@@ -419,6 +456,19 @@ final class InstalledProviderMonitorTests: XCTestCase {
                 homeDirectory: root
             )
             XCTAssertEqual(state, .missingExecutable(path: program.path), replacement)
+        }
+    }
+
+    private static func runChmod(arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        process.arguments = arguments
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
         }
     }
 

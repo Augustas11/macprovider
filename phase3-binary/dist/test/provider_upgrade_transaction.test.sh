@@ -90,6 +90,11 @@ if (INSTALL_DIR="$HOME/link/provider"; validate_install_dir); then
   echo "symlinked install path unexpectedly passed" >&2
   exit 1
 fi
+mkdir -m 700 "$HOME/custom"
+if ! (INSTALL_DIR="$HOME/custom/bin"; validate_install_dir); then
+  echo "owner-private custom install path unexpectedly failed" >&2
+  exit 1
+fi
 mkdir -m 777 "$HOME/shared"
 chmod 777 "$HOME/shared"
 if (INSTALL_DIR="$HOME/shared/provider"; validate_install_dir); then

@@ -118,7 +118,7 @@ final class StartupRouteTests: XCTestCase {
         let providerPlist = root.appendingPathComponent(
             "Library/LaunchAgents/live.streamvc.macprovider.plist"
         )
-        let customProgram = root.appendingPathComponent("macprovider/provider-support/macprovider-cli")
+        let customProgram = root.appendingPathComponent("provider-support/macprovider-cli")
         let manifest = root.appendingPathComponent(
             "Library/Application Support/macprovider/install_manifest.json"
         )
