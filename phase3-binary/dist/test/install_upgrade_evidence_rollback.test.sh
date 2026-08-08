@@ -1094,6 +1094,9 @@ MANUAL
   if [ "$case_rc" -eq 1 ]; then
     cat "$root/stderr.log" >&2
   fi
+  if [ "$case_name" = "success" ] && [ "$case_rc" -ne 9 ]; then
+    cat "$root/stderr.log" >&2
+  fi
   if { [ "$install_phase" = "manual-self-test" ] || [ "$install_phase" = "new-manual-self-test" ]; } \
       && [ "$case_rc" -ne 9 ]; then
     cat "$root/stderr.log" >&2
