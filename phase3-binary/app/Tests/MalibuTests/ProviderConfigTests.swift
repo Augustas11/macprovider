@@ -90,6 +90,18 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertFalse(ProviderConfig.hasProviderToken(paths: paths))
     }
 
+    func testConfigReadersRejectNonRegularConfigWithoutFollowingOrBlocking() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        XCTAssertEqual(Darwin.mkfifo(paths.configFile.path, S_IRUSR | S_IWUSR), 0)
+        XCTAssertFalse(ProviderConfig.hasProviderToken(paths: paths))
+        XCTAssertNil(ProviderConfig.readModel(paths: paths))
+        XCTAssertNil(ProviderConfig.readHTTPPort(paths: paths))
+        XCTAssertNil(ProviderConfig.readLinkState(paths: paths))
+    }
+
     func testImportExistingCLIConfigRecoversInterruptedTokenlessConfigFromBackup() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()

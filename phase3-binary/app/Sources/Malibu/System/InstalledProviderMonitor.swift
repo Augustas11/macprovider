@@ -99,22 +99,488 @@ enum InstalledProviderMonitor {
         ProviderConfig.readHTTPPort(paths: paths)
     }
 
+    /// Resolve the installer-selected provider binary without trusting a
+    /// launchd `program` line by itself. The installer manifest is an
+    /// owner-only regular file and its path is constrained to this user's
+    /// home, which also lets Malibu resume a custom path below the provider's
+    /// validated install prefix. The manifest prefix is part of the schema so
+    /// a stale/corrupt manifest cannot redirect repair into Documents, a
+    /// project checkout, or another unrelated home-directory location.
+    static func configuredProviderProgram(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> URL {
+        let fallback = homeDirectory.appendingPathComponent("macprovider/macprovider-cli").standardizedFileURL
+        let manifestURL = homeDirectory.appendingPathComponent(
+            "Library/Application Support/macprovider/install_manifest.json"
+        )
+        guard let data = readOwnerPrivateRegularFile(
+            manifestURL,
+            maxBytes: 64 * 1024,
+            fileManager: fileManager
+        ),
+              let manifest = try? JSONDecoder().decode(InstallManifest.self, from: data),
+              manifest.binaryPath.hasPrefix("/"),
+              let installPrefix = manifest.installPrefix,
+              installPrefix.hasPrefix("/") else {
+            return fallback
+        }
+        let candidate = URL(fileURLWithPath: manifest.binaryPath).standardizedFileURL
+        let prefix = URL(fileURLWithPath: installPrefix).standardizedFileURL
+        guard candidate.lastPathComponent == "macprovider-cli",
+              candidate.deletingLastPathComponent().path == prefix.path,
+              isSupportedProviderInstallDirectory(prefix, under: homeDirectory) else {
+            return fallback
+        }
+        guard isSafePrivateDirectoryChain(
+            manifestURL.deletingLastPathComponent(),
+            under: homeDirectory
+        ), isSafePrivateDirectoryChainAllowingMissingLeaf(
+            candidate.deletingLastPathComponent(),
+            under: homeDirectory
+        ) else {
+            return fallback
+        }
+        return candidate
+    }
+
+    static let providerLaunchdLabel = "live.streamvc.macprovider"
+    static let watchdogLaunchdLabel = "live.streamvc.macprovider-watchdog"
+
     static func launchdServicePID(
         uid: uid_t = getuid(),
         launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl")
     ) -> Int? {
+        guard let inspection = inspectLaunchdService(
+            uid: uid,
+            label: providerLaunchdLabel,
+            launchctlURL: launchctlURL
+        ),
+              inspection.loaded else { return nil }
+        return parseLaunchdServicePID(inspection.output)
+    }
+
+    enum LaunchdServiceRepairState: Equatable {
+        case unavailable
+        case notLoaded
+        case validExecutable
+        case legacyExecutable(path: String)
+        case missingExecutable(path: String)
+        case unexpectedExecutable(path: String)
+        case unexpectedPlist(path: String)
+
+        var needsRepair: Bool {
+            switch self {
+            case .legacyExecutable, .missingExecutable:
+                return true
+            case .unavailable, .notLoaded, .validExecutable, .unexpectedExecutable, .unexpectedPlist:
+                return false
+            }
+        }
+
+        var requiresManualIntervention: Bool {
+            switch self {
+            case .unexpectedExecutable, .unexpectedPlist:
+                return true
+            case .unavailable, .notLoaded, .validExecutable, .legacyExecutable, .missingExecutable:
+                return false
+            }
+        }
+    }
+
+    /// A readable plist is not enough to attach Malibu to a loaded job. Legacy
+    /// standalone executables are repairable stale ownership, while unknown
+    /// executable/plist identities remain manual conflicts. An unloaded
+    /// managed plist is still inspected so a stale binary cannot dead-end startup.
+    static func launchdServiceRepairState(
+        uid: uid_t = getuid(),
+        label: String = providerLaunchdLabel,
+        launchctlURL: URL = URL(fileURLWithPath: "/bin/launchctl"),
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        expectedProgram: URL? = nil,
+        alternateProgram: URL? = nil,
+        expectedPlist: URL? = nil,
+        fileManager: FileManager = .default
+    ) -> LaunchdServiceRepairState {
+        guard let inspection = inspectLaunchdService(
+            uid: uid,
+            label: label,
+            launchctlURL: launchctlURL
+        ) else {
+            return .unavailable
+        }
+        let managedProgram = (expectedProgram ?? configuredProviderProgram(
+            homeDirectory: homeDirectory,
+            fileManager: fileManager
+        )).path
+        let legacyProgram = (alternateProgram ?? homeDirectory.appendingPathComponent(".local/bin/macprovider-cli")).path
+        let managedPlist = (expectedPlist ?? homeDirectory
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("\(label).plist")).path
+        if !inspection.loaded {
+            guard isSafePrivateDirectoryChain(
+                URL(fileURLWithPath: managedPlist).deletingLastPathComponent(),
+                under: homeDirectory
+            ), let plistData = readOwnerPrivateRegularFile(
+                URL(fileURLWithPath: managedPlist),
+                maxBytes: 64 * 1024,
+                fileManager: fileManager
+            ), let plistIdentity = parseLaunchdPlistIdentity(plistData),
+                  plistIdentity.label == label else {
+                return .notLoaded
+            }
+            guard plistIdentity.program == managedProgram || plistIdentity.program == legacyProgram else {
+                return .unexpectedExecutable(path: plistIdentity.program)
+            }
+            guard isOwnerPrivateExecutable(atPath: plistIdentity.program) else {
+                return .missingExecutable(path: plistIdentity.program)
+            }
+            if plistIdentity.program == legacyProgram {
+                return .legacyExecutable(path: plistIdentity.program)
+            }
+            return .notLoaded
+        }
+        guard let identity = parseLaunchdServiceIdentity(inspection.output) else {
+            return .unavailable
+        }
+        guard identity.path == managedPlist else {
+            return .unexpectedPlist(path: identity.path)
+        }
+        // launchctl's textual identity is not sufficient evidence that the
+        // on-disk plist is still the managed, owner-private file. Re-read the
+        // expected path without following symlinks and bind its label/program
+        // to the loaded job before considering repair.
+        guard isSafePrivateDirectoryChain(
+            URL(fileURLWithPath: managedPlist).deletingLastPathComponent(),
+            under: homeDirectory
+        ), let plistData = readOwnerPrivateRegularFile(
+            URL(fileURLWithPath: managedPlist),
+            maxBytes: 64 * 1024,
+            fileManager: fileManager
+        ), let plistIdentity = parseLaunchdPlistIdentity(plistData),
+              plistIdentity.label == label,
+              plistIdentity.program == identity.program else {
+            return .unexpectedPlist(path: managedPlist)
+        }
+        guard identity.program == managedProgram || identity.program == legacyProgram else {
+            return .unexpectedExecutable(path: identity.program)
+        }
+        guard isOwnerPrivateExecutable(atPath: identity.program) else {
+            return .missingExecutable(path: identity.program)
+        }
+        if identity.program == legacyProgram {
+            return .legacyExecutable(path: identity.program)
+        }
+        return .validExecutable
+    }
+
+    struct LaunchdServiceIdentity: Equatable {
+        let program: String
+        let path: String
+    }
+
+    private struct InstallManifest: Decodable {
+        let binaryPath: String
+        let installPrefix: String?
+
+        enum CodingKeys: String, CodingKey {
+            case binaryPath = "binary_path"
+            case installPrefix = "install_prefix"
+        }
+    }
+
+    private struct LaunchdPlistIdentity {
+        let label: String
+        let program: String
+    }
+
+    static func readOwnerPrivateRegularFile(
+        _ url: URL,
+        maxBytes: Int,
+        fileManager: FileManager
+    ) -> Data? {
+        let descriptor = url.path.withCString {
+            Darwin.open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(descriptor) }
+
+        var info = stat()
+        guard Darwin.fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              info.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              info.st_size >= 0,
+              info.st_size <= off_t(maxBytes),
+              hasNoExtendedACL(descriptor) else {
+            return nil
+        }
+        let initialIdentity = info
+        var data = Data()
+        data.reserveCapacity(Int(info.st_size))
+        var buffer = [UInt8](repeating: 0, count: min(64 * 1024, maxBytes))
+        while data.count < Int(info.st_size) {
+            let count = buffer.withUnsafeMutableBytes { storage in
+                Darwin.read(descriptor, storage.baseAddress, storage.count)
+            }
+            guard count > 0 else { return nil }
+            data.append(buffer, count: count)
+        }
+        guard data.count == Int(initialIdentity.st_size) else { return nil }
+
+        var finalIdentity = stat()
+        guard Darwin.fstat(descriptor, &finalIdentity) == 0,
+              sameFileIdentity(initialIdentity, finalIdentity),
+              hasNoExtendedACL(descriptor) else {
+            return nil
+        }
+        var pathIdentity = stat()
+        guard Darwin.lstat(url.path, &pathIdentity) == 0,
+              sameFileIdentity(finalIdentity, pathIdentity) else {
+            return nil
+        }
+        _ = fileManager // Keep the injected boundary explicit for callers/tests.
+        return data
+    }
+
+    private static func parseLaunchdPlistIdentity(_ data: Data) -> LaunchdPlistIdentity? {
+        guard let object = try? PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ), let plist = object as? [String: Any],
+              let label = plist["Label"] as? String,
+              !label.isEmpty else {
+            return nil
+        }
+        let program = (plist["Program"] as? String)
+            ?? (plist["ProgramArguments"] as? [String])?.first
+        guard let program, !program.isEmpty else { return nil }
+        return LaunchdPlistIdentity(label: label, program: program)
+    }
+
+    static func isOwnerPrivateExecutable(atPath path: String) -> Bool {
+        let descriptor = path.withCString {
+            Darwin.open($0, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else { return false }
+        defer { _ = Darwin.close(descriptor) }
+
+        var info = stat()
+        guard Darwin.fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              info.st_mode & S_IXUSR != 0,
+              info.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              hasNoExtendedACL(descriptor) else {
+            return false
+        }
+        return true
+    }
+
+    static func isSafePrivateDirectoryChain(_ directory: URL, under home: URL) -> Bool {
+        let homePath = home.standardizedFileURL.path
+        let directoryPath = directory.standardizedFileURL.path
+        guard directoryPath == homePath || directoryPath.hasPrefix(homePath + "/") else {
+            return false
+        }
+
+        let relativePath = String(directoryPath.dropFirst(homePath.count))
+        var current = URL(fileURLWithPath: homePath, isDirectory: true)
+        guard isSafePrivateDirectory(atPath: current.path) else { return false }
+        for component in relativePath.split(separator: "/") {
+            current.appendPathComponent(String(component), isDirectory: true)
+            guard isSafePrivateDirectory(atPath: current.path) else { return false }
+        }
+        return true
+    }
+
+    static func isSafePrivateDirectoryChainAllowingMissingLeaf(
+        _ directory: URL,
+        under home: URL
+    ) -> Bool {
+        let homePath = home.standardizedFileURL.path
+        let directoryPath = directory.standardizedFileURL.path
+        guard directoryPath == homePath || directoryPath.hasPrefix(homePath + "/") else {
+            return false
+        }
+
+        let relativePath = String(directoryPath.dropFirst(homePath.count))
+        var current = URL(fileURLWithPath: homePath, isDirectory: true)
+        guard isSafePrivateDirectory(atPath: current.path) else { return false }
+        for component in relativePath.split(separator: "/") {
+            current.appendPathComponent(String(component), isDirectory: true)
+            if isSafePrivateDirectory(atPath: current.path) {
+                continue
+            }
+            var identity = stat()
+            guard Darwin.lstat(current.path, &identity) != 0, errno == ENOENT else {
+                return false
+            }
+            return true
+        }
+        return true
+    }
+
+    static func isSupportedProviderInstallDirectory(
+        _ directory: URL,
+        under home: URL
+    ) -> Bool {
+        let homePath = home.standardizedFileURL.path
+        let rawComponents = directory.path.split(separator: "/", omittingEmptySubsequences: false)
+        guard !rawComponents.contains(where: { $0 == "." || $0 == ".." }) else {
+            return false
+        }
+        let directoryPath = directory.standardizedFileURL.path
+        guard directoryPath != homePath,
+              directoryPath.hasPrefix(homePath + "/") else {
+            return false
+        }
+        return isSafePrivateDirectoryChainAllowingMissingLeaf(directory, under: home)
+    }
+
+    private static func isSafePrivateDirectory(atPath path: String) -> Bool {
+        let descriptor = path.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else { return false }
+        defer { _ = Darwin.close(descriptor) }
+
+        var info = stat()
+        return Darwin.fstat(descriptor, &info) == 0
+            && (info.st_mode & S_IFMT) == S_IFDIR
+            && info.st_uid == getuid()
+            && info.st_nlink >= 1
+            // macOS commonly adds a deny-delete ACL to user directory
+            // ancestors (including $HOME and ~/Library). It does not grant
+            // write access, so directory-chain trust remains based on the
+            // owner, no-follow, and mode checks above. Files carrying
+            // authoritative launchd/configuration data stay strict below.
+            && info.st_mode & (S_IWGRP | S_IWOTH) == 0
+            && hasSafeDirectoryACL(descriptor)
+    }
+
+    private static func sameFileIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
+        lhs.st_dev == rhs.st_dev
+            && lhs.st_ino == rhs.st_ino
+            && lhs.st_mode == rhs.st_mode
+            && lhs.st_uid == rhs.st_uid
+            && lhs.st_nlink == rhs.st_nlink
+            && lhs.st_size == rhs.st_size
+            && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec
+            && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+            && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec
+            && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+    }
+
+    private static func hasNoExtendedACL(_ descriptor: Int32) -> Bool {
+        errno = 0
+        guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+            return errno == 0 || errno == ENOENT
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        guard acl_get_entry(acl, ACL_FIRST_ENTRY.rawValue, &entry) == 0 else { return false }
+        return entry == nil
+    }
+
+    private static func hasSafeDirectoryACL(_ descriptor: Int32) -> Bool {
+        errno = 0
+        guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+            return errno == 0 || errno == ENOENT
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+
+        guard let everyone = getgrnam("everyone") else { return false }
+        var textLength: ssize_t = 0
+        guard let text = acl_to_text(acl, &textLength) else { return false }
+        defer { _ = acl_free(UnsafeMutableRawPointer(text)) }
+
+        let lines = String(cString: text)
+            .split(whereSeparator: \.isNewline)
+        guard lines.count >= 2, lines[0] == "!#acl 1" else { return false }
+        let everyoneGroupID = String(everyone.pointee.gr_gid)
+        return lines.dropFirst().allSatisfy { line in
+            let fields = line.split(separator: ":", omittingEmptySubsequences: false)
+            guard fields.count == 6,
+                  fields[0] == "group",
+                  UUID(uuidString: String(fields[1])) != nil,
+                  fields[2] == "everyone",
+                  fields[3] == everyoneGroupID,
+                  fields[4] == "deny",
+                  fields[5] == "delete" else {
+                return false
+            }
+            return true
+        }
+    }
+
+    static func parseLaunchdServiceIdentity(_ output: String) -> LaunchdServiceIdentity? {
+        let programLines = output.split(separator: "\n").compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("program = ") else { return nil }
+            let program = String(trimmed.dropFirst("program = ".count))
+            return program.isEmpty ? nil : program
+        }
+        let pathLines = output.split(separator: "\n").compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("path = ") else { return nil }
+            let path = String(trimmed.dropFirst("path = ".count))
+            return path.isEmpty ? nil : path
+        }
+        guard programLines.count == 1, pathLines.count == 1 else { return nil }
+        return LaunchdServiceIdentity(program: programLines[0], path: pathLines[0])
+    }
+
+    static func parseLaunchdServiceProgramPath(_ output: String) -> String? {
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("program = ") else { continue }
+            let path = String(trimmed.dropFirst("program = ".count))
+            return path.isEmpty ? nil : path
+        }
+        return nil
+    }
+
+    static func hasTrustedPrivateFile(
+        at url: URL,
+        maxBytes: Int = 64 * 1024,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        readOwnerPrivateRegularFile(url, maxBytes: maxBytes, fileManager: fileManager) != nil
+    }
+
+    private struct LaunchdServiceInspection {
+        let loaded: Bool
+        let output: String
+    }
+
+    private static func inspectLaunchdService(
+        uid: uid_t,
+        label: String,
+        launchctlURL: URL
+    ) -> LaunchdServiceInspection? {
         let process = Process()
         let stdout = Pipe()
         process.executableURL = launchctlURL
-        process.arguments = ["print", "gui/\(uid)/live.streamvc.macprovider"]
+        process.arguments = ["print", "gui/\(uid)/\(label)"]
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
-            let data = stdout.fileHandleForReading.readDataToEndOfFile()
+            let data = stdout.fileHandleForReading.readData(ofLength: 64 * 1024 + 1)
+            if data.count > 64 * 1024 {
+                process.terminate()
+                process.waitUntilExit()
+                return nil
+            }
             process.waitUntilExit()
-            guard process.terminationStatus == 0, data.count <= 64 * 1024 else { return nil }
-            return parseLaunchdServicePID(String(decoding: data, as: UTF8.self))
+            return LaunchdServiceInspection(
+                loaded: process.terminationStatus == 0,
+                output: String(decoding: data, as: UTF8.self)
+            )
         } catch {
             return nil
         }

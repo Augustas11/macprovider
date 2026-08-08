@@ -25,10 +25,11 @@ line_number() {
   awk -v pattern="$pattern" 'index($0, pattern) { print NR; exit }' "$INSTALL_SH"
 }
 
-require_line 'launchctl bootout "gui/$UID" "$PLIST_PATH"' "launchd bootout before replacement"
-require_line 'launchctl enable "gui/$UID/live.streamvc.macprovider"' "launchd enable before bootstrap"
+require_line 'launchctl bootout "$service_target"' "label-target launchd bootout"
+require_line 'reclaim_launchd_service "$PROVIDER_LABEL"' "provider launchd reclaim before replacement"
+require_line 'launchctl enable "gui/$UID/$PROVIDER_LABEL"' "launchd enable before bootstrap"
 require_line 'launchctl bootstrap "gui/$UID" "$PLIST_PATH"' "launchd bootstrap"
-require_line 'Would enable launchd service: launchctl enable gui/$UID/live.streamvc.macprovider' "dry-run enable hint"
+require_line 'Would enable launchd service: launchctl enable gui/$UID/$PROVIDER_LABEL' "dry-run enable hint"
 require_line 'Installing as a background launchd service.' "automatic launchd install message"
 require_line 'MACPROVIDER_NO_LAUNCHD=1 expert/debug override' "explicit no-launchd escape hatch"
 require_line 'holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn' "listener executable identity lookup"
@@ -101,16 +102,24 @@ case "$cache_classification_output" in
     ;;
 esac
 
-bootout_line="$(line_number 'launchctl bootout "gui/$UID" "$PLIST_PATH"')"
-enable_line="$(line_number 'launchctl enable "gui/$UID/live.streamvc.macprovider"')"
-bootstrap_line="$(line_number 'launchctl bootstrap "gui/$UID" "$PLIST_PATH"')"
+install_plist_line="$(line_number 'install_plist() {')"
+line_number_after() {
+  local start_line="$1"
+  local pattern="$2"
+  awk -v start_line="$start_line" -v pattern="$pattern" \
+    'NR > start_line && index($0, pattern) { print NR; exit }' "$INSTALL_SH"
+}
 
-[ -n "$bootout_line" ] || die "could not locate bootout line"
+reclaim_line="$(line_number_after "$install_plist_line" 'reclaim_launchd_service "$PROVIDER_LABEL"')"
+enable_line="$(line_number_after "$install_plist_line" 'launchctl enable "gui/$UID/$PROVIDER_LABEL"')"
+bootstrap_line="$(line_number_after "$install_plist_line" 'launchctl bootstrap "gui/$UID" "$PLIST_PATH"')"
+
+[ -n "$reclaim_line" ] || die "could not locate provider reclaim line"
 [ -n "$enable_line" ] || die "could not locate enable line"
 [ -n "$bootstrap_line" ] || die "could not locate bootstrap line"
 
-if [ "$bootout_line" -ge "$enable_line" ] || [ "$enable_line" -ge "$bootstrap_line" ]; then
-  die "launchd sequence must be bootout -> enable -> bootstrap; got $bootout_line -> $enable_line -> $bootstrap_line"
+if [ "$reclaim_line" -ge "$enable_line" ] || [ "$enable_line" -ge "$bootstrap_line" ]; then
+  die "launchd sequence must be reclaim -> enable -> bootstrap; got $reclaim_line -> $enable_line -> $bootstrap_line"
 fi
 
 printf '[install-launchd-test] install.sh launchd enable sequencing ok\n'

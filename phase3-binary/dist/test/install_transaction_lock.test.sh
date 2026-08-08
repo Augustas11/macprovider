@@ -34,6 +34,7 @@ names = {
     "assert_install_lock_ownership",
     "acquire_install_lock",
     "recover_orphaned_install_transactions",
+    "fsync_directory_path",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 index = 0

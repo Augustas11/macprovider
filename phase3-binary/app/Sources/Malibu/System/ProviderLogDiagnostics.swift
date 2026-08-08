@@ -2,10 +2,19 @@ import Foundation
 
 /// Maps macprovider-cli stderr lines (launchd or Malibu-spawned) to operator-facing text.
 enum ProviderLogDiagnostics {
+    static let staleLaunchAgentMessage =
+        "Provider setup is blocked by a previous installation. "
+        + "Click Launch Provider to repair the background service. "
+        + "Your provider identity and model files will be kept."
+
     struct Finding: Equatable {
         let id: String
         let userMessage: String
         let matchedLine: String
+    }
+
+    static func isActionable(_ finding: Finding, launchdNeedsRepair: Bool) -> Bool {
+        finding.id != "stale_launch_agent" || launchdNeedsRepair
     }
 
     private struct Rule {
@@ -15,6 +24,11 @@ enum ProviderLogDiagnostics {
     }
 
     private static let rules: [Rule] = [
+        Rule(
+            id: "stale_launch_agent",
+            needle: "provider process unhealthy: launchd service live.streamvc.macprovider has no validated pid at",
+            userMessage: staleLaunchAgentMessage
+        ),
         Rule(
             id: "stale_model_catalog",
             needle: "model catalog provenance envelope is stale",
@@ -92,11 +106,30 @@ enum ProviderLogDiagnostics {
         return nil
     }
 
+    /// Provider stdout/stderr and watchdog logs have independent tails, so
+    /// their array order is not a chronology. Provider diagnostics take
+    /// precedence; a stale watchdog hint must not hide a newer provider error.
+    static func diagnose(
+        providerLines: [String],
+        watchdogLines: [String],
+        launchdNeedsRepair: Bool = false
+    ) -> Finding? {
+        if launchdNeedsRepair,
+           let staleFinding = diagnose(
+               lines: (providerLines + watchdogLines).filter {
+                   $0.lowercased().contains("provider process unhealthy: launchd service live.streamvc.macprovider has no validated pid at")
+               }
+           ) {
+            return staleFinding
+        }
+        return diagnose(lines: providerLines) ?? diagnose(lines: watchdogLines)
+    }
+
     static func timeoutMessage(logHint: String) -> String {
         "Background provider did not become healthy in time. \(logHint)"
     }
 
     static func logHint(paths: ProviderPaths = .current) -> String {
-        "Check \(paths.launchdStderrLog.path) and \(paths.launchdStdoutLog.path)."
+        "Check \(paths.launchdStderrLog.path), \(paths.launchdStdoutLog.path), and \(paths.watchdogLog.path)."
     }
 }

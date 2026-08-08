@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Malibu
 
@@ -90,5 +91,29 @@ final class LogTailReaderTests: XCTestCase {
 
         XCTAssertEqual(reader.lines.first?.count, 16)
         XCTAssertEqual(reader.lines.last, "finished")
+    }
+
+    @MainActor
+    func testReaderRejectsSymlinkHardlinkAndFIFO() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let source = directory.appendingPathComponent("source.log")
+        try Data("secret-line\n".utf8).write(to: source)
+
+        let symlink = directory.appendingPathComponent("symlink.log")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: source)
+        let hardlink = directory.appendingPathComponent("hardlink.log")
+        XCTAssertEqual(Darwin.link(source.path, hardlink.path), 0)
+        let fifo = directory.appendingPathComponent("fifo.log")
+        XCTAssertEqual(Darwin.mkfifo(fifo.path, mode_t(0o600)), 0)
+
+        for path in [symlink, hardlink, fifo] {
+            let reader = LogTailReader(fileURL: path, capacity: 10)
+            await reader.readAvailable()
+            XCTAssertTrue(reader.lines.isEmpty, "unsafe log path was read: \(path.path)")
+        }
     }
 }

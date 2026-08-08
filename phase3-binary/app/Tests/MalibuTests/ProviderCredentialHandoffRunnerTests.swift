@@ -139,7 +139,10 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
             at: manifest.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try JSONSerialization.data(withJSONObject: ["binary_path": executable.path])
+        try JSONSerialization.data(withJSONObject: [
+            "install_prefix": executable.deletingLastPathComponent().path,
+            "binary_path": executable.path,
+        ])
             .write(to: manifest)
 
         XCTAssertEqual(

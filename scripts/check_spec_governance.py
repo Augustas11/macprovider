@@ -1342,6 +1342,12 @@ def _shell_invokes_python(command: str) -> bool:
 
 def _shell_materializes_script(command: str) -> bool:
     active = _shell_uncommented_line(command)
+    if (
+        "<<" in active
+        and re.search(r"\bwrite_atomic_install_file\b", active)
+        and "WATCHDOG_PATH" in active
+    ):
+        return True
     if ">" not in active or "<<" not in active:
         return False
     targets = [

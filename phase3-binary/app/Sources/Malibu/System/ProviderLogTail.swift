@@ -1,14 +1,16 @@
 import Combine
 import Foundation
 
-/// Tails launchd provider stdout/stderr logs into one redacted line buffer for UI + diagnostics.
+/// Tails provider stdout/stderr and watchdog logs with separate source buffers.
 @MainActor
 final class ProviderLogTail: ObservableObject {
     @Published private(set) var lines: [String] = []
+    @Published private(set) var watchdogLines: [String] = []
 
     private let capacity: Int
     private var stderrReader: LogTailReader?
     private var stdoutReader: LogTailReader?
+    private var watchdogReader: LogTailReader?
     private var cancellables: Set<AnyCancellable> = []
 
     init(capacity: Int = 200) {
@@ -19,9 +21,11 @@ final class ProviderLogTail: ObservableObject {
         stop()
         stderrReader = attachReader(fileURL: paths.launchdStderrLog)
         stdoutReader = attachReader(fileURL: paths.launchdStdoutLog)
+        watchdogReader = attachReader(fileURL: paths.watchdogLog)
         Task { @MainActor [weak self] in
             await self?.stderrReader?.readAvailable()
             await self?.stdoutReader?.readAvailable()
+            await self?.watchdogReader?.readAvailable()
             self?.mergePublishedLines()
         }
     }
@@ -30,8 +34,12 @@ final class ProviderLogTail: ObservableObject {
         cancellables.removeAll()
         stderrReader?.stop()
         stdoutReader?.stop()
+        watchdogReader?.stop()
         stderrReader = nil
         stdoutReader = nil
+        watchdogReader = nil
+        lines = []
+        watchdogLines = []
     }
 
     @discardableResult
@@ -54,5 +62,6 @@ final class ProviderLogTail: ObservableObject {
             merged.removeFirst(merged.count - capacity)
         }
         lines = merged
+        watchdogLines = watchdogReader?.lines ?? []
     }
 }

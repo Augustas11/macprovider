@@ -89,6 +89,40 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testRepairExistingInstallRunsInstallerWithoutReferralWhenBinaryIsMissing() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.restartSafeIncumbentPresent = false
+        let controller = LaunchProviderController(
+            repairExistingInstall: true,
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertFalse(harness.installedReplacingIncumbentProvider)
+        XCTAssertTrue(harness.installedRepairExistingInstall)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testRepairExistingInstallIgnoresMalformedReferralInput() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(
+            repairExistingInstall: true,
+            dependencies: harness.dependencies()
+        )
+        controller.referralInput = "not-an-invite"
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertNil(harness.installedReferralCode)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
     func testReferralOnRestartSafeIncumbentDoesNotReplaceWithoutConfirmation() async {
         let harness = Harness()
         harness.restartSafeIncumbentPresent = true
@@ -529,6 +563,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         var emittedInstallLogLines: [String] = ["install.sh finished"]
         var installedReferralCode: String?
         var installedReplacingIncumbentProvider = false
+        var installedRepairExistingInstall = false
 
         func dependencies() -> LaunchProviderController.Dependencies {
             LaunchProviderController.Dependencies(
@@ -540,10 +575,11 @@ final class LaunchProviderControllerTests: XCTestCase {
                 registerLoginItem: {
                     self.loginItemRegistrations += 1
                 },
-                runCLIInstall: { referralCode, replacingIncumbentProvider, onLogLine in
+                runCLIInstall: { referralCode, replacingIncumbentProvider, repairExistingInstall, onLogLine in
                     self.cliInstallRuns += 1
                     self.installedReferralCode = referralCode
                     self.installedReplacingIncumbentProvider = replacingIncumbentProvider
+                    self.installedRepairExistingInstall = repairExistingInstall
                     if let error = self.cliInstallError { throw error }
                     self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
                     for line in self.emittedInstallLogLines {

@@ -18,9 +18,11 @@ REFERRAL_CODE_SOURCE_FILE="${MACPROVIDER_REFERRAL_CODE_FILE:-}"
 CREATED_REFERRAL_CODE_SOURCE_FILE=0
 FRESH_REFERRAL_BOOTSTRAP=0
 REFERRAL_REPLACE_INCUMBENT="${MACPROVIDER_REFERRAL_REPLACE_INCUMBENT:-0}"
+REPAIR_EXISTING_INSTALL="${MACPROVIDER_REPAIR_EXISTING_INSTALL:-0}"
 REFERRAL_BOOTSTRAP_COMPLETED=0
 unset MACPROVIDER_REFERRAL_CODE_FILE
 unset MACPROVIDER_REFERRAL_REPLACE_INCUMBENT
+unset MACPROVIDER_REPAIR_EXISTING_INSTALL
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
@@ -62,6 +64,7 @@ LIFECYCLE_LEASE_PATH="$MANIFEST_DIR/lifecycle/lease.json"
 LIFECYCLE_STATE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.state-v1.json.lock"
 LIFECYCLE_LEASE_LOCK_PATH="$MANIFEST_DIR/lifecycle/.lease.json.lock"
 EXISTING_INSTALL_WAS_PRESENT=0
+PROVIDER_LABEL="live.streamvc.macprovider"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 # Issue #191: ship the macprovider-watchdog LaunchAgent alongside
@@ -164,10 +167,16 @@ record_lifecycle_state() {
 }
 
 validate_install_dir() {
-  validated="$({ python3 - "$INSTALL_DIR" "$HOME" <<'PY'
+validated="$({ python3 - "$INSTALL_DIR" "$HOME" <<'PY'
 import os
 import stat
 import sys
+import ctypes
+import errno
+import ctypes
+import errno
+import grp
+import re
 
 raw, raw_home = sys.argv[1:]
 if not raw.startswith("/"):
@@ -186,6 +195,70 @@ except ValueError:
     raise SystemExit("install directory must be inside HOME")
 
 uid = os.getuid()
+
+def safe_directory_acl(path):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_to_text = libc.acl_to_text
+        acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        acl_to_text.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+
+    directory_fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(directory_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if not acl:
+            return ctypes.get_errno() in (0, errno.ENOENT)
+        try:
+            text_length = ctypes.c_long()
+            text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+            if not text_pointer:
+                return False
+            try:
+                lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                    "utf-8", errors="strict"
+                ).splitlines()
+            finally:
+                acl_free(text_pointer)
+
+            everyone_gid = grp.getgrnam("everyone").gr_gid
+            if len(lines) < 2 or lines[0] != "!#acl 1":
+                return False
+            uuid_pattern = re.compile(
+                r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+                r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+            )
+            for line in lines[1:]:
+                fields = line.split(":")
+                if (
+                    len(fields) != 6
+                    or fields[0] != "group"
+                    or not uuid_pattern.fullmatch(fields[1])
+                    or fields[2] != "everyone"
+                    or fields[3] != str(everyone_gid)
+                    or fields[4] != "deny"
+                    or fields[5] != "delete"
+                ):
+                    return False
+            return True
+        finally:
+            acl_free(acl)
+    finally:
+        os.close(directory_fd)
+
 current = home
 relative = os.path.relpath(target, home)
 for component in ["."] + relative.split(os.sep):
@@ -202,6 +275,8 @@ for component in ["."] + relative.split(os.sep):
         raise SystemExit(f"install path component is not owned by the installing user: {current}")
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise SystemExit(f"install path component is group/world-writable: {current}")
+    if not safe_directory_acl(current):
+        raise SystemExit(f"install path component has an unsafe ACL: {current}")
 
 print(target)
 PY
@@ -241,7 +316,7 @@ temporary = ""
 replaced = False
 
 try:
-    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         source_info = os.fstat(source_fd)
         if not stat.S_ISREG(source_info.st_mode):
@@ -531,7 +606,7 @@ try:
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_uid != uid
-        or info.st_nlink != 1
+        or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
         or stat.S_IMODE(info.st_mode) != 0o600
     ):
         raise RuntimeError("installer lock is not an owned private regular file")
@@ -872,6 +947,8 @@ PY
     fi
     [ "$recovery_rc" -eq 0 ] || die 70 "interrupted install recovery failed; run exactly: bash '$orphan/recover.sh'"
     rm -rf "$orphan" || die 70 "recovered orphan transaction could not be retired: $orphan"
+    fsync_directory_path "$CONFIG_DIR" \
+      || die 70 "recovered orphan transaction retirement was not durable: $orphan"
   done <<EOF
 $orphan_list
 EOF
@@ -925,16 +1002,224 @@ cleanup() {
 }
 trap cleanup EXIT
 
+transaction_path_exists() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+transaction_file_or_absent() {
+  transaction_path_exists "$1" || return 0
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+transaction_directory_or_absent() {
+  transaction_path_exists "$1" || return 0
+  [ -d "$1" ] && [ ! -L "$1" ]
+}
+
+transaction_binary_or_absent() {
+  transaction_path_exists "$1" || return 0
+  [ -L "$1" ] || { [ -f "$1" ] && [ ! -L "$1" ]; }
+}
+
+validate_transaction_path_kinds() {
+  transaction_binary_or_absent "$BINARY_PATH" \
+    || die 70 "the previous CLI path is not a regular file or symlink"
+  transaction_file_or_absent "$CONFIG_PATH" \
+    || die 70 "the previous config is not a regular file"
+  transaction_file_or_absent "$PROVIDER_ID_PATH" \
+    || die 70 "the previous provider id is not a regular file"
+  transaction_file_or_absent "$RECOMMENDATION_PATH" \
+    || die 70 "the previous recommendation is not a regular file"
+  transaction_file_or_absent "$PLIST_PATH" \
+    || die 70 "the previous launchd plist is not a regular file"
+  transaction_directory_or_absent "$WATCHDOG_DIR" \
+    || die 70 "the previous watchdog directory is not a directory"
+  transaction_file_or_absent "$WATCHDOG_PLIST_PATH" \
+    || die 70 "the previous watchdog plist is not a regular file"
+  transaction_file_or_absent "$MANIFEST_PATH" \
+    || die 70 "the previous install manifest is not a regular file"
+}
+
+validate_transaction_filesystems() {
+  python3 - \
+    "$CONFIG_DIR" \
+    "$INSTALL_DIR" \
+    "$BINARY_PATH" \
+    "$CONFIG_PATH" \
+    "$PROVIDER_ID_PATH" \
+    "$RECOMMENDATION_PATH" \
+    "$PLIST_PATH" \
+    "$WATCHDOG_DIR" \
+    "$WATCHDOG_PLIST_PATH" \
+    "$MANIFEST_PATH" <<'PY'
+import os
+import stat
+import sys
+
+config_dir, *paths = sys.argv[1:]
+config_device = os.stat(config_dir).st_dev
+for path in paths:
+    if not os.path.lexists(path):
+        continue
+    parent = os.path.dirname(path)
+    parent_device = os.stat(parent).st_dev
+    if parent_device != config_device:
+        raise SystemExit("transaction path is on a different filesystem: %s" % path)
+    info = os.lstat(path)
+    if info.st_dev != config_device:
+        raise SystemExit("transaction path is a mounted filesystem: %s" % path)
+PY
+}
+
 install_tx_path_matches() {
   source_path="$1"
   copied_path="$2"
   path_kind="$3"
-  case "$path_kind" in
-    directory) diff -qr "$source_path" "$copied_path" >/dev/null 2>&1 ;;
-    symlink) [ -L "$copied_path" ] && [ "$(readlink "$source_path")" = "$(readlink "$copied_path")" ] ;;
-    file) cmp -s "$source_path" "$copied_path" ;;
-    *) return 1 ;;
-  esac
+  python3 - "$source_path" "$copied_path" "$path_kind" <<'PY'
+import os
+import stat
+import sys
+
+source_path, copied_path, path_kind = sys.argv[1:]
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+
+def identity(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def compare_regular(source_fd, copied_fd):
+    source_info = os.fstat(source_fd)
+    copied_info = os.fstat(copied_fd)
+    if not stat.S_ISREG(source_info.st_mode) or not stat.S_ISREG(copied_info.st_mode):
+        return False
+    source_identity = identity(source_info)
+    copied_identity = identity(copied_info)
+    while True:
+        source_chunk = os.read(source_fd, 65536)
+        copied_chunk = os.read(copied_fd, 65536)
+        if source_chunk != copied_chunk:
+            return False
+        if not source_chunk:
+            break
+    return identity(os.fstat(source_fd)) == source_identity and identity(os.fstat(copied_fd)) == copied_identity
+
+
+def compare_directory(source_fd, copied_fd):
+    source_names = set(os.listdir(source_fd))
+    copied_names = set(os.listdir(copied_fd))
+    if source_names != copied_names:
+        return False
+    for name in source_names:
+        source_info = os.lstat(name, dir_fd=source_fd)
+        copied_info = os.lstat(name, dir_fd=copied_fd)
+        source_type = stat.S_IFMT(source_info.st_mode)
+        copied_type = stat.S_IFMT(copied_info.st_mode)
+        if source_type != copied_type:
+            return False
+        if stat.S_ISDIR(source_info.st_mode):
+            source_child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=source_fd)
+            copied_child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=copied_fd)
+            try:
+                if not compare_directory(source_child, copied_child):
+                    return False
+            finally:
+                os.close(copied_child)
+                os.close(source_child)
+        elif stat.S_ISLNK(source_info.st_mode):
+            if os.readlink(name, dir_fd=source_fd) != os.readlink(name, dir_fd=copied_fd):
+                return False
+        elif stat.S_ISREG(source_info.st_mode):
+            source_file = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=source_fd)
+            copied_file = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=copied_fd)
+            try:
+                if not compare_regular(source_file, copied_file):
+                    return False
+            finally:
+                os.close(copied_file)
+                os.close(source_file)
+        else:
+            return False
+    return True
+
+
+source_info = os.lstat(source_path)
+copied_info = os.lstat(copied_path)
+if path_kind == "symlink":
+    raise SystemExit(0 if stat.S_ISLNK(copied_info.st_mode) and os.readlink(source_path) == os.readlink(copied_path) else 1)
+if path_kind == "file":
+    if not stat.S_ISREG(source_info.st_mode) or not stat.S_ISREG(copied_info.st_mode):
+        raise SystemExit(1)
+    source_fd = os.open(source_path, os.O_RDONLY | nonblock | nofollow)
+    copied_fd = os.open(copied_path, os.O_RDONLY | nonblock | nofollow)
+    try:
+        raise SystemExit(0 if compare_regular(source_fd, copied_fd) else 1)
+    finally:
+        os.close(copied_fd)
+        os.close(source_fd)
+if path_kind != "directory" or not stat.S_ISDIR(source_info.st_mode) or not stat.S_ISDIR(copied_info.st_mode):
+    raise SystemExit(1)
+source_fd = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+copied_fd = os.open(copied_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+try:
+    raise SystemExit(0 if compare_directory(source_fd, copied_fd) else 1)
+finally:
+    os.close(copied_fd)
+    os.close(source_fd)
+PY
+}
+
+stage_install_tx_symlink() {
+  source_path="$1"
+  copied_path="$2"
+  python3 - "$source_path" "$copied_path" <<'PY'
+import os
+import stat
+import sys
+
+source_path, copied_path = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+source_before = os.lstat(source_path)
+if (
+    not stat.S_ISLNK(source_before.st_mode)
+    or source_before.st_uid != uid
+    or source_before.st_nlink != 1
+):
+    raise SystemExit("unsafe transaction symlink")
+target = os.readlink(source_path)
+source_after = os.lstat(source_path)
+if (
+    (source_after.st_dev, source_after.st_ino, source_after.st_mtime_ns, source_after.st_ctime_ns)
+    != (source_before.st_dev, source_before.st_ino, source_before.st_mtime_ns, source_before.st_ctime_ns)
+):
+    raise SystemExit("transaction symlink changed during snapshot")
+
+destination_parent = os.path.dirname(copied_path)
+destination_name = os.path.basename(copied_path)
+parent_fd = os.open(destination_parent, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+temporary_name = ".%s.symlink-%s" % (destination_name, os.urandom(16).hex())
+try:
+    os.symlink(target, temporary_name, dir_fd=parent_fd)
+    os.replace(temporary_name, destination_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    os.fsync(parent_fd)
+    copied = os.readlink(destination_name, dir_fd=parent_fd)
+    if copied != target:
+        raise SystemExit("transaction symlink destination changed")
+finally:
+    try:
+        os.unlink(temporary_name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    os.close(parent_fd)
+PY
 }
 
 stage_install_tx_path() {
@@ -942,12 +1227,586 @@ stage_install_tx_path() {
   copied_path="$2"
   path_kind="$3"
   case "$path_kind" in
-    directory) cp -R "$source_path" "$copied_path" ;;
-    symlink) cp -P "$source_path" "$copied_path" ;;
-    file) cp -p "$source_path" "$copied_path" ;;
+    directory)
+      python3 - "$source_path" "$copied_path" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import ctypes
+import errno
+
+source_path, copied_path = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+if os.environ.get("INSTALL_TX_DIRECTORY_COPY_FAULT") == "fail-backup-cp":
+    raise SystemExit("injected install transaction directory-copy failure")
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)
+    if acl:
+        free_acl(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def read_extended_attributes(fd):
+    if sys.platform != "darwin":
+        return []
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        list_xattrs = libc.flistxattr
+        list_xattrs.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+        list_xattrs.restype = ctypes.c_ssize_t
+        get_xattr = libc.fgetxattr
+        get_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        get_xattr.restype = ctypes.c_ssize_t
+    except (AttributeError, OSError):
+        raise SystemExit("extended-attribute API is unavailable")
+    size = list_xattrs(fd, None, 0, 0)
+    if size < 0:
+        raise SystemExit("could not enumerate source extended attributes")
+    if size == 0:
+        return []
+    names_buffer = ctypes.create_string_buffer(size)
+    actual_size = list_xattrs(fd, names_buffer, size, 0)
+    if actual_size < 0:
+        raise SystemExit("could not read source extended attributes")
+    names = names_buffer.raw[:actual_size].split(b"\0")
+    attributes = []
+    for raw_name in names:
+        if not raw_name:
+            continue
+        value_size = get_xattr(fd, raw_name, None, 0, 0, 0)
+        if value_size < 0:
+            raise SystemExit("could not read source extended attribute")
+        value_buffer = ctypes.create_string_buffer(value_size) if value_size else None
+        if value_size and get_xattr(fd, raw_name, value_buffer, value_size, 0, 0) != value_size:
+            raise SystemExit("could not read source extended attribute")
+        value = b"" if value_buffer is None else bytes(value_buffer.raw[:value_size])
+        attributes.append((raw_name, value))
+    return attributes
+
+
+def write_extended_attributes(fd, attributes):
+    if sys.platform != "darwin":
+        return
+    try:
+        set_xattr = ctypes.CDLL(None, use_errno=True).fsetxattr
+        set_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        set_xattr.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        raise SystemExit("extended-attribute API is unavailable")
+    for name, value in attributes:
+        value_buffer = ctypes.create_string_buffer(value) if value else None
+        if set_xattr(fd, name, value_buffer, len(value), 0, 0) != 0:
+            raise SystemExit("could not preserve extended attribute")
+
+
+def preserve_metadata(source_fd, destination_fd, info, label):
+    if (
+        info.st_uid != uid
+        or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or getattr(info, "st_flags", 0) != 0
+        or not no_acl(source_fd)
+    ):
+        raise SystemExit("unsupported metadata in install transaction source: %s" % label)
+    attributes = read_extended_attributes(source_fd)
+    os.fchmod(destination_fd, stat.S_IMODE(info.st_mode))
+    os.utime(destination_fd, ns=(info.st_atime_ns, info.st_mtime_ns))
+    write_extended_attributes(destination_fd, attributes)
+    destination_info = os.fstat(destination_fd)
+    if (
+        stat.S_IMODE(destination_info.st_mode) != stat.S_IMODE(info.st_mode)
+        or destination_info.st_atime_ns != info.st_atime_ns
+        or destination_info.st_mtime_ns != info.st_mtime_ns
+        or dict(read_extended_attributes(destination_fd)) != dict(attributes)
+    ):
+        raise SystemExit("destination metadata changed during copy")
+
+
+def copy_regular(source_fd, destination_fd, name):
+    source = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=source_fd)
+    temporary = ".%s.snapshot-%s" % (name, os.urandom(16).hex())
+    output = None
+    try:
+        before = os.fstat(source)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_nlink != 1
+            or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not no_acl(source)
+        ):
+            raise SystemExit("unsupported special file in install transaction source: %s" % name)
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(source, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise SystemExit("install transaction source was truncated: %s" % name)
+            payload.extend(chunk)
+        after = os.fstat(source)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+        ):
+            raise SystemExit("install transaction source changed during copy: %s" % name)
+        output = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            stat.S_IMODE(before.st_mode),
+            dir_fd=destination_fd,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(output, payload[offset:])
+        preserve_metadata(source, output, before, name)
+        os.fsync(output)
+        os.close(output)
+        output = None
+        os.replace(temporary, name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
+        temporary = None
+    finally:
+        if output is not None:
+            os.close(output)
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=destination_fd)
+            except FileNotFoundError:
+                pass
+        os.close(source)
+
+
+def copy_directory(source_fd, destination_fd):
+    for name in os.listdir(source_fd):
+        info = os.lstat(name, dir_fd=source_fd)
+        if stat.S_ISDIR(info.st_mode):
+            os.mkdir(name, stat.S_IMODE(info.st_mode) & 0o7777, dir_fd=destination_fd)
+            child_source = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=source_fd)
+            child_destination = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=destination_fd)
+            try:
+                copy_directory(child_source, child_destination)
+                preserve_metadata(child_source, child_destination, info, name)
+                os.fsync(child_destination)
+            finally:
+                os.close(child_destination)
+                os.close(child_source)
+        elif stat.S_ISLNK(info.st_mode):
+            if info.st_uid != uid or info.st_nlink != 1:
+                raise SystemExit("unsafe symlink in install transaction source: %s" % name)
+            target = os.readlink(name, dir_fd=source_fd)
+            os.symlink(target, name, dir_fd=destination_fd)
+        elif stat.S_ISREG(info.st_mode):
+            copy_regular(source_fd, destination_fd, name)
+        else:
+            raise SystemExit("unsupported special file in install transaction source: %s" % name)
+
+
+source = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+try:
+    source_info = os.fstat(source)
+    if source_info.st_uid != uid or not stat.S_ISDIR(source_info.st_mode):
+        raise SystemExit("unsafe install transaction source directory")
+    os.mkdir(copied_path, 0o700)
+    destination = os.open(copied_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    try:
+        try:
+            copy_directory(source, destination)
+            preserve_metadata(source, destination, source_info, source_path)
+            os.fsync(destination)
+        except BaseException:
+            shutil.rmtree(copied_path, ignore_errors=True)
+            raise
+    finally:
+        os.close(destination)
+finally:
+    os.close(source)
+PY
+      ;;
+    symlink) stage_install_tx_symlink "$source_path" "$copied_path" ;;
+    file)
+      # Recovery inputs are authoritative. Copy them through descriptors so a
+      # pathname replacement cannot turn the snapshot into attacker-selected
+      # content, and publish the destination atomically with a private mode.
+      python3 - "$source_path" "$copied_path" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+source_path, copied_path = sys.argv[1:]
+uid = os.getuid()
+max_bytes = 1024 * 1024
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)
+    if acl:
+        free_acl(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def read_extended_attributes(fd):
+    if sys.platform != "darwin":
+        return []
+    libc = ctypes.CDLL(None, use_errno=True)
+    list_xattrs = libc.flistxattr
+    list_xattrs.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+    list_xattrs.restype = ctypes.c_ssize_t
+    get_xattr = libc.fgetxattr
+    get_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    get_xattr.restype = ctypes.c_ssize_t
+    size = list_xattrs(fd, None, 0, 0)
+    if size < 0:
+        raise SystemExit("could not enumerate source extended attributes")
+    if size == 0:
+        return []
+    names_buffer = ctypes.create_string_buffer(size)
+    actual_size = list_xattrs(fd, names_buffer, size, 0)
+    if actual_size < 0:
+        raise SystemExit("could not read source extended attributes")
+    attributes = []
+    for raw_name in names_buffer.raw[:actual_size].split(b"\0"):
+        if not raw_name:
+            continue
+        value_size = get_xattr(fd, raw_name, None, 0, 0, 0)
+        if value_size < 0:
+            raise SystemExit("could not read source extended attribute")
+        value_buffer = ctypes.create_string_buffer(value_size) if value_size else None
+        if value_size and get_xattr(fd, raw_name, value_buffer, value_size, 0, 0) != value_size:
+            raise SystemExit("could not read source extended attribute")
+        attributes.append((raw_name, b"" if value_buffer is None else bytes(value_buffer.raw[:value_size])))
+    return attributes
+
+
+def write_extended_attributes(fd, attributes):
+    if sys.platform != "darwin":
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    set_xattr = libc.fsetxattr
+    set_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    set_xattr.restype = ctypes.c_int
+    for name, value in attributes:
+        value_buffer = ctypes.create_string_buffer(value) if value else None
+        if set_xattr(fd, name, value_buffer, len(value), 0, 0) != 0:
+            raise SystemExit("could not preserve extended attribute")
+
+
+def safe_regular(fd, info, label):
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or getattr(info, "st_flags", 0) != 0
+        or info.st_size < 0
+        or info.st_size > max_bytes
+        or not no_acl(fd)
+    ):
+        raise SystemExit(f"unsafe recovery snapshot {label}")
+
+
+source_fd = os.open(source_path, os.O_RDONLY | nonblock | nofollow)
+try:
+    before = os.fstat(source_fd)
+    safe_regular(source_fd, before, source_path)
+    source_mode = stat.S_IMODE(before.st_mode)
+    attributes = read_extended_attributes(source_fd)
+    payload = bytearray()
+    while len(payload) < before.st_size:
+        chunk = os.read(source_fd, min(65536, before.st_size - len(payload)))
+        if not chunk:
+            raise SystemExit("recovery snapshot was truncated")
+        payload.extend(chunk)
+    after = os.fstat(source_fd)
+    path_info = os.lstat(source_path)
+    if (
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        or stat.S_ISLNK(path_info.st_mode)
+        or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        raise SystemExit("recovery snapshot changed during copy")
+finally:
+    os.close(source_fd)
+
+parent_path = os.path.dirname(copied_path)
+parent_fd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+temporary_name = ".%s.restore-%s" % (os.path.basename(copied_path), os.urandom(16).hex())
+temporary_fd = None
+try:
+    parent_info = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != uid
+        or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not no_acl(parent_fd)
+    ):
+        raise SystemExit("unsafe recovery snapshot destination")
+    temporary_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+        source_mode,
+        dir_fd=parent_fd,
+    )
+    os.fchmod(temporary_fd, source_mode)
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(temporary_fd, payload[offset:])
+    write_extended_attributes(temporary_fd, attributes)
+    os.utime(temporary_fd, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.fsync(temporary_fd)
+    os.close(temporary_fd)
+    temporary_fd = None
+    os.replace(temporary_name, os.path.basename(copied_path), src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    temporary_name = None
+    os.fsync(parent_fd)
+    verify_fd = os.open(
+        os.path.basename(copied_path),
+        os.O_RDONLY | nonblock | nofollow,
+        dir_fd=parent_fd,
+    )
+    try:
+        verify_info = os.fstat(verify_fd)
+        safe_regular(verify_fd, verify_info, copied_path)
+        if stat.S_IMODE(verify_info.st_mode) != source_mode:
+            raise SystemExit("recovery snapshot destination mode changed")
+        if dict(read_extended_attributes(verify_fd)) != dict(attributes):
+            raise SystemExit("recovery snapshot destination metadata changed")
+        if os.read(verify_fd, len(payload) + 1) != payload:
+            raise SystemExit("recovery snapshot destination changed")
+    finally:
+        os.close(verify_fd)
+finally:
+    if temporary_fd is not None:
+        os.close(temporary_fd)
+    if temporary_name is not None:
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+    os.close(parent_fd)
+PY
+      ;;
     *) return 1 ;;
   esac
   install_tx_path_matches "$source_path" "$copied_path" "$path_kind"
+}
+
+# Launchd plists identify the service being displaced, so snapshot them with
+# descriptor-backed checks rather than a path-following cp. A plist that is a
+# symlink, hard link, non-regular file, foreign-owned file, oversized file, or
+# replaced while it is being copied is not safe recovery input.
+stage_install_tx_plist() {
+  source_path="$1"
+  copied_path="$2"
+  expected_label="$3"
+  expected_program="$4"
+  alternate_program="$5"
+  python3 - "$source_path" "$copied_path" "$expected_label" "$expected_program" "$alternate_program" <<'PY'
+import os
+import plistlib
+import stat
+import subprocess
+import sys
+import ctypes
+import errno
+
+source_path, copied_path, expected_label, expected_program, alternate_program = sys.argv[1:]
+uid = os.getuid()
+max_bytes = 1024 * 1024
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+
+def fail(message):
+    sys.stderr.write("plist_snapshot_failed:%s\n" % message)
+    raise SystemExit(1)
+
+
+def read_bounded(fd):
+    data = bytearray()
+    while len(data) <= max_bytes:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+    fail("oversized")
+
+
+source_fd = os.open(source_path, os.O_RDONLY | nonblock | nofollow)
+destination_created = False
+try:
+    before = os.fstat(source_fd)
+    if not stat.S_ISREG(before.st_mode):
+        fail("not_regular")
+    if before.st_uid != uid:
+        fail("not_owned")
+    if before.st_nlink != 1:
+        fail("hardlinked")
+    if before.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail("group_or_world_writable")
+    if before.st_size > max_bytes:
+        fail("oversized")
+    payload = read_bounded(source_fd)
+    if len(payload) != before.st_size:
+        fail("source_size_changed")
+
+    def source_identity(info):
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_uid,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    before_identity = source_identity(before)
+
+    def verify_source():
+        current = os.fstat(source_fd)
+        if source_identity(current) != before_identity:
+            fail("source_metadata_changed")
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        if read_bounded(source_fd) != payload:
+            fail("source_contents_changed")
+        path_info = os.lstat(source_path)
+        if stat.S_ISLNK(path_info.st_mode) or source_identity(path_info) != before_identity:
+            fail("source_path_replaced")
+
+    def verify_acl():
+        # The shipped installer is macOS-only, and this recovery harness is
+        # also exercised on Linux CI. Keep ACL enforcement on the Darwin
+        # descriptor API; all portable descriptor, owner, mode, link-count,
+        # identity, and content checks remain active on every platform.
+        if sys.platform != "darwin":
+            return
+
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            acl_get_fd_np = libc.acl_get_fd_np
+            acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+            acl_get_fd_np.restype = ctypes.c_void_p
+            acl_free = libc.acl_free
+            acl_free.argtypes = [ctypes.c_void_p]
+            acl_free.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            fail("acl_uninspectable")
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(source_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if acl:
+            acl_free(acl)
+            fail("acl_present")
+        if ctypes.get_errno() != errno.ENOENT:
+            fail("acl_uninspectable")
+
+    verify_acl()
+    try:
+        plist = plistlib.loads(payload)
+    except Exception:
+        fail("invalid_plist")
+    if not isinstance(plist, dict) or plist.get("Label") != expected_label:
+        fail("unexpected_label")
+    program = plist.get("Program")
+    if "Program" in plist and (not isinstance(program, str) or not program):
+        fail("invalid_program")
+    arguments = plist.get("ProgramArguments")
+    if "ProgramArguments" in plist:
+        if (
+            not isinstance(arguments, list)
+            or not arguments
+            or not all(isinstance(argument, str) and argument for argument in arguments)
+        ):
+            fail("invalid_program_arguments")
+    if program is None and arguments is None:
+        fail("missing_program_identity")
+    effective_program = program if program is not None else arguments[0]
+    if effective_program not in (expected_program, alternate_program):
+        fail("unexpected_program")
+
+    previous_umask = os.umask(0o077)
+    try:
+        destination_fd = os.open(
+            copied_path,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+    finally:
+        os.umask(previous_umask)
+    destination_created = True
+    try:
+        written = 0
+        while written < len(payload):
+            progress = os.write(destination_fd, payload[written:])
+            if progress <= 0:
+                fail("destination_write")
+            written += progress
+        os.fchmod(destination_fd, stat.S_IMODE(before.st_mode) & ~0o022)
+        os.fsync(destination_fd)
+        verify_source()
+        verify_acl()
+        destination_info = os.fstat(destination_fd)
+        if (
+            not stat.S_ISREG(destination_info.st_mode)
+            or destination_info.st_uid != uid
+            or destination_info.st_nlink != 1
+            or destination_info.st_size != len(payload)
+        ):
+            fail("destination_unsafe")
+        os.lseek(destination_fd, 0, os.SEEK_SET)
+        if read_bounded(destination_fd) != payload:
+            fail("destination_mismatch")
+    finally:
+        os.close(destination_fd)
+
+    verify_source()
+    verify_acl()
+finally:
+    os.close(source_fd)
+    if destination_created:
+        try:
+            final_info = os.lstat(copied_path)
+            if not stat.S_ISREG(final_info.st_mode) or final_info.st_nlink != 1:
+                os.unlink(copied_path)
+        except FileNotFoundError:
+            pass
+PY
 }
 
 # Snapshot the CLI-owned lifecycle-state file into the recovery staging area
@@ -1092,7 +1951,7 @@ try:
     # Read the exact bytes through an O_NOFOLLOW descriptor and confirm the
     # descriptor still refers to the lstat'd inode (defeats a swap between the
     # lstat and open).
-    src_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    src_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         src_desc = os.fstat(src_fd)
         if (src_desc.st_dev, src_desc.st_ino) != (st.st_dev, st.st_ino):
@@ -1139,7 +1998,7 @@ try:
     # contents against the payload. Any mismatch (e.g. a short write) aborts
     # BEFORE the meta file is written, so no truncated snapshot is ever
     # published or later restored.
-    verify_fd = os.open(destination_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    verify_fd = os.open(destination_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         verify_desc = os.fstat(verify_fd)
         if (verify_desc.st_dev, verify_desc.st_ino) != (dest_dev, dest_ino):
@@ -1176,7 +2035,7 @@ try:
         or reverify.st_size != st.st_size
     ):
         fail("lifecycle_state_changed_during_copy")
-    recheck_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    recheck_fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         recheck_desc = os.fstat(recheck_fd)
         if (recheck_desc.st_dev, recheck_desc.st_ino) != (st.st_dev, st.st_ino):
@@ -1202,6 +2061,54 @@ finally:
 PY
 }
 
+secure_private_directory() {
+  directory_path="$1"
+  python3 - "$directory_path" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+fd = os.open(
+    path,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    os.fchmod(fd, 0o700)
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink < 1
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise SystemExit("private directory is unsafe")
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            acl_get_fd_np = libc.acl_get_fd_np
+            acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+            acl_get_fd_np.restype = ctypes.c_void_p
+            acl_free = libc.acl_free
+            acl_free.argtypes = [ctypes.c_void_p]
+            acl_free.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            raise SystemExit("private directory ACL API is unavailable")
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if acl:
+            acl_free(acl)
+            raise SystemExit("private directory has an extended ACL")
+        if ctypes.get_errno() != errno.ENOENT:
+            raise SystemExit("private directory ACL verification failed")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
 write_install_recovery_artifacts() {
   recovery_dir="$1"
   state_path="$recovery_dir/state.sh"
@@ -1213,6 +2120,7 @@ write_install_recovery_artifacts() {
     printf 'REC_CONFIG_PATH=%q\n' "$CONFIG_PATH"
     printf 'REC_PROVIDER_ID_PATH=%q\n' "$PROVIDER_ID_PATH"
     printf 'REC_RECOMMENDATION_PATH=%q\n' "$RECOMMENDATION_PATH"
+    printf 'REC_PROVIDER_LABEL=%q\n' "$PROVIDER_LABEL"
     printf 'REC_PLIST_PATH=%q\n' "$PLIST_PATH"
     printf 'REC_WATCHDOG_DIR=%q\n' "$WATCHDOG_DIR"
     printf 'REC_WATCHDOG_PLIST_PATH=%q\n' "$WATCHDOG_PLIST_PATH"
@@ -1249,15 +2157,89 @@ write_install_recovery_artifacts() {
     printf 'REC_WATCHDOG_WAS_DISABLED=%q\n' "$INSTALL_TX_WATCHDOG_WAS_DISABLED"
     printf 'REC_BINARY_KIND=%q\n' "$INSTALL_TX_BINARY_KIND"
     printf 'REC_REFERRAL_REPLACE_INCUMBENT=%q\n' "$REFERRAL_REPLACE_INCUMBENT"
-  } > "$state_path" || return 1
+  } | write_atomic_install_file "$state_path" 0600 || return 1
 
-  cat > "$recovery_script" <<'RECOVERY_SCRIPT'
+  write_atomic_install_file "$recovery_script" 0700 <<'RECOVERY_SCRIPT'
 #!/usr/bin/env bash
 set -u
 
 RECOVERY_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 70
+verify_recovery_artifact() {
+  artifact_path="$1"
+  expected_payload="${2-}"
+  python3 - "$artifact_path" "$expected_payload" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+path, expected = sys.argv[1:]
+max_bytes = 1024 * 1024
+fd = os.open(
+    path,
+    os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_nlink != 1
+        or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or before.st_size > max_bytes
+    ):
+        raise SystemExit("recovery artifact is unsafe")
+    if sys.platform == "darwin":
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            acl_get_fd_np = libc.acl_get_fd_np
+            acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+            acl_get_fd_np.restype = ctypes.c_void_p
+            acl_free = libc.acl_free
+            acl_free.argtypes = [ctypes.c_void_p]
+            acl_free.restype = ctypes.c_int
+        except (AttributeError, OSError):
+            raise SystemExit("recovery artifact ACL API is unavailable")
+        ctypes.set_errno(0)
+        acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+        if acl:
+            acl_free(acl)
+            raise SystemExit("recovery artifact has an extended ACL")
+        if ctypes.get_errno() != errno.ENOENT:
+            raise SystemExit("recovery artifact ACL verification failed")
+    data = os.read(fd, before.st_size + 1)
+    if len(data) != before.st_size:
+        raise SystemExit("recovery artifact was truncated")
+    after = os.fstat(fd)
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+    ):
+        raise SystemExit("recovery artifact changed during verification")
+    path_info = os.lstat(path)
+    if stat.S_ISLNK(path_info.st_mode) or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino):
+        raise SystemExit("recovery artifact path was replaced")
+    if expected and data != (expected + "\n").encode("utf-8"):
+        raise SystemExit("recovery marker payload is invalid")
+finally:
+    os.close(fd)
+PY
+}
+verify_recovery_artifact "$RECOVERY_DIR/state.sh" || exit 70
+verify_recovery_artifact "$RECOVERY_DIR/recover.sh" || exit 70
+for recovery_marker in cutover-started provider-service-created watchdog-service-created new-manual.pid; do
+  if [ -e "$RECOVERY_DIR/$recovery_marker" ] || [ -L "$RECOVERY_DIR/$recovery_marker" ]; then
+    case "$recovery_marker" in
+      cutover-started) recovery_marker_payload="cutover-started" ;;
+      provider-service-created|watchdog-service-created) recovery_marker_payload="transaction-created" ;;
+      new-manual.pid) recovery_marker_payload="" ;;
+    esac
+    verify_recovery_artifact "$RECOVERY_DIR/$recovery_marker" "$recovery_marker_payload" || exit 70
+  fi
+done
 # shellcheck disable=SC1091
 . "$RECOVERY_DIR/state.sh" || exit 70
+REC_PROVIDER_LABEL="${REC_PROVIDER_LABEL:-live.streamvc.macprovider}"
 
 recovery_log() { printf '[macprovider-recovery] %s\n' "$*" >&2; }
 acquire_recovery_claim() {
@@ -1404,41 +2386,819 @@ release_recovery_claim() {
 acquire_recovery_claim || exit $?
 trap release_recovery_claim EXIT
 path_exists() { [ -e "$1" ] || [ -L "$1" ]; }
+fsync_directory_path() {
+  directory_path="$1"
+  python3 - "$directory_path" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+fd = os.open(
+    path,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise SystemExit("unsafe recovery parent directory")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+durable_move() {
+  local move_source="$1"
+  local move_destination="$2"
+  mv "$move_source" "$move_destination" || return 1
+  fsync_directory_path "$(dirname "$move_source")" || return 1
+  fsync_directory_path "$(dirname "$move_destination")" || return 1
+}
 paths_match() {
   source_path="$1"
   copied_path="$2"
   path_kind="$3"
-  case "$path_kind" in
-    directory) diff -qr "$source_path" "$copied_path" >/dev/null 2>&1 ;;
-    symlink) [ -L "$copied_path" ] && [ "$(readlink "$source_path")" = "$(readlink "$copied_path")" ] ;;
-    file) cmp -s "$source_path" "$copied_path" ;;
-    *) return 1 ;;
-  esac
+  python3 - "$source_path" "$copied_path" "$path_kind" <<'PY'
+import os
+import stat
+import sys
+
+source_path, copied_path, path_kind = sys.argv[1:]
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+
+def identity(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def compare_regular(source_fd, copied_fd):
+    source_info = os.fstat(source_fd)
+    copied_info = os.fstat(copied_fd)
+    if not stat.S_ISREG(source_info.st_mode) or not stat.S_ISREG(copied_info.st_mode):
+        return False
+    source_identity = identity(source_info)
+    copied_identity = identity(copied_info)
+    while True:
+        source_chunk = os.read(source_fd, 65536)
+        copied_chunk = os.read(copied_fd, 65536)
+        if source_chunk != copied_chunk:
+            return False
+        if not source_chunk:
+            break
+    return identity(os.fstat(source_fd)) == source_identity and identity(os.fstat(copied_fd)) == copied_identity
+
+
+def compare_directory(source_fd, copied_fd):
+    source_names = set(os.listdir(source_fd))
+    copied_names = set(os.listdir(copied_fd))
+    if source_names != copied_names:
+        return False
+    for name in source_names:
+        source_info = os.lstat(name, dir_fd=source_fd)
+        copied_info = os.lstat(name, dir_fd=copied_fd)
+        source_type = stat.S_IFMT(source_info.st_mode)
+        copied_type = stat.S_IFMT(copied_info.st_mode)
+        if source_type != copied_type:
+            return False
+        if stat.S_ISDIR(source_info.st_mode):
+            source_child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=source_fd)
+            copied_child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=copied_fd)
+            try:
+                if not compare_directory(source_child, copied_child):
+                    return False
+            finally:
+                os.close(copied_child)
+                os.close(source_child)
+        elif stat.S_ISLNK(source_info.st_mode):
+            if os.readlink(name, dir_fd=source_fd) != os.readlink(name, dir_fd=copied_fd):
+                return False
+        elif stat.S_ISREG(source_info.st_mode):
+            source_file = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=source_fd)
+            copied_file = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=copied_fd)
+            try:
+                if not compare_regular(source_file, copied_file):
+                    return False
+            finally:
+                os.close(copied_file)
+                os.close(source_file)
+        else:
+            return False
+    return True
+
+
+source_info = os.lstat(source_path)
+copied_info = os.lstat(copied_path)
+if path_kind == "symlink":
+    raise SystemExit(0 if stat.S_ISLNK(copied_info.st_mode) and os.readlink(source_path) == os.readlink(copied_path) else 1)
+if path_kind == "file":
+    if not stat.S_ISREG(source_info.st_mode) or not stat.S_ISREG(copied_info.st_mode):
+        raise SystemExit(1)
+    source_fd = os.open(source_path, os.O_RDONLY | nonblock | nofollow)
+    copied_fd = os.open(copied_path, os.O_RDONLY | nonblock | nofollow)
+    try:
+        raise SystemExit(0 if compare_regular(source_fd, copied_fd) else 1)
+    finally:
+        os.close(copied_fd)
+        os.close(source_fd)
+if path_kind != "directory" or not stat.S_ISDIR(source_info.st_mode) or not stat.S_ISDIR(copied_info.st_mode):
+    raise SystemExit(1)
+source_fd = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+copied_fd = os.open(copied_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+try:
+    raise SystemExit(0 if compare_directory(source_fd, copied_fd) else 1)
+finally:
+    os.close(copied_fd)
+    os.close(source_fd)
+PY
+}
+stage_restore_file() {
+  source_path="$1"
+  candidate_path="$2"
+  python3 - "$source_path" "$candidate_path" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+source_path, candidate_path = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+max_bytes = 1024 * 1024
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)
+    if acl:
+        free_acl(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def read_extended_attributes(fd):
+    if sys.platform != "darwin":
+        return []
+    libc = ctypes.CDLL(None, use_errno=True)
+    list_xattrs = libc.flistxattr
+    list_xattrs.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+    list_xattrs.restype = ctypes.c_ssize_t
+    get_xattr = libc.fgetxattr
+    get_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    get_xattr.restype = ctypes.c_ssize_t
+    size = list_xattrs(fd, None, 0, 0)
+    if size < 0:
+        raise SystemExit("could not enumerate source extended attributes")
+    if size == 0:
+        return []
+    names_buffer = ctypes.create_string_buffer(size)
+    actual_size = list_xattrs(fd, names_buffer, size, 0)
+    if actual_size < 0:
+        raise SystemExit("could not read source extended attributes")
+    attributes = []
+    for raw_name in names_buffer.raw[:actual_size].split(b"\0"):
+        if not raw_name:
+            continue
+        value_size = get_xattr(fd, raw_name, None, 0, 0, 0)
+        if value_size < 0:
+            raise SystemExit("could not read source extended attribute")
+        value_buffer = ctypes.create_string_buffer(value_size) if value_size else None
+        if value_size and get_xattr(fd, raw_name, value_buffer, value_size, 0, 0) != value_size:
+            raise SystemExit("could not read source extended attribute")
+        attributes.append((raw_name, b"" if value_buffer is None else bytes(value_buffer.raw[:value_size])))
+    return attributes
+
+
+def write_extended_attributes(fd, attributes):
+    if sys.platform != "darwin":
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    set_xattr = libc.fsetxattr
+    set_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+    set_xattr.restype = ctypes.c_int
+    for name, value in attributes:
+        value_buffer = ctypes.create_string_buffer(value) if value else None
+        if set_xattr(fd, name, value_buffer, len(value), 0, 0) != 0:
+            raise SystemExit("could not preserve extended attribute")
+
+
+def validate(fd, info):
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or info.st_nlink != 1
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or getattr(info, "st_flags", 0) != 0
+        or info.st_size < 0
+        or info.st_size > max_bytes
+        or not no_acl(fd)
+    ):
+        raise SystemExit("unsafe restore file")
+
+
+source_fd = os.open(source_path, os.O_RDONLY | nonblock | nofollow)
+try:
+    before = os.fstat(source_fd)
+    validate(source_fd, before)
+    source_mode = stat.S_IMODE(before.st_mode)
+    attributes = read_extended_attributes(source_fd)
+    payload = bytearray()
+    while len(payload) < before.st_size:
+        chunk = os.read(source_fd, min(65536, before.st_size - len(payload)))
+        if not chunk:
+            raise SystemExit("restore source was truncated")
+        payload.extend(chunk)
+    after = os.fstat(source_fd)
+    path_info = os.lstat(source_path)
+    if (
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        or stat.S_ISLNK(path_info.st_mode)
+        or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino)
+    ):
+        raise SystemExit("restore source changed during copy")
+finally:
+    os.close(source_fd)
+
+parent_fd = os.open(os.path.dirname(candidate_path), os.O_RDONLY | os.O_DIRECTORY | nofollow)
+temporary_name = ".%s.restore-%s" % (os.path.basename(candidate_path), os.urandom(16).hex())
+temporary_fd = None
+try:
+    parent_info = os.fstat(parent_fd)
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != uid
+        or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not no_acl(parent_fd)
+    ):
+        raise SystemExit("unsafe restore destination")
+    temporary_fd = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+        source_mode,
+        dir_fd=parent_fd,
+    )
+    os.fchmod(temporary_fd, source_mode)
+    offset = 0
+    while offset < len(payload):
+        offset += os.write(temporary_fd, payload[offset:])
+    write_extended_attributes(temporary_fd, attributes)
+    os.utime(temporary_fd, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.fsync(temporary_fd)
+    os.close(temporary_fd)
+    temporary_fd = None
+    os.replace(temporary_name, os.path.basename(candidate_path), src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    temporary_name = None
+    os.fsync(parent_fd)
+    verify_fd = os.open(
+        os.path.basename(candidate_path),
+        os.O_RDONLY | nonblock | nofollow,
+        dir_fd=parent_fd,
+    )
+    try:
+        verify = os.fstat(verify_fd)
+        validate(verify_fd, verify)
+        if stat.S_IMODE(verify.st_mode) != source_mode:
+            raise SystemExit("restore destination mode changed")
+        if dict(read_extended_attributes(verify_fd)) != dict(attributes):
+            raise SystemExit("restore destination metadata changed")
+        if os.read(verify_fd, len(payload) + 1) != payload:
+            raise SystemExit("restore destination changed")
+    finally:
+        os.close(verify_fd)
+finally:
+    if temporary_fd is not None:
+        os.close(temporary_fd)
+    if temporary_name is not None:
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+    os.close(parent_fd)
+PY
+}
+stage_restore_symlink() {
+  source_path="$1"
+  candidate_path="$2"
+  python3 - "$source_path" "$candidate_path" <<'PY'
+import os
+import stat
+import sys
+
+source_path, candidate_path = sys.argv[1:]
+source_info = os.lstat(source_path)
+if not stat.S_ISLNK(source_info.st_mode) or source_info.st_uid != os.getuid():
+    raise SystemExit("unsafe restore symlink")
+target = os.readlink(source_path)
+parent_fd = os.open(os.path.dirname(candidate_path), os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+temporary_name = ".%s.restore-%s" % (os.path.basename(candidate_path), os.urandom(16).hex())
+try:
+    os.symlink(target, temporary_name, dir_fd=parent_fd)
+    os.replace(temporary_name, os.path.basename(candidate_path), src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    temporary_name = None
+    os.fsync(parent_fd)
+    if os.readlink(os.path.join(os.path.dirname(candidate_path), os.path.basename(candidate_path))) != target:
+        raise SystemExit("restore symlink changed")
+finally:
+    if temporary_name is not None:
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+    os.close(parent_fd)
+PY
+}
+stage_restore_directory() {
+  source_path="$1"
+  candidate_path="$2"
+  python3 - "$source_path" "$candidate_path" <<'PY'
+import ctypes
+import errno
+import os
+import stat
+import sys
+
+source_path, candidate_path = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)
+    if acl:
+        free_acl(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def read_extended_attributes(fd):
+    if sys.platform != "darwin":
+        return []
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        list_xattrs = libc.flistxattr
+        list_xattrs.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+        list_xattrs.restype = ctypes.c_ssize_t
+        get_xattr = libc.fgetxattr
+        get_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        get_xattr.restype = ctypes.c_ssize_t
+    except (AttributeError, OSError):
+        raise SystemExit("extended-attribute API is unavailable")
+    size = list_xattrs(fd, None, 0, 0)
+    if size < 0:
+        raise SystemExit("could not enumerate source extended attributes")
+    if size == 0:
+        return []
+    names_buffer = ctypes.create_string_buffer(size)
+    actual_size = list_xattrs(fd, names_buffer, size, 0)
+    if actual_size < 0:
+        raise SystemExit("could not read source extended attributes")
+    names = names_buffer.raw[:actual_size].split(b"\0")
+    attributes = []
+    for raw_name in names:
+        if not raw_name:
+            continue
+        value_size = get_xattr(fd, raw_name, None, 0, 0, 0)
+        if value_size < 0:
+            raise SystemExit("could not read source extended attribute")
+        value_buffer = ctypes.create_string_buffer(value_size) if value_size else None
+        if value_size and get_xattr(fd, raw_name, value_buffer, value_size, 0, 0) != value_size:
+            raise SystemExit("could not read source extended attribute")
+        value = b"" if value_buffer is None else bytes(value_buffer.raw[:value_size])
+        attributes.append((raw_name, value))
+    return attributes
+
+
+def write_extended_attributes(fd, attributes):
+    if sys.platform != "darwin":
+        return
+    try:
+        set_xattr = ctypes.CDLL(None, use_errno=True).fsetxattr
+        set_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        set_xattr.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        raise SystemExit("extended-attribute API is unavailable")
+    for name, value in attributes:
+        value_buffer = ctypes.create_string_buffer(value) if value else None
+        if set_xattr(fd, name, value_buffer, len(value), 0, 0) != 0:
+            raise SystemExit("could not preserve extended attribute")
+
+
+def preserve_metadata(source_fd, destination_fd, info, label):
+    if (
+        info.st_uid != uid
+        or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or getattr(info, "st_flags", 0) != 0
+        or not no_acl(source_fd)
+    ):
+        raise SystemExit("unsupported metadata in restore directory: %s" % label)
+    attributes = read_extended_attributes(source_fd)
+    os.fchmod(destination_fd, stat.S_IMODE(info.st_mode))
+    os.utime(destination_fd, ns=(info.st_atime_ns, info.st_mtime_ns))
+    write_extended_attributes(destination_fd, attributes)
+    destination_info = os.fstat(destination_fd)
+    if (
+        stat.S_IMODE(destination_info.st_mode) != stat.S_IMODE(info.st_mode)
+        or destination_info.st_atime_ns != info.st_atime_ns
+        or destination_info.st_mtime_ns != info.st_mtime_ns
+        or dict(read_extended_attributes(destination_fd)) != dict(attributes)
+    ):
+        raise SystemExit("destination metadata changed during copy")
+
+
+def copy_regular(source_fd, destination_fd, name):
+    source = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=source_fd)
+    temporary = ".%s.restore-%s" % (name, os.urandom(16).hex())
+    output = None
+    try:
+        before = os.fstat(source)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_nlink != 1
+            or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not no_acl(source)
+        ):
+            raise SystemExit("unsupported special file in restore directory: %s" % name)
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(source, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise SystemExit("restore directory source was truncated: %s" % name)
+            payload.extend(chunk)
+        after = os.fstat(source)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+        ):
+            raise SystemExit("restore directory source changed during copy: %s" % name)
+        output = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            stat.S_IMODE(before.st_mode),
+            dir_fd=destination_fd,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(output, payload[offset:])
+        preserve_metadata(source, output, before, name)
+        os.fsync(output)
+        os.close(output)
+        output = None
+        os.replace(temporary, name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
+        temporary = None
+    finally:
+        if output is not None:
+            os.close(output)
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=destination_fd)
+            except FileNotFoundError:
+                pass
+        os.close(source)
+
+
+def copy_directory(source_fd, destination_fd):
+    for name in os.listdir(source_fd):
+        info = os.lstat(name, dir_fd=source_fd)
+        if stat.S_ISDIR(info.st_mode):
+            os.mkdir(name, stat.S_IMODE(info.st_mode) & 0o7777, dir_fd=destination_fd)
+            child_source = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=source_fd)
+            child_destination = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=destination_fd)
+            try:
+                copy_directory(child_source, child_destination)
+                preserve_metadata(child_source, child_destination, info, name)
+                os.fsync(child_destination)
+            finally:
+                os.close(child_destination)
+                os.close(child_source)
+        elif stat.S_ISLNK(info.st_mode):
+            if info.st_uid != uid or info.st_nlink != 1:
+                raise SystemExit("unsafe symlink in restore directory: %s" % name)
+            os.symlink(os.readlink(name, dir_fd=source_fd), name, dir_fd=destination_fd)
+        elif stat.S_ISREG(info.st_mode):
+            copy_regular(source_fd, destination_fd, name)
+        else:
+            raise SystemExit("unsupported special file in restore directory: %s" % name)
+
+
+source = os.open(source_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+try:
+    source_info = os.fstat(source)
+    if not stat.S_ISDIR(source_info.st_mode) or source_info.st_uid != os.getuid():
+        raise SystemExit("unsafe restore directory")
+    os.mkdir(candidate_path, 0o700)
+    destination = os.open(candidate_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+    try:
+        copy_directory(source, destination)
+        preserve_metadata(source, destination, source_info, source_path)
+        os.fsync(destination)
+    finally:
+        os.close(destination)
+finally:
+    os.close(source)
+PY
 }
 stage_restore() {
   source_path="$1"
   candidate_path="$2"
   path_kind="$3"
-  parent_path="$(dirname "$candidate_path")" || return 1
-  mkdir -p "$parent_path" || return 1
+  if [ "${INSTALL_TX_TEST_RESTORE_COPY_FAULT:-}" = "fail-restore-cp" ]; then
+    log "injected restore-copy failure"
+    return 1
+  fi
   case "$path_kind" in
-    directory) cp -R "$source_path" "$candidate_path" || return 1 ;;
-    symlink) cp -P "$source_path" "$candidate_path" || return 1 ;;
-    file) cp -p "$source_path" "$candidate_path" || return 1 ;;
+    directory) stage_restore_directory "$source_path" "$candidate_path" || return 1 ;;
+    symlink) stage_restore_symlink "$source_path" "$candidate_path" || return 1 ;;
+    file) stage_restore_file "$source_path" "$candidate_path" || return 1 ;;
     *) return 1 ;;
   esac
   paths_match "$source_path" "$candidate_path" "$path_kind"
+}
+preserve_unmanaged_install_entries() {
+  live_path="$1"
+  candidate_path="$2"
+  python3 - "$live_path" "$candidate_path" <<'PY'
+import ctypes
+import errno
+import os
+import re
+import shutil
+import stat
+import sys
+
+live_path, candidate_path = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+managed_bundle = re.compile(r".*\.bundle$")
+
+
+def installer_owned(name):
+    return name in {
+        "macprovider-cli",
+        "mlx.metallib",
+        "THIRD-PARTY-NOTICES.txt",
+        "compatibility-set.json",
+        "compatibility-set-local",
+        "catalog-release",
+    } or bool(managed_bundle.fullmatch(name)) or bool(
+        re.fullmatch(r"macprovider-cli\.v[0-9.]+\.bak", name)
+    )
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        get_acl = libc.acl_get_fd_np
+        get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+        get_acl.restype = ctypes.c_void_p
+        free_acl = libc.acl_free
+        free_acl.argtypes = [ctypes.c_void_p]
+        free_acl.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = get_acl(fd, 0x00000100)
+    if acl:
+        free_acl(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def read_extended_attributes(fd):
+    if sys.platform != "darwin":
+        return []
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        list_xattrs = libc.flistxattr
+        list_xattrs.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+        list_xattrs.restype = ctypes.c_ssize_t
+        get_xattr = libc.fgetxattr
+        get_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        get_xattr.restype = ctypes.c_ssize_t
+    except (AttributeError, OSError):
+        raise SystemExit("extended-attribute API is unavailable")
+    size = list_xattrs(fd, None, 0, 0)
+    if size < 0:
+        raise SystemExit("could not enumerate source extended attributes")
+    if size == 0:
+        return []
+    names_buffer = ctypes.create_string_buffer(size)
+    actual_size = list_xattrs(fd, names_buffer, size, 0)
+    if actual_size < 0:
+        raise SystemExit("could not read source extended attributes")
+    names = names_buffer.raw[:actual_size].split(b"\0")
+    attributes = []
+    for raw_name in names:
+        if not raw_name:
+            continue
+        value_size = get_xattr(fd, raw_name, None, 0, 0, 0)
+        if value_size < 0:
+            raise SystemExit("could not read source extended attribute")
+        value_buffer = ctypes.create_string_buffer(value_size) if value_size else None
+        if value_size and get_xattr(fd, raw_name, value_buffer, value_size, 0, 0) != value_size:
+            raise SystemExit("could not read source extended attribute")
+        value = b"" if value_buffer is None else bytes(value_buffer.raw[:value_size])
+        attributes.append((raw_name, value))
+    return attributes
+
+
+def write_extended_attributes(fd, attributes):
+    if sys.platform != "darwin":
+        return
+    try:
+        set_xattr = ctypes.CDLL(None, use_errno=True).fsetxattr
+        set_xattr.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+        set_xattr.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        raise SystemExit("extended-attribute API is unavailable")
+    for name, value in attributes:
+        value_buffer = ctypes.create_string_buffer(value) if value else None
+        if set_xattr(fd, name, value_buffer, len(value), 0, 0) != 0:
+            raise SystemExit("could not preserve extended attribute")
+
+
+def preserve_metadata(source_fd, destination_fd, info, label):
+    if (
+        info.st_uid != uid
+        or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or getattr(info, "st_flags", 0) != 0
+        or not no_acl(source_fd)
+    ):
+        raise SystemExit("unsupported metadata in mixed install content: %s" % label)
+    attributes = read_extended_attributes(source_fd)
+    os.fchmod(destination_fd, stat.S_IMODE(info.st_mode))
+    os.utime(destination_fd, ns=(info.st_atime_ns, info.st_mtime_ns))
+    write_extended_attributes(destination_fd, attributes)
+    destination_info = os.fstat(destination_fd)
+    if (
+        stat.S_IMODE(destination_info.st_mode) != stat.S_IMODE(info.st_mode)
+        or destination_info.st_atime_ns != info.st_atime_ns
+        or destination_info.st_mtime_ns != info.st_mtime_ns
+        or dict(read_extended_attributes(destination_fd)) != dict(attributes)
+    ):
+        raise SystemExit("destination metadata changed during copy")
+
+
+def copy_regular(source_fd, destination_fd, name):
+    source = os.open(name, os.O_RDONLY | nonblock | nofollow, dir_fd=source_fd)
+    temporary = ".%s.preserve-%s" % (name, os.urandom(16).hex())
+    output = None
+    try:
+        before = os.fstat(source)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_nlink != 1
+            or before.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not no_acl(source)
+        ):
+            raise SystemExit("unsupported special file in mixed install content: %s" % name)
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(source, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise SystemExit("mixed install content was truncated: %s" % name)
+            payload.extend(chunk)
+        after = os.fstat(source)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns
+        ):
+            raise SystemExit("mixed install content changed during copy: %s" % name)
+        output = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            stat.S_IMODE(before.st_mode),
+            dir_fd=destination_fd,
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(output, payload[offset:])
+        preserve_metadata(source, output, before, name)
+        os.fsync(output)
+        os.close(output)
+        output = None
+        os.replace(temporary, name, src_dir_fd=destination_fd, dst_dir_fd=destination_fd)
+        temporary = None
+    finally:
+        if output is not None:
+            os.close(output)
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=destination_fd)
+            except FileNotFoundError:
+                pass
+        os.close(source)
+
+
+def copy_entry(source_fd, destination_fd, name):
+    info = os.lstat(name, dir_fd=source_fd)
+    if stat.S_ISDIR(info.st_mode):
+        os.mkdir(name, stat.S_IMODE(info.st_mode) & 0o7777, dir_fd=destination_fd)
+        child_source = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=source_fd)
+        child_destination = os.open(name, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=destination_fd)
+        try:
+            for child_name in os.listdir(child_source):
+                copy_entry(child_source, child_destination, child_name)
+            preserve_metadata(child_source, child_destination, info, name)
+            os.fsync(child_destination)
+        finally:
+            os.close(child_destination)
+            os.close(child_source)
+    elif stat.S_ISLNK(info.st_mode):
+        if info.st_uid != uid or info.st_nlink != 1:
+            raise SystemExit("unsafe symlink in mixed install content: %s" % name)
+        os.symlink(os.readlink(name, dir_fd=source_fd), name, dir_fd=destination_fd)
+    elif stat.S_ISREG(info.st_mode):
+        copy_regular(source_fd, destination_fd, name)
+    else:
+        raise SystemExit("unsupported special file in mixed install content: %s" % name)
+
+
+def remove_candidate(path):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
+live = os.open(live_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+candidate = os.open(candidate_path, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+try:
+    for name in os.listdir(live):
+        if installer_owned(name):
+            continue
+        remove_candidate(os.path.join(candidate_path, name))
+        copy_entry(live, candidate, name)
+    os.fsync(candidate)
+finally:
+    os.close(candidate)
+    os.close(live)
+PY
 }
 swap_restore() {
   item_name="$1"
   destination_path="$2"
   candidate_path="$3"
   had_previous="$4"
+  if [ "$item_name" = "install-dir" ] && [ "${REC_INSTALL_DIR_PREMOVED:-0}" -eq 1 ]; then
+    path_exists "$destination_path" && return 1
+    if [ "$had_previous" -eq 1 ]; then
+      durable_move "$candidate_path" "$destination_path" || return 1
+    fi
+    return 0
+  fi
   if path_exists "$destination_path"; then
-    mv "$destination_path" "$FAILED_CURRENT_DIR/$item_name" || return 1
+    durable_move "$destination_path" "$FAILED_CURRENT_DIR/$item_name" || return 1
   fi
   if [ "$had_previous" -eq 1 ]; then
-    mv "$candidate_path" "$destination_path" || return 1
+    durable_move "$candidate_path" "$destination_path" || return 1
   fi
 }
 # Restore the lifecycle-state file coherently instead of a raw byte swap:
@@ -1500,7 +3260,7 @@ def lstat_or_none(path):
 
 
 def read_bytes_nofollow(path):
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         data = b""
         while len(data) <= MAX_STATE_BYTES:
@@ -2867,7 +4627,7 @@ try:
         remove = True
         record = None
     else:
-        fd = os.open(lease_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(lease_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
             raw = b""
             while len(raw) <= MAX_LEASE_BYTES:
@@ -3029,6 +4789,39 @@ recovery_failed() {
   recovery_log "Recovery data was preserved. Retry exactly: bash '$RECOVERY_DIR/recover.sh'"
   exit 70
 }
+service_loaded() {
+  launchctl print "gui/$REC_UID/$1" >/dev/null 2>&1
+}
+service_identity_matches() {
+  service_label="$1"
+  expected_path="$2"
+  expected_program="$3"
+  alternate_program="$4"
+  service_details="$(launchctl print "gui/$REC_UID/$service_label" 2>/dev/null | head -c 65537)" || return 1
+  [ "${#service_details}" -le 65536 ] || return 1
+  program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
+  path_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*path = / { count++ } END { print count + 0 }')"
+  [ "$program_count" -eq 1 ] || return 1
+  [ "$path_count" -eq 1 ] || return 1
+  service_program="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p')"
+  service_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p')"
+  [ "$service_path" = "$expected_path" ] || return 1
+  [ "$service_program" = "$expected_program" ] || [ "$service_program" = "$alternate_program" ]
+}
+stop_loaded_service() {
+  service_label="$1"
+  expected_path="$2"
+  expected_program="$3"
+  alternate_program="$4"
+  failure_message="$5"
+  if ! service_loaded "$service_label"; then
+    return 0
+  fi
+  service_identity_matches "$service_label" "$expected_path" "$expected_program" "$alternate_program" \
+    || recovery_failed "$failure_message has an unexpected launchd identity"
+  launchctl bootout "gui/$REC_UID/$service_label" >/dev/null 2>&1 \
+    || recovery_failed "$failure_message could not be stopped"
+}
 
 # Before the durable cutover marker exists, the installer has not touched the
 # provider binary, config, launchd service, or manual process. Only the
@@ -3036,28 +4829,34 @@ recovery_failed() {
 # guard service without booting out or replacing the healthy incumbent.
 if [ ! -e "$RECOVERY_DIR/cutover-started" ] && [ ! -L "$RECOVERY_DIR/cutover-started" ]; then
   if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
-    if ! launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1; then
+    if ! launchctl print "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_PLIST" -eq 1 ] \
         || recovery_failed "the prior provider service disappeared before cutover and no launchd plist was preserved"
+      paths_match "$RECOVERY_DIR/provider.plist" "$REC_PLIST_PATH" file \
+        || recovery_failed "the pre-cutover provider plist changed after the recovery snapshot"
       launchctl bootstrap "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 \
         || recovery_failed "could not restore the unexpectedly inactive pre-cutover provider service"
-      launchctl kickstart -k "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+      launchctl kickstart -k "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 \
         || recovery_failed "could not start the unexpectedly inactive pre-cutover provider service"
     fi
-    launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 \
-      || recovery_failed "pre-cutover provider service is not active"
+    service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      || recovery_failed "pre-cutover provider service has an unexpected identity"
   fi
   if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
     if ! launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
       [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] \
         || recovery_failed "the prior watchdog was active but no launchd plist was preserved"
+      paths_match "$RECOVERY_DIR/watchdog.plist" "$REC_WATCHDOG_PLIST_PATH" file \
+        || recovery_failed "the pre-cutover watchdog plist changed after the recovery snapshot"
       launchctl bootstrap "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
         || recovery_failed "could not restore the pre-cutover watchdog service"
     fi
     launchctl kickstart -k "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
       || recovery_failed "could not start the pre-cutover watchdog service"
-    launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 \
-      || recovery_failed "pre-cutover watchdog service is not active"
+    service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+      "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+      || recovery_failed "pre-cutover watchdog service has an unexpected identity"
   fi
   recovery_log "Cutover never started; incumbent provider files and process were left untouched."
   exit 0
@@ -3217,16 +5016,21 @@ for directory in {parent, provider_id_parent}:
 PY
 }
 
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$" || recovery_failed "could not create recovery run id"
-INSTALL_CANDIDATE="${REC_INSTALL_DIR}.macprovider-restore.$$"
-BINARY_CANDIDATE="${REC_BINARY_PATH}.macprovider-restore.$$"
-CONFIG_CANDIDATE="${REC_CONFIG_PATH}.macprovider-restore.$$"
-PROVIDER_ID_CANDIDATE="${REC_PROVIDER_ID_PATH}.macprovider-restore.$$"
-RECOMMENDATION_CANDIDATE="${REC_RECOMMENDATION_PATH}.macprovider-restore.$$"
-PLIST_CANDIDATE="${REC_PLIST_PATH}.macprovider-restore.$$"
-WATCHDOG_DIR_CANDIDATE="${REC_WATCHDOG_DIR}.macprovider-restore.$$"
-WATCHDOG_PLIST_CANDIDATE="${REC_WATCHDOG_PLIST_PATH}.macprovider-restore.$$"
-MANIFEST_CANDIDATE="${REC_MANIFEST_PATH}.macprovider-restore.$$"
+RUN_ID="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" \
+  || recovery_failed "could not create recovery run id"
+RESTORE_STAGING_DIR="$(mktemp -d "$RECOVERY_DIR/restore.XXXXXX")" \
+  || recovery_failed "could not create randomized restore staging directory"
+chmod 700 "$RESTORE_STAGING_DIR" \
+  || recovery_failed "could not secure randomized restore staging directory"
+INSTALL_CANDIDATE="$RESTORE_STAGING_DIR/install-dir"
+BINARY_CANDIDATE="$RESTORE_STAGING_DIR/binary-path"
+CONFIG_CANDIDATE="$RESTORE_STAGING_DIR/config.yaml"
+PROVIDER_ID_CANDIDATE="$RESTORE_STAGING_DIR/provider_id"
+RECOMMENDATION_CANDIDATE="$RESTORE_STAGING_DIR/last-recommendation.json"
+PLIST_CANDIDATE="$RESTORE_STAGING_DIR/provider.plist"
+WATCHDOG_DIR_CANDIDATE="$RESTORE_STAGING_DIR/watchdog-dir"
+WATCHDOG_PLIST_CANDIDATE="$RESTORE_STAGING_DIR/watchdog.plist"
+MANIFEST_CANDIDATE="$RESTORE_STAGING_DIR/install-manifest.json"
 FAILED_CURRENT_DIR="$RECOVERY_DIR/failed-current/$RUN_ID"
 
 # Prove every requested restore can be copied byte-for-byte before touching the
@@ -3262,13 +5066,80 @@ fi
 # restored under the store's lock by restore_lifecycle_state (translate/pause
 # reconcile/atomic write/verify/fsync), reading the snapshot directly.
 
-mkdir -p "$FAILED_CURRENT_DIR" || recovery_failed "could not create durable failed-install storage"
-chmod 700 "$RECOVERY_DIR/failed-current" "$FAILED_CURRENT_DIR" || recovery_failed "could not secure durable failed-install storage"
-if launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1; then
-  launchctl bootout "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not stop the current provider service"
+REC_INSTALL_DIR_PREMOVED=0
+if [ "$REC_HAD_INSTALL_DIR" -eq 1 ] && ! path_exists "$REC_INSTALL_DIR"; then
+  prior_failed_current_dir=""
+  for existing_failed_current_dir in "$RECOVERY_DIR/failed-current"/*; do
+    if [ -d "$existing_failed_current_dir" ] && [ ! -L "$existing_failed_current_dir" ] \
+      && [ -d "$existing_failed_current_dir/install-dir" ] \
+      && [ ! -L "$existing_failed_current_dir/install-dir" ]; then
+      [ -z "$prior_failed_current_dir" ] \
+        || recovery_failed "multiple interrupted install-directory move-asides were found"
+      prior_failed_current_dir="$existing_failed_current_dir"
+    fi
+  done
+  if [ -n "$prior_failed_current_dir" ]; then
+    FAILED_CURRENT_DIR="$prior_failed_current_dir"
+    REC_INSTALL_DIR_PREMOVED=1
+    fsync_directory_path "$FAILED_CURRENT_DIR" || recovery_failed "could not validate the interrupted install-directory move-aside"
+  fi
 fi
-if launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
-  launchctl bootout "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not stop the current watchdog service"
+if [ "$REC_INSTALL_DIR_PREMOVED" -eq 0 ]; then
+  mkdir -p "$FAILED_CURRENT_DIR" || recovery_failed "could not create durable failed-install storage"
+fi
+chmod 700 "$RECOVERY_DIR/failed-current" "$FAILED_CURRENT_DIR" || recovery_failed "could not secure durable failed-install storage"
+if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
+  [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "the prior provider service was active but no recoverable plist was preserved"
+  if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
+    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "the transaction provider service"
+  else
+    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "the incumbent provider service"
+  fi
+else
+  if [ -f "$RECOVERY_DIR/provider-service-created" ] && [ ! -L "$RECOVERY_DIR/provider-service-created" ]; then
+    stop_loaded_service "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+      "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+      "the transaction provider service"
+  fi
+  service_loaded "$REC_PROVIDER_LABEL" && recovery_failed "provider service is active even though it was inactive before the failed install"
+fi
+if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
+  [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "the prior watchdog was active but no recoverable plist was preserved"
+  stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    "the transaction watchdog service"
+else
+  if [ -f "$RECOVERY_DIR/watchdog-service-created" ] && [ ! -L "$RECOVERY_DIR/watchdog-service-created" ]; then
+    stop_loaded_service "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+      "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+      "the transaction watchdog service"
+  fi
+  service_loaded "$REC_WATCHDOG_LABEL" && recovery_failed "watchdog service is active even though it was inactive before the failed install"
+fi
+# INSTALL_DIR intentionally permits unrelated support files. Stop all owners
+# first, then move the live directory to a stable private name before merging
+# unmanaged entries into the staged incumbent. If the merge fails, restore the
+# rename so the original install remains reachable for a later retry.
+if [ "$REC_HAD_INSTALL_DIR" -eq 1 ]; then
+  if [ "$REC_INSTALL_DIR_PREMOVED" -eq 0 ]; then
+    path_exists "$REC_INSTALL_DIR" || recovery_failed "the previous install directory disappeared before rollback"
+    durable_move "$REC_INSTALL_DIR" "$FAILED_CURRENT_DIR/install-dir" \
+      || recovery_failed "could not stabilize the previous install directory before rollback"
+    REC_INSTALL_DIR_PREMOVED=1
+  else
+    path_exists "$FAILED_CURRENT_DIR/install-dir" \
+      || recovery_failed "the interrupted install-directory move-aside disappeared before rollback"
+  fi
+  if ! preserve_unmanaged_install_entries "$FAILED_CURRENT_DIR/install-dir" "$INSTALL_CANDIDATE"; then
+    durable_move "$FAILED_CURRENT_DIR/install-dir" "$REC_INSTALL_DIR" \
+      || recovery_failed "could not restore the previous install directory after preserving unrelated content"
+    REC_INSTALL_DIR_PREMOVED=0
+    recovery_failed "could not preserve unrelated install-directory content"
+  fi
 fi
 if [ -s "$RECOVERY_DIR/new-manual.pid" ]; then
   NEW_MANUAL_PID="$(cat "$RECOVERY_DIR/new-manual.pid")"
@@ -3312,17 +5183,19 @@ restore_lifecycle_state || recovery_failed "could not restore the previous lifec
 reconcile_lifecycle_lease || recovery_failed "could not reconcile the lifecycle lease after rollback"
 
 if [ "$REC_SERVICE_WAS_DISABLED" -eq 1 ]; then
-  launchctl disable "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
+  launchctl disable "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the disabled provider service state"
 else
-  launchctl enable "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "could not restore the enabled provider service state"
+  launchctl enable "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not restore the enabled provider service state"
 fi
 if [ "$REC_SERVICE_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_PLIST" -eq 1 ] || recovery_failed "previous service was active but no previous plist was preserved"
   launchctl bootstrap "gui/$REC_UID" "$REC_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous provider service"
-  launchctl kickstart -k "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
-  launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1 || recovery_failed "previous provider service did not become active"
+  launchctl kickstart -k "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous provider service"
+  service_identity_matches "$REC_PROVIDER_LABEL" "$REC_PLIST_PATH" \
+    "$REC_INSTALL_DIR/macprovider-cli" "$REC_BINARY_PATH" \
+    || recovery_failed "previous provider service has an unexpected identity"
 else
-  if launchctl print "gui/$REC_UID/live.streamvc.macprovider" >/dev/null 2>&1; then
+  if launchctl print "gui/$REC_UID/$REC_PROVIDER_LABEL" >/dev/null 2>&1; then
     recovery_failed "provider service is active even though it was inactive before the failed install"
   fi
 fi
@@ -3336,7 +5209,9 @@ if [ "$REC_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
   [ "$REC_HAD_WATCHDOG_PLIST" -eq 1 ] || recovery_failed "previous watchdog was active but no previous plist was preserved"
   launchctl bootstrap "gui/$REC_UID" "$REC_WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || recovery_failed "could not bootstrap the previous watchdog service"
   launchctl kickstart -k "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "could not kickstart the previous watchdog service"
-  launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1 || recovery_failed "previous watchdog service did not become active"
+  service_identity_matches "$REC_WATCHDOG_LABEL" "$REC_WATCHDOG_PLIST_PATH" \
+    "$REC_WATCHDOG_DIR/macprovider-health-monitor" "$REC_WATCHDOG_DIR/watchdog.sh" \
+    || recovery_failed "previous watchdog service has an unexpected identity"
 else
   if launchctl print "gui/$REC_UID/$REC_WATCHDOG_LABEL" >/dev/null 2>&1; then
     recovery_failed "watchdog service is active even though it was inactive before the failed install"
@@ -3354,6 +5229,7 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -3432,6 +5308,48 @@ if not 1 <= ready_timeout <= 60:
 process = None
 cleanup_armed = False
 temporary = pid_path + ".tmp"
+
+def terminate_process_group(child):
+    """Stop the restored provider and every descendant in its private session."""
+    process_group = child.pid  # start_new_session=True makes the child its PGID.
+
+    def signal_group(signal_number):
+        try:
+            os.killpg(process_group, signal_number)
+        except ProcessLookupError:
+            pass
+
+    if child.poll() is None:
+        signal_group(signal.SIGTERM)
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        signal_group(signal.SIGKILL)
+        child.wait(timeout=2)
+
+    # The leader may have exited while a descendant remains in the private
+    # session. Prove that the process group has drained before reporting the
+    # recovery failure; otherwise a retry can inherit an orphaned listener.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            break
+        time.sleep(0.05)
+    signal_group(signal.SIGKILL)
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return
+    raise RuntimeError(f"restored manual provider process group {process_group} survived cleanup")
+
 try:
     with open(stdout_path, "ab", buffering=0) as stdout, open(stderr_path, "ab", buffering=0) as stderr:
         process = subprocess.Popen(
@@ -3470,25 +5388,7 @@ except BaseException as original_error:
     cleanup_error = None
     if cleanup_armed and process is not None:
         try:
-            if process.poll() is None:
-                terminate_error = None
-                try:
-                    process.terminate()
-                except ProcessLookupError:
-                    pass
-                except BaseException as error:
-                    terminate_error = error
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=2)
-            if process.poll() is None:
-                detail = f" after TERM error {terminate_error}" if terminate_error is not None else ""
-                raise RuntimeError(f"restored manual provider pid {process.pid} survived TERM/KILL cleanup{detail}")
+            terminate_process_group(process)
         except BaseException as error:
             cleanup_error = error
     for path in (temporary, pid_path):
@@ -3508,12 +5408,14 @@ PY
 fi
 
 recovery_log "Previous provider, recommendation, watchdog, manifest, service, and manual-process states were restored and verified."
+rm -rf "$RESTORE_STAGING_DIR" || recovery_failed "could not retire randomized restore staging directory"
+fsync_directory_path "$(dirname "$RESTORE_STAGING_DIR")" \
+  || recovery_failed "could not durably retire randomized restore staging directory"
 exit 0
 RECOVERY_SCRIPT
-  chmod 700 "$recovery_script" || return 1
   bash -n "$recovery_script" || return 1
   observer_script="$recovery_dir/observe.sh"
-  cat > "$observer_script" <<'OBSERVER_SCRIPT'
+  write_atomic_install_file "$observer_script" 0700 <<'OBSERVER_SCRIPT'
 #!/usr/bin/env bash
 set -u
 
@@ -3542,6 +5444,24 @@ import subprocess
 import sys
 
 recovery_dir, lock_path, plist_path, uid, label = sys.argv[1:]
+
+def fsync_directory(path):
+    fd = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise RuntimeError("unsafe recovery parent directory")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
 lock_fd = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
 try:
     info = os.fstat(lock_fd)
@@ -3560,11 +5480,14 @@ try:
             file=sys.stderr,
         )
         raise SystemExit(result.returncode)
+    recovery_parent = os.path.dirname(recovery_dir)
     shutil.rmtree(recovery_dir)
+    fsync_directory(recovery_parent)
     try:
         os.unlink(plist_path)
     except FileNotFoundError:
         pass
+    fsync_directory(os.path.dirname(plist_path))
     subprocess.run(
         ["launchctl", "bootout", f"gui/{uid}/{label}"],
         check=False,
@@ -3575,28 +5498,54 @@ finally:
     os.close(lock_fd)
 PY
 OBSERVER_SCRIPT
-  chmod 700 "$observer_script" || return 1
   bash -n "$observer_script" || return 1
   [ -s "$state_path" ] && [ -s "$recovery_script" ] && [ -s "$observer_script" ]
 }
 
+fsync_directory_path() {
+  directory_path="$1"
+  python3 - "$directory_path" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+fd = os.open(
+    path,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise SystemExit("unsafe directory for durable rename")
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
 disarm_install_recovery_agent() {
   launchctl bootout "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || true
-  rm -f "$INSTALL_RECOVERY_PLIST_PATH"
+  rm -f "$INSTALL_RECOVERY_PLIST_PATH" || return 70
+  fsync_directory_path "$(dirname "$INSTALL_RECOVERY_PLIST_PATH")" || return 70
 }
 
 arm_install_recovery_agent() {
   [ -n "$INSTALL_TX_BACKUP" ] && [ -x "$INSTALL_TX_BACKUP/observe.sh" ] || return 70
   mkdir -p "$(dirname "$INSTALL_RECOVERY_PLIST_PATH")" || return 70
   disarm_install_recovery_agent || return 70
-  plist_temp="${INSTALL_RECOVERY_PLIST_PATH}.tmp.$$"
-  python3 - "$plist_temp" "$INSTALL_RECOVERY_LABEL" "$INSTALL_TX_BACKUP/observe.sh" \
-    "$INSTALL_TX_BACKUP/recovery-observer.out.log" "$INSTALL_TX_BACKUP/recovery-observer.err.log" <<'PY'
-import os
+  python3 - "$INSTALL_RECOVERY_LABEL" "$INSTALL_TX_BACKUP/observe.sh" \
+    "$INSTALL_TX_BACKUP/recovery-observer.out.log" "$INSTALL_TX_BACKUP/recovery-observer.err.log" <<'PY' \
+    | write_atomic_install_file "$INSTALL_RECOVERY_PLIST_PATH" 0600 \
+    || return 70
 import plistlib
 import sys
 
-path, label, observer, stdout_path, stderr_path = sys.argv[1:]
+label, observer, stdout_path, stderr_path = sys.argv[1:]
 payload = {
     "Label": label,
     "ProgramArguments": ["/bin/bash", observer],
@@ -3605,13 +5554,8 @@ payload = {
     "StandardOutPath": stdout_path,
     "StandardErrorPath": stderr_path,
 }
-with open(path, "wb") as handle:
-    plistlib.dump(payload, handle, fmt=plistlib.FMT_XML, sort_keys=True)
-    handle.flush()
-    os.fsync(handle.fileno())
-os.chmod(path, 0o600)
+sys.stdout.buffer.write(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=True))
 PY
-  mv "$plist_temp" "$INSTALL_RECOVERY_PLIST_PATH" || return 70
   launchctl bootstrap "gui/$UID" "$INSTALL_RECOVERY_PLIST_PATH" >/dev/null 2>&1 || return 70
   launchctl kickstart -k "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || return 70
 }
@@ -3816,12 +5760,19 @@ stop_owned_manual_provider() {
 begin_install_transaction() {
   [ "$DRY_RUN" -eq 0 ] || return 0
   assert_install_lock_ownership
+  validate_transaction_path_kinds
+  if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
+    repair_safe_incumbent_present \
+      || die 20 "trusted existing-install evidence changed before the transaction snapshot"
+  fi
   recovery_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   recovery_staging="$CONFIG_DIR/install-recovery-$recovery_id.staging"
   INSTALL_TX_BACKUP="$CONFIG_DIR/install-recovery-$recovery_id"
   mkdir -p "$CONFIG_DIR" || die 70 "could not create config directory for durable install recovery"
+  validate_transaction_filesystems \
+    || die 70 "provider recovery paths must share the config filesystem for atomic rollback"
   mkdir "$recovery_staging" || die 70 "could not create durable install recovery staging directory: $recovery_staging"
-  chmod 700 "$recovery_staging" \
+  secure_private_directory "$recovery_staging" \
     || die 70 "could not secure durable install recovery staging directory: $recovery_staging"
   if [ -d "$INSTALL_DIR" ]; then
     stage_install_tx_path "$INSTALL_DIR" "$recovery_staging/install-dir" directory \
@@ -3856,7 +5807,8 @@ begin_install_transaction() {
     INSTALL_TX_HAD_RECOMMENDATION=1
   fi
   if [ -f "$PLIST_PATH" ]; then
-    stage_install_tx_path "$PLIST_PATH" "$recovery_staging/provider.plist" file \
+    stage_install_tx_plist "$PLIST_PATH" "$recovery_staging/provider.plist" \
+      "$PROVIDER_LABEL" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
       || die 70 "could not stage and verify the previous launchd plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_PLIST=1
   fi
@@ -3866,7 +5818,8 @@ begin_install_transaction() {
     INSTALL_TX_HAD_WATCHDOG_DIR=1
   fi
   if [ -f "$WATCHDOG_PLIST_PATH" ]; then
-    stage_install_tx_path "$WATCHDOG_PLIST_PATH" "$recovery_staging/watchdog.plist" file \
+    stage_install_tx_plist "$WATCHDOG_PLIST_PATH" "$recovery_staging/watchdog.plist" \
+      "$WATCHDOG_LABEL" "$WATCHDOG_PATH" "$WATCHDOG_DIR/watchdog.sh" \
       || die 70 "could not stage and verify the previous watchdog plist; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_WATCHDOG_PLIST=1
   fi
@@ -3904,16 +5857,34 @@ begin_install_transaction() {
   if launchd_label_is_disabled "$WATCHDOG_LABEL"; then
     INSTALL_TX_WATCHDOG_WAS_DISABLED=1
   fi
+  # A loaded service without an owner-safe plist snapshot cannot be reclaimed
+  # before cutover or restored after rollback. Abort before publishing or
+  # arming durable recovery rather than entering an unrecoverable transaction.
+  if [ "$INSTALL_TX_SERVICE_WAS_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_HAD_PLIST" -ne 1 ]; then
+    rm -rf -- "$recovery_staging" \
+      || die 70 "loaded provider has no recoverable launchd plist and partial recovery data could not be removed"
+    die 70 "loaded provider has no recoverable launchd plist; current install was not changed"
+  fi
+  if [ "$INSTALL_TX_WATCHDOG_WAS_ACTIVE" -eq 1 ] && [ "$INSTALL_TX_HAD_WATCHDOG_PLIST" -ne 1 ]; then
+    rm -rf -- "$recovery_staging" \
+      || die 70 "loaded watchdog has no recoverable launchd plist and partial recovery data could not be removed"
+    die 70 "loaded watchdog has no recoverable launchd plist; current install was not changed"
+  fi
   write_install_recovery_artifacts "$recovery_staging" \
     || die 70 "could not create verified recovery instructions; current install was not changed (partial recovery data: $recovery_staging)"
-  mv "$recovery_staging" "$INSTALL_TX_BACKUP" \
-    || die 70 "could not publish durable recovery data; current install was not changed (partial recovery data: $recovery_staging)"
+  if ! mv "$recovery_staging" "$INSTALL_TX_BACKUP" \
+    || ! fsync_directory_path "$CONFIG_DIR"; then
+    if [ -d "$INSTALL_TX_BACKUP" ] && mv "$INSTALL_TX_BACKUP" "$recovery_staging"; then
+      fsync_directory_path "$CONFIG_DIR" || true
+    fi
+    die 70 "could not publish durable recovery data; current install was not changed (partial recovery data: $recovery_staging)"
+  fi
   INSTALL_TX_ACTIVE=1
   assert_install_lock_ownership
   arm_install_recovery_agent \
     || die 70 "could not arm independent interrupted-install recovery before live mutation"
   if [ "$INSTALL_TX_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
-    launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+    reclaim_launchd_service "$WATCHDOG_LABEL" \
       || die 70 "could not suspend the existing watchdog for the protected install transaction"
   fi
 }
@@ -3923,30 +5894,84 @@ mark_install_cutover_started() {
   [ "$INSTALL_TX_ACTIVE" -eq 1 ] && [ -n "$INSTALL_TX_BACKUP" ] \
     || die 70 "install cutover cannot start without durable recovery"
   assert_install_lock_ownership
-  python3 - "$INSTALL_TX_BACKUP/cutover-started" <<'PY' \
+  write_install_tx_marker "$INSTALL_TX_BACKUP/cutover-started" "cutover-started" \
     || die 70 "could not durably mark install cutover before live provider mutation"
+  CUTOVER_STARTED=1
+}
+
+write_install_tx_marker() {
+  marker_path="$1"
+  marker_payload="${2:-transaction-created}"
+  python3 - "$marker_path" "$marker_payload" <<'PY'
+import ctypes
+import errno
 import os
 import stat
 import sys
 
-path = sys.argv[1]
+path, payload_text = sys.argv[1:]
+parent_path = os.path.dirname(path)
+marker_name = os.path.basename(path)
+directory_fd = os.open(
+    parent_path,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+directory_info = os.fstat(directory_fd)
+if (
+    not stat.S_ISDIR(directory_info.st_mode)
+    or directory_info.st_uid != os.getuid()
+    or directory_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+):
+    os.close(directory_fd)
+    raise RuntimeError("unsafe install transaction marker parent")
+if sys.platform == "darwin":
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        os.close(directory_fd)
+        raise RuntimeError("install transaction marker ACL API is unavailable")
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(directory_fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        os.close(directory_fd)
+        raise RuntimeError("install transaction marker parent has an extended ACL")
+    if ctypes.get_errno() != errno.ENOENT:
+        os.close(directory_fd)
+        raise RuntimeError("install transaction marker parent ACL verification failed")
+
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-fd = os.open(path, flags, 0o600)
+fd = os.open(marker_name, flags, 0o600, dir_fd=directory_fd)
 try:
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
-        raise RuntimeError("unsafe cutover marker")
-    os.write(fd, b"cutover-started\n")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    ):
+        raise RuntimeError("unsafe install transaction marker")
+    payload = (payload_text + "\n").encode("utf-8")
+    written = 0
+    while written < len(payload):
+        progress = os.write(fd, payload[written:])
+        if progress <= 0:
+            raise RuntimeError("install transaction marker write made no progress")
+        written += progress
     os.fsync(fd)
 finally:
     os.close(fd)
-directory_fd = os.open(os.path.dirname(path), os.O_RDONLY)
 try:
     os.fsync(directory_fd)
 finally:
     os.close(directory_fd)
 PY
-  CUTOVER_STARTED=1
 }
 
 discard_install_transaction_before_cutover() {
@@ -3962,6 +5987,10 @@ discard_install_transaction_before_cutover() {
   fi
   if ! rm -rf "$INSTALL_TX_BACKUP"; then
     log "ERROR: pre-cutover cleanup succeeded but recovery data could not be retired: $INSTALL_TX_BACKUP"
+    return 70
+  fi
+  if ! fsync_directory_path "$CONFIG_DIR"; then
+    log "ERROR: pre-cutover cleanup succeeded but recovery retirement was not durable: $INSTALL_TX_BACKUP"
     return 70
   fi
   INSTALL_TX_ACTIVE=0
@@ -4000,6 +6029,11 @@ rollback_install_transaction() {
     INSTALL_TX_ROLLING_BACK=0
     return 70
   fi
+  if ! fsync_directory_path "$CONFIG_DIR"; then
+    log "ERROR: rollback succeeded but recovery retirement was not durable: $INSTALL_TX_BACKUP"
+    INSTALL_TX_ROLLING_BACK=0
+    return 70
+  fi
   log "Previous provider files and service state were restored and verified."
   INSTALL_TX_ACTIVE=0
   INSTALL_TX_ROLLING_BACK=0
@@ -4011,6 +6045,8 @@ commit_install_transaction() {
     retired_recovery="${INSTALL_TX_BACKUP}.committed.$$"
     mv "$INSTALL_TX_BACKUP" "$retired_recovery" \
       || die 70 "new install passed admission but durable recovery data could not be retired: $INSTALL_TX_BACKUP"
+    fsync_directory_path "$CONFIG_DIR" \
+      || die 70 "new install passed admission but recovery retirement was not durable: $retired_recovery"
     # Crossing this rename is the no-rollback boundary. From here onward the
     # recovery bundle cannot be mistaken for an active transaction even if
     # best-effort cleanup fails partway through.
@@ -4023,6 +6059,8 @@ commit_install_transaction() {
     fi
     if ! rm -rf "$retired_recovery"; then
       log "WARNING: install committed but retired recovery data could not be removed: $retired_recovery"
+    elif ! fsync_directory_path "$CONFIG_DIR"; then
+      log "WARNING: install committed but recovery retirement was not durable: $retired_recovery"
     fi
     return 0
   fi
@@ -4082,6 +6120,219 @@ restart_safe_incumbent_present() {
     return 0
   fi
   [ -f "$MANIFEST_PATH" ] && [ -f "$PLIST_PATH" ]
+}
+
+# Malibu may request repair after the provider executable was removed while
+# the owner-private config, provider identity, manifest, and LaunchAgent plist
+# survived. This bypasses only referral admission; the evidence itself is
+# revalidated descriptor-first and must identify this install's provider label
+# and executable paths. The later transaction snapshots the same files again
+# before any live mutation.
+repair_safe_incumbent_present() {
+  python3 - \
+    "$CONFIG_PATH" \
+    "$PROVIDER_ID_PATH" \
+    "$MANIFEST_PATH" \
+    "$PLIST_PATH" \
+    "$INSTALL_DIR" \
+    "$BINARY_PATH" \
+    "$PROVIDER_LABEL" <<'PY' 2>/dev/null
+import ctypes
+import errno
+import json
+import os
+import plistlib
+import re
+import stat
+import sys
+import grp
+
+config_path, provider_id_path, manifest_path, plist_path, install_dir, binary_path, label = sys.argv[1:]
+uid = os.getuid()
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+nonblock = getattr(os, "O_NONBLOCK", 0)
+max_bytes = 1024 * 1024
+
+
+def no_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        return False
+    return ctypes.get_errno() in (0, errno.ENOENT)
+
+
+def safe_directory_acl(fd):
+    if sys.platform != "darwin":
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_to_text = libc.acl_to_text
+        acl_to_text.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_long)]
+        acl_to_text.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        return False
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(fd, 0x00000100)
+    if not acl:
+        return ctypes.get_errno() in (0, errno.ENOENT)
+    try:
+        text_length = ctypes.c_long()
+        text_pointer = acl_to_text(acl, ctypes.byref(text_length))
+        if not text_pointer:
+            return False
+        try:
+            lines = ctypes.string_at(text_pointer, text_length.value).decode(
+                "utf-8", errors="strict"
+            ).splitlines()
+        finally:
+            acl_free(text_pointer)
+        everyone_gid = grp.getgrnam("everyone").gr_gid
+        if len(lines) < 2 or lines[0] != "!#acl 1":
+            return False
+        uuid_pattern = re.compile(
+            r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+        )
+        return all(
+            (fields := line.split(":"))
+            and len(fields) == 6
+            and fields[0] == "group"
+            and bool(uuid_pattern.fullmatch(fields[1]))
+            and fields[2] == "everyone"
+            and fields[3] == str(everyone_gid)
+            and fields[4] == "deny"
+            and fields[5] == "delete"
+            for line in lines[1:]
+        )
+    finally:
+        acl_free(acl)
+
+
+def safe_parent_chain(path):
+    home = os.path.normpath(os.path.expanduser("~"))
+    parent = os.path.normpath(os.path.dirname(path))
+    try:
+        if os.path.commonpath([home, parent]) != home:
+            return False
+    except ValueError:
+        return False
+    current = home
+    relative = os.path.relpath(parent, home)
+    components = [] if relative == "." else relative.split(os.sep)
+    for component in components:
+        current = os.path.join(current, component)
+        directory_fd = os.open(
+            current,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow,
+        )
+        try:
+            info = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != uid
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                or not safe_directory_acl(directory_fd)
+            ):
+                return False
+        finally:
+            os.close(directory_fd)
+    return True
+
+
+def read_owned(path):
+    if not safe_parent_chain(path):
+        raise RuntimeError("unsafe repair evidence parent chain")
+    fd = os.open(path, os.O_RDONLY | nonblock | nofollow)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != uid
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+            or before.st_size < 0
+            or before.st_size > max_bytes
+            or not no_acl(fd)
+        ):
+            raise RuntimeError("unsafe repair evidence")
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size - len(payload)))
+            if not chunk:
+                raise RuntimeError("repair evidence truncated")
+            payload.extend(chunk)
+        after = os.fstat(fd)
+        path_info = os.lstat(path)
+        if (
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (path_info.st_dev, path_info.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise RuntimeError("repair evidence changed during read")
+        return bytes(payload)
+    finally:
+        os.close(fd)
+
+
+config = read_owned(config_path).decode("utf-8")
+provider_id = read_owned(provider_id_path).decode("utf-8").strip()
+config_ids = []
+for line in config.splitlines():
+    match = re.match(r'^provider_id:\s*"?([^"\s]+)"?\s*$', line)
+    if match:
+        config_ids.append(match.group(1))
+if config_ids != [provider_id]:
+    raise SystemExit(1)
+
+manifest = json.loads(read_owned(manifest_path).decode("utf-8"))
+labels = manifest.get("launchd_labels") if isinstance(manifest, dict) else None
+plists = manifest.get("launchd_plists") if isinstance(manifest, dict) else None
+if (
+    not isinstance(manifest, dict)
+    or manifest.get("install_prefix") != install_dir
+    or manifest.get("binary_path") != os.path.join(install_dir, "macprovider-cli")
+    or not isinstance(labels, list)
+    or not all(isinstance(value, str) for value in labels)
+    or label not in labels
+    or not isinstance(plists, list)
+    or not all(isinstance(value, str) for value in plists)
+    or plist_path not in plists
+):
+    raise SystemExit(1)
+
+plist = plistlib.loads(read_owned(plist_path))
+if not isinstance(plist, dict) or plist.get("Label") != label:
+    raise SystemExit(1)
+program = plist.get("Program")
+arguments = plist.get("ProgramArguments")
+if program is None:
+    if not isinstance(arguments, list) or not arguments:
+        raise SystemExit(1)
+    program = arguments[0]
+if program not in (os.path.join(install_dir, "macprovider-cli"), binary_path):
+    raise SystemExit(1)
+PY
 }
 
 validate_supplied_referral_code_file() {
@@ -4149,6 +6400,16 @@ prepare_fresh_referral_code() {
   case "$REFERRAL_REPLACE_INCUMBENT" in
     0|1) ;;
     *) die 7 "MACPROVIDER_REFERRAL_REPLACE_INCUMBENT must be 0 or 1" ;;
+  esac
+  case "$REPAIR_EXISTING_INSTALL" in
+    0) ;;
+    1)
+      repair_safe_incumbent_present \
+        || die 20 "trusted existing-install evidence is required for Malibu repair"
+      log "Trusted existing-install evidence found; repairing without a referral code."
+      return 0
+      ;;
+    *) die 7 "MACPROVIDER_REPAIR_EXISTING_INSTALL must be 0 or 1" ;;
   esac
   if restart_safe_incumbent_present; then
     if [ "$REFERRAL_REPLACE_INCUMBENT" != "1" ]; then
@@ -4252,7 +6513,8 @@ ensure_port_free() {
       esac
       capture_manual_provider_for_recovery "$holding_pids"
     fi
-    launchctl bootout "gui/$UID" "$PLIST_PATH" 2>/dev/null || true
+    reclaim_launchd_service "$PROVIDER_LABEL" \
+      || die 5 "could not reclaim existing provider launchd service"
     sleep 2
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
       log "Port $PORT still held after launchctl bootout; stopping each revalidated macprovider-cli PID."
@@ -4275,6 +6537,85 @@ ensure_port_free() {
   log "Note: env var must be on the bash side of the pipe, not the curl side:"
   log "  curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_PORT=18080 bash"
   die 6 "port $PORT busy; macprovider-cli cannot bind"
+}
+
+# Reclaim by launchd service target rather than plist path. A standalone
+# install and Malibu share the provider label, so an older loaded job can
+# continue to own the label even after its plist path has been replaced.
+# A label-wide bootout is only allowed inside a durable install transaction
+# with an owner-validated prior plist snapshot. The print record is bounded
+# and its executable must be one of the provider/watchdog paths emitted by
+# this installer; otherwise an unrelated job cannot be stopped accidentally.
+reclaim_launchd_service() {
+  local label="$1"
+  local service_target="gui/$UID/$label"
+  local expected_program
+  local legacy_program
+  local expected_plist
+  local had_plist
+  case "$label" in
+    "$PROVIDER_LABEL")
+      expected_program="$INSTALL_DIR/macprovider-cli"
+      legacy_program="$BINARY_PATH"
+      expected_plist="$PLIST_PATH"
+      had_plist="${INSTALL_TX_HAD_PLIST:-0}"
+      ;;
+    "$WATCHDOG_LABEL")
+      expected_program="$WATCHDOG_PATH"
+      legacy_program="$WATCHDOG_DIR/watchdog.sh"
+      expected_plist="$WATCHDOG_PLIST_PATH"
+      had_plist="${INSTALL_TX_HAD_WATCHDOG_PLIST:-0}"
+      ;;
+    *)
+      log "Refusing to reclaim unknown launchd label: $label"
+      return 1
+      ;;
+  esac
+  local service_details
+  if ! service_details="$(launchctl print "$service_target" 2>/dev/null | head -c 65537)"; then
+    if [ -n "$service_details" ]; then
+      log "Refusing to reclaim $label because its launchd identity exceeded the inspection limit."
+      return 1
+    fi
+    # A fresh install has no incumbent plist. Absence of the label is safe;
+    # only a loaded incumbent requires a durable snapshot before bootout.
+    return 0
+  fi
+  [ -n "$service_details" ] || return 1
+  if [ "${#service_details}" -gt 65536 ]; then
+    log "Refusing to reclaim $label because its launchd identity exceeded the inspection limit."
+    return 1
+  fi
+  if [ "${INSTALL_TX_ACTIVE:-0}" -ne 1 ] || [ "$had_plist" -ne 1 ]; then
+    log "Refusing to reclaim loaded $label without a durable owner-safe recovery plist."
+    return 1
+  fi
+  local program_line
+  program_line="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*program = //p' | head -n 1)"
+  if [ -z "$program_line" ]; then
+    log "Refusing to reclaim $label because launchd did not provide an executable identity."
+    return 1
+  fi
+  local program_count
+  program_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*program = / { count++ } END { print count + 0 }')"
+  if [ "$program_count" -ne 1 ]; then
+    log "Refusing to reclaim $label because launchd returned an ambiguous executable identity."
+    return 1
+  fi
+  local plist_path
+  plist_path="$(printf '%s\n' "$service_details" | sed -n 's/^[[:space:]]*path = //p' | head -n 1)"
+  local plist_path_count
+  plist_path_count="$(printf '%s\n' "$service_details" | awk '/^[[:space:]]*path = / { count++ } END { print count + 0 }')"
+  if [ "$plist_path_count" -ne 1 ] || [ "$plist_path" != "$expected_plist" ]; then
+    log "Refusing to reclaim $label because launchd plist identity is unexpected: ${plist_path:-<missing>}"
+    return 1
+  fi
+  if [ "$program_line" != "$expected_program" ] && [ "$program_line" != "$legacy_program" ]; then
+    log "Refusing to reclaim $label with unexpected executable: $program_line"
+    return 1
+  fi
+  log "Reclaiming existing $label launchd service before replacing its plist."
+  launchctl bootout "$service_target" >/dev/null 2>&1
 }
 
 prompt_yes_no() {
@@ -5596,7 +7937,7 @@ prepare_staged_config() {
 }
 
 activate_staged_config() {
-  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && [ -n "${INSTALL_TX_BACKUP:-}" ]; then
     assert_install_lock_ownership
   fi
   [ -n "$STAGED_CONFIG_PATH" ] && [ -f "$STAGED_CONFIG_PATH" ] \
@@ -6063,7 +8404,13 @@ prefetch_upgrade_autotune_model() {
     # earner for a blind re-tune. Otherwise there is no live provider to
     # protect, so fall through to a full fresh recommendation instead of
     # dead-ending the retry loop (die 6).
-    if [ "${INSTALL_TX_SERVICE_WAS_ACTIVE:-0}" -eq 1 ] || own_macprovider_cli_holds_live_port; then
+    # A stale repair label may still be loaded after its executable was
+    # removed. In that narrow, evidence-gated repair mode the label is not
+    # proof that a provider is serving; the live-port ownership check is the
+    # stronger guard against stopping an actual earner. Normal upgrades keep
+    # the historical fail-closed behavior for any loaded provider label.
+    if { [ "${INSTALL_TX_SERVICE_WAS_ACTIVE:-0}" -eq 1 ] && [ "${REPAIR_EXISTING_INSTALL:-0}" -ne 1 ]; } \
+      || own_macprovider_cli_holds_live_port; then
       die 6 "active provider lacks an exact signed-catalog model identity; the active provider was not stopped"
     fi
     log "Existing install has no verified signed-catalog model and no live provider; running a full fresh recommendation."
@@ -6124,7 +8471,7 @@ use_fresh_recommendation_if_available() {
 }
 
 install_binary() {
-  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && [ -n "${INSTALL_TX_BACKUP:-}" ]; then
     assert_install_lock_ownership
   fi
   run mkdir -p "$BIN_DIR" "$INSTALL_DIR"
@@ -6239,6 +8586,125 @@ clear_quarantine() {
   fi
 }
 
+write_atomic_install_file() {
+  destination_path="$1"
+  destination_mode="${2:-0600}"
+  python3 - "$destination_path" "$destination_mode" 3<&0 <<'PY'
+import os
+import stat
+import sys
+import ctypes
+import errno
+
+destination_path, destination_mode = sys.argv[1:]
+payload = bytearray()
+while len(payload) <= 1024 * 1024:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        break
+    payload.extend(chunk)
+if len(payload) > 1024 * 1024:
+    raise SystemExit("atomic install file is oversized")
+parent_path = os.path.dirname(destination_path)
+destination_name = os.path.basename(destination_path)
+directory_fd = os.open(
+    parent_path,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+directory_info = os.fstat(directory_fd)
+
+
+def verify_no_extended_acl(descriptor, label):
+    if sys.platform != "darwin":
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        acl_get_fd_np = libc.acl_get_fd_np
+        acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        acl_get_fd_np.restype = ctypes.c_void_p
+        acl_free = libc.acl_free
+        acl_free.argtypes = [ctypes.c_void_p]
+        acl_free.restype = ctypes.c_int
+    except (AttributeError, OSError):
+        raise SystemExit("atomic install file ACL API is unavailable")
+    ctypes.set_errno(0)
+    acl = acl_get_fd_np(descriptor, 0x00000100)  # ACL_TYPE_EXTENDED
+    if acl:
+        acl_free(acl)
+        raise SystemExit("%s has an extended ACL" % label)
+    if ctypes.get_errno() != errno.ENOENT:
+        raise SystemExit("%s ACL verification failed" % label)
+
+
+if (
+    not stat.S_ISDIR(directory_info.st_mode)
+    or directory_info.st_uid != os.getuid()
+    or directory_info.st_nlink < 1
+    or directory_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+):
+    os.close(directory_fd)
+    raise SystemExit("atomic install file parent is unsafe")
+verify_no_extended_acl(directory_fd, "atomic install file parent")
+
+temporary_name = ".%s.install-%s" % (destination_name, os.urandom(16).hex())
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+temporary_fd = None
+
+try:
+    temporary_fd = os.open(temporary_name, flags, 0o600, dir_fd=directory_fd)
+    try:
+        os.fchmod(temporary_fd, int(destination_mode, 8) & ~0o022)
+        written = 0
+        while written < len(payload):
+            progress = os.write(temporary_fd, payload[written:])
+            if progress <= 0:
+                raise SystemExit("atomic install file write made no progress")
+            written += progress
+        verify_no_extended_acl(temporary_fd, "atomic install file temporary")
+        os.fsync(temporary_fd)
+    finally:
+        os.close(temporary_fd)
+        temporary_fd = None
+    os.replace(
+        temporary_name,
+        destination_name,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+    )
+    temporary_name = None
+    os.fsync(directory_fd)
+    verify_fd = os.open(
+        destination_name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    try:
+        info = os.fstat(verify_fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or info.st_size != len(payload)
+        ):
+            raise SystemExit("atomic install file verification failed")
+        verify_no_extended_acl(verify_fd, "atomic install file destination")
+        if os.read(verify_fd, len(payload) + 1) != payload:
+            raise SystemExit("atomic install file contents changed")
+    finally:
+        os.close(verify_fd)
+finally:
+    if temporary_fd is not None:
+        os.close(temporary_fd)
+    if temporary_name is not None:
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+    os.close(directory_fd)
+PY
+}
+
 install_plist() {
   if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
     assert_install_lock_ownership
@@ -6255,16 +8721,23 @@ install_plist() {
   run mkdir -p "$(dirname "$PLIST_PATH")" "$LOG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would render launchd plist to $PLIST_PATH"
-    log "Would enable launchd service: launchctl enable gui/$UID/live.streamvc.macprovider"
+    log "Would enable launchd service: launchctl enable gui/$UID/$PROVIDER_LABEL"
     log "Would bootstrap with: launchctl bootstrap gui/$UID $PLIST_PATH"
     return
   fi
 
-  render_plist "$model" "$provider_id" "$coordinator_url" > "$PLIST_PATH"
+  reclaim_launchd_service "$PROVIDER_LABEL" \
+    || die 5 "could not reclaim existing provider launchd service"
+  render_plist "$model" "$provider_id" "$coordinator_url" \
+    | write_atomic_install_file "$PLIST_PATH" \
+    || die 5 "could not publish rendered launchd plist safely"
 
   plutil -lint "$PLIST_PATH" >/dev/null || die 5 "rendered launchd plist is invalid"
-  launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
-  launchctl enable "gui/$UID/live.streamvc.macprovider" || die 5 "failed to enable launchd service"
+  launchctl enable "gui/$UID/$PROVIDER_LABEL" || die 5 "failed to enable launchd service"
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && [ -n "${INSTALL_TX_BACKUP:-}" ]; then
+    write_install_tx_marker "$INSTALL_TX_BACKUP/provider-service-created" \
+      || die 70 "could not durably record the provider launchd mutation"
+  fi
   launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die 5 "failed to load launchd service"
   LAUNCHD_INSTALLED=1
 }
@@ -6329,7 +8802,7 @@ EOF
 # / blank-line normalization) with `ops/macprovider-watchdog/watchdog.sh`.
 # `scripts/test-watchdog-inline-drift.sh` enforces this in CI.
 write_watchdog_script() {
-  cat <<'WATCHDOG_EOF' > "$WATCHDOG_PATH"
+  write_atomic_install_file "$WATCHDOG_PATH" 0755 <<'WATCHDOG_EOF'
 #!/usr/bin/env bash
 # macprovider-watchdog: local provider liveness monitor plus
 # auto-update rollback observer.
@@ -6741,7 +9214,7 @@ def verify_root():
                 raise RuntimeError(f"not_directory:{path}")
 
 def read_marker():
-    fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         raw = os.read(fd, 65536)
     finally:
@@ -6840,7 +9313,7 @@ def current_binary_version(path):
 
 def read_success_sentinel(path):
     reject_path(path)
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         payload = json.loads(os.read(fd, 65536).decode("utf-8"))
     finally:
@@ -6901,7 +9374,7 @@ def process_success_sentinel(marker):
 
 def sha256(path):
     h = hashlib.sha256()
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         while True:
             chunk = os.read(fd, 1024 * 1024)
@@ -7370,7 +9843,7 @@ def validate_malibu_app_backup(release_backup):
     state_st = reject_path(state_path)
     if not stat.S_ISREG(archive_st.st_mode) or not stat.S_ISREG(state_st.st_mode):
         raise RuntimeError("malibu_backup_not_regular")
-    fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(state_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
         raw = os.read(fd, 65537)
     finally:
@@ -7482,7 +9955,7 @@ def fsync_release_tree(root_path):
         directories.append(current)
         for name in file_names:
             path = os.path.join(current, name)
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
             try:
                 os.fsync(fd)
             finally:
@@ -7497,7 +9970,7 @@ def fsync_release_tree(root_path):
 def atomic_copy_binary(source, target, mode):
     temporary = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-restore-{uuid.uuid4()}")
     try:
-        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
             destination_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), mode)
             try:
@@ -7818,7 +10291,6 @@ main() {
 
 main "$@"
 WATCHDOG_EOF
-  chmod 0755 "$WATCHDOG_PATH"
 }
 
 render_watchdog_plist() {
@@ -7896,17 +10368,24 @@ install_watchdog() {
   fi
   log "Installing watchdog LaunchAgent (operator-visibility safety net for iss-189-class wedges)."
   mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
+  reclaim_launchd_service "$WATCHDOG_LABEL" \
+    || die 5 "could not reclaim existing watchdog launchd service"
   legacy_watchdog="$WATCHDOG_DIR/watchdog.sh"
   if [ -f "$legacy_watchdog" ] && [ "$legacy_watchdog" != "$WATCHDOG_PATH" ]; then
     rm -f "$legacy_watchdog"
   fi
   write_watchdog_script
-  render_watchdog_plist "$coordinator_url" > "$WATCHDOG_PLIST_PATH"
+  render_watchdog_plist "$coordinator_url" \
+    | write_atomic_install_file "$WATCHDOG_PLIST_PATH" \
+    || die 5 "could not publish rendered watchdog plist safely"
   plutil -lint "$WATCHDOG_PLIST_PATH" >/dev/null \
     || die 5 "rendered watchdog plist is invalid"
-  launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || true
   launchctl enable "gui/$UID/$WATCHDOG_LABEL" \
     || die 5 "failed to enable watchdog launchd service"
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && [ -n "${INSTALL_TX_BACKUP:-}" ]; then
+    write_install_tx_marker "$INSTALL_TX_BACKUP/watchdog-service-created" \
+      || die 70 "could not durably record the watchdog launchd mutation"
+  fi
   launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH" \
     || die 5 "failed to load watchdog launchd service"
   WATCHDOG_INSTALLED=1
@@ -7931,7 +10410,7 @@ write_install_manifest() {
   elif [ "$WATCHDOG_INSTALLED" -eq 1 ]; then
     labels_json='["live.streamvc.macprovider-watchdog"]'
   fi
-  cat > "$MANIFEST_PATH" <<EOF
+  write_atomic_install_file "$MANIFEST_PATH" 0600 <<EOF
 {
   "install_prefix": $(json_escape "$INSTALL_DIR"),
   "binary_path": $(json_escape "$INSTALL_DIR/macprovider-cli"),
@@ -7949,7 +10428,6 @@ write_install_manifest() {
   "version": $(json_escape "$version")
 }
 EOF
-  chmod 600 "$MANIFEST_PATH" 2>/dev/null || true
 }
 
 start_manual_service() {
@@ -7972,10 +10450,8 @@ start_manual_service() {
   ) > "$TMPDIR_PATH/manual.pid"
   MANUAL_PID="$(cat "$TMPDIR_PATH/manual.pid")"
   if [ "$INSTALL_TX_ACTIVE" -eq 1 ]; then
-    printf '%s\n' "$MANUAL_PID" > "$INSTALL_TX_BACKUP/new-manual.pid" \
+    printf '%s\n' "$MANUAL_PID" | write_atomic_install_file "$INSTALL_TX_BACKUP/new-manual.pid" 0600 \
       || die 70 "could not durably record the manual provider process for rollback"
-    chmod 600 "$INSTALL_TX_BACKUP/new-manual.pid" \
-      || die 70 "could not secure the manual provider rollback record"
   fi
 }
 
@@ -8561,7 +11037,7 @@ if (
     or info.st_size > 1024 * 1024
 ):
     raise SystemExit(1)
-descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+descriptor = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW)
 try:
     opened = os.fstat(descriptor)
     if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
@@ -8591,7 +11067,7 @@ import sys
 
 source, expected, destination = sys.argv[1:]
 source_info = os.lstat(source)
-source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+source_fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW)
 try:
     opened = os.fstat(source_fd)
     if (
