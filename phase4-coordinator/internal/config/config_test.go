@@ -1115,3 +1115,40 @@ malibu_emission:
 		t.Fatalf("provider cap=%v", cfg.MalibuEmission.ProviderDailyCapMALIBU)
 	}
 }
+
+func TestValidateRegistrationOnlyCoolingOffFloor(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Payout.Enabled = false
+	cfg.Payout.Security.HotWalletAddress = "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	cfg.Payout.Tuning.AddressCoolingOffPeriod = 30 * time.Minute
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "address_cooling_off_period") {
+		t.Fatalf("Validate error=%v, want cooling-off floor for registration-only", err)
+	}
+
+	cfg.Payout.Tuning.AddressCoolingOffPeriod = 24 * time.Hour
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate registration-only with valid cooling-off: %v", err)
+	}
+}
+
+func TestValidateRegistrationOnlyRejectsPlaceholderHotWallet(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Payout.Enabled = false
+	cfg.Payout.Security.HotWalletAddress = "<0x... EIP-55 checksummed hot wallet>"
+	cfg.Payout.Tuning.AddressCoolingOffPeriod = 24 * time.Hour
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "hot_wallet_address") {
+		t.Fatalf("Validate error=%v, want placeholder hot wallet rejection", err)
+	}
+}
+
+func TestValidateDisabledWithoutHotWalletSkipsCoolingOff(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Payout.Enabled = false
+	cfg.Payout.Security.HotWalletAddress = ""
+	cfg.Payout.Tuning.AddressCoolingOffPeriod = 30 * time.Minute
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("fully disabled payout should not enforce cooling-off: %v", err)
+	}
+}

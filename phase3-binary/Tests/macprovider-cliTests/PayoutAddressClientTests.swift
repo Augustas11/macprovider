@@ -201,6 +201,11 @@ final class PayoutAddressClientTests: XCTestCase {
             PayoutAddressClient.userMessage(for: .httpStatus(409, errorCode: "payout_not_allowed"))
                 .contains("not yet enabled")
         )
+        // 404 registration surface absent (#954)
+        XCTAssertTrue(
+            PayoutAddressClient.userMessage(for: .httpStatus(404, errorCode: nil))
+                .contains("temporarily unavailable")
+        )
         // 503 rotation
         XCTAssertTrue(
             PayoutAddressClient.userMessage(for: .httpStatus(503, errorCode: "rotation_in_progress"))

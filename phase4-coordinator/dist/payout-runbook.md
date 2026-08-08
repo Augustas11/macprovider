@@ -1,4 +1,4 @@
-# Payout pipeline operator runbook (SPEC-016 v0.1.21)
+# Payout pipeline operator runbook (SPEC-016 v0.1.26)
 
 This document is the cutover checklist + day-2 operations
 guide for the SPEC-016 USDC-on-Base payout pipeline. Every
@@ -7,14 +7,48 @@ narrative**, the SPEC body is the source of truth on contract.
 
 > **Read order for first-time deploy.**
 >
-> 1. §1 Hot wallet provisioning + funding (this doc)
-> 2. §2 Cap-decision worksheet (this doc, mirrors SPEC §9.3)
-> 3. §3 BetterStack synthetic-alert verification (SPEC §9.7
+> 1. §0 Registration-only posture (this doc — #954)
+> 2. §1 Hot wallet provisioning + funding (this doc)
+> 3. §2 Cap-decision worksheet (this doc, mirrors SPEC §9.3)
+> 4. §3 BetterStack synthetic-alert verification (SPEC §9.7
 >    prereq item 6 — required BEFORE cutover)
-> 4. §4 Cutover sequence (this doc, mirrors SPEC §9 cutover)
-> 5. Day-2: §5 key-rotation runbook (SPEC §6.4 steps 1–5)
-> 6. Day-2: §6 SPKI pin rotation (when rotating RPC endpoint certificates)
-> 7. Day-2: §7 weekly reconciliation (SPEC §7.4 queries A–F)
+> 5. §4 Cutover sequence (this doc, mirrors SPEC §9 cutover)
+> 6. Day-2: §5 key-rotation runbook (SPEC §6.4 steps 1–5)
+> 7. Day-2: §6 SPKI pin rotation (when rotating RPC endpoint certificates)
+> 8. Day-2: §7 weekly reconciliation (SPEC §7.4 queries A–F)
+
+---
+
+## 0. Registration-only posture (#954 / SPEC-016 v0.1.26)
+
+`payout.enabled: false` no longer means "§3.3 is dark." When
+`payout.security.hot_wallet_address` is set to the **final**
+production EIP-55 address, the coordinator mounts:
+
+- `GET /providers/{id}/payout-address/challenge`
+- `POST /providers/{id}/payout-address`
+- `POST /admin/payout/pause-registration` /
+  `POST /admin/payout/resume-registration`
+
+and does **not** start the runner, load the signer/KEK, open
+RPC clients, or acquire the payout lease. Leave
+`hot_wallet_address: ""` to keep §3.3 unmounted.
+
+**Production remediation for Malibu "Open browser wallet" HTTP 404:**
+set the real hot-wallet pin in the Pearl overlay while keeping
+`payout.enabled: false`, then restart the coordinator. Confirm
+journal line `payout registration-only enabled` and that
+`/providers/{id}/payout-address/challenge` returns 401 (not 404)
+without a bearer. Use the FINAL production address —
+registrations stamp `registered_against_hot_wallet` and a later
+rotation strands every prior row until re-registration (§6.4 step 5).
+
+**Kill switch while registration-only:** call pause-registration
+(operator key). Do **not** rely on flipping `payout.enabled` —
+that flag no longer unmounts §3.3 when the hot wallet is set.
+
+**Rotation ordering (§6.4 step 1):** pause-registration FIRST,
+THEN flip `payout.enabled: false` / restart. Pause-before-disable.
 
 ---
 

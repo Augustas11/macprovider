@@ -37,40 +37,81 @@ func TestAssertPayoutRuntimeTopology_InvalidHotWalletPinRejected(t *testing.T) {
 	}
 }
 
-func TestAssertPayoutRuntimeTopology_HappyPath_Step2Posture(t *testing.T) {
-	// Step 2 posture (post-tightening): HandlerEnabled=true,
-	// RunnerCoResident=true, LinuxRequired toggleable.
-	if err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
+func TestAssertPayoutRuntimeTopology_HappyPath_FullExecution(t *testing.T) {
+	err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
 		HandlerEnabled:         true,
 		RunnerCoResident:       true,
+		ExecutionEnabled:       true,
 		HotWalletAddressPinned: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
-		LinuxRequired:          false,
-	}); err != nil {
-		t.Fatalf("Step 2 happy-path posture should pass: %v", err)
+		LinuxRequired:          true,
+	})
+	if runtime.GOOS != "linux" {
+		if err == nil {
+			t.Fatalf("full execution posture must reject on %s", runtime.GOOS)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("full execution posture should pass on linux: %v", err)
 	}
 }
 
-func TestAssertPayoutRuntimeTopology_HandlerWithoutRunnerRejected(t *testing.T) {
-	// Step 2 tightening: handler enabled but runner missing is
-	// rejected.
+func TestAssertPayoutRuntimeTopology_ExecutionWithoutRunnerRejected(t *testing.T) {
 	err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
 		HandlerEnabled:         true,
 		RunnerCoResident:       false,
+		ExecutionEnabled:       true,
 		HotWalletAddressPinned: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		LinuxRequired:          true,
 	})
 	if err == nil {
-		t.Fatal("expected error when HandlerEnabled but RunnerCoResident=false")
+		t.Fatal("expected error when ExecutionEnabled but RunnerCoResident=false")
 	}
 }
 
-// FULL-r1 [full-arch:r1-1] MEDIUM closure: setupPayout now passes
-// LinuxRequired=true when payout.enabled=true. Verify the gate:
-// on non-linux the topology MUST reject; on linux it MUST accept.
-// Same test body covers both — the assertion branches on runtime.GOOS.
+func TestAssertPayoutRuntimeTopology_ExecutionWithoutLinuxRequiredRejected(t *testing.T) {
+	err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
+		HandlerEnabled:         true,
+		RunnerCoResident:       true,
+		ExecutionEnabled:       true,
+		HotWalletAddressPinned: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		LinuxRequired:          false,
+	})
+	if err == nil || !strings.Contains(err.Error(), "LinuxRequired") {
+		t.Fatalf("expected LinuxRequired cross-check error, got %v", err)
+	}
+}
+
+func TestAssertPayoutRuntimeTopology_RunnerWithoutExecutionRejected(t *testing.T) {
+	err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
+		HandlerEnabled:         true,
+		RunnerCoResident:       true,
+		ExecutionEnabled:       false,
+		HotWalletAddressPinned: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		LinuxRequired:          false,
+	})
+	if err == nil || !strings.Contains(err.Error(), "registration-only") {
+		t.Fatalf("expected runner-in-registration-only error, got %v", err)
+	}
+}
+
+func TestAssertPayoutRuntimeTopology_RegistrationOnlyOK(t *testing.T) {
+	if err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
+		HandlerEnabled:         true,
+		RunnerCoResident:       false,
+		ExecutionEnabled:       false,
+		HotWalletAddressPinned: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		LinuxRequired:          false,
+	}); err != nil {
+		t.Fatalf("registration-only posture should pass: %v", err)
+	}
+}
+
 func TestAssertPayoutRuntimeTopology_LinuxRequiredGate(t *testing.T) {
 	err := AssertPayoutRuntimeTopology(PayoutRuntimeTopology{
 		HandlerEnabled:         true,
 		RunnerCoResident:       true,
+		ExecutionEnabled:       true,
 		HotWalletAddressPinned: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
 		LinuxRequired:          true,
 	})

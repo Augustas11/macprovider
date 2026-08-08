@@ -408,14 +408,26 @@ providers:
 # operator runbook at dist/payout-runbook.md.
 
 payout:
-  # Master switch. Schema + handlers initialise at false; runner +
-  # endpoints do NOT start. Flip to true after every §9 prereq is met.
+  # Execution-pipeline switch. Schema always initialises. When false
+  # (default): runner/signer/RPC/lease stay idle. Flip to true only
+  # after every §9 prereq is met (see dist/payout-runbook.md).
+  #
+  # Registration-only (#954 / SPEC-016 v0.1.26): setting a valid
+  # hot_wallet_address below while enabled=false mounts §3.3
+  # challenge/register + §6.4.1 pause/resume so providers can set
+  # wallets without starting the payout runner. Leave empty to keep
+  # §3.3 unmounted.
   enabled: false
 
   security:
-    # §3.1 hot wallet address (EIP-55 checksummed). Required when
-    # enabled=true.
-    hot_wallet_address: "<0x... EIP-55 checksummed hot wallet>"
+    # §3.1 hot wallet address (EIP-55 checksummed).
+    # - empty + enabled=false: §3.3 unmounted (handlers idle)
+    # - set + enabled=false: registration-only (§3.3 + pause/resume)
+    # - set + enabled=true: full pipeline (also requires RPC URLs,
+    #   encrypted wallet path, caps, etc.)
+    # Use the FINAL production hot wallet — registrations pin
+    # registered_against_hot_wallet to this value.
+    hot_wallet_address: ""
 
     # §4.4 two-RPC URLs. Both required for nonce sync + receipt
     # agreement. Use distinct providers (e.g. Infura + Alchemy) so

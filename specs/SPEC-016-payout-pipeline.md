@@ -1,17 +1,17 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.25 (2026-08-01, draft — §9.5b.1 assertion-set reconciliation
-to the merged SPEC-005 `POST /admin/ledger/payout-ready` IMPL: canonical
-idempotency_key requirement (leading-zero-alias double-pay defense), replay
-precedence, `payout_attempts` join with `is_cancel_self_transfer = 0`
-non-compensable carve-out, `resolved_at_utc IS NULL` unresolved filter, and
-`ambiguous_orphan` multiplicity guard. Documentation of enforced endpoint
-behavior; no runner activation, production deployment, or §9 prerequisite
-state changes. Prior: 0.1.24 (2026-07-31, preliminary conformance-unit
-anchors for the default-off payout implementation merged by PR #164).)
+**Version:** 0.1.26 (2026-08-08, draft — #954 registration-only carve-out:
+mount SPEC-016 §3.3 payout-address challenge/register routes whenever
+`payout.security.hot_wallet_address` is configured, even when
+`payout.enabled=false`. Execution pipeline (runner, signer/KEK, RPC,
+lease, admin `/admin/payout/*`, provider `/providers/{id}/payouts`) remains
+gated on `payout.enabled=true`. Prior: 0.1.25 (2026-08-01, §9.5b.1
+assertion-set reconciliation to SPEC-005 `POST /admin/ledger/payout-ready`).)
 **Status:** Draft (IMPL merged via PR #164, default-off — `payout.enabled=false`
 everywhere until the operator funds the hot wallet and discharges the eight
-§9 prerequisites; flipping the flag is an operator decision gated on §9).
+§9 prerequisites; flipping the flag is an operator decision gated on §9.
+Providers MAY register/change payout wallets while the execution pipeline
+is disabled, provided the hot-wallet pin is configured.)
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
 mode + synchronous=FULL requirement; §11.4 earnings endpoint;
 §2.1 D1 donation-only / no-custodial framing),
@@ -66,6 +66,21 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.26 (2026-08-08, draft — #954 registration-only carve-out):**
+Normative: `payout.enabled` gates the **execution pipeline** only
+(runner, signer/KEK load, RPC clients, lease, execution-only admin
+routes, `GET /providers/{id}/payouts`). The two provider-token §3.3
+routes plus §6.4.1 pause/resume MUST mount whenever
+`payout.security.hot_wallet_address` is configured, regardless of
+`payout.enabled`. Registration-only mode MUST NOT start the runner,
+load the signer/KEK, open RPC connections, or acquire the payout
+lease. Cooling-off, EIP-712 verification, denylist, pause-registration,
+and audit/alert emission behave identically in both modes. §6.4
+rotation step 1 mandates pause-before-disable. Co-residency of
+handler + runner is required only when `payout.enabled=true`.
+Closes the production defect where Change-wallet returned HTTP 404
+while the pipeline was deliberately disabled.
 
 **v0.1.24 (2026-07-31, draft — #614 preliminary conformance anchors):**
 Editorial, non-normative reconciliation after the PR #164 payout implementation
@@ -539,15 +554,18 @@ for reorg orphans live at the SPEC-005 layer with their own
 
 **Linux-only constraint when `payout.enabled = true`.** §6.3
 requires the runner process to run on Linux (Crashreporter on
-macOS bypasses `RLIMIT_CORE`). §3.3 requires the registration
-handler + runner to be co-resident in the same coordinator
-process (clock authority). Therefore enabling
-`payout.enabled = true` constrains the ENTIRE coordinator
-process — including SPEC-005 settlement + SPEC-014 portal
-endpoints + buyer-mux + ws-mux — to Linux. macOS dev
-environments cannot run a payout-enabled coordinator. This is
-a deliberate cut; the dev workflow on macOS continues to work
-with `payout.enabled = false` (default).
+macOS bypasses `RLIMIT_CORE`). When `payout.enabled = true`,
+§3.3 requires the registration handler + runner to be
+co-resident in the same coordinator process (clock authority).
+Therefore enabling `payout.enabled = true` constrains the
+ENTIRE coordinator process — including SPEC-005 settlement +
+SPEC-014 portal endpoints + buyer-mux + ws-mux — to Linux.
+macOS dev environments cannot run a payout-**execution**-enabled
+coordinator. Registration-only mode (`payout.enabled = false`
+with `payout.security.hot_wallet_address` set) MAY run on any
+OS: it mounts the §3.3 handlers without the runner, so the
+Linux-only + co-residency gates do not apply. This is a
+deliberate cut; the default remains `payout.enabled = false`.
 
 ## 3 Provider payout-address registration (FR-P1)
 
@@ -793,15 +811,20 @@ on the realm the path-table declared.
 
 **Clock authority.** Both `pending_until_utc` (set at
 registration) and `:now` (read at §4.3 step 1) MUST come
-from the SAME coordinator process clock. The registration
-handler and the runner are co-resident in the same
-coordinator process per §4.1; IMPL MUST assert this
-co-residency at startup (e.g. a deployment-mode check that
-fails-fast if the runner is configured to a different
-process or host) and MUST NOT honor any clock-skew tolerance
-when comparing `pending_until_utc` to `:now`. This makes the
-cooling-off boundary non-bypassable by multi-host
-deployment expansion.
+from the SAME coordinator process clock. When
+`payout.enabled = true`, the registration handler and the
+runner MUST be co-resident in the same coordinator process
+per §4.1; IMPL MUST assert this co-residency at startup
+(e.g. a deployment-mode check that fails-fast if the runner
+is configured to a different process or host) and MUST NOT
+honor any clock-skew tolerance when comparing
+`pending_until_utc` to `:now`. This makes the cooling-off
+boundary non-bypassable by multi-host deployment expansion.
+When `payout.enabled = false` (registration-only), no runner
+exists; the co-residency assertion is vacuously satisfied and
+MUST NOT reject the handler-only posture. Cooling-off still
+uses the registration process clock; the runner, when later
+enabled, MUST share that same process.
 
 ```
 POST /providers/{provider_id}/payout-address
@@ -1029,6 +1052,33 @@ this.
 The runner starts from `cmd/coordinator/main.go` only when
 config explicitly enables it (`payout.enabled: true`).
 Default config ships `payout.enabled: false`.
+
+**Registration-only mode (`payout.enabled: false`).** When
+`payout.security.hot_wallet_address` is configured, IMPL MUST
+still mount the two provider-token §3.3 routes
+(`GET /providers/{provider_id}/payout-address/challenge`,
+`POST /providers/{provider_id}/payout-address`) so providers
+can register or rotate payout wallets while the execution
+pipeline is off. Registration-only mode MUST ALSO mount the
+§6.4.1 operator-key kill switch
+(`POST /admin/payout/pause-registration`,
+`POST /admin/payout/resume-registration`) so
+`runtime.registration_paused` remains writable whenever the
+§3.3 write surface is live. Registration-only mode MUST NOT:
+
+- start the §4.3 runner or reorg/reaper/chain-balance workers;
+- load the settlement signer or KEK;
+- open payout RPC connections;
+- acquire the payout runner lease;
+- mount execution-only admin routes (`run-now`, `abandon-attempt`,
+  `record-funding`, `record-orphan`) or `GET /providers/{id}/payouts`.
+
+Cooling-off, EIP-712 verification, denylist, `runtime.registration_paused`
+(read + write via §6.4.1), rate limits, and §3.4 audit/alert
+emission MUST behave identically to the fully-enabled posture.
+When `payout.security.hot_wallet_address` is empty AND
+`payout.enabled` is false, IMPL MUST leave §3.3 handlers
+unmounted (schema migrations may still apply).
 
 ### 4.2 Cadence
 
@@ -3574,12 +3624,16 @@ build/broadcast from step 5 to step 6.)
 
 Procedure (manual, operator-driven):
 
-1. **Halt the runner AND pause the registration handler.**
-   Flip `payout.enabled: false` + flip the in-process flag
-   `runtime.registration_paused: true` (per §6.5 the
-   `runtime.*` namespace carves out in-process flags that
-   are neither security nor tuning config keys — set via
-   the §6.4.1 endpoint below). The §3.3 handler returns
+1. **Pause the registration handler, THEN halt the runner.**
+   Call `POST /admin/payout/pause-registration` FIRST (while
+   `payout.enabled` is still true OR while registration-only
+   mode is live — §6.4.1 is mounted in both postures per
+   §4.1) to flip `runtime.registration_paused: true`. Only
+   AFTER the pause returns 200 MAY the operator flip
+   `payout.enabled: false` and restart. Ordering matters:
+   disabling first and restarting into registration-only
+   without a prior pause leaves §3.3 writable against the
+   old hot wallet. The §3.3 handler returns
    `503 Service Unavailable {"error":"rotation_in_progress"}`
    for the rotation duration. Without this, a provider who
    registers during steps 2–3 stamps
@@ -3689,9 +3743,11 @@ defect was caused by exactly that. The buckets:
   backed by `coordinator.toml`. Mutated via authenticated
   admin endpoints (e.g. `runtime.registration_paused`
   toggled by §6.4.1 pause/resume endpoints; v0.1.x also
-  keeps `payout.enabled` as a singleton master switch
-  separate from this bucket because it gates whether the
-  namespace loaders run at all). Persistence: every
+  keeps `payout.enabled` as a singleton execution-pipeline
+  switch separate from this bucket — it gates runner/signer/
+  RPC/lease/admin surfaces, NOT the §3.3 registration
+  handlers when `payout.security.hot_wallet_address` is set;
+  see §4.1 registration-only mode). Persistence: every
   `runtime.*` flag MUST persist across coordinator
   restarts via the `runtime_flags` SQLite table defined in
   §4.8a (same database file as `payout_runner_state` per

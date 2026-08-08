@@ -893,8 +893,10 @@ func main() {
 
 	// SPEC-016 §4.1 — wire the payout package. Migrations + asserts
 	// run unconditionally so a future flip of payout.enabled does
-	// not require a schema migration window; the §3.3 handler is
-	// only mounted on the listener when payout.enabled is true.
+	// not require a schema migration window. §3.3 challenge/register
+	// mount whenever hot_wallet_address is set (registration-only
+	// when payout.enabled=false; #954 / SPEC v0.1.26). Admin payout
+	// routes and the runner require payout.enabled=true.
 	// Adapt billingStore to the payout.PayoutClaimer interface — the
 	// concrete ClaimPayoutReady method satisfies it without modification.
 	payoutAddresses, payoutMuxHandler, payoutS2, err := setupPayout(context.Background(), reqLogStore.DB(), cfg, tokenStore, billingStore, billingHandler, logger)
@@ -905,11 +907,11 @@ func main() {
 	_ = payoutAddresses // satisfies billing.PayoutAddressReader (used by Step 4 reconcile)
 	if cfg.Auth.RequireProviderTokens {
 		if payoutMuxHandler != nil {
-			// Mount payout mux at BOTH /providers/ (for §3.3) and
-			// /admin/payout/ (for §4.6 abandon + §4.2 run-now).
-			// Per architect r1 [arch:3.2]: a single /providers/ mount
-			// makes /admin/payout/* unreachable; mounting at both
-			// roots lets chi route to the right handler.
+			// Mount at BOTH /providers/ (§3.3; §7.3 when fully
+			// enabled) and /admin/payout/ (§6.4.1 pause/resume in
+			// registration-only; full admin suite when payoutS2 is
+			// wired). Per architect r1 [arch:3.2]: a single
+			// /providers/ mount makes /admin/payout/* unreachable.
 			providerMux.Handle("/providers/", payoutMuxHandler)
 			providerMux.Handle("/admin/payout/", payoutMuxHandler)
 		} else {
@@ -1584,9 +1586,10 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 // for the §3.3 endpoint.
 //
 // When payout.enabled = false the migrations + asserts still
-// run (so the schema is ready) but the returned http.Handler
-// is nil and the runner does not start. This matches SPEC-016
-// §0 "design-only" disposition at v0.1.x.
+// run (so the schema is ready) and the runner does not start.
+// If payout.security.hot_wallet_address is set, §3.3 handlers
+// still mount in registration-only mode (#954 / SPEC v0.1.26);
+// otherwise the returned http.Handler is nil.
 // payoutStep2 bundles the Step 2 components so main.go can run
 // the runner lifecycle alongside the existing shutdown ordering.
 // Step 3 extends it with the §4.8a + §4.7 reaper. Step 4 adds the
@@ -1629,8 +1632,34 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		return nil, nil, nil, fmt.Errorf("assert triggers: %w", err)
 	}
 	if !cfg.Payout.Enabled {
-		logger.Info().Msg("payout pipeline disabled (payout.enabled=false); schema applied, handlers idle")
-		return nil, nil, nil, nil
+		if strings.TrimSpace(cfg.Payout.Security.HotWalletAddress) == "" {
+			logger.Info().Msg("payout pipeline disabled (payout.enabled=false); schema applied, handlers idle")
+			return nil, nil, nil, nil
+		}
+		// #954 / SPEC-016 v0.1.26 — registration-only: mount §3.3
+		// challenge/register + §6.4.1 pause/resume so providers can
+		// set/change wallets while the execution pipeline stays off.
+		// No runner, signer, RPC, lease, or execution-only admin routes.
+		hotWallet := strings.TrimSpace(cfg.Payout.Security.HotWalletAddress)
+		svc, mux, err := payout.BuildRegistrationOnly(payout.RegistrationOnlyOptions{
+			DB:                     db,
+			HotWallet:              hotWallet,
+			CoolingOff:             cfg.Payout.Tuning.AddressCoolingOffPeriod,
+			Tokens:                 tokenStore,
+			Identity:               tokenStore,
+			Fallback:               billingFallback,
+			OperatorKey:            cfg.Auth.OperatorKey,
+			PauseResumeMinInterval: cfg.Payout.Security.PauseResumeMinInterval,
+			Logger:                 logger,
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("payout registration-only: %w", err)
+		}
+		logger.Info().
+			Str("hot_wallet_address", hotWallet).
+			Dur("address_cooling_off_period", cfg.Payout.Tuning.AddressCoolingOffPeriod).
+			Msg("payout registration-only enabled (payout.enabled=false; §3.3 + pause/resume mounted, runner idle)")
+		return svc, mux, nil, nil
 	}
 	sec, err := payout.LoadSecurityConfig(cfg.Payout.Security.HotWalletAddress)
 	if err != nil {
@@ -1649,6 +1678,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	if err := payout.AssertPayoutRuntimeTopology(payout.PayoutRuntimeTopology{
 		HandlerEnabled:         true,
 		RunnerCoResident:       true,
+		ExecutionEnabled:       true,
 		HotWalletAddressPinned: sec.HotWalletAddress,
 		LinuxRequired:          true,
 	}); err != nil {
