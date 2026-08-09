@@ -116,8 +116,8 @@ jobs:
         run: |
           bash scripts/test-coordinator-advertised-version.sh \
             "${{ steps.release_source.outputs.tag }}" \
-            --allow-previous-stable=1.8.88 \
-            --staged-candidate=1.8.90
+            --allow-previous-stable=1.8.90 \
+            --staged-candidate=1.8.92
 
       - name: Select and verify reviewed release toolchain
         shell: bash
