@@ -429,6 +429,60 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    /// Builds the same target authority used by `models list --json` to report
+    /// local weights. A supported-model string is only a policy hint; a warm
+    /// switch target also needs a signed catalog row and a locally verified
+    /// artifact snapshot. Keeping this map at serve startup prevents the list
+    /// command and the runtime from disagreeing about what Ready means.
+    static func localRuntimeTargetAuthorities(
+        supportedModels: [String]?,
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
+    ) -> [String: ModelRuntimeTargetAuthority] {
+        guard let supportedModels, !supportedModels.isEmpty,
+              let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
+                  Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+              ) else { return [:] }
+
+        var authorities: [String: ModelRuntimeTargetAuthority] = [:]
+        for target in supportedModels {
+            let targetKey = target.lowercased(with: nil)
+            guard let catalogEntry = catalog.rows.first(where: { entry in
+                entry.key.lowercased(with: nil) == targetKey
+                    || entry.value.modelID.lowercased(with: nil) == targetKey
+            }),
+            let revision = catalogEntry.value.modelRevision,
+            let artifactSHA256 = catalogEntry.value.modelSHA256,
+            let artifact = try? artifactResolver.verifiedExistingArtifact(for: catalogEntry.value)
+            else { continue }
+
+            let authority = ModelRuntimeTargetAuthority(
+                modelArgument: artifact.modelArgument,
+                artifactSHA256: artifactSHA256,
+                catalogRevision: revision
+            )
+            authorities[target] = authority
+            authorities[target.lowercased(with: nil)] = authority
+            authorities[catalogEntry.value.modelID] = authority
+            authorities[catalogEntry.value.modelID.lowercased(with: nil)] = authority
+            authorities[catalogEntry.key] = authority
+            authorities[catalogEntry.key.lowercased(with: nil)] = authority
+        }
+        return authorities
+    }
+
+    static func localRuntimeTargetModelIDs(
+        supportedModels: [String]?,
+        authorities: [String: ModelRuntimeTargetAuthority]
+    ) -> [String] {
+        guard let supportedModels else { return [] }
+        var seen = Set<String>()
+        return supportedModels.filter { modelID in
+            let key = modelID.lowercased(with: nil)
+            guard authorities[modelID] != nil || authorities[key] != nil else { return false }
+            return seen.insert(key).inserted
+        }
+    }
+
     /// Round-2 code MEDIUM-3: autotune candidates must not use speculative
     /// decoding. The serve-stream speculative path (`collectSpeculativeText`)
     /// owns its own decode loop and never fires the outer `decodeTimer`, so a
@@ -1277,6 +1331,13 @@ struct ServeCommand: AsyncParsableCommand {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
+        let targetAuthorities = Self.localRuntimeTargetAuthorities(
+            supportedModels: resolved.supportedModels
+        )
+        let authorizedSwitchModelIDs = Self.localRuntimeTargetModelIDs(
+            supportedModels: resolved.supportedModels,
+            authorities: targetAuthorities
+        )
         _ = try lifecycleStateStore.transition(
             to: .loadingModel,
             reasonCode: "catalog_preflight_passed",
@@ -1307,7 +1368,9 @@ struct ServeCommand: AsyncParsableCommand {
                 // MEDIUM-5 (FR-KVP4): thread the catalog REVISION separately from the
                 // artifact SHA so the cold-tier envelope carries both as distinct identity
                 // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
-                verifiedModelCatalogRevision: resolved.modelCatalogRevision
+                verifiedModelCatalogRevision: resolved.modelCatalogRevision,
+                targetAuthorities: targetAuthorities,
+                authorizedSwitchModelIDs: authorizedSwitchModelIDs
             )
         } catch {
             _ = try? lifecycleStateStore.transition(

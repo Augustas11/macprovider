@@ -50,6 +50,8 @@ targets:
       # folder, matching the existing install.sh packaging pattern.
       - Sources/Malibu/Resources/Assets.xcassets
       - Sources/Malibu/Resources/Brand
+      - Sources/Malibu/Resources/MalibuFeature.xcstrings
+      - Sources/Malibu/Resources/MalibuModelCapabilities.json
     entitlements:
       path: Malibu.entitlements
     info:

@@ -41,6 +41,8 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case switchAck(accepted: Bool, reason: SwitchAckReason?, currentTarget: String?, secondsRemaining: Int?)
     case switchProgress(state: SwitchProgressState, elapsedMs: Int, reason: String?)
     case statusResponse(currentModelID: String, runtimeState: SwapState)
+    case modelsRequest
+    case modelsResponse(modelIDs: [String], supportedModelIDs: [String])
 
     // SPEC-025 §5.2 — additive frames used by Malibu.app's read-only control client.
     case metricsRequest
@@ -133,6 +135,14 @@ public enum ControlSocketCodec {
                 "type": "status_response",
                 "current_model_id": currentModelID,
                 "runtime_state": runtimeState.rawValue,
+            ]
+        case .modelsRequest:
+            object = ["type": "models_request"]
+        case let .modelsResponse(modelIDs, supportedModelIDs):
+            object = [
+                "type": "models_response",
+                "model_ids": modelIDs,
+                "supported_model_ids": supportedModelIDs,
             ]
         case .metricsRequest:
             object = ["type": "metrics_request"]
@@ -301,6 +311,28 @@ public enum ControlSocketCodec {
                 currentModelID: try stringField("current_model_id", in: object),
                 runtimeState: state
             )
+        case "models_request":
+            return .modelsRequest
+        case "models_response":
+            guard let rawModelIDs = object["model_ids"] as? [Any] else {
+                throw ControlSocketError.missingRequiredField("model_ids")
+            }
+            guard let rawSupportedModelIDs = object["supported_model_ids"] as? [Any] else {
+                throw ControlSocketError.missingRequiredField("supported_model_ids")
+            }
+            let modelIDs = try rawModelIDs.map { rawValue -> String in
+                guard let modelID = rawValue as? String else {
+                    throw ControlSocketError.missingRequiredField("model_ids")
+                }
+                return modelID
+            }
+            let supportedModelIDs = try rawSupportedModelIDs.map { rawValue -> String in
+                guard let modelID = rawValue as? String else {
+                    throw ControlSocketError.missingRequiredField("supported_model_ids")
+                }
+                return modelID
+            }
+            return .modelsResponse(modelIDs: modelIDs, supportedModelIDs: supportedModelIDs)
         case "metrics_request":
             return .metricsRequest
         case "metrics_response":
@@ -1158,6 +1190,11 @@ actor ControlSocketServer {
                     let snapshot = await modelRuntime.currentSnapshot()
                     let state = snapshot.state == .failed ? SwapState.ready : snapshot.state
                     try await connection.send(.statusResponse(currentModelID: snapshot.modelID ?? "", runtimeState: state))
+                case .modelsRequest:
+                    try await connection.send(.modelsResponse(
+                        modelIDs: await modelRuntime.authorizedSwitchModelIDList(),
+                        supportedModelIDs: supportedModels ?? []
+                    ))
                 case let .rotateReceiptKeyRequest(providerID):
                     await handleReceiptKeyRotationRequest(
                         providerID: providerID,

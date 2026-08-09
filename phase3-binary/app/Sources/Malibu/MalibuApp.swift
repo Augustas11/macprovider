@@ -7,7 +7,7 @@ struct MalibuApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { EmptyView() }
+        Settings { ModelSettingsView() }
     }
 }
 
@@ -94,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .resume: Task { await agent.resume() }
         case .checkForUpdates, .updateCLI: Task { await agent.updateCLINow() }
         case .exportDiagnostics: exportDiagnostics()
+        case .openSettings:
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
             guard confirmUninstall() else { return }

@@ -90,6 +90,11 @@ final class ControlSocketTests: XCTestCase {
 
     func testEncodeDecodeStatusResponseReady() throws {
         try assertRoundTrip(.statusResponse(currentModelID: "model-A", runtimeState: .ready))
+        try assertRoundTrip(.modelsRequest)
+        try assertRoundTrip(.modelsResponse(
+            modelIDs: ["model-A"],
+            supportedModelIDs: ["model-A", "model-B"]
+        ))
     }
 
     func testDecodeRejectsMissingType() {

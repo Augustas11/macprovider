@@ -66,6 +66,81 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertTrue(capture.stderr.contains("macprovider-cli serve is not running on this host"))
     }
 
+    func testModelsListJSONFallbackIsOneStrictObject() async throws {
+        let socketPath = try makeSocketPath()
+        let command = try ModelsListCommand.parse([
+            "--json",
+            "--ctl-socket-path", socketPath.path,
+            "--model", "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "--supported-models", "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+        XCTAssertNil(capture.error)
+        let lines = capture.stdout.split(whereSeparator: \.isNewline)
+        XCTAssertEqual(lines.count, 1)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(object["schema_version"] as? String, "models_list.v1")
+        XCTAssertEqual(object["source"] as? String, "config_fallback")
+        XCTAssertEqual(object["warm_swap_available"] as? Bool, false)
+        XCTAssertNil(object["current_model_id"] as? String)
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        XCTAssertEqual(rows.first?["action_model_id"] as? String, "mlx-community/Qwen2.5-7B-Instruct-4bit")
+        XCTAssertEqual(rows.first?["state"] as? String, "idle")
+        XCTAssertNotNil(rows.first?["weights_present_locally"] as? Bool)
+    }
+
+    func testModelsListJSONFallbackDeduplicatesModelIDsIgnoringCase() async throws {
+        let socketPath = try makeSocketPath()
+        let command = try ModelsListCommand.parse([
+            "--json",
+            "--ctl-socket-path", socketPath.path,
+            "--model", "Org/Model",
+            "--supported-models", "Org/Model,org/model,Other/Model",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+        XCTAssertNil(capture.error)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(capture.stdout.split(whereSeparator: \.isNewline).first!.utf8)
+            ) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        XCTAssertEqual(rows.map { $0["action_model_id"] as? String }, ["Org/Model", "Other/Model"])
+    }
+
+    func testModelsListConnectedPreservesSupportedModelWithoutRuntimeAuthority() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "old-model")
+        )
+        try await server.start()
+
+        let command = try ModelsListCommand.parse([
+            "--json",
+            "--ctl-socket-path", socketPath.path,
+            "--model", "old-model",
+            "--supported-models", "old-model,uninstalled-model",
+        ])
+        let capture = await captureOutput { try await command.run() }
+        await server.stop()
+
+        XCTAssertNil(capture.error)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(capture.stdout.split(whereSeparator: \.isNewline).first!.utf8)
+            ) as? [String: Any]
+        )
+        let rows = try XCTUnwrap(object["rows"] as? [[String: Any]])
+        let uninstalled = try XCTUnwrap(rows.first { ($0["action_model_id"] as? String) == "uninstalled-model" })
+        XCTAssertEqual(uninstalled["state"] as? String, "idle")
+        XCTAssertEqual(uninstalled["weights_present_locally"] as? Bool, false)
+    }
+
     func testModelsSwitchSuccess() async throws {
         let socketPath = try makeSocketPath()
         let runtime = makeRuntime(modelID: "old-model") { target in
@@ -91,6 +166,39 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertTrue(capture.stderr.contains("state=loading"))
         XCTAssertTrue(capture.stderr.contains("state=draining"))
         XCTAssertTrue(capture.stderr.contains("state=loaded"))
+    }
+
+    func testModelsSwitchJSONEmitsAuthoritativeTerminalLoadedEvent() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "old-model") { target in (target, "hash") },
+            supportedModels: ["old-model", "new-model"]
+        )
+        try await server.start()
+        let command = try ModelsSwitchCommand.parse([
+            "new-model", "--json",
+            "--supported-models", "old-model,new-model",
+            "--model", "old-model",
+            "--ctl-socket-path", socketPath.path,
+            "--switch-state-path", makeStatePath().path,
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+        await server.stop()
+
+        XCTAssertNil(capture.error)
+        let decoder = JSONDecoder()
+        let events = try capture.stdout
+            .split(whereSeparator: \.isNewline)
+            .map { try decoder.decode(ModelSwitchEventWire.self, from: Data($0.utf8)) }
+        XCTAssertTrue(events.contains { $0.phase == "loading" })
+        XCTAssertTrue(events.contains { $0.phase == "draining" })
+        let terminal = try XCTUnwrap(events.last)
+        XCTAssertEqual(terminal.schemaVersion, "model_switch_event.v1")
+        XCTAssertEqual(terminal.type, "terminal")
+        XCTAssertEqual(terminal.phase, "loaded")
+        XCTAssertEqual(terminal.fromModelID, "old-model")
     }
 
     func testModelsSwitchReportsDrainingWhileInFlightRequestFinishes() async throws {
@@ -147,6 +255,38 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         XCTAssertTrue(capture.stderr.contains("switch target C not in --supported-models"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath.path))
+    }
+
+    func testModelsSwitchJSONPreFlightRejectionEmitsTerminalEvent() async throws {
+        let socketPath = try makeSocketPath()
+        let command = try ModelsSwitchCommand.parse([
+            "C", "--json",
+            "--supported-models", "A,B",
+            "--model", "A",
+            "--ctl-socket-path", socketPath.path,
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        let line = try XCTUnwrap(capture.stdout.split(whereSeparator: \.isNewline).first)
+        let event = try JSONDecoder().decode(ModelSwitchEventWire.self, from: Data(line.utf8))
+        XCTAssertEqual(event.type, "terminal")
+        XCTAssertEqual(event.phase, "failed")
+        XCTAssertEqual(event.reason, "not_in_supported_models")
+        XCTAssertFalse(event.transactionID.isEmpty)
+    }
+
+    func testModelsBrowseJSONArgumentFailureEmitsCatalogError() async throws {
+        let command = try ModelsBrowseCommand.parse(["--json", "--limit", "0"])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        let line = try XCTUnwrap(capture.stdout.split(whereSeparator: \.isNewline).first)
+        let error = try JSONDecoder().decode(ModelCatalogErrorWire.self, from: Data(line.utf8))
+        XCTAssertEqual(error.schemaVersion, "model_catalog_error.v1")
+        XCTAssertEqual(error.code, "invalid_argument")
     }
 
     func testServerSideRejectsSwitchWhenNotInSupportedModels() async throws {
