@@ -1,0 +1,298 @@
+{
+  "schema_version": "macprovider.spec034-referral-posture-evidence.partial.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "requirement_ids": [
+    "SPEC-034-R001"
+  ],
+  "run_id": "provider-prebeta-referral-posture-live-20260809T161124Z",
+  "captured_at": "2026-08-09T16:11:24Z",
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "2885b6d957c7d5c43e0b3c4d0895bf185706289f",
+    "branch": "origin/main",
+    "governance_pr": "https://github.com/Augustas11/macprovider/pull/970"
+  },
+  "issue": {
+    "url": "https://github.com/Augustas11/macprovider/issues/960",
+    "state_at_capture": "OPEN",
+    "labels_at_capture": [
+      "enhancement",
+      "P3",
+      "ops",
+      "blocked",
+      "harm:hygiene"
+    ]
+  },
+  "result": {
+    "status": "partial-pass-not-promotable",
+    "summary": "The live Pearl, Vercel, Malibu release, and CLI evidence prove that the pre-beta referral/X posture is active and first-class, not an expired exception: Pearl requires referrals for registration, exposes public validation and join links, enables social invite bonus, and pins join_base_url to https://malibu.tech/j. Vercel production serves only the fragment-based /j authority, rejects path authorities, and points downloads to the immutable v1.8.90 Malibu release. The v1.8.90 Malibu artifact is notarized and byte-matches the standalone CLI tarball, whose binary advertises the SPEC-034 referral capabilities. This artifact is intentionally not promotable because it does not include a live valid invitation activation, provider admission using that invitation, X post verification/dwell proof, or a rollback/disable exercise."
+  },
+  "promotion": {
+    "spec034_r001_promoted": false,
+    "conformance_update_allowed": false,
+    "reason": "SPEC-034-R001 requires full enabled-path authority plus rollback evidence before promotion. This capture establishes current deployed posture and immutable release agreement only."
+  },
+  "pearl": {
+    "host_fingerprint": "ubuntu-s-2vcpu-4gb-120gb-intel-nyc1",
+    "captured_at": "2026-08-09T16:11:24Z",
+    "coordinator_service": {
+      "systemd_active": "active",
+      "systemd_enabled": "enabled",
+      "version": "v1.8.91",
+      "binary_sha256": "0b5fcb3d7070b8cdf10b96ed853f7caafab01cd822f19d5b4bd9f8a21f42ea48"
+    },
+    "config_fingerprints": {
+      "/etc/macprovider/coordinator.pearl-overlays.yaml": "296af0a6c944ae06d1ec6f5163d5b3c10c1b0b5d0cb718327e27482b03a10d62",
+      "/opt/macprovider/coordinator.yaml": "3ec485e807e7fa4bacbe8fdac99807a056cc6bf41f6428d6e6613718068f10aa"
+    },
+    "referral_policy": {
+      "require_for_registration": true,
+      "enable_public_validation": true,
+      "enable_join_links": true,
+      "enable_social_invite_bonus": true,
+      "campaign": "prebeta_20260719",
+      "current_key_id": "k1",
+      "join_base_url": "https://malibu.tech/j",
+      "hmac_keys_present": true,
+      "x_api_bearer_token_present": true
+    },
+    "nginx_routes": {
+      "referral_validate_proxy": "location = /v1/referrals/validate -> http://127.0.0.1:8443/v1/referrals/validate",
+      "legacy_join_path_routes_present": true,
+      "redacted_route_line_numbers": [
+        547,
+        849,
+        852,
+        1117
+      ]
+    }
+  },
+  "vercel": {
+    "deployment_id": "dpl_D2rrfR8HDwpBgQdEeRJENTogGYs8",
+    "project": "malibu",
+    "target": "production",
+    "status": "Ready",
+    "deployment_url": "https://malibu-nlwvwbz1x-augstar-8472s-projects.vercel.app",
+    "created_at_local": "2026-08-08T08:10:48+03:00",
+    "aliases": [
+      "https://malibu.tech",
+      "https://www.malibu.tech",
+      "https://malibu-phi.vercel.app",
+      "https://malibu-augstar-8472s-projects.vercel.app",
+      "https://malibu-git-main-augstar-8472s-projects.vercel.app"
+    ],
+    "join_page": {
+      "url": "https://malibu.tech/j",
+      "http_status": 200,
+      "server": "Vercel",
+      "cache_control": "private, no-store",
+      "content_security_policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://coordinator.streamvc.live; img-src 'self'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; manifest-src 'none'; worker-src 'none'",
+      "referrer_policy": "no-referrer",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body_sha256": "3271b048637e5d104ee74fa881c0cc959bc78b3fb5e3e8cbbbc9856a7538e4f8",
+      "body_bytes": 2062,
+      "assets": [
+        "/assets/chunk-KL5VtC6j.js",
+        "/assets/join-CdZVbKE6.css",
+        "/assets/join-DNIHGFeW.js",
+        "/assets/modulepreload-polyfill-Dezn_h7o.js",
+        "/assets/release-C2fuHoos.js"
+      ]
+    },
+    "fragment_authority": {
+      "fragment_probe_url": "https://malibu.tech/j#/REDACTED-960-PROBE?c=<64-hex-redacted>",
+      "server_observed_path": "/j",
+      "fragment_body_sha256": "3271b048637e5d104ee74fa881c0cc959bc78b3fb5e3e8cbbbc9856a7538e4f8",
+      "fragment_body_matches_plain_j": true,
+      "legacy_coordinator_path_status": 404,
+      "legacy_coordinator_path_cache_control": "no-store",
+      "malibu_path_authority_status": 404,
+      "malibu_path_authority_error": "NOT_FOUND"
+    },
+    "join_js": {
+      "path": "/assets/join-DNIHGFeW.js",
+      "sha256": "9227155e65fe7f492edd58a909af0d6a09d266c842369bd65604c8a9fa6e2ec1",
+      "bytes": 4775,
+      "behaviors_present": [
+        "fragment-only MAL1 invite parsing",
+        "history.replaceState('/j')",
+        "credentialless fetch to https://coordinator.streamvc.live/v1/referrals/validate",
+        "copy invite code",
+        "fixed Malibu download link"
+      ],
+      "forbidden_behaviors_absent": [
+        "localStorage",
+        "sessionStorage",
+        "Authorization",
+        "Bearer",
+        "credentials include",
+        "x.com",
+        "twitter"
+      ]
+    },
+    "release_js": {
+      "path": "/assets/release-C2fuHoos.js",
+      "sha256": "6c00ac79fa5b8959ff3f62e89a1aba1df9f12fe39a27a78be89e4d64972284fe",
+      "bytes": 266,
+      "malibu_version": "v1.8.90",
+      "malibu_dmg_url": "https://github.com/Augustas11/macprovider/releases/download/v1.8.90/Malibu-v1.8.90.dmg",
+      "malibu_dmg_sha256": "4cbe757232047314ca09772d08accd96683097a4777c90057b6c67e9aa8ac20e"
+    }
+  },
+  "public_validation": {
+    "endpoint": "https://coordinator.streamvc.live/v1/referrals/validate",
+    "allowed_origin_preflight": {
+      "origin": "https://malibu.tech",
+      "http_status": 204,
+      "access_control_allow_origin": "https://malibu.tech",
+      "access_control_allow_methods": "POST",
+      "access_control_allow_headers": "Content-Type",
+      "access_control_max_age": 300,
+      "cache_control": "no-store"
+    },
+    "hostile_origin_preflight": {
+      "origin": "https://malibu.tech.evil.test",
+      "http_status": 403,
+      "access_control_allow_origin": null,
+      "error_code": "origin_forbidden"
+    },
+    "allowed_origin_invalid_code_post": {
+      "origin": "https://malibu.tech",
+      "http_status": 200,
+      "access_control_allow_origin": "https://malibu.tech",
+      "access_control_allow_credentials": null,
+      "cache_control": "no-store",
+      "response": {
+        "valid": false,
+        "required": true,
+        "reason": "invalid"
+      }
+    },
+    "hostile_origin_invalid_code_post": {
+      "origin": "https://malibu.tech.evil.test",
+      "http_status": 403,
+      "access_control_allow_origin": null,
+      "error_code": "origin_forbidden"
+    }
+  },
+  "release_artifacts": {
+    "github_release": {
+      "tag": "v1.8.90",
+      "published_at": "2026-08-07T18:10:04Z",
+      "target_commitish": "c59568b83b511a78ab07f9ef40939911200a7091",
+      "is_draft": false,
+      "is_prerelease": false,
+      "url": "https://github.com/Augustas11/macprovider/releases/tag/v1.8.90"
+    },
+    "downloaded_assets": {
+      "Malibu-v1.8.90.dmg": {
+        "sha256": "4cbe757232047314ca09772d08accd96683097a4777c90057b6c67e9aa8ac20e",
+        "bytes": 17721230
+      },
+      "macprovider-cli-v1.8.90-darwin-arm64.tar.gz": {
+        "sha256": "26357edb0d7de44fcfabee72a9afb3792f20fb91c5142861ba6d36bbd27afd6b",
+        "bytes": 13945438
+      },
+      "release.json": {
+        "sha256": "140455420b0c6fce002e16a1a6e45080ab17a40be787889309ac9547631d7a7a",
+        "bytes": 1287
+      },
+      "release-provenance.json": {
+        "sha256": "db0f6d8ab18e00e3d9365a577cf8fa74be7d5f14fae82536052d9056817d8007",
+        "bytes": 2600
+      }
+    },
+    "malibu_verification": {
+      "repo_verifier": "scripts/verify-malibu-release-artifacts.sh",
+      "status": "pass",
+      "codesign_strict_deep": "pass",
+      "sparkle_trust_anchor": "pass",
+      "stapler_validate_dmg": "pass",
+      "gatekeeper_result": "Malibu.app accepted as Notarized Developer ID",
+      "developer_id_origin": "Developer ID Application: Superposition Technologies Pte. Ltd. (YF7XNRJUG4)",
+      "embedded_cli_matches_standalone_tarball": true
+    },
+    "standalone_cli": {
+      "version": "1.8.90",
+      "extracted_binary_sha256": "6be80e274348031e9b76035b300c01c24eb22e151dc52812297337f965bc3ab6",
+      "capabilities_observed_with_strings": [
+        "referral_bootstrap_v1",
+        "referral_status_v1",
+        "referral_advocacy_v1",
+        "referral_repeatable_advocacy_v1",
+        "referral_fragment_links_v1"
+      ]
+    },
+    "release_provenance": {
+      "tag": "v1.8.90",
+      "commit": "c59568b83b511a78ab07f9ef40939911200a7091",
+      "xcode_version": "16.4",
+      "swift_version": "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)",
+      "macos_sdk_version": "15.5"
+    }
+  },
+  "validated_claims": [
+    {
+      "claim": "Pearl is currently configured for active pre-beta referral admission and social invite posture.",
+      "status": "pass"
+    },
+    {
+      "claim": "The only public join authority served by Malibu is fragment-based https://malibu.tech/j#/...",
+      "status": "pass"
+    },
+    {
+      "claim": "Path-based alternate authorities fail closed.",
+      "status": "pass"
+    },
+    {
+      "claim": "Browser validation is CORS-limited to https://malibu.tech and omits credentials.",
+      "status": "pass"
+    },
+    {
+      "claim": "The live join page pins a fixed GitHub Malibu v1.8.90 DMG URL and digest.",
+      "status": "pass"
+    },
+    {
+      "claim": "The downloaded v1.8.90 Malibu DMG is notarized and contains the same CLI bytes as the standalone v1.8.90 provider tarball.",
+      "status": "pass"
+    },
+    {
+      "claim": "The standalone v1.8.90 CLI binary advertises the SPEC-034 referral capability set.",
+      "status": "pass"
+    },
+    {
+      "claim": "A valid live invite activates, admits one provider identity, preserves identity through copy/download/paste, and does not leak credentials to Malibu, logs, or argv.",
+      "status": "blocked",
+      "reason": "No live valid invite code was exercised in this read-only capture."
+    },
+    {
+      "claim": "X/social initial and dwell verification are accepted exactly once for the active campaign.",
+      "status": "blocked",
+      "reason": "No provider-authenticated social challenge/verify path was exercised in this read-only capture."
+    },
+    {
+      "claim": "Rollback/disable clears exposure fail-closed while incumbents remain unaffected.",
+      "status": "blocked",
+      "reason": "No production rollback or disable/re-enable exercise was performed."
+    }
+  ],
+  "next_required_capture": [
+    "Exercise one active, redacted Malibu invite through https://malibu.tech/j#/... and record valid validation response shape without storing the raw code or challenge.",
+    "Complete copy/download/paste into Malibu and prove the same provider identity/admission row consumes the invite exactly once without exposing the invite to Malibu logs, CLI argv, or stored credential fields.",
+    "Exercise the provider-authenticated X challenge and verify flow for the active prebeta campaign, preserving only post/challenge fingerprints and audit row counts.",
+    "Exercise a controlled rollback/disable and restore, proving public validation and join exposure fail closed while existing admitted providers remain unaffected.",
+    "Package the final pass artifact as a signed provider-prebeta journey-result before any SPEC-034-R001 promotion."
+  ],
+  "redaction": {
+    "secrets_redacted": true,
+    "referral_codes_redacted": true,
+    "referral_challenges_redacted": true,
+    "x_api_bearer_token_redacted": true,
+    "operator_tokens_redacted": true,
+    "provider_tokens_redacted": true,
+    "provider_ids_redacted": true,
+    "host_log_ips_redacted": true,
+    "raw_access_logs_omitted": true,
+    "raw_journal_payloads_omitted": true
+  }
+}
