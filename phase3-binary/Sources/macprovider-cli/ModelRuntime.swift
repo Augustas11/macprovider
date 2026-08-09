@@ -261,6 +261,69 @@ struct ModelRuntimeTargetAuthority: Sendable, Equatable {
     let catalogRevision: String
 }
 
+struct ModelRuntimePreparedAdoption: Sendable, Equatable {
+    let request: ModelAdoptionAuthorityWire
+    let authority: ModelRuntimeTargetAuthority
+    let expiresAt: Date
+}
+
+struct ModelRuntimeAdoptionRecoveryClaim: Sendable, Equatable {
+    let transactionID: String
+    let fromModelID: String
+    let targetModelID: String
+    let expiresAt: Date
+}
+
+struct ModelRuntimeAdoptionServeKnobs: Sendable, Equatable {
+    let kvBits: Int?
+    let maxContext: Int
+    let maxBatch: Int
+}
+
+enum ModelRuntimeAdoptionError: Error, CustomStringConvertible, Equatable {
+    case invalidTransactionID
+    case invalidRecommendationSHA256
+    case invalidServeKnobsSHA256
+    case invalidCatalogIdentitySHA256
+    case incumbentMismatch(expected: String, actual: String?)
+    case unsupportedTarget
+    case authorityUnavailable
+    case authorityMismatch
+    case adoptionReservationConflict
+    case transactionConsumed
+    case transactionNotPrepared
+    case runtimeRejected(String)
+
+    var description: String {
+        switch self {
+        case .invalidTransactionID:
+            return "invalid_transaction_id"
+        case .invalidRecommendationSHA256:
+            return "invalid_recommendation_sha256"
+        case .invalidServeKnobsSHA256:
+            return "invalid_serve_knobs_sha256"
+        case .invalidCatalogIdentitySHA256:
+            return "invalid_catalog_identity_sha256"
+        case let .incumbentMismatch(expected, actual):
+            return "incumbent_mismatch: expected \(expected), actual \(actual ?? "<none>")"
+        case .unsupportedTarget:
+            return "unsupported_target"
+        case .authorityUnavailable:
+            return "runtime_target_authority_unavailable"
+        case .authorityMismatch:
+            return "runtime_target_authority_mismatch"
+        case .adoptionReservationConflict:
+            return "model_adoption_reservation_conflict"
+        case .transactionConsumed:
+            return "model_adoption_transaction_consumed"
+        case .transactionNotPrepared:
+            return "transaction_not_prepared"
+        case let .runtimeRejected(reason):
+            return reason
+        }
+    }
+}
+
 struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
@@ -601,11 +664,23 @@ actor ModelRuntime: ModelRuntimeServing {
     private let verifiedModelCatalogRevision: String?
     private let targetAuthorities: [String: ModelRuntimeTargetAuthority]
     private let authorizedSwitchModelIDs: [String]
-    private let maxContextTokens: Int
+    private var preparedAdoptions: [String: ModelRuntimePreparedAdoption] = [:]
+    private var preparedAdoptionReservationID: String?
+    private var applyingAdoptionTransactionID: String?
+    private var adoptionRecoveryClaims: [String: ModelRuntimeAdoptionRecoveryClaim] = [:]
+    private var consumedAdoptionTransactionIDs: [String: Date] = [:]
+    private var finalizedAdoptionTransactionIDs: [String: Date] = [:]
+    private static let adoptionTransactionLifetime: TimeInterval = 5 * 60
+    // The CLI permits a drain timeout of up to ten minutes. Once apply starts,
+    // retain the switch-lane reservation through that full window plus the
+    // normal five-minute commit/recovery margin.
+    private static let activeAdoptionTransactionLifetime: TimeInterval = 15 * 60
+    private static let maximumConsumedAdoptionTransactionIDs = 64
+    private var maxContextTokens: Int
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
     // pre-knob behavior; lifting above 1 widens the autotune search.
-    private let kvBitsOverride: Int?
+    private var kvBitsOverride: Int?
     private let prefillStepSize: Int
     private let pagedKVConfig: PagedKVConfig
     private var pagedKVAttachDecision: PagedKVAttachDecision
@@ -614,9 +689,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// cold tier (FR-KVP7). Gates all per-request cold-tier context construction;
     /// false ⇒ the hot path is byte-identical to today (FR-KVP1).
     private var coldTierAttached = false
-    private let inferenceGate: AsyncSemaphore
+    private var inferenceGate: AsyncSemaphore
     private let blockingInferenceExecutor: BlockingInferenceExecutor
-    private let maxBatch: Int
+    private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
     private let continuousBatchQueueLimit: Int?
     private let warmSwapEnabled: Bool
@@ -1218,8 +1293,21 @@ actor ModelRuntime: ModelRuntimeServing {
         return pair.stream
     }
 
-    func beginSwap(targetModelID: String) async throws -> Task<Void, Error> {
+    func beginSwap(
+        targetModelID: String,
+        adoptionKnobs: ModelRuntimeAdoptionServeKnobs? = nil,
+        adoptionTransactionID: String? = nil,
+        now: Date = Date()
+    ) async throws -> Task<Void, Error> {
         guard warmSwapEnabled else { throw WarmSwapDisabledError() }
+        pruneAdoptionTransactions(now: now)
+        if let reservationID = preparedAdoptionReservationID {
+            guard reservationID == adoptionTransactionID else {
+                throw ModelRuntimeAdoptionError.adoptionReservationConflict
+            }
+        } else if adoptionTransactionID != nil {
+            throw ModelRuntimeAdoptionError.transactionNotPrepared
+        }
         let targetAuthority = targetAuthority(for: targetModelID)
         if testLoader == nil {
             guard targetAuthority != nil else {
@@ -1233,10 +1321,10 @@ actor ModelRuntime: ModelRuntimeServing {
         let configuredDraftModelID = configuredDraftModelID
         let configuredDraftModelLoadPath = configuredDraftModelLoadPath
         let numDraftTokens = numDraftTokens
-        let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
+        let maxContextTokens = adoptionKnobs?.maxContext ?? maxContextTokens
+        let kvBitsOverride = adoptionKnobs?.kvBits ?? kvBitsOverride
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority, adoptionKnobs] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -1356,11 +1444,330 @@ actor ModelRuntime: ModelRuntimeServing {
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason,
-                    modelCapabilities: modelCapabilities
+                    modelCapabilities: modelCapabilities,
+                    adoptionKnobs: adoptionKnobs
                 )
             } catch {
                 await self.failSwap(reason: String(describing: error))
             }
+        }
+    }
+
+    func prepareModelAdoption(
+        _ request: ModelAdoptionAuthorityWire,
+        now: Date = Date()
+    ) async -> ModelAdoptionPrepareResultWire {
+        do {
+            pruneAdoptionTransactions(now: now)
+            if consumedAdoptionTransactionIDs[request.transactionID] != nil {
+                throw ModelRuntimeAdoptionError.transactionConsumed
+            }
+            if let existing = preparedAdoptions[request.transactionID] {
+                guard existing.request == request else {
+                    throw ModelRuntimeAdoptionError.authorityMismatch
+                }
+                return acceptedModelAdoptionPreparation(existing)
+            }
+            guard preparedAdoptionReservationID == nil else {
+                throw ModelRuntimeAdoptionError.adoptionReservationConflict
+            }
+            guard consumedAdoptionTransactionIDs.count < Self.maximumConsumedAdoptionTransactionIDs else {
+                throw ModelRuntimeAdoptionError.runtimeRejected("model_adoption_replay_window_full")
+            }
+            guard state == .ready else {
+                throw ModelRuntimeAdoptionError.runtimeRejected("runtime_not_ready")
+            }
+            let prepared = try validateModelAdoptionPreparation(request, now: now)
+            preparedAdoptions[request.transactionID] = prepared
+            preparedAdoptionReservationID = request.transactionID
+            return acceptedModelAdoptionPreparation(prepared)
+        } catch {
+            return ModelAdoptionPrepareResultWire(
+                transactionID: request.transactionID,
+                accepted: false,
+                reason: String(describing: error),
+                targetModelID: nil,
+                targetArtifactPath: nil,
+                targetArtifactSHA256: nil,
+                targetCatalogRevision: nil,
+                serveKnobsSHA256: nil,
+                catalogIdentitySHA256: nil
+            )
+        }
+    }
+
+    func beginPreparedModelAdoption(
+        transactionID: String,
+        now: Date = Date()
+    ) async throws -> (ModelRuntimePreparedAdoption, Task<Void, Error>) {
+        guard warmSwapEnabled else { throw WarmSwapDisabledError() }
+        pruneAdoptionTransactions(now: now)
+        guard consumedAdoptionTransactionIDs[transactionID] == nil,
+              preparedAdoptionReservationID == transactionID,
+              let prepared = preparedAdoptions[transactionID] else {
+            throw ModelRuntimeAdoptionError.transactionNotPrepared
+        }
+        guard applyingAdoptionTransactionID == nil else {
+            throw ModelRuntimeAdoptionError.transactionConsumed
+        }
+        guard currentModelID == prepared.request.expectedIncumbentModelID else {
+            consumePreparedAdoption(transactionID: transactionID, now: now)
+            throw ModelRuntimeAdoptionError.incumbentMismatch(
+                expected: prepared.request.expectedIncumbentModelID,
+                actual: currentModelID
+            )
+        }
+        guard let runtimeAuthority = targetAuthority(for: prepared.request.targetModelID),
+              runtimeAuthority == prepared.authority else {
+            consumePreparedAdoption(transactionID: transactionID, now: now)
+            throw ModelRuntimeAdoptionError.authorityMismatch
+        }
+        do {
+            let active = ModelRuntimePreparedAdoption(
+                request: prepared.request,
+                authority: prepared.authority,
+                expiresAt: now.addingTimeInterval(Self.activeAdoptionTransactionLifetime)
+            )
+            preparedAdoptions[transactionID] = active
+            applyingAdoptionTransactionID = transactionID
+            let task = try await beginSwap(
+                targetModelID: prepared.request.targetModelID,
+                adoptionKnobs: ModelRuntimeAdoptionServeKnobs(
+                    kvBits: prepared.request.targetKVBits,
+                    maxContext: prepared.request.targetMaxContext,
+                    maxBatch: prepared.request.targetMaxBatch
+                ),
+                adoptionTransactionID: transactionID,
+                now: now
+            )
+            return (active, task)
+        } catch {
+            consumePreparedAdoption(transactionID: transactionID, now: now)
+            throw error
+        }
+    }
+
+    func preparedModelAdoption(
+        transactionID: String,
+        now: Date = Date()
+    ) -> ModelRuntimePreparedAdoption? {
+        pruneAdoptionTransactions(now: now)
+        return preparedAdoptions[transactionID]
+    }
+
+    func cancelPreparedModelAdoption(transactionID: String, now: Date = Date()) -> Bool {
+        pruneAdoptionTransactions(now: now)
+        if consumedAdoptionTransactionIDs[transactionID] != nil,
+           finalizedAdoptionTransactionIDs[transactionID] == nil {
+            return true
+        }
+        guard preparedAdoptions[transactionID] != nil || adoptionRecoveryClaims[transactionID] != nil else {
+            return false
+        }
+        consumePreparedAdoption(transactionID: transactionID, now: now)
+        return true
+    }
+
+    func claimModelAdoptionRecovery(
+        transactionID: String,
+        fromModelID: String,
+        targetModelID: String,
+        now: Date = Date()
+    ) -> Bool {
+        pruneAdoptionTransactions(now: now)
+        guard UUID(uuidString: transactionID) != nil,
+              !fromModelID.isEmpty,
+              !targetModelID.isEmpty,
+              fromModelID != targetModelID,
+              state == .ready,
+              currentModelID == fromModelID || currentModelID == targetModelID else {
+            return false
+        }
+        if preparedAdoptionReservationID == transactionID {
+            if let prepared = preparedAdoptions[transactionID] {
+                guard prepared.request.expectedIncumbentModelID == fromModelID,
+                      prepared.request.targetModelID == targetModelID else {
+                    return false
+                }
+                preparedAdoptions[transactionID] = ModelRuntimePreparedAdoption(
+                    request: prepared.request,
+                    authority: prepared.authority,
+                    expiresAt: now.addingTimeInterval(Self.activeAdoptionTransactionLifetime)
+                )
+                return true
+            }
+            if let claim = adoptionRecoveryClaims[transactionID] {
+                guard claim.fromModelID == fromModelID,
+                      claim.targetModelID == targetModelID else {
+                    return false
+                }
+                adoptionRecoveryClaims[transactionID] = ModelRuntimeAdoptionRecoveryClaim(
+                    transactionID: transactionID,
+                    fromModelID: fromModelID,
+                    targetModelID: targetModelID,
+                    expiresAt: now.addingTimeInterval(Self.activeAdoptionTransactionLifetime)
+                )
+                return true
+            }
+            return false
+        }
+        guard preparedAdoptionReservationID == nil,
+              consumedAdoptionTransactionIDs[transactionID] == nil,
+              finalizedAdoptionTransactionIDs[transactionID] == nil else {
+            return false
+        }
+        adoptionRecoveryClaims[transactionID] = ModelRuntimeAdoptionRecoveryClaim(
+            transactionID: transactionID,
+            fromModelID: fromModelID,
+            targetModelID: targetModelID,
+            expiresAt: now.addingTimeInterval(Self.activeAdoptionTransactionLifetime)
+        )
+        preparedAdoptionReservationID = transactionID
+        return true
+    }
+
+    func finalizePreparedModelAdoption(transactionID: String, now: Date = Date()) -> Bool {
+        pruneAdoptionTransactions(now: now)
+        if finalizedAdoptionTransactionIDs[transactionID] != nil {
+            return true
+        }
+        guard preparedAdoptionReservationID == transactionID,
+              state == .ready else {
+            return false
+        }
+        let expectedTarget: String?
+        if applyingAdoptionTransactionID == transactionID,
+           let prepared = preparedAdoptions[transactionID] {
+            expectedTarget = prepared.request.targetModelID
+        } else {
+            expectedTarget = adoptionRecoveryClaims[transactionID]?.targetModelID
+        }
+        guard currentModelID == expectedTarget else { return false }
+        consumePreparedAdoption(transactionID: transactionID, now: now)
+        finalizedAdoptionTransactionIDs[transactionID] = now.addingTimeInterval(Self.adoptionTransactionLifetime)
+        return true
+    }
+
+    private func acceptedModelAdoptionPreparation(
+        _ prepared: ModelRuntimePreparedAdoption
+    ) -> ModelAdoptionPrepareResultWire {
+        let request = prepared.request
+        return ModelAdoptionPrepareResultWire(
+            transactionID: request.transactionID,
+            accepted: true,
+            reason: nil,
+            targetModelID: request.targetModelID,
+            targetArtifactPath: prepared.authority.modelArgument,
+            targetArtifactSHA256: prepared.authority.artifactSHA256,
+            targetCatalogRevision: prepared.authority.catalogRevision,
+            serveKnobsSHA256: request.serveKnobsSHA256,
+            catalogIdentitySHA256: request.catalogIdentitySHA256
+        )
+    }
+
+    private func pruneAdoptionTransactions(now: Date) {
+        let expired = preparedAdoptions.values
+            .filter { $0.expiresAt < now }
+            .map(\.request.transactionID)
+        for transactionID in expired {
+            consumePreparedAdoption(transactionID: transactionID, now: now)
+        }
+        let expiredClaims = adoptionRecoveryClaims.values
+            .filter { $0.expiresAt < now }
+            .map(\.transactionID)
+        for transactionID in expiredClaims {
+            consumePreparedAdoption(transactionID: transactionID, now: now)
+        }
+        consumedAdoptionTransactionIDs = consumedAdoptionTransactionIDs.filter { $0.value >= now }
+        finalizedAdoptionTransactionIDs = finalizedAdoptionTransactionIDs.filter { $0.value >= now }
+        if let reservationID = preparedAdoptionReservationID,
+           preparedAdoptions[reservationID] == nil,
+           adoptionRecoveryClaims[reservationID] == nil {
+            preparedAdoptionReservationID = nil
+        }
+    }
+
+    private func consumePreparedAdoption(transactionID: String, now: Date) {
+        preparedAdoptions.removeValue(forKey: transactionID)
+        adoptionRecoveryClaims.removeValue(forKey: transactionID)
+        if preparedAdoptionReservationID == transactionID {
+            preparedAdoptionReservationID = nil
+        }
+        if applyingAdoptionTransactionID == transactionID {
+            applyingAdoptionTransactionID = nil
+        }
+        consumedAdoptionTransactionIDs[transactionID] = now.addingTimeInterval(Self.adoptionTransactionLifetime)
+    }
+
+    private func validateModelAdoptionPreparation(
+        _ request: ModelAdoptionAuthorityWire,
+        now: Date
+    ) throws -> ModelRuntimePreparedAdoption {
+        guard request.schemaVersion == "model_recommendation_apply_switch.v1" else {
+            throw ModelRuntimeAdoptionError.invalidTransactionID
+        }
+        guard UUID(uuidString: request.transactionID) != nil else {
+            throw ModelRuntimeAdoptionError.invalidTransactionID
+        }
+        guard Self.safeSHA256(request.recommendationSHA256) else {
+            throw ModelRuntimeAdoptionError.invalidRecommendationSHA256
+        }
+        guard Self.safeSHA256(request.serveKnobsSHA256) else {
+            throw ModelRuntimeAdoptionError.invalidServeKnobsSHA256
+        }
+        guard Self.safeSHA256(request.catalogIdentitySHA256) else {
+            throw ModelRuntimeAdoptionError.invalidCatalogIdentitySHA256
+        }
+        guard request.targetMaxContext > 0,
+              request.targetMaxBatch > 0,
+              request.targetMaxBatch <= ProviderCapacity.maxConcurrencyOverrideLimit,
+              request.targetKVBits == nil || request.targetKVBits! > 0,
+              request.targetDonorMode == false,
+              request.serveKnobsSHA256 == ModelAdoptionAuthorityWire.serveKnobsDigest(
+                  kvBits: request.targetKVBits,
+                  maxContext: request.targetMaxContext,
+                  maxBatch: request.targetMaxBatch,
+                  donorMode: request.targetDonorMode
+              ) else {
+            throw ModelRuntimeAdoptionError.authorityMismatch
+        }
+        guard currentModelID == request.expectedIncumbentModelID else {
+            throw ModelRuntimeAdoptionError.incumbentMismatch(
+                expected: request.expectedIncumbentModelID,
+                actual: currentModelID
+            )
+        }
+        if !authorizedSwitchModelIDs.isEmpty {
+            let authorized = Set(authorizedSwitchModelIDs.map { $0.lowercased(with: nil) })
+            guard authorized.contains(request.targetModelID.lowercased(with: nil)) else {
+                throw ModelRuntimeAdoptionError.unsupportedTarget
+            }
+        }
+        guard let authority = targetAuthority(for: request.targetModelID) else {
+            throw ModelRuntimeAdoptionError.authorityUnavailable
+        }
+        guard authority.modelArgument == request.targetArtifactPath,
+              authority.artifactSHA256 == request.targetArtifactSHA256,
+              authority.catalogRevision == request.targetCatalogRevision else {
+            throw ModelRuntimeAdoptionError.authorityMismatch
+        }
+        return ModelRuntimePreparedAdoption(
+            request: request,
+            authority: authority,
+            expiresAt: now.addingTimeInterval(5 * 60)
+        )
+    }
+
+    private nonisolated static func safeControlID(_ value: String) -> Bool {
+        ModelSwitchingWireCodec.safeID(value)
+    }
+
+    private nonisolated static func safeSHA256(_ value: String) -> Bool {
+        guard value.utf8.count == 64 else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            (48...57).contains(scalar.value)
+                || (97...102).contains(scalar.value)
+                || (65...70).contains(scalar.value)
         }
     }
 
@@ -1556,7 +1963,8 @@ actor ModelRuntime: ModelRuntimeServing {
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
-            modelCapabilities: Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
+            modelCapabilities: Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil),
+            adoptionKnobs: nil
         )
     }
 
@@ -1571,9 +1979,16 @@ actor ModelRuntime: ModelRuntimeServing {
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?,
-        modelCapabilities: PagedKVRuntimeModelCapabilities
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        adoptionKnobs: ModelRuntimeAdoptionServeKnobs?
     ) async {
         let target = targetModelID ?? modelID
+        if let adoptionKnobs {
+            maxContextTokens = adoptionKnobs.maxContext
+            kvBitsOverride = adoptionKnobs.kvBits
+            maxBatch = adoptionKnobs.maxBatch
+            inferenceGate = AsyncSemaphore(value: adoptionKnobs.maxBatch)
+        }
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
@@ -1618,6 +2033,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHash: modelHash,
             modelHashAlgorithm: currentModelHashAlgorithm,
             weightsManifestSHA256: weightsManifestSHA256,
+            maxContextTokens: adoptionKnobs?.maxContext,
+            maxConcurrency: adoptionKnobs?.maxBatch,
             specDecodeDraftModelID: draftModelID,
             specDecodeNumDraftTokens: draftModelID == nil ? nil : numDraftTokens
         )

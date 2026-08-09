@@ -350,6 +350,49 @@ struct ModelCLIResult: Sendable {
     let stderr: String
 }
 
+enum ModelCLIWorkPriority: Sendable {
+    case interactive
+    case background
+
+    var dispatchQoS: DispatchQoS.QoSClass {
+        switch self {
+        case .interactive: .userInitiated
+        case .background: .utility
+        }
+    }
+}
+
+@MainActor
+protocol MalibuModelCLIRunning: AnyObject {
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence?,
+        stdinData: Data?,
+        priority: ModelCLIWorkPriority,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult
+    func cancelCurrentOperation()
+}
+
+extension MalibuModelCLIRunning {
+    func cancelCurrentOperation() {}
+
+    func run(
+        arguments: [String],
+        peer: MalibuModelPeerEvidence? = nil,
+        priority: ModelCLIWorkPriority = .interactive,
+        onLine: @escaping @MainActor @Sendable (String) -> Void
+    ) async throws -> ModelCLIResult {
+        try await run(
+            arguments: arguments,
+            peer: peer,
+            stdinData: nil,
+            priority: priority,
+            onLine: onLine
+        )
+    }
+}
+
 private final class ModelCLIOutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var value = ""
@@ -399,8 +442,32 @@ private final class ModelCLIOutputLineBuffer: @unchecked Sendable {
     }
 }
 
+private final class ModelCLIProcessCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var process: Process?
+
+    func install(_ process: Process) {
+        lock.lock()
+        self.process = process
+        lock.unlock()
+    }
+
+    func clear(_ process: Process) {
+        lock.lock()
+        if self.process === process { self.process = nil }
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let process = self.process
+        lock.unlock()
+        if process?.isRunning == true { process?.terminate() }
+    }
+}
+
 @MainActor
-final class MalibuModelCLI {
+final class MalibuModelCLI: MalibuModelCLIRunning {
     enum Error: Swift.Error, LocalizedError {
         case executableUnavailable
         case launchFailed(String)
@@ -416,19 +483,30 @@ final class MalibuModelCLI {
     }
 
     static let shared = MalibuModelCLI()
+    private let cancellation = ModelCLIProcessCancellation()
+
+    func cancelCurrentOperation() {
+        cancellation.cancel()
+    }
 
     func run(
         arguments: [String],
         peer: MalibuModelPeerEvidence? = nil,
+        stdinData: Data? = nil,
+        priority: ModelCLIWorkPriority = .interactive,
         onLine: @escaping @MainActor @Sendable (String) -> Void
     ) async throws -> ModelCLIResult {
         let executable = try resolveExecutable(peer: peer)
         let environment = try ProcessEnvironmentSanitizer.sanitized()
+        let cancellation = self.cancellation
         return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.global(qos: priority.dispatchQoS).async {
                 let process = Process()
+                cancellation.install(process)
+                defer { cancellation.clear(process) }
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
+                let stdinPipe = stdinData == nil ? nil : Pipe()
                 let stdout = ModelCLIOutputBuffer()
                 let stderr = ModelCLIOutputBuffer()
                 let stdoutLines = ModelCLIOutputLineBuffer()
@@ -438,6 +516,7 @@ final class MalibuModelCLI {
                 process.environment = environment
                 process.standardOutput = stdoutPipe
                 process.standardError = stderrPipe
+                process.standardInput = stdinPipe
 
                 func consume(
                     _ pipe: Pipe,
@@ -465,6 +544,10 @@ final class MalibuModelCLI {
 
                 do {
                     try process.run()
+                    if let stdinData, let stdinPipe {
+                        stdinPipe.fileHandleForWriting.write(stdinData)
+                        stdinPipe.fileHandleForWriting.closeFile()
+                    }
                 } catch {
                     stdoutPipe.fileHandleForReading.readabilityHandler = nil
                     stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -658,12 +741,15 @@ private struct ModelManagementPersistedState: Codable {
     var previousModelAt: Date?
     var history: [ModelActivityEntry]
     var backgroundRecommendationsEnabled: Bool
+    var recommendationSchedule: MalibuRecommendationSchedule?
 }
 
 // MARK: - App state and actions
 
 @MainActor
 final class ModelManagementStore: ObservableObject {
+    static let shared = ModelManagementStore()
+
     enum ListState: Equatable {
         case checking
         case ready
@@ -678,7 +764,19 @@ final class ModelManagementStore: ObservableObject {
         case reconciling(target: String)
         case runtimeConflict(expected: String, observed: String?)
         case cooldown(target: String, secondsRemaining: Int)
+        case checkingRecommendation(phase: String)
+        case adoptingRecommendation(target: String, phase: String)
         case failed(String)
+
+        var blocksRefresh: Bool {
+            switch self {
+            case .loadingList, .switching, .reconciling, .runtimeConflict,
+                 .checkingRecommendation, .adoptingRecommendation:
+                return true
+            case .idle, .cooldown, .failed:
+                return false
+            }
+        }
     }
 
     private struct PendingSwitch: Equatable {
@@ -695,11 +793,12 @@ final class ModelManagementStore: ObservableObject {
     @Published private(set) var peerObservationFresh = false
     @Published private(set) var statusLine = String(localized: "Checking model controls…", comment: "Model activity status")
     @Published private(set) var recommendationLine: String?
+    @Published private(set) var recommendation: MalibuRecommendationDocument?
     @Published private(set) var previousModelID: String?
     @Published private(set) var history: [ModelActivityEntry] = []
     @Published private(set) var backgroundRecommendationsEnabled: Bool
 
-    private let cli: MalibuModelCLI
+    private let cli: any MalibuModelCLIRunning
     private let paths: ProviderPaths
     private let defaults: UserDefaults
     private let powerMonitor: MalibuPowerMonitor
@@ -713,9 +812,12 @@ final class ModelManagementStore: ObservableObject {
     private var switchWatchdogTask: Task<Void, Never>?
     private var cooldownTask: Task<Void, Never>?
     private var lastSwitchEventReason: String?
+    private var recommendationSchedule = MalibuRecommendationSchedule()
+    private var recommendationJSON: Data?
+    private var backgroundCheckSafetyCancelled = false
 
     init(
-        cli: MalibuModelCLI = .shared,
+        cli: any MalibuModelCLIRunning = MalibuModelCLI.shared,
         paths: ProviderPaths = .current,
         defaults: UserDefaults = .standard,
         powerMonitor: MalibuPowerMonitor = MalibuPowerMonitor()
@@ -730,6 +832,7 @@ final class ModelManagementStore: ObservableObject {
             previousModelAt = persisted.previousModelAt
             history = Array(persisted.history.suffix(20))
             backgroundRecommendationsEnabled = persisted.backgroundRecommendationsEnabled
+            recommendationSchedule = persisted.recommendationSchedule ?? MalibuRecommendationSchedule()
         } else {
             backgroundRecommendationsEnabled = true
         }
@@ -742,11 +845,86 @@ final class ModelManagementStore: ObservableObject {
         )
     }
 
+    var recommendationAdoptionCapabilityAvailable: Bool {
+        MalibuModelCapabilityManifest.checkedIn.supports(
+            MalibuModelCapabilityManifest.recommendationAdoption,
+            peer: peerEvidence
+        )
+    }
+
+    var canAdoptRecommendation: Bool {
+        guard let target = recommendation?.recommendedModel,
+              !Self.recommendationTargetIsCurrent(target, currentModelID: currentModelID),
+              Self.recommendationTargetIsReadyForAdoption(
+                  target,
+                  listState: listState,
+                  rows: rows
+              ),
+              recommendation?.isActionable == true,
+              recommendationJSON != nil,
+              recommendationAdoptionCapabilityAvailable,
+              peerObservationFresh,
+              peerEvidence.isFresh(),
+              operation == .idle else { return false }
+        return true
+    }
+
+    var recommendationAdoptionUnavailableReason: String? {
+        guard let recommendation, let target = recommendation.recommendedModel else { return nil }
+        if let advisoryReason = recommendation.adoptionAdvisoryReason {
+            return advisoryReason
+        }
+        if Self.recommendationTargetIsCurrent(target, currentModelID: currentModelID) {
+            return String(localized: "This recommended model is already active.", comment: "Recommendation already active")
+        }
+        if recommendationJSON == nil {
+            return String(localized: "Recommendation evidence is unavailable. Run the check again before adopting.", comment: "Recommendation evidence unavailable")
+        }
+        if !recommendationAdoptionCapabilityAvailable {
+            return String(localized: "Adoption requires a compatible provider update; the recommendation remains advisory.", comment: "Adoption capability unavailable")
+        }
+        if !peerObservationFresh || !peerEvidence.isFresh() {
+            return String(localized: "Waiting for fresh provider status before adoption.", comment: "Recommendation waiting for provider status")
+        }
+        if listState != .ready {
+            return String(localized: "Provider model controls are view-only, so this recommendation cannot be adopted right now.", comment: "Recommendation blocked by view-only model controls")
+        }
+        if !Self.recommendationTargetIsReadyForAdoption(target, listState: listState, rows: rows) {
+            return String(localized: "The recommended model is no longer ready for a live switch. Run the check again.", comment: "Recommendation target no longer actionable")
+        }
+        if operation != .idle {
+            return String(localized: "Finish the current model action before adopting this recommendation.", comment: "Recommendation blocked by active model action")
+        }
+        return nil
+    }
+
     var recommendationStatus: String {
         if !recommendationCapabilityAvailable {
             return String(localized: "Background recommendations require a provider update. Manual model switching remains available.", comment: "Recommendation capability unavailable")
         }
         return recommendationLine ?? String(localized: "Background recommendation checks are ready.", comment: "Recommendation status")
+    }
+
+    nonisolated static func recommendationTargetIsCurrent(
+        _ target: String,
+        currentModelID: String?
+    ) -> Bool {
+        guard let currentModelID else { return false }
+        return modelIdentityKey(target) == modelIdentityKey(currentModelID)
+    }
+
+    nonisolated static func recommendationTargetIsReadyForAdoption(
+        _ target: String,
+        listState: ListState,
+        rows: [MalibuModelRow]
+    ) -> Bool {
+        guard listState == .ready else { return false }
+        let targetKey = modelIdentityKey(target)
+        return rows.contains { row in
+            modelIdentityKey(row.id) == targetKey
+                && row.weightsPresentLocally
+                && row.action == .switchModel
+        }
     }
 
     func setBackgroundRecommendationsEnabled(_ enabled: Bool) {
@@ -755,6 +933,22 @@ final class ModelManagementStore: ObservableObject {
         recommendationLine = enabled
             ? String(localized: "Background recommendations enabled.", comment: "Recommendation preference enabled")
             : String(localized: "Background recommendations stopped. Manual model switching remains available.", comment: "Recommendation preference disabled")
+    }
+
+    func snoozeRecommendation() {
+        if let identity = recommendation?.identity(currentModelID: currentModelID) {
+            recommendationSchedule.snooze(identity: identity, at: Date())
+        }
+        recommendation = nil
+        recommendationJSON = nil
+        recommendationLine = String(localized: "Recommendation hidden for 24 hours.", comment: "Recommendation snoozed")
+        saveState()
+    }
+
+    func stopBackgroundRecommendations() {
+        setBackgroundRecommendationsEnabled(false)
+        recommendation = nil
+        recommendationJSON = nil
     }
 
     var readySwitchCapabilityAvailable: Bool {
@@ -813,7 +1007,11 @@ final class ModelManagementStore: ObservableObject {
         if let pendingSwitch {
             switch operation {
             case .reconciling:
-                if peerObservationFresh, currentModelID == pendingSwitch.targetModelID {
+                if peerObservationFresh,
+                   Self.recommendationTargetIsCurrent(
+                       pendingSwitch.targetModelID,
+                       currentModelID: currentModelID
+                   ) {
                     commitSuccessfulSwitch(pendingSwitch)
                     return
                 } else if peerObservationFresh, let currentModelID {
@@ -825,7 +1023,11 @@ final class ModelManagementStore: ObservableObject {
                 }
                 return
             case .runtimeConflict:
-                if peerObservationFresh, currentModelID == pendingSwitch.targetModelID {
+                if peerObservationFresh,
+                   Self.recommendationTargetIsCurrent(
+                       pendingSwitch.targetModelID,
+                       currentModelID: currentModelID
+                   ) {
                     commitSuccessfulSwitch(pendingSwitch)
                 }
                 return
@@ -837,6 +1039,12 @@ final class ModelManagementStore: ObservableObject {
             }
         } else if case .switching = operation {
             statusLine = String(localized: "A model switch is in progress. New actions remain disabled until the provider confirms the result.", comment: "Model switch refresh guard")
+            return
+        }
+        if operation.blocksRefresh {
+            // Status observations may arrive while a CLI subprocess owns the
+            // recommendation/adoption protocol. Preserve that operation until
+            // its typed terminal frame is consumed.
             return
         }
         let configuredModel = currentModelID ?? ProviderConfig.readModel(paths: paths)
@@ -979,7 +1187,7 @@ final class ModelManagementStore: ObservableObject {
         saveState()
     }
 
-    func startBackgroundCheckIfEligible(thermalState: MalibuThermalState?) {
+    func startBackgroundCheckIfEligible(thermalState: MalibuThermalState?) async {
         guard backgroundRecommendationsEnabled else {
             recommendationLine = String(localized: "Skipped: background recommendations are stopped in Settings.", comment: "Recommendation skip reason")
             return
@@ -988,18 +1196,257 @@ final class ModelManagementStore: ObservableObject {
             recommendationLine = recommendationStatus
             return
         }
+        guard operation == .idle else {
+            recommendationLine = String(localized: "Skipped: another model operation is active.", comment: "Recommendation skip reason")
+            return
+        }
+        guard recommendation == nil else { return }
+        let now = Date()
+        guard recommendationSchedule.isEligible(at: now) else {
+            if let next = [recommendationSchedule.nextEligibleAt, recommendationSchedule.snoozedUntil]
+                .compactMap({ $0 }).max() {
+                recommendationLine = String(localized: "Next background recommendation check after \(next.formatted(date: .abbreviated, time: .shortened)).", comment: "Recommendation next check")
+            }
+            return
+        }
         let power = powerMonitor.sample()
-        guard power.state == .external,
-              power.observedAt.timeIntervalSinceNow <= 0.0,
-              Date().timeIntervalSince(power.observedAt) <= 10 else {
-            recommendationLine = String(localized: "Skipped: background recommendations require external power.", comment: "Recommendation skip reason")
+        guard Self.backgroundSafetyAllows(power: power, thermalState: thermalState, now: now) else {
+            let powerAge = now.timeIntervalSince(power.observedAt)
+            let powerSafe = power.state == .external && powerAge >= 0 && powerAge <= 10
+            recommendationLine = powerSafe
+                ? String(localized: "Skipped: thermal pressure is too high for a background check.", comment: "Recommendation skip reason")
+                : String(localized: "Skipped: background recommendations require external power.", comment: "Recommendation skip reason")
             return
         }
-        guard thermalState == nil || thermalState == .nominal || thermalState == .fair else {
-            recommendationLine = String(localized: "Skipped: thermal pressure is too high for a background check.", comment: "Recommendation skip reason")
-            return
+        operation = .checkingRecommendation(phase: "planning")
+        backgroundCheckSafetyCancelled = false
+        recommendationLine = String(localized: "Checking installed models for a recommendation…", comment: "Recommendation check status")
+        var transcript = MalibuRecommendationCheckTranscript()
+        var invalidFrame = false
+        var document: MalibuRecommendationDocument?
+        var documentData: Data?
+        let safetyTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self else { return }
+                guard case .checkingRecommendation = self.operation else { return }
+                let power = self.powerMonitor.sample()
+                let thermal = MalibuThermalState(processInfoState: ProcessInfo.processInfo.thermalState)
+                let powerSafe = power.state == .external
+                    && power.observedAt.timeIntervalSinceNow <= 0
+                    && Date().timeIntervalSince(power.observedAt) <= 10
+                guard powerSafe, thermal == .nominal || thermal == .fair else {
+                    self.backgroundCheckSafetyCancelled = true
+                    self.cli.cancelCurrentOperation()
+                    return
+                }
+            }
         }
-        recommendationLine = String(localized: "Background recommendation check is available.", comment: "Recommendation status")
+        defer { safetyTask.cancel() }
+        do {
+            let result = try await cli.run(
+                arguments: Self.backgroundRecommendationArguments(
+                    configURL: paths.configFile,
+                    isolatedCacheRoot: paths.appSupport.appendingPathComponent("RecommendationChecks", isDirectory: true)
+                ),
+                peer: peerEvidence,
+                priority: .background,
+                onLine: { [weak self] line in
+                    guard let self, let data = line.data(using: .utf8) else { return }
+                    if let event = try? JSONDecoder().decode(MalibuRecommendationCheckEvent.self, from: data) {
+                        do {
+                            if event.type == "completed", document == nil {
+                                throw MalibuRecommendationError.invalidCheckEvent
+                            }
+                            try transcript.consume(event)
+                            let checked = try event.validatedForBackground()
+                            if let phase = checked.phase {
+                                self.operation = .checkingRecommendation(phase: phase)
+                                self.recommendationLine = self.localizedRecommendationCheckPhase(phase)
+                            }
+                        } catch {
+                            invalidFrame = true
+                        }
+                        return
+                    }
+                    if let decoded = try? JSONDecoder().decode(MalibuRecommendationDocument.self, from: data) {
+                        do {
+                            guard document == nil, transcript.terminalType == nil else {
+                                throw MalibuRecommendationError.invalidCheckEvent
+                            }
+                            document = try decoded.validated()
+                            documentData = data
+                        } catch {
+                            invalidFrame = true
+                        }
+                        return
+                    }
+                    invalidFrame = true
+                }
+            )
+            guard result.exitCode == 0,
+                  transcript.terminalType == "completed",
+                  !invalidFrame,
+                  !backgroundCheckSafetyCancelled,
+                  let document else {
+                throw MalibuRecommendationError.invalidDocument
+            }
+            recommendationSchedule.recordSuccess(at: now)
+            if let target = document.recommendedModel,
+               !Self.recommendationTargetIsCurrent(target, currentModelID: currentModelID),
+               rows.contains(where: { modelIdentityKey($0.id) == modelIdentityKey(target) && $0.weightsPresentLocally }),
+               let identity = document.identity(currentModelID: currentModelID),
+               !recommendationSchedule.suppresses(identity: identity, at: now) {
+                recommendation = document
+                recommendationJSON = documentData
+                // Recommendation payloads intentionally remain in memory. Recheck after an
+                // app restart instead of suppressing the prompt for a day with no restorable card.
+                recommendationSchedule.nextEligibleAt = nil
+                recommendationLine = String(localized: "Recommended installed model: \(target)", comment: "Recommendation available")
+                MalibuAccessibility.announce(String(localized: "A new installed model recommendation is available for \(target).", comment: "Recommendation VoiceOver announcement"))
+            } else {
+                recommendation = nil
+                recommendationJSON = nil
+                if let identity = document.identity(currentModelID: currentModelID),
+                   recommendationSchedule.suppresses(identity: identity, at: now) {
+                    recommendationLine = String(localized: "The current recommendation is hidden until its inputs change or the 24-hour snooze ends.", comment: "Recommendation identity snoozed")
+                } else {
+                    recommendationLine = String(localized: "Checked installed models; no new recommendation is available.", comment: "No recommendation result")
+                }
+            }
+            operation = .idle
+            saveState()
+        } catch {
+            if backgroundCheckSafetyCancelled {
+                recommendationSchedule.nextEligibleAt = now.addingTimeInterval(60 * 60)
+                recommendation = nil
+                recommendationJSON = nil
+                operation = .idle
+                recommendationLine = String(localized: "Recommendation check deferred because power or thermal conditions changed.", comment: "Recommendation safety deferral")
+                saveState()
+                return
+            }
+            recommendationSchedule.recordFailure(at: now)
+            recommendation = nil
+            recommendationJSON = nil
+            operation = .idle
+            if let next = recommendationSchedule.nextEligibleAt {
+                recommendationLine = String(localized: "Recommendation check failed. Malibu will retry after \(next.formatted(date: .abbreviated, time: .shortened)).", comment: "Recommendation retry status")
+            } else {
+                recommendationLine = String(localized: "Recommendation check failed.", comment: "Recommendation failure status")
+            }
+            saveState()
+        }
+    }
+
+    static func backgroundRecommendationArguments(configURL: URL, isolatedCacheRoot: URL) -> [String] {
+        [
+            "autotune", "--recommend", "--json", "--check-only", "--progress-json",
+            "--installed-only", "--isolated-cache-root", isolatedCacheRoot.path,
+            "--no-submit-hardware-evidence", "--config", configURL.path,
+        ]
+    }
+
+    nonisolated static func backgroundSafetyAllows(
+        power: MalibuPowerSample,
+        thermalState: MalibuThermalState?,
+        now: Date
+    ) -> Bool {
+        let powerAge = now.timeIntervalSince(power.observedAt)
+        return power.state == .external
+            && powerAge >= 0
+            && powerAge <= 10
+            && (thermalState == .nominal || thermalState == .fair)
+    }
+
+    func adoptRecommendation() async {
+        guard canAdoptRecommendation,
+              let recommendation,
+              let target = recommendation.recommendedModel,
+              let recommendationJSON else { return }
+        let from = currentModelID
+        var transcript = MalibuModelAdoptionTranscript()
+        var invalidFrame = false
+        operation = .adoptingRecommendation(target: target, phase: "validating")
+        statusLine = String(localized: "Validating recommendation…", comment: "Adoption progress")
+        do {
+            let result = try await cli.run(
+                arguments: [
+                    "models", "adopt-recommendation", "--json",
+                    "--recommendation-json", "-",
+                    "--config", paths.configFile.path,
+                    "--ctl-socket-path", paths.controlSocket.path,
+                ],
+                peer: peerEvidence,
+                stdinData: recommendationJSON + Data("\n".utf8),
+                priority: .interactive,
+                onLine: { [weak self] line in
+                    guard let self, let data = line.data(using: .utf8) else {
+                        invalidFrame = true
+                        return
+                    }
+                    do {
+                        let decoded = try JSONDecoder().decode(MalibuModelAdoptionEvent.self, from: data)
+                        try transcript.consume(decoded, target: target)
+                        if let phase = decoded.phase {
+                            self.operation = .adoptingRecommendation(target: target, phase: phase)
+                            self.statusLine = self.localizedAdoptionPhase(phase, rollbackState: decoded.rollbackState)
+                            MalibuAccessibility.announce(self.statusLine)
+                        }
+                    } catch {
+                        invalidFrame = true
+                    }
+                }
+            )
+            guard result.exitCode == 0,
+                  !invalidFrame,
+                  transcript.terminalEvent?.type == "completed" else {
+                let rollback = transcript.terminalEvent?.rollbackState
+                let reason: String
+                switch rollback {
+                case "rollback_failed":
+                    reason = String(localized: "Adoption reached the provider, but configuration recovery needs repair. The recommended model may already be active; Malibu will refresh live status before more model actions.", comment: "Adoption rollback failure")
+                case "rolled_back":
+                    reason = String(localized: "Recommendation adoption failed; provider configuration was rolled back.", comment: "Adoption rolled back")
+                default:
+                    reason = String(localized: "Recommendation adoption could not be verified. The provider's current model remains visible.", comment: "Adoption unverified")
+                }
+                recordFailure(operation: "adopt", from: from, to: target, reason: reason)
+                return
+            }
+            pendingSwitch = PendingSwitch(operationName: "adopt", fromModelID: from, targetModelID: target)
+            self.recommendation = nil
+            self.recommendationJSON = nil
+            operation = .reconciling(target: target)
+            statusLine = String(localized: "Recommendation adopted. Confirming the live model…", comment: "Adoption reconciliation")
+            saveState()
+        } catch {
+            recordFailure(operation: "adopt", from: from, to: target, reason: safeOperationError(error))
+        }
+    }
+
+    private func localizedRecommendationCheckPhase(_ phase: String) -> String {
+        switch phase {
+        case "benchmarking": return String(localized: "Benchmarking installed models…", comment: "Recommendation progress")
+        case "preparing": return String(localized: "Preparing installed model checks…", comment: "Recommendation progress")
+        default: return String(localized: "Checking installed models for a recommendation…", comment: "Recommendation progress")
+        }
+    }
+
+    private func localizedAdoptionPhase(_ phase: String, rollbackState: String?) -> String {
+        if rollbackState == "rollback_failed" {
+            return String(localized: "Configuration recovery needs repair. The recommended model may already be active; refreshing live status…", comment: "Adoption rollback failure")
+        }
+        switch phase {
+        case "config_backup": return String(localized: "Backing up provider configuration…", comment: "Adoption progress")
+        case "config_apply": return String(localized: "Applying recommendation…", comment: "Adoption progress")
+        case "switch_loading": return String(localized: "Loading recommended model…", comment: "Adoption progress")
+        case "switch_draining": return String(localized: "Finishing current request…", comment: "Adoption progress")
+        case "config_verify": return String(localized: "Verifying model and configuration…", comment: "Adoption progress")
+        case "rollback": return String(localized: "Restoring previous provider configuration…", comment: "Adoption progress")
+        case "completed": return String(localized: "Recommendation adopted.", comment: "Adoption completed")
+        default: return String(localized: "Validating recommendation…", comment: "Adoption progress")
+        }
     }
 
     private func consumeSwitchEvent(_ line: String, target: String) {
@@ -1179,7 +1626,8 @@ final class ModelManagementStore: ObservableObject {
             previousModelID: previousModelID,
             previousModelAt: previousModelAt,
             history: history,
-            backgroundRecommendationsEnabled: backgroundRecommendationsEnabled
+            backgroundRecommendationsEnabled: backgroundRecommendationsEnabled,
+            recommendationSchedule: recommendationSchedule
         )
         if let data = try? JSONEncoder().encode(state) {
             defaults.set(data, forKey: "malibu.model-management.state")

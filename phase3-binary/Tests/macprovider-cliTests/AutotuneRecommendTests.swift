@@ -300,6 +300,55 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(root["serve_config"] is NSNull)
     }
 
+    func testInstalledOnlyRecommendationUsesOnlyExistingVerifiedArtifacts() throws {
+        var request = try makeRequest()
+        let modelKey = try XCTUnwrap(request.candidateCatalog.rows.keys.sorted().first)
+        request.candidateCatalog.rows[modelKey]?.modelRevision = String(repeating: "a", count: 40)
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = String(repeating: "b", count: 64)
+        let hubRoot = URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("mpm-installed-only-\(getpid())-\(UUID().uuidString)", isDirectory: true)
+        let resolver = CachedModelArtifactResolver(hubRoot: hubRoot)
+
+        let outcomes = try AutotuneCommand.installedOnlyBenchmarkOutcomes(
+            request: request,
+            candidateModelIDs: [request.candidateCatalog.rows[modelKey]!.modelID],
+            catalogSHA: request.candidateCatalogSHA256,
+            artifactResolver: resolver
+        )
+
+        XCTAssertTrue(outcomes.benchmarks.isEmpty)
+        XCTAssertEqual(outcomes.diagnostics[modelKey], "installed_only_missing_verified_artifact")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hubRoot.path))
+    }
+
+    func testCheckOnlyFlagsRejectMutationAndRequireExplicitNoSubmission() throws {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--check-only", "--json",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--check-only", "--json", "--apply", "--no-submit-hardware-evidence",
+        ]))
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend", "--check-only", "--json", "--no-submit-hardware-evidence",
+            "--isolated-cache-root", "relative/path",
+        ]))
+        XCTAssertNoThrow(try AutotuneCommand.parse([
+            "--recommend", "--check-only", "--json", "--progress-json", "--installed-only",
+            "--no-submit-hardware-evidence", "--isolated-cache-root", "/private/check-cache",
+        ]))
+    }
+
+    func testInstalledOnlyDisclosureDoesNotClaimMeasuredPerformance() throws {
+        let request = try makeRequest()
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        let disclosed = AutotuneCommand.disclosingInstalledOnlyEstimate(result)
+
+        XCTAssertEqual(disclosed.selectedCandidate?.confidence, "catalog_estimate")
+        XCTAssertTrue(disclosed.selectedCandidate?.why.contains("signed catalog estimates") == true)
+        XCTAssertFalse(disclosed.selectedCandidate?.why.contains("measured throughput") == true)
+    }
+
     func testRecommendApplyServeConfigUsesHardwareDerivedMaxBatch() throws {
         var request = try makeRequest()
         request.hardware = Self.hardware(chip: "Apple M4 Max", memoryGB: 64, bandwidthTier: .a)

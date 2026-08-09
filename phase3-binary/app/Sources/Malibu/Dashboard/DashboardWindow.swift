@@ -52,7 +52,7 @@ private struct DashboardView: View {
     let onExportDiagnostics: () -> Void
     @State private var showAddWalletSheet = false
     @State private var showModelSheet = false
-    @StateObject private var modelStore = ModelManagementStore()
+    @ObservedObject private var modelStore = ModelManagementStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -110,6 +110,58 @@ private struct DashboardView: View {
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
+
+            if let recommendation = modelStore.recommendation,
+               let target = recommendation.recommendedModel {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(String(localized: "Recommended installed model", comment: "Dashboard recommendation title"))
+                        .font(.caption.weight(.semibold))
+                    Text(target)
+                        .font(.body.monospaced())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    if let why = recommendation.recommendedCandidate?.why {
+                        Text(why)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(String(localized: "Scope: signed catalog \(recommendation.inputs.candidateCatalogVersion) for \(recommendation.hardware.chip), \(recommendation.hardware.memoryGB) GB.", comment: "Recommendation evidence scope"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if let prompt = recommendation.promptRateUSDPerMillionTokens,
+                       let completion = recommendation.completionRateUSDPerMillionTokens {
+                        Text(String(localized: "Estimated rates: prompt $\(prompt, format: .number.precision(.fractionLength(2...4))) / 1M; completion $\(completion, format: .number.precision(.fractionLength(2...4))) / 1M.", comment: "Recommendation estimated rates"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !recommendation.warnings.isEmpty {
+                        Text(String(localized: "Warnings: \(recommendation.warnings.joined(separator: ", "))", comment: "Recommendation warnings"))
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                    if let unavailableReason = modelStore.recommendationAdoptionUnavailableReason {
+                        Text(unavailableReason)
+                            .font(.caption2)
+                            .foregroundStyle(recommendation.isActionable ? Color.secondary : Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Button(String(localized: "Adopt", comment: "Dashboard recommendation action")) {
+                            Task { await modelStore.adoptRecommendation() }
+                        }
+                        .disabled(!modelStore.canAdoptRecommendation)
+                        Button(String(localized: "Not now", comment: "Dashboard recommendation snooze")) {
+                            modelStore.snoozeRecommendation()
+                        }
+                        Button(String(localized: "Stop background recommendations", comment: "Dashboard recommendation opt-out")) {
+                            modelStore.stopBackgroundRecommendations()
+                        }
+                    }
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.09)))
+                .accessibilityElement(children: .contain)
+            }
 
             HStack(alignment: .top, spacing: 16) {
                 panel {
@@ -305,7 +357,7 @@ private struct DashboardView: View {
                 currentModelID: agent.snapshot.currentModelID,
                 peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
             )
-            modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
+            await modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
         }
     }
 
