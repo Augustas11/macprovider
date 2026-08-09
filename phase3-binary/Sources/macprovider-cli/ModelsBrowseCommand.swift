@@ -20,18 +20,31 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
     @Option(help: "Drop models whose estimated weight size exceeds this many GB.")
     var maxGb: Int?
 
+    @Flag(name: .customLong("json"), help: "Emit the strict models_browse.v1 JSON contract.")
+    var emitJSON = false
+
     static let maxAllowedLimit = 200
 
     func run() async throws {
+        func fail(_ code: String, _ message: String, exitCode: Int32) throws -> Never {
+            if emitJSON {
+                try ModelSwitchingWireCodec.printJSON(ModelCatalogErrorWire(
+                    command: "models browse",
+                    code: code,
+                    message: message
+                ))
+            }
+            writeStderr(message)
+            throw ExitCode(exitCode)
+        }
+
         // Round-2 (codex code MINOR + security MINOR): cap --limit to bound
         // memory + network use; reject non-positive --max-gb.
         guard limit > 0 && limit <= Self.maxAllowedLimit else {
-            writeStderr("--limit must be between 1 and \(Self.maxAllowedLimit)")
-            throw ExitCode(2)
+            try fail("invalid_argument", "--limit must be between 1 and \(Self.maxAllowedLimit)", exitCode: 2)
         }
         if let maxGb, maxGb <= 0 {
-            writeStderr("--max-gb must be positive")
-            throw ExitCode(2)
+            try fail("invalid_argument", "--max-gb must be positive", exitCode: 2)
         }
 
         let client = HFClient.fromEnvironment()
@@ -39,15 +52,13 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
         do {
             summaries = try await client.searchMLXCommunity(query: family, limit: limit)
         } catch let error as HFClientError {
-            writeStderr("\(error)")
-            throw ExitCode(4)
+            try fail("offline", "\(error)", exitCode: 4)
         } catch {
             // Round-2 (codex code MAJOR): raw URLSession errors (DNS, TLS,
             // offline, request timeout) previously escaped to ArgumentParser's
             // default handler and produced an ugly stack-trace-style exit.
             // Route them through ExitCode(4) with a one-line message.
-            writeStderr("HuggingFace request failed: \(error.localizedDescription)")
-            throw ExitCode(4)
+            try fail("offline", "HuggingFace request failed: \(error.localizedDescription)", exitCode: 4)
         }
 
         let ramGB = ModelFit.detectRAMGB()
@@ -57,7 +68,40 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
             fitsOnly: fitsOnly,
             maxGB: maxGb
         )
-        renderTable(rows: rows, ramGB: ramGB)
+        if emitJSON {
+            guard rows.allSatisfy({ ModelSwitchingWireCodec.safeID($0.id) }) else {
+                try ModelSwitchingWireCodec.printJSON(ModelCatalogErrorWire(
+                    command: "models browse",
+                    code: "internal",
+                    message: "The provider returned an invalid model identifier."
+                ))
+                throw ExitCode(2)
+            }
+            let wireRows = rows.map { row -> ModelsBrowseWire.Row in
+                ModelsBrowseWire.Row(
+                    modelID: row.id,
+                    displayID: sanitizeForTable(row.id),
+                    actionModelID: nil,
+                    source: "huggingface_mlx_community",
+                    fit: verdictLabel(row.verdict),
+                    estimatedGB: row.estimateGB.map(Double.init),
+                    actionable: false
+                )
+            }
+            try ModelSwitchingWireCodec.printJSON(
+                ModelsBrowseWire(
+                    generatedAt: ModelSwitchingWireCodec.timestamp(),
+                    query: family,
+                    limit: limit,
+                    fitsOnly: fitsOnly,
+                    maxGB: maxGb,
+                    ramGB: ramGB,
+                    rows: wireRows
+                )
+            )
+        } else {
+            renderTable(rows: rows, ramGB: ramGB)
+        }
     }
 
     private func renderTable(rows: [BrowseRow], ramGB: Int) {

@@ -234,6 +234,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "referral_repeatable_advocacy_v1",
         "referral_fragment_links_v1",
         "provider_safety_telemetry_v2",
+        "model_status_v1",
+        "model_catalog_json_v1",
+        "model_ready_switch_v1",
+        "models status",
+        "models list.v1",
+        "models browse.v1",
+        "model_catalog_error.v1",
+        "models switch.v1",
+        "status_request",
+        "status_response",
+        "models_request",
+        "models_response",
+        "switch_request",
+        "switch_ack",
+        "switch_progress",
     ]
     static let serviceInstanceID = UUID().uuidString.lowercased()
     static let serviceStartedAt = Date()

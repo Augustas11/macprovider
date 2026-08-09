@@ -252,6 +252,15 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     }
 }
 
+/// A signed, locally verified artifact that the serve runtime may load during
+/// a warm switch. The authority is scoped to an exact model ID by the map
+/// built at serve startup; a supported-model string alone is never sufficient.
+struct ModelRuntimeTargetAuthority: Sendable, Equatable {
+    let modelArgument: String
+    let artifactSHA256: String
+    let catalogRevision: String
+}
+
 struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
@@ -560,6 +569,7 @@ actor ModelRuntime: ModelRuntimeServing {
     // warm-swaps). Used to gate the catalog-id alias so the alias only applies
     // while the configured model is the one currently loaded.
     private let modelID: String?
+    private let configuredModelLoadPath: String?
     // Coordinator-advertised catalog id (e.g. mlx-community/…) accepted as an
     // alias for the configured served model. nil when unset. See BUILD_SPEC
     // relay_serve_model_id_alias.
@@ -589,6 +599,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// disk_miss_envelope, not hit. Nil ⇒ the cold tier treats identity as unavailable
     /// and neither promotes nor persists (never falls back to the artifact SHA).
     private let verifiedModelCatalogRevision: String?
+    private let targetAuthorities: [String: ModelRuntimeTargetAuthority]
+    private let authorizedSwitchModelIDs: [String]
     private let maxContextTokens: Int
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
@@ -916,11 +928,14 @@ actor ModelRuntime: ModelRuntimeServing {
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
         verifiedModelArtifactSHA256: String? = nil,
-        verifiedModelCatalogRevision: String? = nil
+        verifiedModelCatalogRevision: String? = nil,
+        targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
+        authorizedSwitchModelIDs: [String] = []
     ) async throws {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.modelID = modelID
+        self.configuredModelLoadPath = Self.nonEmpty(modelLoadPath)
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
         self.currentDraftModelID = nil
@@ -953,6 +968,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
         self.verifiedModelCatalogRevision = verifiedModelCatalogRevision
+        self.targetAuthorities = targetAuthorities
+        self.authorizedSwitchModelIDs = authorizedSwitchModelIDs
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
@@ -1076,6 +1093,8 @@ actor ModelRuntime: ModelRuntimeServing {
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
         catalogModelIDAlias: String? = nil,
+        targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
+        authorizedSwitchModelIDs: [String] = [],
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
@@ -1084,6 +1103,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         self.modelID = modelID
+        self.configuredModelLoadPath = nil
         self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
         self.currentContainer = nil
@@ -1100,6 +1120,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentChatTemplateSHA256 = nil
         self.verifiedCatalogArtifactSHA256 = nil
         self.verifiedModelCatalogRevision = nil
+        self.targetAuthorities = targetAuthorities
+        self.authorizedSwitchModelIDs = authorizedSwitchModelIDs
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
@@ -1133,6 +1155,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func setProviderStatus(_ providerStatus: ProviderStatus) {
         self.providerStatus = providerStatus
+    }
+
+    func authorizedSwitchModelIDList() -> [String] {
+        authorizedSwitchModelIDs
     }
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1194,6 +1220,12 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func beginSwap(targetModelID: String) async throws -> Task<Void, Error> {
         guard warmSwapEnabled else { throw WarmSwapDisabledError() }
+        let targetAuthority = targetAuthority(for: targetModelID)
+        if testLoader == nil {
+            guard targetAuthority != nil else {
+                throw ModelRuntimeLoadError(target: targetModelID, reason: "signed catalog identity unavailable")
+            }
+        }
         try transitionToLoading(target: targetModelID)
         let drainTimeoutSeconds = swapDrainTimeoutSeconds
         let providerStatus = providerStatus
@@ -1204,7 +1236,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
         let prefillStepSize = prefillStepSize
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize] in
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize, targetAuthority] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -1245,16 +1277,17 @@ actor ModelRuntime: ModelRuntimeServing {
                         draftFailureReason = nil
                     }
                 } else {
-                    let loaded = try await Self.loadLocalContainer(from: targetModelID)
+                    guard let targetAuthority else {
+                        throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
+                    }
+                    let loaded = try await Self.loadLocalContainer(from: targetAuthority.modelArgument)
                     container = loaded.0
                     modelID = targetModelID
-                    guard let expected = self.verifiedCatalogArtifactSHA256,
-                          await self.isConfiguredCatalogModel(targetModelID),
-                          (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == expected
+                    guard (try? ModelArtifactVerifier.canonicalArtifactHash(directory: loaded.1)) == targetAuthority.artifactSHA256
                     else {
                         throw ModelRuntimeLoadError(target: "signed catalog identity unavailable for \(targetModelID)")
                     }
-                    modelHash = expected
+                    modelHash = targetAuthority.artifactSHA256
                     modelHashAlgorithm = ModelArtifactIdentity.snapshotManifestV1
                     weightsManifestSHA256 = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
                     let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
@@ -1604,6 +1637,23 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func isConfiguredCatalogModel(_ targetModelID: String) -> Bool {
         targetModelID == modelID || targetModelID == catalogModelIDAlias
+    }
+
+    private func targetAuthority(for targetModelID: String) -> ModelRuntimeTargetAuthority? {
+        if let authority = targetAuthorities[targetModelID]
+            ?? targetAuthorities[targetModelID.lowercased(with: nil)] {
+            return authority
+        }
+        guard isConfiguredCatalogModel(targetModelID),
+              let artifactSHA256 = verifiedCatalogArtifactSHA256,
+              let catalogRevision = verifiedModelCatalogRevision else {
+            return nil
+        }
+        return ModelRuntimeTargetAuthority(
+            modelArgument: configuredModelLoadPath ?? targetModelID,
+            artifactSHA256: artifactSHA256,
+            catalogRevision: catalogRevision
+        )
     }
 
     private nonisolated static func logDraftSwapFailure(targetModelID: String?, draftModelID: String?, reason: String) {

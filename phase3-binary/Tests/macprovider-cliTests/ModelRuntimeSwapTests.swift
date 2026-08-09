@@ -32,6 +32,19 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
     }
 
+    func testProductionSwapRejectsMissingTargetAuthorityBeforeLoading() async throws {
+        let runtime = try await ModelRuntime(modelID: nil, warmSwapEnabled: true)
+
+        do {
+            _ = try await runtime.beginSwap(targetModelID: "unsigned-target")
+            XCTFail("Expected missing signed target authority")
+        } catch let error as ModelRuntimeLoadError {
+            XCTAssertEqual(error.reason, "signed catalog identity unavailable")
+            let snapshot = await runtime.currentSnapshot()
+            XCTAssertEqual(snapshot.state, .ready)
+        }
+    }
+
     func testEnabledModeAcceptsSwap() async throws {
         let runtime = makeRuntime(modelID: nil, warmSwapEnabled: true) { target in
             try await Task.sleep(nanoseconds: 50_000_000)

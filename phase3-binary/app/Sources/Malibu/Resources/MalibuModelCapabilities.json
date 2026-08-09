@@ -1,0 +1,23 @@
+{
+  "schema_version": "malibu_model_capabilities.v1",
+  "tiers": {
+    "model_status_v1": {
+      "first_supporting_binary_version": "1.8.90",
+      "local_status_capabilities": ["model_status_v1", "service_instance_v1", "status_observation_v1"],
+      "command_schemas": ["models status"],
+      "control_frame_schemas": ["status_request", "status_response"]
+    },
+    "model_catalog_json_v1": {
+      "first_supporting_binary_version": "1.8.90",
+      "local_status_capabilities": ["model_status_v1", "model_catalog_json_v1", "service_instance_v1", "status_observation_v1"],
+      "command_schemas": ["models list.v1", "models browse.v1", "model_catalog_error.v1"],
+      "control_frame_schemas": ["status_request", "status_response", "models_request", "models_response"]
+    },
+    "model_ready_switch_v1": {
+      "first_supporting_binary_version": "1.8.90",
+      "local_status_capabilities": ["model_status_v1", "model_catalog_json_v1", "model_ready_switch_v1", "service_instance_v1", "status_observation_v1"],
+      "command_schemas": ["models list.v1", "models switch.v1"],
+      "control_frame_schemas": ["status_request", "status_response", "models_request", "models_response", "switch_request", "switch_ack", "switch_progress"]
+    }
+  }
+}

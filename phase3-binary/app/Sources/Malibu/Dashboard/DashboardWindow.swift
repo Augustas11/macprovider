@@ -51,6 +51,8 @@ private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
     let onExportDiagnostics: () -> Void
     @State private var showAddWalletSheet = false
+    @State private var showModelSheet = false
+    @StateObject private var modelStore = ModelManagementStore()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -72,6 +74,42 @@ private struct DashboardView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(color(for: agent.snapshot.state))
             }
+
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(String(localized: "Model", comment: "Dashboard model row label"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(modelStore.currentModelID
+                         ?? agent.snapshot.currentModelID
+                         ?? String(localized: "Checking…", comment: "Dashboard model loading state"))
+                        .font(.body.monospaced())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .accessibilityLabel(Text(String(localized: "Current provider model", comment: "Dashboard model accessibility label")))
+                    Text(modelStore.statusLine)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button(String(localized: "Change Model…", comment: "Dashboard model action")) {
+                    showModelSheet = true
+                }
+                .disabled(modelStore.listState == .unavailable)
+                .accessibilityHint(Text(String(localized: "Opens the model switcher and shows provider guards before any action.", comment: "Dashboard model action hint")))
+                Menu {
+                    Button(String(localized: "Settings…", comment: "Dashboard settings action")) {
+                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .accessibilityLabel(Text(String(localized: "More model options", comment: "Dashboard model menu label")))
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
 
             HStack(alignment: .top, spacing: 16) {
                 panel {
@@ -256,9 +294,18 @@ private struct DashboardView: View {
         .sheet(isPresented: $showAddWalletSheet) {
             AddWalletSheet(agent: agent, isPresented: $showAddWalletSheet)
         }
-        .task(id: agent.snapshot.localProviderID) {
-            guard agent.snapshot.localProviderID != nil else { return }
-            await agent.refreshPayoutRegistration()
+        .sheet(isPresented: $showModelSheet) {
+            ModelSwitcherSheet(store: modelStore, agent: agent, isPresented: $showModelSheet)
+        }
+        .task(id: "\(agent.snapshot.localProviderID ?? "unknown"):\(agent.snapshot.statusObservationID ?? "unknown")") {
+            if agent.snapshot.localProviderID != nil {
+                await agent.refreshPayoutRegistration()
+            }
+            await modelStore.refresh(
+                currentModelID: agent.snapshot.currentModelID,
+                peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
+            )
+            modelStore.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
         }
     }
 
