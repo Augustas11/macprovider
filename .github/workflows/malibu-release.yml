@@ -93,8 +93,8 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           bash scripts/validate-malibu-release-cli-inputs.sh \
             "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256" \
-            --allow-previous-stable=1.8.88 \
-            --staged-candidate=1.8.90
+            --allow-previous-stable=1.8.90 \
+            --staged-candidate=1.8.92
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
@@ -450,8 +450,8 @@ jobs:
           [[ "$EXPECTED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
           bash scripts/validate-malibu-release-cli-inputs.sh \
             "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256" \
-            --allow-previous-stable=1.8.88 \
-            --staged-candidate=1.8.90
+            --allow-previous-stable=1.8.90 \
+            --staged-candidate=1.8.92
           test "$GITHUB_REF" = refs/heads/main
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
