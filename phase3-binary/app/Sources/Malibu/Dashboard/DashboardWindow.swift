@@ -217,7 +217,9 @@ private struct DashboardView: View {
                         }
                     }
                     Button(agent.snapshot.payoutRegistrationInProgress
-                           ? "Waiting for wallet…"
+                           ? (agent.snapshot.payoutRegistrationCanCancel
+                              ? "Waiting for wallet…"
+                              : "Registering wallet…")
                            : (agent.snapshot.payoutRegisteredAddress == nil ? "Add wallet" : "Change wallet")) {
                         showAddWalletSheet = true
                     }
@@ -468,6 +470,12 @@ private struct DashboardView: View {
     }
 }
 
+enum PayoutRegistrationPresentation {
+    static func isCancellable(inProgress: Bool, canCancel: Bool) -> Bool {
+        !inProgress || canCancel
+    }
+}
+
 private struct AddWalletSheet: View {
     @ObservedObject var agent: MalibuAgent
     @Binding var isPresented: Bool
@@ -477,6 +485,18 @@ private struct AddWalletSheet: View {
     @State private var pasteTsUtc = ""
     @State private var showPaste = false
     @State private var localError: String?
+    @State private var registrationTask: Task<Void, Never>?
+
+    private var registrationIsCancellable: Bool {
+        // Before the agent's task gets its first MainActor turn, inProgress is
+        // still false. Treat that scheduling window as cancellable too. Once
+        // registration crosses the remote commit boundary, inProgress stays
+        // true while canCancel flips false and this correctly becomes Close.
+        PayoutRegistrationPresentation.isCancellable(
+            inProgress: agent.snapshot.payoutRegistrationInProgress,
+            canCancel: agent.snapshot.payoutRegistrationCanCancel
+        )
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -491,28 +511,27 @@ private struct AddWalletSheet: View {
                 .foregroundStyle(.secondary)
 
             if agent.snapshot.payoutRegistrationInProgress {
-                ProgressView("Waiting for browser wallet signature…")
+                ProgressView(agent.snapshot.payoutRegistrationCanCancel
+                    ? "Waiting for browser wallet signature…"
+                    : "Registering payout wallet…")
                     .controlSize(.small)
             }
 
             HStack(spacing: 10) {
                 Button("Open browser wallet") {
                     localError = nil
-                    Task {
-                        await agent.registerPayoutWallet()
-                        if agent.snapshot.payoutLastError == nil,
-                           agent.snapshot.payoutRegisteredAddress != nil {
-                            isPresented = false
-                        }
-                    }
+                    startRegistration()
                 }
-                .disabled(agent.snapshot.payoutRegistrationInProgress)
+                .disabled(agent.snapshot.payoutRegistrationInProgress || registrationTask != nil)
                 .keyboardShortcut(.defaultAction)
 
-                Button("Cancel") {
+                Button(registrationIsCancellable ? "Cancel" : "Close") {
+                    if registrationIsCancellable {
+                        registrationTask?.cancel()
+                    }
+                    registrationTask = nil
                     isPresented = false
                 }
-                .disabled(agent.snapshot.payoutRegistrationInProgress)
             }
 
             DisclosureGroup("Paste signature instead", isExpanded: $showPaste) {
@@ -529,28 +548,23 @@ private struct AddWalletSheet: View {
                     TextField("ts_utc (unix seconds)", text: $pasteTsUtc)
                         .textFieldStyle(.roundedBorder)
                     Button("Submit pasted signature") {
-                        Task {
-                            guard let ts = UInt64(pasteTsUtc.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                                localError = "ts_utc must be a unix-seconds integer."
-                                return
-                            }
-                            localError = nil
-                            let payload = PayoutSignedPayload(
-                                address: pasteAddress.trimmingCharacters(in: .whitespacesAndNewlines),
-                                nonce: pasteNonce.trimmingCharacters(in: .whitespacesAndNewlines),
-                                tsUtc: ts,
-                                signature: pasteSignature.trimmingCharacters(in: .whitespacesAndNewlines),
-                                state: "paste"
-                            )
-                            await agent.registerPayoutWallet(pasted: payload)
-                            if agent.snapshot.payoutLastError == nil,
-                               agent.snapshot.payoutRegisteredAddress != nil {
-                                isPresented = false
-                            }
+                        guard let ts = UInt64(pasteTsUtc.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                            localError = "ts_utc must be a unix-seconds integer."
+                            return
                         }
+                        localError = nil
+                        let payload = PayoutSignedPayload(
+                            address: pasteAddress.trimmingCharacters(in: .whitespacesAndNewlines),
+                            nonce: pasteNonce.trimmingCharacters(in: .whitespacesAndNewlines),
+                            tsUtc: ts,
+                            signature: pasteSignature.trimmingCharacters(in: .whitespacesAndNewlines),
+                            state: "paste"
+                        )
+                        startRegistration(pasted: payload)
                     }
                     .disabled(
                         agent.snapshot.payoutRegistrationInProgress
+                            || registrationTask != nil
                             || pasteAddress.isEmpty
                             || pasteSignature.isEmpty
                             || pasteNonce.isEmpty
@@ -569,6 +583,25 @@ private struct AddWalletSheet: View {
         }
         .padding(20)
         .frame(width: 440)
+        .onDisappear {
+            if registrationIsCancellable {
+                registrationTask?.cancel()
+            }
+            registrationTask = nil
+        }
+    }
+
+    private func startRegistration(pasted: PayoutSignedPayload? = nil) {
+        guard registrationTask == nil else { return }
+        registrationTask = Task {
+            await agent.registerPayoutWallet(pasted: pasted)
+            guard !Task.isCancelled else { return }
+            registrationTask = nil
+            if agent.snapshot.payoutLastError == nil,
+               agent.snapshot.payoutRegisteredAddress != nil {
+                isPresented = false
+            }
+        }
     }
 }
 
