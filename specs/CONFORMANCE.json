@@ -959,7 +959,7 @@
     {
       "spec_id": "SPEC-034",
       "title": "Referral admission, provider invites, and advocacy rewards",
-      "version": "v0.4.6",
+      "version": "v0.4.7",
       "path": "specs/SPEC-034-referral-gated-prebeta.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1878,7 +1878,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/960",
-        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested. The core provider-prebeta journey passed under #895 with referral activation not required, but its signed result did not promote this exact public-authority requirement. Issue #960 may record disabled or not-required cohort posture as non-promoting context, but conformance requires physical evidence of the enabled exact fragment authority, alternate-authority rejection, capability and immutable-release agreement, activation, and rollback path, or a future split into narrower stable requirement IDs. Real-X dwell rewards and broad advocacy economics remain outside this slice unless explicitly enabled."
+        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested. Decision Entry 224 makes the prebeta referral/X campaign an ongoing reviewed posture rather than an expired Entry 172 exception. The core provider-prebeta journey passed under #895 with referral activation not required, and its signed result did not promote this exact public-authority requirement. Issue #960 owns current deployed posture evidence for the enabled exact fragment authority, alternate-authority rejection, capability and immutable-release agreement, activation, and rollback path before any SPEC-034-R001 promotion attempt, or a future split into narrower stable requirement IDs. Real-X dwell rewards and broad advocacy economics remain outside this slice unless explicitly enabled for the active prebeta campaign."
       }
     },
     {
