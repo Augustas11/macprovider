@@ -89,4 +89,75 @@ final class ModelSwitchingWireTests: XCTestCase {
         XCTAssertTrue(rows.first?.keys.contains("action_model_id") == true)
         XCTAssertTrue(rows.first?.keys.contains("estimated_gb") == true)
     }
+
+    func testRecommendationCheckAndAdoptionFramesUseExpectedSchemas() throws {
+        let check = ModelRecommendationCheckEventWire(
+            type: "accepted",
+            checkID: "check-1",
+            candidateModelID: "hf/model",
+            isolatedCacheRoot: "redacted",
+            stagingOwner: "cli",
+            phase: nil,
+            elapsedMS: 0,
+            cancellable: false,
+            downloadBytesWritten: nil,
+            downloadBytesTotal: nil,
+            reason: nil,
+            stagingDiscarded: nil,
+            installedOnly: true
+        )
+        let checkObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try ModelSwitchingWireCodec.encode(check).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(checkObject["schema_version"] as? String, "model_recommendation_check_event.v1")
+        XCTAssertEqual(checkObject["check_id"] as? String, "check-1")
+        XCTAssertEqual(checkObject["installed_only"] as? Bool, true)
+        XCTAssertEqual(checkObject["cancellable"] as? Bool, false)
+
+        let completed = ModelRecommendationCheckEventWire(
+            type: "completed",
+            checkID: "check-1",
+            candidateModelID: "hf/model",
+            isolatedCacheRoot: nil,
+            stagingOwner: nil,
+            phase: "completed",
+            elapsedMS: 2,
+            cancellable: false,
+            downloadBytesWritten: nil,
+            downloadBytesTotal: nil,
+            reason: nil,
+            stagingDiscarded: true,
+            installedOnly: true
+        )
+        let completedObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try ModelSwitchingWireCodec.encode(completed).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(completedObject["schema_version"] as? String, "model_recommendation_check_event.v1")
+        XCTAssertEqual(completedObject["type"] as? String, "completed")
+        XCTAssertEqual(completedObject["phase"] as? String, "completed")
+        XCTAssertEqual(completedObject["staging_discarded"] as? Bool, true)
+
+        let adoption = ModelAdoptionEventWire(
+            type: "failed",
+            transactionID: "tx-1",
+            targetModelID: "hf/model",
+            fromModelID: "hf/current",
+            phase: "switch_loading",
+            elapsedMS: 1,
+            cancellable: false,
+            downloadBytesWritten: nil,
+            downloadBytesTotal: nil,
+            reason: "switch_failed",
+            rollbackState: "rolled_back",
+            incumbentModelID: "hf/current",
+            configSHA256: nil,
+            backupPath: nil
+        )
+        let adoptionObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try ModelSwitchingWireCodec.encode(adoption).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(adoptionObject["schema_version"] as? String, "model_adoption_event.v1")
+        XCTAssertEqual(adoptionObject["transaction_id"] as? String, "tx-1")
+        XCTAssertEqual(adoptionObject["rollback_state"] as? String, "rolled_back")
+    }
 }

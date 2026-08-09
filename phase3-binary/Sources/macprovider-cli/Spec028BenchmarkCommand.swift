@@ -125,6 +125,9 @@ struct Spec028BenchmarkCommand: AsyncParsableCommand {
             draftModelID: fixture.draftModel,
             draftModelLoadPath: draftLoadPath,
             numDraftTokens: numDraftTokens,
+            // Diagnostic speculation inside the safe cache window only. The
+            // boundary-crossing parity harness remains tracked in #377.
+            speculativeCacheWrapValidated: true,
             maxContextTokensOverride: maxContextTokens,
             maxBatch: 1,
             warmSwapEnabled: false

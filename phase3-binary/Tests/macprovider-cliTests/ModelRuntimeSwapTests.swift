@@ -45,6 +45,368 @@ final class ModelRuntimeSwapTests: XCTestCase {
         }
     }
 
+    func testPrepareModelAdoptionRejectsIncumbentMismatch() async throws {
+        let runtime = makeRuntime(
+            modelID: "actual-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: "/verified/new-model",
+                    artifactSHA256: String(repeating: "b", count: 64),
+                    catalogRevision: "catalog-r1"
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"]
+        )
+
+        let result = await runtime.prepareModelAdoption(makeAdoptionAuthority(expectedIncumbentModelID: "expected-model"))
+
+        XCTAssertFalse(result.accepted)
+        XCTAssertEqual(result.reason, "incumbent_mismatch: expected expected-model, actual actual-model")
+    }
+
+    func testPrepareModelAdoptionRejectsRuntimeAuthorityMismatch() async throws {
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: "/verified/new-model",
+                    artifactSHA256: String(repeating: "c", count: 64),
+                    catalogRevision: "catalog-r1"
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"]
+        )
+
+        let result = await runtime.prepareModelAdoption(makeAdoptionAuthority())
+
+        XCTAssertFalse(result.accepted)
+        XCTAssertEqual(result.reason, ModelRuntimeAdoptionError.authorityMismatch.description)
+    }
+
+    func testPreparedModelAdoptionIsScopedAndReservedUntilFinalized() async throws {
+        let authority = makeAdoptionAuthority()
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"],
+            loader: { target in (target, "new-hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        let prepare = await runtime.prepareModelAdoption(authority)
+        XCTAssertTrue(prepare.accepted)
+
+        do {
+            _ = try await runtime.beginPreparedModelAdoption(transactionID: "tx-other")
+            XCTFail("Expected transaction-scoped adoption rejection")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .transactionNotPrepared)
+        }
+
+        let applyStartedAt = Date()
+        let (_, task) = try await runtime.beginPreparedModelAdoption(
+            transactionID: authority.transactionID,
+            now: applyStartedAt
+        )
+        try await task.value
+        let snapshot = await runtime.currentSnapshot()
+        let adoptedKVBits = await runtime.kvBitsOverrideForTest()
+        let adoptedMaxContext = await runtime.maxContextTokensForTest()
+        let adoptedMaxBatch = await runtime.maxBatchForTest()
+        XCTAssertEqual(snapshot.modelID, "new-model")
+        XCTAssertEqual(adoptedKVBits, authority.targetKVBits)
+        XCTAssertEqual(adoptedMaxContext, authority.targetMaxContext)
+        XCTAssertEqual(adoptedMaxBatch, authority.targetMaxBatch)
+        let providerSnapshot = await providerStatus.snapshot()
+        XCTAssertEqual(providerSnapshot.capacity.maxContextTokens, authority.targetMaxContext)
+        XCTAssertEqual(providerSnapshot.capacity.maxConcurrency, authority.targetMaxBatch)
+
+        do {
+            _ = try await runtime.beginSwap(targetModelID: "manual-model")
+            XCTFail("Expected adoption reservation to remain through CLI verification")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .adoptionReservationConflict)
+        }
+
+        do {
+            _ = try await runtime.beginPreparedModelAdoption(transactionID: authority.transactionID)
+            XCTFail("Expected duplicate adoption apply rejection")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .transactionConsumed)
+        }
+
+        let finalized = await runtime.finalizePreparedModelAdoption(
+            transactionID: authority.transactionID,
+            now: applyStartedAt.addingTimeInterval(10 * 60 + 1)
+        )
+        let finalizedRetry = await runtime.finalizePreparedModelAdoption(
+            transactionID: authority.transactionID,
+            now: applyStartedAt.addingTimeInterval(10 * 60 + 2)
+        )
+        XCTAssertTrue(finalized)
+        XCTAssertTrue(finalizedRetry)
+        do {
+            _ = try await runtime.beginPreparedModelAdoption(transactionID: authority.transactionID)
+            XCTFail("Expected finalized adoption transaction rejection")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .transactionNotPrepared)
+        }
+    }
+
+    func testPreparedModelAdoptionReservesSwitchLaneUntilCancelled() async throws {
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"],
+            loader: { target in (target, "new-hash") }
+        )
+
+        let prepared = await runtime.prepareModelAdoption(authority)
+        XCTAssertTrue(prepared.accepted)
+        do {
+            _ = try await runtime.beginSwap(targetModelID: "manual-model")
+            XCTFail("Expected adoption reservation to block a manual switch")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .adoptionReservationConflict)
+        }
+
+        let cancelled = await runtime.cancelPreparedModelAdoption(transactionID: authority.transactionID)
+        XCTAssertTrue(cancelled)
+        let task = try await runtime.beginSwap(targetModelID: "manual-model")
+        try await task.value
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.modelID, "manual-model")
+    }
+
+    func testRecoveryClaimFencesManualSwitchUntilTargetIsFinalized() async throws {
+        let transactionID = UUID().uuidString.lowercased()
+        let runtime = makeRuntime(
+            modelID: "new-model",
+            modelHash: "new-hash",
+            warmSwapEnabled: true,
+            authorizedSwitchModelIDs: ["manual-model"],
+            loader: { target in (target, "manual-hash") }
+        )
+
+        let claimed = await runtime.claimModelAdoptionRecovery(
+            transactionID: transactionID,
+            fromModelID: "old-model",
+            targetModelID: "new-model"
+        )
+        let claimedSnapshot = await runtime.currentSnapshot()
+        XCTAssertTrue(claimed, "snapshot=\(claimedSnapshot)")
+        do {
+            _ = try await runtime.beginSwap(targetModelID: "manual-model")
+            XCTFail("Expected recovery claim to fence manual switching")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .adoptionReservationConflict)
+        }
+
+        let finalized = await runtime.finalizePreparedModelAdoption(transactionID: transactionID)
+        XCTAssertTrue(finalized)
+        let task = try await runtime.beginSwap(targetModelID: "manual-model")
+        try await task.value
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertEqual(snapshot.modelID, "manual-model")
+    }
+
+    func testRecoveryClaimRenewalFencesForFullActiveTransactionWindow() async throws {
+        let transactionID = UUID().uuidString.lowercased()
+        let claimedAt = Date()
+        let runtime = makeRuntime(
+            modelID: "new-model",
+            modelHash: "new-hash",
+            warmSwapEnabled: true,
+            authorizedSwitchModelIDs: ["manual-model"],
+            loader: { target in (target, "manual-hash") }
+        )
+
+        let claimed = await runtime.claimModelAdoptionRecovery(
+            transactionID: transactionID,
+            fromModelID: "old-model",
+            targetModelID: "new-model",
+            now: claimedAt
+        )
+        let renewed = await runtime.claimModelAdoptionRecovery(
+            transactionID: transactionID,
+            fromModelID: "old-model",
+            targetModelID: "new-model",
+            now: claimedAt.addingTimeInterval(4 * 60)
+        )
+        XCTAssertTrue(claimed)
+        XCTAssertTrue(renewed)
+        do {
+            _ = try await runtime.beginSwap(
+                targetModelID: "manual-model",
+                now: claimedAt.addingTimeInterval(16 * 60)
+            )
+            XCTFail("Expected renewed recovery claim to remain active")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .adoptionReservationConflict)
+        }
+        let finalized = await runtime.finalizePreparedModelAdoption(
+            transactionID: transactionID,
+            now: claimedAt.addingTimeInterval(16 * 60)
+        )
+        XCTAssertTrue(finalized)
+        let replay = await runtime.claimModelAdoptionRecovery(
+            transactionID: transactionID,
+            fromModelID: "old-model",
+            targetModelID: "new-model",
+            now: claimedAt.addingTimeInterval(16 * 60 + 1)
+        )
+        XCTAssertFalse(replay)
+    }
+
+    func testPreparedModelAdoptionRetryIsExactAndConsumedIDsCannotReplay() async throws {
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"],
+            loader: { target in (target, "new-hash") }
+        )
+
+        let firstPrepare = await runtime.prepareModelAdoption(authority)
+        let retryPrepare = await runtime.prepareModelAdoption(authority)
+        XCTAssertTrue(firstPrepare.accepted)
+        XCTAssertTrue(retryPrepare.accepted)
+        let conflicting = makeAdoptionAuthority(targetMaxBatch: 3)
+        let conflictResult = await runtime.prepareModelAdoption(conflicting)
+        XCTAssertFalse(conflictResult.accepted)
+        XCTAssertEqual(conflictResult.reason, ModelRuntimeAdoptionError.authorityMismatch.description)
+
+        let (_, task) = try await runtime.beginPreparedModelAdoption(transactionID: authority.transactionID)
+        try await task.value
+        let finalized = await runtime.finalizePreparedModelAdoption(transactionID: authority.transactionID)
+        XCTAssertTrue(finalized)
+        let replay = await runtime.prepareModelAdoption(authority)
+        XCTAssertFalse(replay.accepted)
+        XCTAssertEqual(replay.reason, ModelRuntimeAdoptionError.transactionConsumed.description)
+    }
+
+    func testConsumedAdoptionReplayWindowFailsClosedAtBound() async throws {
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"]
+        )
+
+        for _ in 0..<64 {
+            let transaction = makeAdoptionAuthority(transactionID: UUID().uuidString.lowercased())
+            let prepared = await runtime.prepareModelAdoption(transaction)
+            XCTAssertTrue(prepared.accepted)
+            let cancelled = await runtime.cancelPreparedModelAdoption(transactionID: transaction.transactionID)
+            XCTAssertTrue(cancelled)
+        }
+
+        let overflow = makeAdoptionAuthority(transactionID: UUID().uuidString.lowercased())
+        let result = await runtime.prepareModelAdoption(overflow)
+        XCTAssertFalse(result.accepted)
+        XCTAssertEqual(result.reason, "model_adoption_replay_window_full")
+    }
+
+    func testCancelledPreparedModelAdoptionCannotBeApplied() async throws {
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"]
+        )
+
+        let prepared = await runtime.prepareModelAdoption(authority)
+        let firstCancellation = await runtime.cancelPreparedModelAdoption(transactionID: authority.transactionID)
+        let secondCancellation = await runtime.cancelPreparedModelAdoption(transactionID: authority.transactionID)
+        XCTAssertTrue(prepared.accepted)
+        XCTAssertTrue(firstCancellation)
+        XCTAssertTrue(secondCancellation, "cancel retries are idempotent for durable cleanup")
+
+        do {
+            _ = try await runtime.beginPreparedModelAdoption(transactionID: authority.transactionID)
+            XCTFail("Expected cancelled adoption transaction rejection")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .transactionNotPrepared)
+        }
+    }
+
+    func testPreparedModelAdoptionExpiresBeforeApply() async throws {
+        let authority = makeAdoptionAuthority()
+        let preparedAt = Date(timeIntervalSince1970: 1_754_611_200)
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                "new-model": ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: ["new-model"]
+        )
+
+        let prepared = await runtime.prepareModelAdoption(authority, now: preparedAt)
+        XCTAssertTrue(prepared.accepted)
+
+        do {
+            _ = try await runtime.beginPreparedModelAdoption(
+                transactionID: authority.transactionID,
+                now: preparedAt.addingTimeInterval(5 * 60 + 1)
+            )
+            XCTFail("Expected expired adoption transaction rejection")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .transactionNotPrepared)
+        }
+    }
+
     func testEnabledModeAcceptsSwap() async throws {
         let runtime = makeRuntime(modelID: nil, warmSwapEnabled: true) { target in
             try await Task.sleep(nanoseconds: 50_000_000)
@@ -590,7 +952,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertNil(statusSnapshot.specDecodeNumDraftTokens)
     }
 
-    func testSuccessfulTargetSwapEnablesVerifiedDraftForNewTarget() async throws {
+    func testSuccessfulTargetSwapKeepsUnvalidatedSpeculationUnadvertised() async throws {
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
         let runtime = makeRuntime(
             modelID: "old-model",
@@ -609,9 +971,9 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(runtimeSnapshot.modelID, "new-model")
         XCTAssertEqual(runtimeSnapshot.draftModelID, "mlx-community/configured-draft")
         XCTAssertEqual(runtimeSnapshot.draftTargetModelID, "new-model")
-        XCTAssertTrue(statusSnapshot.specDecodeEnabled)
-        XCTAssertEqual(statusSnapshot.specDecodeDraftModelID, "mlx-community/configured-draft")
-        XCTAssertEqual(statusSnapshot.specDecodeNumDraftTokens, 3)
+        XCTAssertFalse(statusSnapshot.specDecodeEnabled)
+        XCTAssertNil(statusSnapshot.specDecodeDraftModelID)
+        XCTAssertNil(statusSnapshot.specDecodeNumDraftTokens)
     }
 
     func testHandleDrainCancellationStillFiresEvenIfStateAlreadyChanged() async throws {
@@ -731,6 +1093,8 @@ final class ModelRuntimeSwapTests: XCTestCase {
         draftModelID: String? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
+        targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
+        authorizedSwitchModelIDs: [String] = [],
         loader: @escaping @Sendable (String) async throws -> (String, String?) = { target in (target, nil) },
         completion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         speculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
@@ -742,10 +1106,39 @@ final class ModelRuntimeSwapTests: XCTestCase {
             draftModelID: draftModelID,
             warmSwapEnabled: warmSwapEnabled,
             swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
+            targetAuthorities: targetAuthorities,
+            authorizedSwitchModelIDs: authorizedSwitchModelIDs,
             loader: { _ in throw TestError.unexpectedContainerLoader },
             testLoader: loader,
             testCompletion: completion,
             testSpeculativeCompletion: speculativeCompletion
+        )
+    }
+
+    private func makeAdoptionAuthority(
+        transactionID: String = "d13c5d4c-3e4f-47ac-b72d-7f8f172747a0",
+        expectedIncumbentModelID: String = "old-model",
+        targetMaxBatch: Int = 2
+    ) -> ModelAdoptionAuthorityWire {
+        ModelAdoptionAuthorityWire(
+            transactionID: transactionID,
+            recommendationSHA256: String(repeating: "a", count: 64),
+            expectedIncumbentModelID: expectedIncumbentModelID,
+            targetModelID: "new-model",
+            targetArtifactPath: "/verified/new-model",
+            targetArtifactSHA256: String(repeating: "b", count: 64),
+            targetCatalogRevision: "catalog-r1",
+            targetKVBits: 4,
+            targetMaxContext: 4_000,
+            targetMaxBatch: targetMaxBatch,
+            targetDonorMode: false,
+            serveKnobsSHA256: ModelAdoptionAuthorityWire.serveKnobsDigest(
+                kvBits: 4,
+                maxContext: 4_000,
+                maxBatch: targetMaxBatch,
+                donorMode: false
+            ),
+            catalogIdentitySHA256: String(repeating: "d", count: 64)
         )
     }
 

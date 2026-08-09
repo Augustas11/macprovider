@@ -3,6 +3,12 @@ import MLXLMCommon
 import XCTest
 
 final class ConversationCacheTests: XCTestCase {
+    func testQuantizedKVIsDisabledForReusableConversationKeys() {
+        XCTAssertNil(ModelRuntime.effectiveKVBits(configured: 8, conversationKey: "conv:buyer-1"))
+        XCTAssertNil(ModelRuntime.effectiveKVBits(configured: 4, conversationKey: "   "))
+        XCTAssertEqual(ModelRuntime.effectiveKVBits(configured: 8, conversationKey: nil), 8)
+    }
+
     func testLongestCommonPrefixCases() {
         XCTAssertEqual(ConversationCache.longestCommonPrefix([], []), 0)
         XCTAssertEqual(ConversationCache.longestCommonPrefix([1, 2, 3], [1, 2, 3]), 3)

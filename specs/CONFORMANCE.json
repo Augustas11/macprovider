@@ -1355,8 +1355,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row. The provider-prebeta admission journey is now mapped for the serving-smoke subset only; conformance remains pending until #895 verifies the production route to the admitted provider and #896 supplies the signed journey-result contract required for sensitive promotion. Full receipt-chain reconciliation remains outside provider pre-beta unless separately enabled."
+        "issue": "https://github.com/Augustas11/macprovider/issues/957",
+        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row. The core provider-prebeta admission and serving-smoke journey passed under #895, but its signed result did not claim this requirement. Issue #957 owns requirement-scoped proof that the exact admitted row remains authoritative through heartbeat and route-snapshot binding. Full receipt-chain reconciliation remains outside provider pre-beta unless separately enabled."
       }
     },
     {
@@ -1380,8 +1380,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 implements the finite bridge and deploy preflight. For provider pre-beta, #895 must record whether any admitted cohort provider still depends on the bridge and prove buyer-serving smoke after admission or upgrade. The broader legacy fleet retirement proof remains pending outside this slice."
+        "issue": "https://github.com/Augustas11/macprovider/issues/957",
+        "rationale": "Issue #609 implements the finite bridge and deploy preflight. The core provider-prebeta admission and serving-smoke journey passed under #895, but it did not promote the bridge posture. Issue #957 must record whether any admitted cohort provider still depends on the bridge and prove the applicable deadline/count or zero-bridge state. The broader legacy fleet retirement proof remains pending outside this slice."
       }
     },
     {
@@ -1404,8 +1404,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row. For provider pre-beta, #895 must prove the selected cohort model row and startup model readiness; operator-pushed warm-swap production enablement remains outside this slice unless explicitly enabled."
+        "issue": "https://github.com/Augustas11/macprovider/issues/957",
+        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row. The core provider-prebeta journey under #895 proved startup model readiness only. Issue #957 owns a separately approved production-equivalent warm-swap run proving atomic target row, digest, algorithm, and model publication; operator-pushed production enablement remains outside this slice unless explicitly authorized."
       }
     },
     {
@@ -1697,10 +1697,10 @@
       ],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired in code and tests. The provider-prebeta admission journey is now mapped to prove the operator-visible autotune transcript and model-readiness decision on a real provider; real-X dwell reward evidence remains outside the provider-admission subset unless explicitly enabled."
+        "issue": "https://github.com/Augustas11/macprovider/issues/958",
+        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired in code and tests. The core provider-prebeta journey passed under #895, but its signed result excluded the broader physical autotune transcript claim. Issue #958 owns the operator-visible advisory gate and model-readiness evidence on a real provider; real-X dwell reward evidence remains outside the provider-admission subset unless explicitly enabled."
       }
     },
     {
@@ -1724,10 +1724,10 @@
       ],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests. The provider-prebeta admission journey is now mapped as the scoped physical installer/autotune proof; conformance remains pending until #895 captures the operator-visible transcript in production-equivalent conditions."
+        "issue": "https://github.com/Augustas11/macprovider/issues/958",
+        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests. The core provider-prebeta journey passed under #895, but it did not promote this transcript requirement. Conformance remains pending until #958 captures the operator-visible transcript, provenance/drift fields, and applicable warning copy in production-equivalent conditions."
       }
     },
     {
@@ -1757,8 +1757,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. The provider-prebeta admission journey is now mapped to capture the active cohort gate posture, admitted model ceiling, and route eligibility; strict-gate production rollout remains pending unless enabled for the cohort."
+        "issue": "https://github.com/Augustas11/macprovider/issues/959",
+        "rationale": "B2 implements coordinator route/capacity exclusion for over-ceiling and uncatalogued heartbeat model transitions under strict hello-gate unit tests. The normal admission journey passed under #895 without exercising the default-off strict matrix. Issue #959 owns a separately reviewed run that captures the active gate posture, admitted model ceiling, route exclusion, and unaffected healthy-provider state; production rollout remains pending unless explicitly enabled for the cohort."
       }
     },
     {
@@ -1786,8 +1786,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. The provider-prebeta admission journey is now mapped to record evidence freshness and whether stale-evidence routing exclusion is active for the cohort; proactive refresh and broader production deploy evidence remain pending outside this slice."
+        "issue": "https://github.com/Augustas11/macprovider/issues/959",
+        "rationale": "B2 adds the 30s session-time autotune evidence TTL route-exclusion sweep for capped strict hello-gate sessions. The normal admission journey passed under #895 without exercising stale or tuple-mismatched evidence. Issue #959 owns separately reviewed freshness and route-exclusion evidence; proactive refresh and broader production deployment remain outside this slice."
       }
     },
     {
@@ -1820,8 +1820,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. The provider-prebeta admission journey is now mapped to record the cohort admission/sandbox posture; FR-HG5 below-two alert and broader Pearl deploy evidence remain pending outside this slice unless enabled."
+        "issue": "https://github.com/Augustas11/macprovider/issues/959",
+        "rationale": "B5 parks evidence-absent strict hello-gate providers in a non-buyer/admission-limited/no-credential sandbox, reloads proof_of_weights config without restart, pre-quarantines/revalidates existing sessions on gate enable, clears gate exclusions for credential-authorized sessions, leaves sandbox-only/no-credential sessions sandboxed on gate-disable reload, and clears disabled telemetry-drift benchmark quarantines on reload. The normal admission journey passed under #895 without exercising this default-off matrix. Issue #959 owns separately reviewed sandbox/reload evidence; FR-HG5 below-two alert and broader Pearl deployment remain pending outside this slice unless explicitly enabled."
       }
     },
     {
@@ -1877,8 +1877,8 @@
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/895",
-        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested. For provider pre-beta, referral/invite admission is scoped to provider admission and now maps to JOURNEY-PROVIDER-PREBETA-ADMISSION; conformance remains pending until #895 captures the current production posture for a fresh provider. Real-X dwell rewards and broad advocacy economics remain outside this slice unless explicitly enabled."
+        "issue": "https://github.com/Augustas11/macprovider/issues/960",
+        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested. The core provider-prebeta journey passed under #895 with referral activation not required, but its signed result did not promote this exact public-authority requirement. Issue #960 may record disabled or not-required cohort posture as non-promoting context, but conformance requires physical evidence of the enabled exact fragment authority, alternate-authority rejection, capability and immutable-release agreement, activation, and rollback path, or a future split into narrower stable requirement IDs. Real-X dwell rewards and broad advocacy economics remain outside this slice unless explicitly enabled."
       }
     },
     {

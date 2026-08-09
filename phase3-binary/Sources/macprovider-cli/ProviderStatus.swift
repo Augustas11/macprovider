@@ -525,6 +525,8 @@ actor ProviderStatus {
         modelHash: String?,
         modelHashAlgorithm: String? = nil,
         weightsManifestSHA256: String? = nil,
+        maxContextTokens: Int? = nil,
+        maxConcurrency: Int? = nil,
         specDecodeDraftModelID: String? = nil,
         specDecodeNumDraftTokens: Int? = nil
     ) {
@@ -532,6 +534,13 @@ actor ProviderStatus {
         self.modelHash = modelHash
         self.modelHashAlgorithm = modelHashAlgorithm
         self.weightsManifestSHA256 = weightsManifestSHA256
+        if maxContextTokens != nil || maxConcurrency != nil {
+            capacity = ProviderCapacity(
+                maxContextOverride: maxContextTokens ?? capacity.maxContextTokens,
+                maxConcurrencyOverride: maxConcurrency ?? capacity.maxConcurrency,
+                throughputTPSEstimate: capacity.throughputTPSEstimate
+            )
+        }
         modelLoaded = true
         if status == .unavailable {
             transition(to: .ready, reason: "target_swap_completed")

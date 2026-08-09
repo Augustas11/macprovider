@@ -43,6 +43,27 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case statusResponse(currentModelID: String, runtimeState: SwapState)
     case modelsRequest
     case modelsResponse(modelIDs: [String], supportedModelIDs: [String])
+    case prepareModelAdoptionRequest(ModelAdoptionAuthorityWire)
+    case prepareModelAdoptionResult(ModelAdoptionPrepareResultWire)
+    case applyModelAdoptionRequest(transactionID: String, requestedAtMs: Int64)
+    case cancelModelAdoptionRequest(transactionID: String, requestedAtMs: Int64)
+    case cancelModelAdoptionResult(transactionID: String, accepted: Bool, reason: String?)
+    case finalizeModelAdoptionRequest(transactionID: String, requestedAtMs: Int64)
+    case finalizeModelAdoptionResult(transactionID: String, accepted: Bool, reason: String?)
+    case claimModelAdoptionRecoveryRequest(
+        transactionID: String,
+        fromModelID: String,
+        targetModelID: String,
+        requestedAtMs: Int64
+    )
+    case claimModelAdoptionRecoveryResult(
+        transactionID: String,
+        accepted: Bool,
+        reason: String?,
+        currentModelID: String,
+        runtimeState: SwapState
+    )
+    case modelAdoptionProgress(ModelAdoptionProgressWire)
 
     // SPEC-025 §5.2 — additive frames used by Malibu.app's read-only control client.
     case metricsRequest
@@ -144,6 +165,86 @@ public enum ControlSocketCodec {
                 "model_ids": modelIDs,
                 "supported_model_ids": supportedModelIDs,
             ]
+        case let .prepareModelAdoptionRequest(request):
+            object = try Self.object(
+                encoding: request,
+                adding: ["type": "recommendation_apply_switch_prepare_request"]
+            )
+        case let .prepareModelAdoptionResult(result):
+            object = try Self.object(
+                encoding: result,
+                adding: ["type": "recommendation_apply_switch_prepare_result"]
+            )
+        case let .applyModelAdoptionRequest(transactionID, requestedAtMs):
+            object = [
+                "type": "recommendation_apply_switch_apply_request",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "requested_at_ms": requestedAtMs,
+            ]
+        case let .cancelModelAdoptionRequest(transactionID, requestedAtMs):
+            object = [
+                "type": "recommendation_apply_switch_cancel_request",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "requested_at_ms": requestedAtMs,
+            ]
+        case let .cancelModelAdoptionResult(transactionID, accepted, reason):
+            var frame: [String: Any] = [
+                "type": "recommendation_apply_switch_cancel_result",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "accepted": accepted,
+            ]
+            if let reason { frame["reason"] = reason }
+            object = frame
+        case let .finalizeModelAdoptionRequest(transactionID, requestedAtMs):
+            object = [
+                "type": "recommendation_apply_switch_finalize_request",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "requested_at_ms": requestedAtMs,
+            ]
+        case let .finalizeModelAdoptionResult(transactionID, accepted, reason):
+            var frame: [String: Any] = [
+                "type": "recommendation_apply_switch_finalize_result",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "accepted": accepted,
+            ]
+            if let reason { frame["reason"] = reason }
+            object = frame
+        case let .claimModelAdoptionRecoveryRequest(transactionID, fromModelID, targetModelID, requestedAtMs):
+            object = [
+                "type": "recommendation_apply_switch_recovery_claim_request",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "from_model_id": fromModelID,
+                "target_model_id": targetModelID,
+                "requested_at_ms": requestedAtMs,
+            ]
+        case let .claimModelAdoptionRecoveryResult(
+            transactionID,
+            accepted,
+            reason,
+            currentModelID,
+            runtimeState
+        ):
+            var frame: [String: Any] = [
+                "type": "recommendation_apply_switch_recovery_claim_result",
+                "schema_version": "model_recommendation_apply_switch.v1",
+                "transaction_id": transactionID,
+                "accepted": accepted,
+                "current_model_id": currentModelID,
+                "runtime_state": runtimeState.rawValue,
+            ]
+            if let reason { frame["reason"] = reason }
+            object = frame
+        case let .modelAdoptionProgress(progress):
+            object = try Self.object(
+                encoding: progress,
+                adding: ["type": "recommendation_apply_switch_progress"]
+            )
         case .metricsRequest:
             object = ["type": "metrics_request"]
         case let .metricsResponse(metrics):
@@ -333,6 +434,89 @@ public enum ControlSocketCodec {
                 return modelID
             }
             return .modelsResponse(modelIDs: modelIDs, supportedModelIDs: supportedModelIDs)
+        case "recommendation_apply_switch_prepare_request":
+            return .prepareModelAdoptionRequest(try decode(
+                ModelAdoptionAuthorityWire.self,
+                from: object,
+                removing: "type"
+            ))
+        case "recommendation_apply_switch_prepare_result":
+            return .prepareModelAdoptionResult(try decode(
+                ModelAdoptionPrepareResultWire.self,
+                from: object,
+                removing: "type"
+            ))
+        case "recommendation_apply_switch_apply_request":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1" else {
+                throw ControlSocketError.missingRequiredField("schema_version")
+            }
+            return .applyModelAdoptionRequest(
+                transactionID: try stringField("transaction_id", in: object),
+                requestedAtMs: try int64Field("requested_at_ms", in: object)
+            )
+        case "recommendation_apply_switch_cancel_request":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1" else {
+                throw ControlSocketError.missingRequiredField("schema_version")
+            }
+            return .cancelModelAdoptionRequest(
+                transactionID: try stringField("transaction_id", in: object),
+                requestedAtMs: try int64Field("requested_at_ms", in: object)
+            )
+        case "recommendation_apply_switch_cancel_result":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1" else {
+                throw ControlSocketError.missingRequiredField("schema_version")
+            }
+            return .cancelModelAdoptionResult(
+                transactionID: try stringField("transaction_id", in: object),
+                accepted: try boolField("accepted", in: object),
+                reason: object["reason"] as? String
+            )
+        case "recommendation_apply_switch_finalize_request":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1" else {
+                throw ControlSocketError.missingRequiredField("schema_version")
+            }
+            return .finalizeModelAdoptionRequest(
+                transactionID: try stringField("transaction_id", in: object),
+                requestedAtMs: try int64Field("requested_at_ms", in: object)
+            )
+        case "recommendation_apply_switch_finalize_result":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1" else {
+                throw ControlSocketError.missingRequiredField("schema_version")
+            }
+            return .finalizeModelAdoptionResult(
+                transactionID: try stringField("transaction_id", in: object),
+                accepted: try boolField("accepted", in: object),
+                reason: object["reason"] as? String
+            )
+        case "recommendation_apply_switch_recovery_claim_request":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1" else {
+                throw ControlSocketError.missingRequiredField("schema_version")
+            }
+            return .claimModelAdoptionRecoveryRequest(
+                transactionID: try stringField("transaction_id", in: object),
+                fromModelID: try stringField("from_model_id", in: object),
+                targetModelID: try stringField("target_model_id", in: object),
+                requestedAtMs: try int64Field("requested_at_ms", in: object)
+            )
+        case "recommendation_apply_switch_recovery_claim_result":
+            guard object["schema_version"] as? String == "model_recommendation_apply_switch.v1",
+                  let stateValue = object["runtime_state"] as? String,
+                  let runtimeState = SwapState(rawValue: stateValue) else {
+                throw ControlSocketError.missingRequiredField("runtime_state")
+            }
+            return .claimModelAdoptionRecoveryResult(
+                transactionID: try stringField("transaction_id", in: object),
+                accepted: try boolField("accepted", in: object),
+                reason: object["reason"] as? String,
+                currentModelID: try stringField("current_model_id", in: object),
+                runtimeState: runtimeState
+            )
+        case "recommendation_apply_switch_progress":
+            return .modelAdoptionProgress(try decode(
+                ModelAdoptionProgressWire.self,
+                from: object,
+                removing: "type"
+            ))
         case "metrics_request":
             return .metricsRequest
         case "metrics_response":
@@ -1215,6 +1399,57 @@ actor ControlSocketServer {
                     )
                     await connection.close()
                     return
+                case let .prepareModelAdoptionRequest(request):
+                    await handlePrepareModelAdoptionRequest(
+                        request: request,
+                        connection: connection,
+                        modelRuntime: modelRuntime,
+                        supportedModels: supportedModels
+                    )
+                case let .applyModelAdoptionRequest(transactionID, requestedAtMs):
+                    await handleApplyModelAdoptionRequest(
+                        transactionID: transactionID,
+                        requestedAtMs: requestedAtMs,
+                        connection: connection,
+                        modelRuntime: modelRuntime,
+                        tracker: tracker
+                    )
+                    await connection.close()
+                    return
+                case let .cancelModelAdoptionRequest(transactionID, _):
+                    let accepted = await modelRuntime.cancelPreparedModelAdoption(transactionID: transactionID)
+                    try? await connection.send(.cancelModelAdoptionResult(
+                        transactionID: transactionID,
+                        accepted: accepted,
+                        reason: accepted ? nil : ModelRuntimeAdoptionError.transactionNotPrepared.description
+                    ))
+                    await connection.close()
+                    return
+                case let .finalizeModelAdoptionRequest(transactionID, _):
+                    let accepted = await modelRuntime.finalizePreparedModelAdoption(transactionID: transactionID)
+                    try? await connection.send(.finalizeModelAdoptionResult(
+                        transactionID: transactionID,
+                        accepted: accepted,
+                        reason: accepted ? nil : ModelRuntimeAdoptionError.transactionNotPrepared.description
+                    ))
+                    await connection.close()
+                    return
+                case let .claimModelAdoptionRecoveryRequest(transactionID, fromModelID, targetModelID, _):
+                    let accepted = await modelRuntime.claimModelAdoptionRecovery(
+                        transactionID: transactionID,
+                        fromModelID: fromModelID,
+                        targetModelID: targetModelID
+                    )
+                    let snapshot = await modelRuntime.currentSnapshot()
+                    try? await connection.send(.claimModelAdoptionRecoveryResult(
+                        transactionID: transactionID,
+                        accepted: accepted,
+                        reason: accepted ? nil : ModelRuntimeAdoptionError.adoptionReservationConflict.description,
+                        currentModelID: snapshot.modelID ?? "",
+                        runtimeState: snapshot.state
+                    ))
+                    await connection.close()
+                    return
                 case .metricsRequest:
                     let snapshot = await ControlMetricsBuilder.build(
                         providerStatus: providerStatus,
@@ -1536,6 +1771,166 @@ actor ControlSocketServer {
         } catch {
             try? await connection.send(.switchAck(accepted: false, reason: .other, currentTarget: nil, secondsRemaining: nil))
         }
+    }
+
+    private nonisolated static func handlePrepareModelAdoptionRequest(
+        request: ModelAdoptionAuthorityWire,
+        connection: ControlSocketConnection,
+        modelRuntime: ModelRuntime,
+        supportedModels: [String]?
+    ) async {
+        do {
+            _ = try SupportedModels.validate(model: request.targetModelID, supportedModels: supportedModels)
+        } catch SupportedModelsValidationError.modelNotInCatalog {
+            try? await connection.send(.prepareModelAdoptionResult(ModelAdoptionPrepareResultWire(
+                transactionID: request.transactionID,
+                accepted: false,
+                reason: ModelRuntimeAdoptionError.unsupportedTarget.description,
+                targetModelID: nil,
+                targetArtifactPath: nil,
+                targetArtifactSHA256: nil,
+                targetCatalogRevision: nil,
+                serveKnobsSHA256: nil,
+                catalogIdentitySHA256: nil
+            )))
+            return
+        } catch {
+            try? await connection.send(.prepareModelAdoptionResult(ModelAdoptionPrepareResultWire(
+                transactionID: request.transactionID,
+                accepted: false,
+                reason: String(describing: error),
+                targetModelID: nil,
+                targetArtifactPath: nil,
+                targetArtifactSHA256: nil,
+                targetCatalogRevision: nil,
+                serveKnobsSHA256: nil,
+                catalogIdentitySHA256: nil
+            )))
+            return
+        }
+        try? await connection.send(.prepareModelAdoptionResult(await modelRuntime.prepareModelAdoption(request)))
+    }
+
+    private nonisolated static func handleApplyModelAdoptionRequest(
+        transactionID: String,
+        requestedAtMs: Int64,
+        connection: ControlSocketConnection,
+        modelRuntime: ModelRuntime,
+        tracker: ControlSocketSwitchTracker
+    ) async {
+        let preparedForFailure = await modelRuntime.preparedModelAdoption(transactionID: transactionID)
+        do {
+            let stream = await modelRuntime.swapSignals()
+            let (prepared, _) = try await modelRuntime.beginPreparedModelAdoption(transactionID: transactionID)
+            let request = prepared.request
+            let authority = prepared.authority
+            await tracker.start(request.targetModelID)
+            try await connection.send(.modelAdoptionProgress(Self.modelAdoptionProgress(
+                request: request,
+                authority: authority,
+                state: .loading,
+                requestedAtMs: requestedAtMs,
+                reason: nil,
+                loadedModelID: nil,
+                loadedModelSHA256: nil
+            )))
+
+            var iterator = stream.makeAsyncIterator()
+            while let signal = await iterator.next() {
+                guard signal.targetModelID == request.targetModelID else {
+                    continue
+                }
+                switch signal.outcome {
+                case .loadFinished:
+                    try await connection.send(.modelAdoptionProgress(Self.modelAdoptionProgress(
+                        request: request,
+                        authority: authority,
+                        state: .draining,
+                        requestedAtMs: requestedAtMs,
+                        reason: nil,
+                        loadedModelID: nil,
+                        loadedModelSHA256: nil
+                    )))
+                    continue
+                case let .completed(newModelID, newModelHash):
+                    try await connection.send(.modelAdoptionProgress(Self.modelAdoptionProgress(
+                        request: request,
+                        authority: authority,
+                        state: .loaded,
+                        requestedAtMs: requestedAtMs,
+                        reason: nil,
+                        loadedModelID: newModelID,
+                        loadedModelSHA256: newModelHash
+                    )))
+                case let .failed(reason):
+                    try await connection.send(.modelAdoptionProgress(Self.modelAdoptionProgress(
+                        request: request,
+                        authority: authority,
+                        state: .failed,
+                        requestedAtMs: requestedAtMs,
+                        reason: reason,
+                        loadedModelID: nil,
+                        loadedModelSHA256: nil
+                    )))
+                }
+                await tracker.clear()
+                return
+            }
+            await tracker.clear()
+        } catch {
+            await tracker.clear()
+            if let preparedForFailure {
+                try? await connection.send(.modelAdoptionProgress(Self.modelAdoptionProgress(
+                    request: preparedForFailure.request,
+                    authority: preparedForFailure.authority,
+                    state: .failed,
+                    requestedAtMs: requestedAtMs,
+                    reason: String(describing: error),
+                    loadedModelID: nil,
+                    loadedModelSHA256: nil
+                )))
+            } else {
+                try? await connection.send(.modelAdoptionProgress(ModelAdoptionProgressWire(
+                    transactionID: transactionID,
+                    state: SwitchProgressState.failed.rawValue,
+                    elapsedMS: elapsedMs(since: requestedAtMs),
+                    reason: String(describing: error),
+                    targetModelID: "",
+                    targetArtifactPath: "",
+                    targetArtifactSHA256: "",
+                    targetCatalogRevision: "",
+                    serveKnobsSHA256: "",
+                    catalogIdentitySHA256: "",
+                    loadedModelID: nil,
+                    loadedModelSHA256: nil
+                )))
+            }
+        }
+    }
+
+    private nonisolated static func modelAdoptionProgress(
+        request: ModelAdoptionAuthorityWire,
+        authority: ModelRuntimeTargetAuthority,
+        state: SwitchProgressState,
+        requestedAtMs: Int64,
+        reason: String?,
+        loadedModelID: String?,
+        loadedModelSHA256: String?
+    ) -> ModelAdoptionProgressWire {
+        ModelAdoptionProgressWire(
+            transactionID: request.transactionID,
+            state: state.rawValue,
+            elapsedMS: elapsedMs(since: requestedAtMs),
+            reason: reason,
+            targetModelID: request.targetModelID,
+            targetArtifactPath: authority.modelArgument,
+            targetArtifactSHA256: authority.artifactSHA256,
+            targetCatalogRevision: authority.catalogRevision,
+            serveKnobsSHA256: request.serveKnobsSHA256,
+            catalogIdentitySHA256: request.catalogIdentitySHA256,
+            loadedModelID: loadedModelID,
+            loadedModelSHA256: loadedModelSHA256
+        )
     }
 
     private nonisolated static func elapsedMs(since requestedAtMs: Int64) -> Int {

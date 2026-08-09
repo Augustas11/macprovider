@@ -61,6 +61,73 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertTrue(post.contains("log_path: /tmp/provider.log"))
     }
 
+    func testApplyFailsClosedWhenExistingConfigCannotBeRead() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let applier = ConfigApplier(
+            configPath: fixture.configURL,
+            readData: { _ in throw CocoaError(.fileReadNoPermission) }
+        )
+
+        XCTAssertThrowsError(try applier.apply(recommendation: recommendation(), now: fixture.now)) { error in
+            XCTAssertEqual(error as? ConfigApplierError, .configReadFailed(applier.configPath.path))
+        }
+        XCTAssertEqual(try String(contentsOf: fixture.configURL), sampleConfig())
+    }
+
+    func testApplyRejectsHardLinkedConfigAlias() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let alias = fixture.tempDir.appendingPathComponent("config-alias.yaml")
+        try FileManager.default.linkItem(at: fixture.configURL, to: alias)
+        let applier = ConfigApplier(configPath: alias)
+
+        XCTAssertThrowsError(try applier.apply(recommendation: recommendation(), now: fixture.now)) { error in
+            XCTAssertEqual(error as? ConfigApplierError, .unsafeConfigPath(applier.configPath.path))
+        }
+        XCTAssertEqual(try String(contentsOf: fixture.configURL), sampleConfig())
+    }
+
+    func testApplyCanonicalizesSymlinkAliasBeforeLockingAndMutation() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let alias = fixture.tempDir.appendingPathComponent("config-link.yaml")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.configURL)
+        let applier = ConfigApplier(configPath: alias)
+
+        _ = try applier.apply(recommendation: recommendation(), now: fixture.now)
+
+        XCTAssertEqual(applier.configPath, fixture.configURL.resolvingSymlinksInPath())
+        XCTAssertTrue(try String(contentsOf: fixture.configURL).contains("model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit\n"))
+    }
+
+    func testApplyQuotesCatalogStringsInsteadOfInjectingYAMLKeys() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        var unsafe = recommendation()
+        unsafe.modelCatalogRevision = "revision\ninjected_key: value"
+
+        _ = try fixture.applier().apply(recommendation: unsafe, now: fixture.now)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertFalse(post.contains("\ninjected_key: value\n"))
+        XCTAssertEqual(
+            try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.configURL.path)).modelCatalogRevision,
+            "revision\ninjected_key: value"
+        )
+    }
+
+    func testRestoreRecommendationOwnedFieldsPreservesNonOwnedKeys() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let before = try String(contentsOf: fixture.configURL)
+        let applied = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now)
+
+        try fixture.applier().restoreRecommendationOwnedFields(from: applied.backupPath, now: fixture.now)
+
+        XCTAssertEqual(try String(contentsOf: fixture.configURL), before)
+    }
+
     func testApplyMutatesOnlyFourOwnedKeys() throws {
         let fixture = try ConfigFixture()
         try fixture.writeConfig(sampleConfig())
@@ -238,6 +305,27 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertEqual(flock(lockFD, LOCK_UN), 0)
         _ = close(lockFD)
         XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+    }
+
+    func testRecommendationRecoveryLockFailsWithinBoundedTimeout() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let lockURL = fixture.configURL.deletingLastPathComponent()
+            .appendingPathComponent(".config.yaml.lock")
+        let lockFD = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+        XCTAssertGreaterThanOrEqual(lockFD, 0)
+        guard lockFD >= 0 else { return }
+        XCTAssertEqual(flock(lockFD, LOCK_EX), 0)
+        defer {
+            _ = flock(lockFD, LOCK_UN)
+            _ = close(lockFD)
+        }
+
+        let startedAt = Date()
+        XCTAssertThrowsError(
+            try fixture.applier().acquireRecommendationMutationLock(timeoutSeconds: 0.05)
+        )
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1)
     }
 
     func testApplyBackupUsesExclusiveCreateAgainstTOCTOURace() throws {
