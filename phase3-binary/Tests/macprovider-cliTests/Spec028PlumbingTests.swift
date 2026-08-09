@@ -189,12 +189,53 @@ final class Spec028PlumbingTests: XCTestCase {
         )
     }
 
+    func testSpeculativeCacheWindowRequiresRoomForPromptGenerationAndDraftRollback() {
+        XCTAssertTrue(ModelRuntime.speculativeCacheWindowSafe(
+            promptTokens: 100, maxTokens: 20, maxContextTokens: 256, numDraftTokens: 3))
+        XCTAssertFalse(ModelRuntime.speculativeCacheWindowSafe(
+            promptTokens: 230, maxTokens: 23, maxContextTokens: 256, numDraftTokens: 3))
+        XCTAssertFalse(ModelRuntime.speculativeCacheWindowSafe(
+            promptTokens: 100, maxTokens: nil, maxContextTokens: 256, numDraftTokens: 3))
+    }
+
+    func testSpeculativeProductionGateDefaultsToOrdinaryDecode() async throws {
+        XCTAssertFalse(ModelRuntime.productionSpeculativeCacheWrapValidated)
+        let speculativeCalls = LockedCounter()
+        let fallbackCalls = LockedCounter()
+        let runtime = ModelRuntime(
+            modelID: "target",
+            draftModelID: "draft",
+            warmSwapEnabled: false,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testCompletion: { _, _ in
+                fallbackCalls.increment()
+                return CompletionResult(
+                    content: "safe fallback", finishReason: "stop",
+                    promptTokens: 1, completionTokens: 1
+                )
+            },
+            testSpeculativeCompletion: { _, _ in
+                speculativeCalls.increment()
+                return CompletionResult(
+                    content: "unsafe", finishReason: "stop",
+                    promptTokens: 1, completionTokens: 1
+                )
+            }
+        )
+
+        let completion = try await runtime.complete(try makeChatRequest())
+        XCTAssertEqual(completion.content, "safe fallback")
+        XCTAssertEqual(speculativeCalls.value, 0)
+        XCTAssertEqual(fallbackCalls.value, 1)
+    }
+
     func testSpeculativeNonStreamingFailureFallsBackBeforeOutput() async throws {
         let speculativeCalls = LockedCounter()
         let fallbackCalls = LockedCounter()
         let runtime = ModelRuntime(
             modelID: "target",
             draftModelID: "draft",
+            speculativeCacheWrapValidated: true,
             warmSwapEnabled: false,
             loader: { _ in throw TestError.unexpectedContainerLoader },
             testCompletion: { _, _ in
@@ -228,6 +269,7 @@ final class Spec028PlumbingTests: XCTestCase {
         let runtime = ModelRuntime(
             modelID: "target",
             draftModelID: "draft",
+            speculativeCacheWrapValidated: true,
             warmSwapEnabled: false,
             loader: { _ in throw TestError.unexpectedContainerLoader },
             testCompletion: { _, _ in
@@ -385,6 +427,33 @@ final class Spec028PlumbingTests: XCTestCase {
 
         XCTAssertEqual(config.draftModel, "/models/draft",
             "a normal serve must retain its draft model")
+        XCTAssertEqual(config.draftModelArtifactSHA256, hash)
+    }
+
+    func testProductionSafetyGateSuppressesUnvalidatedDraftConfiguration() {
+        var config = AppConfig.defaults()
+        config.draftModel = "/models/draft"
+        config.draftModelArtifactSHA256 = String(repeating: "c", count: 64)
+
+        ServeCommand.applySpeculativeSafetyGate(&config, cacheWrapValidated: false)
+
+        XCTAssertNil(config.draftModel)
+        XCTAssertNil(config.draftModelArtifactSHA256)
+        var followOn = config
+        XCTAssertNoThrow(try ServeCommand.runSpecDecodeCapacityPreflight(&followOn))
+        XCTAssertNil(followOn.maxContextOverride)
+        XCTAssertNil(followOn.maxConcurrencyOverride)
+    }
+
+    func testValidatedDiagnosticSafetyGateKeepsDraftConfiguration() {
+        var config = AppConfig.defaults()
+        config.draftModel = "/models/draft"
+        let hash = String(repeating: "d", count: 64)
+        config.draftModelArtifactSHA256 = hash
+
+        ServeCommand.applySpeculativeSafetyGate(&config, cacheWrapValidated: true)
+
+        XCTAssertEqual(config.draftModel, "/models/draft")
         XCTAssertEqual(config.draftModelArtifactSHA256, hash)
     }
 

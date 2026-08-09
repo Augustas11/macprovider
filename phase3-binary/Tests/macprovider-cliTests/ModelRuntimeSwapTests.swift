@@ -952,7 +952,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertNil(statusSnapshot.specDecodeNumDraftTokens)
     }
 
-    func testSuccessfulTargetSwapEnablesVerifiedDraftForNewTarget() async throws {
+    func testSuccessfulTargetSwapKeepsUnvalidatedSpeculationUnadvertised() async throws {
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
         let runtime = makeRuntime(
             modelID: "old-model",
@@ -971,9 +971,9 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(runtimeSnapshot.modelID, "new-model")
         XCTAssertEqual(runtimeSnapshot.draftModelID, "mlx-community/configured-draft")
         XCTAssertEqual(runtimeSnapshot.draftTargetModelID, "new-model")
-        XCTAssertTrue(statusSnapshot.specDecodeEnabled)
-        XCTAssertEqual(statusSnapshot.specDecodeDraftModelID, "mlx-community/configured-draft")
-        XCTAssertEqual(statusSnapshot.specDecodeNumDraftTokens, 3)
+        XCTAssertFalse(statusSnapshot.specDecodeEnabled)
+        XCTAssertNil(statusSnapshot.specDecodeDraftModelID)
+        XCTAssertNil(statusSnapshot.specDecodeNumDraftTokens)
     }
 
     func testHandleDrainCancellationStillFiresEvenIfStateAlreadyChanged() async throws {

@@ -1,73 +1,186 @@
 {
-  "schema_version": 1,
-  "last_checked_at": "2026-07-22T19:29:44Z",
-  "last_changed_at": "2026-07-22T19:29:44Z",
-  "macprovider_pins": {
-    "mlx_swift_lm": "3.31.4",
-    "mlx_swift": "0.31.6"
-  },
   "blockers": {
-    "mlx_swift_lm_406_compile_kv_offset": {
-      "repo": "ml-explore/mlx-swift-lm",
+    "mlx_swift_lm_312_quantized_cache_ownership": {
+      "closed_at": null,
       "kind": "issue",
-      "number": 406,
-      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/406",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/965",
+      "number": 312,
+      "repo": "ml-explore/mlx-swift-lm",
+      "runbook_tasks": [
+        "quantized_reusable_kv"
+      ],
       "state": "OPEN",
-      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode",
-      "runbook_tasks": ["T2-01", "TG2"],
-      "updated_at": "2026-07-07T16:53:26Z"
+      "status": "blocked",
+      "title": "[BUG] maybeQuantizeKVCache silently corrupts context mid-generation",
+      "updated_at": "2026-06-19T11:54:12Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/312"
     },
     "mlx_swift_lm_364_gemma_moe": {
-      "repo": "ml-explore/mlx-swift-lm",
       "kind": "pull_request",
-      "number": 364,
-      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/364",
-      "state": "MERGED",
-      "title": "MLXLLM Gemma4Text: add MoE block (router + experts) for the text path",
-      "runbook_tasks": ["T1-02", "TG1"],
-      "updated_at": "2026-07-22T19:29:44Z",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/700",
       "merged_at": "2026-07-21T19:43:49Z",
-      "status": "awaiting_release_tag"
-    }
-  },
-  "releases": {
-    "mlx_swift_lm_latest": {
+      "number": 364,
       "repo": "ml-explore/mlx-swift-lm",
-      "tag": "3.31.4",
-      "published_at": "2026-06-30T16:31:18Z"
+      "runbook_tasks": [
+        "T1-02",
+        "TG1"
+      ],
+      "state": "MERGED",
+      "status": "awaiting_release_tag",
+      "title": "MLXLLM Gemma4Text: add MoE block (router + experts) for the text path",
+      "updated_at": "2026-07-21T20:22:03Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/364"
     },
-    "mlx_swift_latest": {
-      "repo": "ml-explore/mlx-swift",
-      "tag": "0.31.6",
-      "published_at": "2026-07-02T01:30:21Z"
+    "mlx_swift_lm_406_compile_kv_offset": {
+      "closed_at": null,
+      "kind": "issue",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/964",
+      "number": 406,
+      "repo": "ml-explore/mlx-swift-lm",
+      "runbook_tasks": [
+        "T2-01",
+        "TG2"
+      ],
+      "state": "OPEN",
+      "status": "blocked",
+      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode \u2014 cache write position frozen across steps",
+      "updated_at": "2026-07-07T16:53:26Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/406"
+    },
+    "mlx_swift_lm_424_speculative_cache_wrap": {
+      "closed_at": null,
+      "kind": "issue",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/377",
+      "number": 424,
+      "repo": "ml-explore/mlx-swift-lm",
+      "runbook_tasks": [
+        "speculative_cache_wrap"
+      ],
+      "state": "OPEN",
+      "status": "blocked",
+      "title": "RotatingKVCache becomes untrimmable once the window wraps: speculative-decoding rollback silently no-ops, and prompt-cache prefix reuse is defeated",
+      "updated_at": "2026-07-16T15:50:14Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/424"
+    },
+    "mlx_swift_lm_453_typed_cache_storage": {
+      "kind": "pull_request",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/965",
+      "merged_at": "2026-08-05T23:54:27Z",
+      "number": 453,
+      "repo": "ml-explore/mlx-swift-lm",
+      "runbook_tasks": [
+        "quantized_reusable_kv"
+      ],
+      "state": "MERGED",
+      "status": "awaiting_release_tag",
+      "title": "Add typed KV cache configuration and runtime reporting",
+      "updated_at": "2026-08-05T23:54:27Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/453"
+    },
+    "mlx_swift_lm_518_remote_package_unsafe_flags": {
+      "closed_at": null,
+      "kind": "issue",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/700",
+      "number": 518,
+      "repo": "ml-explore/mlx-swift-lm",
+      "runbook_tasks": [
+        "T1-01",
+        "TG1"
+      ],
+      "state": "OPEN",
+      "status": "blocked",
+      "title": "[BUG] Can't add mlx-swift-lm as a dependency because of Unsafe Flags",
+      "updated_at": "2026-08-08T03:18:53Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/518"
     }
   },
   "implementation_signals": {
     "kvcache_offset_graph_traceable": false,
-    "note": "Heuristic: KVCache.swift on upstream main still uses Swift Int offset in KVCacheSimple.update (checked 2026-07-07)."
+    "note": "KVCache.swift heuristic on upstream main"
+  },
+  "last_changed_at": "2026-08-09T09:43:58Z",
+  "last_checked_at": "2026-08-09T09:43:58Z",
+  "macprovider_pins": {
+    "mlx_swift": "0.31.4",
+    "mlx_swift_lm": "3.31.4",
+    "mlx_swift_lm_revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57",
+    "mlx_swift_revision": "dc43e62d7055353c7f99fa071a4e71d29dfddc44",
+    "swift_jinja": "2.4.2",
+    "swift_jinja_revision": "7d0b8880ef8e567dd4e0089f8b99fb354129017c",
+    "swift_transformers": "1.0.0",
+    "swift_transformers_revision": "a2e184dddb4757bc943e77fbe99ac6786c53f0b2"
+  },
+  "protected_release_toolchain": {
+    "note": "mlx-swift 0.31.5/0.31.6 require Swift 6.3 and are not production-compatible",
+    "swift": "6.1",
+    "xcode": "16.4"
+  },
+  "reference_only": {
+    "note": "benchmark/reference only; not a Macprovider runtime dependency",
+    "omlx_latest_stable": "v0.5.7"
+  },
+  "releases": {
+    "mlx_swift_latest": {
+      "published_at": "2026-07-02T01:30:21Z",
+      "repo": "ml-explore/mlx-swift",
+      "tag": "0.31.6"
+    },
+    "mlx_swift_lm_latest": {
+      "published_at": "2026-06-30T16:31:18Z",
+      "repo": "ml-explore/mlx-swift-lm",
+      "tag": "3.31.4"
+    },
+    "swift_jinja_latest": {
+      "published_at": "2026-07-21T09:32:08Z",
+      "repo": "huggingface/swift-jinja",
+      "tag": "2.4.2"
+    },
+    "swift_transformers_latest": {
+      "published_at": "2026-05-16T11:43:01Z",
+      "repo": "huggingface/swift-transformers",
+      "tag": "1.3.3"
+    }
+  },
+  "reviewed_adjacent_pins": {
+    "swift_jinja": "2.4.2",
+    "swift_jinja_revision": "7d0b8880ef8e567dd4e0089f8b99fb354129017c",
+    "swift_transformers": "1.0.0",
+    "swift_transformers_revision": "a2e184dddb4757bc943e77fbe99ac6786c53f0b2"
+  },
+  "schema_version": 2,
+  "source_of_truth": "phase3-binary/Package.resolved",
+  "trackers": {
+    "compiled_decode": "https://github.com/Augustas11/macprovider/issues/964",
+    "engine_upgrade": "https://github.com/Augustas11/macprovider/issues/700",
+    "quantized_reusable_kv": "https://github.com/Augustas11/macprovider/issues/965",
+    "speculative_cache_wrap": "https://github.com/Augustas11/macprovider/issues/377",
+    "swift_transformers_migration": "https://github.com/Augustas11/macprovider/issues/966"
   },
   "watchlist": {
     "omlx": {
-      "repo": "jundot/omlx",
-      "homepage": "https://omlx.ai",
-      "benchmark_page_url": "https://omlx.ai/benchmarks",
-      "latest_release_tag": "v0.5.3",
-      "latest_release_published_at": "2026-07-22",
-      "previous_tracked_release_tag": "v0.5.0.dev3",
-      "benchmark_page_schema_version": "2026-07-09",
       "benchmark_page_reachable_at": "2026-07-22T11:49:28Z",
+      "benchmark_page_schema_version": "2026-07-09",
+      "benchmark_page_url": "https://omlx.ai/benchmarks",
       "community_benchmark_rows_approx": 339980,
-      "submission_min_app_version": "v0.2.6",
-      "runbook_tasks": ["RESEARCH_231", "catalog-calibration"],
       "engine_delta_to_macprovider": 0.85,
+      "homepage": "https://omlx.ai",
+      "latest_release_published_at": "2026-08-08",
+      "latest_release_tag": "v0.5.7",
+      "notes": "Community board uses mlx-lm Python; Macprovider uses mlx-swift-lm. Calibration source only \u2014 not a runtime dependency. See docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md.",
+      "previous_tracked_release_tag": "v0.5.3",
       "refresh_2026-07-22": {
-        "checked_via": "in-app browser UA (server-side fetch 403s on Cloudflare, per RESEARCH_231 §methodology)",
-        "release_drift": "tracked tag was the v0.5.0.dev3 PRERELEASE; upstream is now v0.5.3 stable (v0.5.0/0.5.1/0.5.2/0.5.3 shipped 2026-07-21..22). v0.5.3 notes GLM MTP quantization changes — MTP = multi-token prediction, spec-decode-adjacent; may shift board TG numbers, so engine_delta=0.85 should be re-derived against a v0.5.x-stable snapshot before any gate change.",
         "board_growth": "rows 321280 -> ~339980 (+~18.7k / +5.8% in ~2wk); board live and current (today-dated rows).",
-        "new_signal_for_blocked_p1_row": "qwen3.6-35b-a3b now HAS direct oMLX rows (was extrapolated ~35 TG in the memo): 'Qwen3.6-35B-A3B-4bit-MTP...' on M3 Max 40c 64GB -> TG 90.6 @8k, 95.7 @4k. CAVEAT: MTP build includes built-in speculative acceleration macprovider's plain decode path would NOT get, so do not apply 0.85 naively; treat as upper bound. Residency/VLM-pin/rate-card blockers (E1/E3 + RESEARCH_227) are UNCHANGED — throughput was never the 35b blocker.",
+        "checked_via": "in-app browser UA (server-side fetch 403s on Cloudflare, per RESEARCH_231 \u00a7methodology)",
+        "new_signal_for_blocked_p1_row": "qwen3.6-35b-a3b now HAS direct oMLX rows (was extrapolated ~35 TG in the memo): 'Qwen3.6-35B-A3B-4bit-MTP...' on M3 Max 40c 64GB -> TG 90.6 @8k, 95.7 @4k. CAVEAT: MTP build includes built-in speculative acceleration macprovider's plain decode path would NOT get, so do not apply 0.85 naively; treat as upper bound. Residency/VLM-pin/rate-card blockers (E1/E3 + RESEARCH_227) are UNCHANGED \u2014 throughput was never the 35b blocker.",
+        "release_drift": "tracked tag was the v0.5.0.dev3 PRERELEASE; upstream is now v0.5.3 stable (v0.5.0/0.5.1/0.5.2/0.5.3 shipped 2026-07-21..22). v0.5.3 notes GLM MTP quantization changes \u2014 MTP = multi-token prediction, spec-decode-adjacent; may shift board TG numbers, so engine_delta=0.85 should be re-derived against a v0.5.x-stable snapshot before any gate change.",
         "schema_version_unconfirmed": "no explicit schema stamp on the page; column layout unchanged vs 2026-07-09."
       },
-      "notes": "Community board uses mlx-lm Python; macprovider mlx-swift-lm 3.31.4. Calibration source only — not a runtime dependency. See docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md."
+      "repo": "jundot/omlx",
+      "runbook_tasks": [
+        "RESEARCH_231",
+        "catalog-calibration"
+      ],
+      "submission_min_app_version": "v0.2.6"
     }
   }
 }

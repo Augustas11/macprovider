@@ -133,6 +133,17 @@ The failure MUST be loud and local: nonzero process exit, structured error log, 
 
 ### FR-5. Request gating
 
+**Temporary production safety override (2026-08-09):** upstream
+`mlx-swift-lm` issue #424 shows that rejection rollback may corrupt state after a
+rotating/sliding KV cache wraps. Until a tagged upstream fix and the real
+cache-wrap token/settlement parity canary pass, production `serve` MUST report
+speculative decode disabled and route every request through ordinary target-only
+decode, even when the v0.1 conditions below hold. A dedicated future
+boundary-crossing parity harness tracked in #377 must produce exact token,
+settlement, stop-reason, and artifact-provenance evidence before the production
+gate can reopen; existing benchmark/canary commands remain inside the safe cache
+window and are not production enablement paths.
+
 In v0.1, speculative decoding MUST run only when all conditions hold:
 
 - `draft_model` is configured and compatibility-checked.

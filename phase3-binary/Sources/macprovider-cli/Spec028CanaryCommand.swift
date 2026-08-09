@@ -111,6 +111,8 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
             draftModelID: fixture.draftModel,
             draftModelLoadPath: draftLoadPath,
             numDraftTokens: numDraftTokens,
+            // Diagnostic-only validation path; production serve stays fail-closed.
+            speculativeCacheWrapValidated: true,
             maxContextTokensOverride: maxContextTokens,
             maxBatch: 1,
             warmSwapEnabled: false
@@ -207,6 +209,8 @@ struct Spec028CanaryCommand: AsyncParsableCommand {
             draftModelID: shortChat.draftModel,
             draftModelLoadPath: draftLoadPath,
             numDraftTokens: numDraftTokens,
+            // Diagnostic-only validation path; production serve stays fail-closed.
+            speculativeCacheWrapValidated: true,
             maxContextTokensOverride: ac11MaxContextTokens(),
             maxBatch: 1,
             warmSwapEnabled: false
