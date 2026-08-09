@@ -194,6 +194,40 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(resolved[0]["source_model_id"], "google/gemma-4-31b-it")
         self.assertEqual(resolved[0]["ranking_model_permaslug"], "google/gemma-4-31b-it-20260402")
 
+    def test_catalog_alias_resolution_uses_endpoint_confirmed_regular_variant_over_batch(self):
+        rankings = [{"source_model_id": "z-ai/glm-5.2-20260616", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-08"}]
+        catalog = {
+            "z-ai/glm-5.2": {"canonical_slug": "z-ai/glm-5.2-20260616"},
+            "z-ai/glm-5.2:batch": {"canonical_slug": "z-ai/glm-5.2-20260616"},
+        }
+        pending = engine.resolve_rankings_to_catalog(rankings, catalog)
+        self.assertEqual(pending[0]["source_model_id"], "z-ai/glm-5.2-20260616")
+        self.assertEqual(pending[0]["_identity_resolution"], "endpoint_candidate_pending")
+        endpoints = {"z-ai/glm-5.2-20260616": {"data": {"id": "z-ai/glm-5.2"}}}
+        resolved = engine.resolve_rankings_to_catalog(rankings, catalog, endpoints)
+        self.assertEqual(resolved[0]["source_model_id"], "z-ai/glm-5.2")
+        self.assertEqual(resolved[0]["_identity_resolution"], "endpoint_confirmed_catalog_candidate")
+
+    def test_catalog_alias_resolution_rejects_endpoint_id_not_in_ambiguous_candidates(self):
+        rankings = [{"source_model_id": "z-ai/glm-5.2-20260616", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-08"}]
+        catalog = {
+            "z-ai/glm-5.2": {"canonical_slug": "z-ai/glm-5.2-20260616"},
+            "z-ai/glm-5.2:batch": {"canonical_slug": "z-ai/glm-5.2-20260616"},
+        }
+        endpoints = {"z-ai/glm-5.2-20260616": {"data": {"id": "z-ai/other"}}}
+        with self.assertRaisesRegex(engine.SchemaError, "does not uniquely identify a catalog candidate"):
+            engine.resolve_rankings_to_catalog(rankings, catalog, endpoints)
+
+    def test_catalog_alias_resolution_rejects_malformed_endpoint_for_ambiguous_candidates(self):
+        rankings = [{"source_model_id": "z-ai/glm-5.2-20260616", "rank": 1, "total_token_volume": "10", "ranking_date": "2026-08-08"}]
+        catalog = {
+            "z-ai/glm-5.2": {"canonical_slug": "z-ai/glm-5.2-20260616"},
+            "z-ai/glm-5.2:batch": {"canonical_slug": "z-ai/glm-5.2-20260616"},
+        }
+        endpoints = {"z-ai/glm-5.2-20260616": {"data": {}}}
+        with self.assertRaises(engine.SchemaError):
+            engine.resolve_rankings_to_catalog(rankings, catalog, endpoints)
+
     def test_catalog_missing_dated_ranking_uses_endpoint_confirmed_alias(self):
         rankings = {"data": [{"date": "2026-08-04", "model_permaslug": "bytedance-seed/seedream-4.5-20251203", "total_tokens": "10"}], "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-08-04", "end_date": "2026-08-04", "version": "v1"}}
         catalog = {"data": [{"id": "example/other", "canonical_slug": "example/other", "pricing": None}]}
@@ -310,8 +344,12 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             engine.build_snapshot(self.rankings, self.models, partial, policy(), now=NOW, top_n=4)
         empty_pricing = copy.deepcopy(self.endpoints)
         empty_pricing["openai/gpt-oss-20b"]["data"]["endpoints"] = []
-        with self.assertRaises(engine.SchemaError):
-            engine.build_snapshot(self.rankings, self.models, empty_pricing, policy(), now=NOW, top_n=4)
+        snapshot_with_unpriced_model = engine.build_snapshot(
+            self.rankings, self.models, empty_pricing, policy(), now=NOW, top_n=4
+        )
+        empty_endpoint_row = next(row for row in snapshot_with_unpriced_model["rows"] if row["source_model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(empty_endpoint_row["pricing_status"], "no_active_priced_endpoint")
+        self.assertIsNone(empty_endpoint_row["pricing"])
         invalid = copy.deepcopy(self.endpoints)
         invalid["openai/gpt-oss-20b"]["data"]["endpoints"][0]["pricing"]["completion"] = "-1"
         with self.assertRaises(engine.SchemaError):

@@ -475,8 +475,10 @@ def resolve_rankings_to_catalog(
     OpenRouter rankings can retain a dated permaslug after the catalog exposes
     the same model under a current ID. If the catalog no longer lists a dated
     ranking ID, the endpoint response for that exact dated ID may authoritatively
-    return its current ID. All other ambiguity is a coverage failure, never a
-    guess.
+    return its current ID. When a canonical slug maps to several catalog IDs,
+    the endpoint response for the exact ranking permaslug may select one only
+    if its returned ID is exactly one of those catalog candidates. All other
+    ambiguity is a coverage failure, never a guess.
     """
     canonical_index: dict[str, list[str]] = {}
     for model_id, catalog_row in catalog.items():
@@ -502,22 +504,32 @@ def resolve_rankings_to_catalog(
                 if len(paid_candidates) == 1:
                     catalog_id = paid_candidates[0]
                     identity_resolution = "catalog_paid_variant"
-                elif not candidates:
+                else:
                     if endpoint_documents is None:
-                        # Fetch the dated endpoint first; build_snapshot will
-                        # validate and replace this temporary request identity.
+                        # Fetch the ranking permaslug itself first.  It is a
+                        # temporary request identity, not a selected catalog
+                        # row; build_snapshot validates the response before
+                        # accepting an alias or a candidate.
                         catalog_id = ranking_slug
-                        identity_resolution = "endpoint_alias_pending"
+                        identity_resolution = (
+                            "endpoint_alias_pending" if not candidates else "endpoint_candidate_pending"
+                        )
                     else:
                         endpoint_document = endpoint_documents.get(ranking_slug)
                         if endpoint_document is None:
                             raise SchemaError(f"partial pull: endpoints response missing for ranked model {ranking_slug!r}")
-                        catalog_id = endpoint_response_model_id(endpoint_document, ranking_slug)
-                        identity_resolution = "endpoint_alias_fallback"
-                else:
-                    raise SchemaError(
-                        f"catalog response cannot uniquely resolve ranked model {ranking_slug!r} to an endpoint model id"
-                    )
+                        endpoint_id = endpoint_response_model_id(endpoint_document, ranking_slug)
+                        if not candidates:
+                            catalog_id = endpoint_id
+                            identity_resolution = "endpoint_alias_fallback"
+                        else:
+                            matching_candidates = [candidate for candidate in candidates if candidate == endpoint_id]
+                            if len(matching_candidates) != 1:
+                                raise SchemaError(
+                                    f"endpoints response for ranked model {ranking_slug!r} does not uniquely identify a catalog candidate"
+                                )
+                            catalog_id = matching_candidates[0]
+                            identity_resolution = "endpoint_confirmed_catalog_candidate"
         normalized = dict(demand)
         normalized["source_model_id"] = catalog_id
         normalized["ranking_model_permaslug"] = ranking_slug
@@ -548,8 +560,8 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
     if data.get("id") != model_id:
         raise SchemaError(f"endpoints response for {model_id}: response id mismatch")
     endpoints = data.get("endpoints")
-    if not isinstance(endpoints, list) or not endpoints:
-        raise SchemaError(f"endpoints response for {model_id}: endpoints must be a non-empty list")
+    if not isinstance(endpoints, list):
+        raise SchemaError(f"endpoints response for {model_id}: endpoints must be a list")
     priced: list[tuple[Decimal, Decimal, str]] = []
     for index, endpoint in enumerate(endpoints):
         if not isinstance(endpoint, dict):
@@ -670,7 +682,12 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot.rows[{index}] has invalid catalog provenance")
         if source_metadata["catalog_name"] is not None and not isinstance(source_metadata["catalog_name"], str):
             raise SchemaError(f"snapshot.rows[{index}] has invalid catalog provenance")
-        if source_metadata["identity_resolution"] not in {"catalog", "catalog_paid_variant", "endpoint_alias_fallback"}:
+        if source_metadata["identity_resolution"] not in {
+            "catalog",
+            "catalog_paid_variant",
+            "endpoint_alias_fallback",
+            "endpoint_confirmed_catalog_candidate",
+        }:
             raise SchemaError(f"snapshot.rows[{index}] has invalid identity resolution")
         if pricing_status == "active_priced":
             parse_decimal(pricing.get("input_per_mtok"), f"snapshot.rows[{index}].pricing.input_per_mtok")
@@ -703,7 +720,11 @@ def build_snapshot(
     rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents)
     resolved_endpoints: dict[str, Mapping[str, Any]] = {}
     for demand in rankings:
-        request_id = demand["ranking_model_permaslug"] if demand["_identity_resolution"] == "endpoint_alias_fallback" else demand["source_model_id"]
+        request_id = (
+            demand["ranking_model_permaslug"]
+            if demand["_identity_resolution"] in {"endpoint_alias_fallback", "endpoint_confirmed_catalog_candidate"}
+            else demand["source_model_id"]
+        )
         source_model_id = demand["source_model_id"]
         if source_model_id in resolved_endpoints:
             raise SchemaError(f"endpoint alias resolution produced duplicate model id {source_model_id!r}")
