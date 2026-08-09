@@ -31,8 +31,8 @@ there is intentionally no apply mode in this tool.
 Run the workflow once per day after the UTC ranking window closes. Archive
 successful outputs under `docs/research/openrouter-snapshots/`; its README
 defines the durable artifact contract. Retain timestamped snapshots and
-proposals such as `openrouter-pricing-snapshot-<YYYYMMDDTHHMMSSZ>.json` and
-`openrouter-rate-card-proposal-<YYYYMMDDTHHMMSSZ>-<digest8>.json`. Preserve
+proposals such as `openrouter-pricing-snapshot-YYYY-MM-DDTHH-MM-SSZ-<digest16>.json`
+and `openrouter-rate-card-proposal-YYYY-MM-DDTHH-MM-SSZ-<digest16>.json`. Preserve
 each artifact's content digest and review notes; never hand-edit an artifact.
 
 Treat artifacts older than 48 hours as stale for a pricing decision. A stale
