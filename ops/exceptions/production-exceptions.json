@@ -1,8 +1,8 @@
 {
   "$schema": "./production-exceptions.schema.json",
   "schema_version": "macprovider-production-exceptions-v1",
-  "updated_at": "2026-07-23T23:40:33Z",
-  "updated_by": "fix/609-clear-hash-containment",
+  "updated_at": "2026-08-09T00:00:00Z",
+  "updated_by": "fix/960-permanent-referral-posture",
   "environment": "pearl-production",
   "exceptions": [
     {
@@ -281,28 +281,30 @@
     },
     {
       "id": "exc-entry172-air-referral-activation",
-      "status": "expired",
+      "status": "removed",
       "environment": "pearl-production",
       "component": "edge",
-      "policy_delta": "Entry 172 allowed one controlled private-prebeta referral activation while the Air exception was not #613-complete; the first fresh referred-provider invite-earn journey has now PASSed, so the exception expiry condition is met while Pearl referral flags still need operator roll-off cleanup.",
+      "policy_delta": "Entry 172 allowed one controlled private-prebeta referral activation while the Air exception was not #613-complete. Decision Entry 224 supersedes that expired exception with an ongoing reviewed provider-prebeta referral/X campaign posture; any live public referral flags now derive from Entry 224 and #960 evidence, not from this exception.",
       "authority_surface": "Pearl referral overlay keys `referrals.require_for_registration`, `referrals.enable_public_validation`, `referrals.enable_join_links`, `referrals.enable_social_invite_bonus`, `referrals.campaign`, `referrals.current_key_id`, and Vercel product-origin `/j` landing page.",
-      "reason": "Decision Entry 172 and SPEC-034 \u00a78 define a one-time limited Air / fragment-link activation exception for private-prebeta referrals, with strict order, rollback, and expiry on terminal success/failure of the first fresh referred-provider journey.",
+      "reason": "Decision Entry 172 and SPEC-034 \u00a78 defined a one-time limited Air / fragment-link activation exception for private-prebeta referrals, with strict order, rollback, and expiry on terminal success/failure of the first fresh referred-provider journey. Decision Entry 224 makes the ongoing campaign posture reviewed first-class policy instead of extending the exception.",
       "owner": "referral activation/security",
       "issue": "https://github.com/Augustas11/macprovider/issues/615",
       "created_at": "2026-07-19T00:00:00Z",
       "expires_at": "2026-07-26T23:59:59Z",
-      "scope": "Entry 172 private-prebeta referral campaign only; Air5 fresh referred journey PASS for `mp-90542c0bcf7c4d303795cd10bda3830d` closed invite-earn under campaign `prebeta_20260719` with issuer `tn6skbiu4cfeiffs`. No broad stable release and no claim of complete #613 two-Mac conformance.",
-      "removal_condition": "Terminal success of the first fresh referred-provider journey is recorded; mark `removed` only after Pearl referral flags are rolled back to recorded prior/off values and `post_removal_validation` passes. Keeping or re-enabling flags afterward requires complete #613 evidence or a new reviewed decision.",
-      "rollback_command": "Restore the prior recorded Pearl referral flag values for `require_for_registration`, `enable_public_validation`, `enable_join_links`, and `enable_social_invite_bonus`; do not print HMAC secrets or referral codes.",
-      "post_removal_validation": "Pearl flags match the recorded prior/off values, Vercel `/j` remains fragment-only/static, coordinator validation rejects disallowed origins, and no server logs contain invite code or challenge material.",
-      "blocks_stable_promotion": true,
+      "scope": "Historical Entry 172 private-prebeta referral activation only; Air5 fresh referred journey PASS for `mp-90542c0bcf7c4d303795cd10bda3830d` closed invite-earn under campaign `prebeta_20260719` with issuer `tn6skbiu4cfeiffs`. Ongoing prebeta campaign exposure is governed by Decision Entry 224 and #960, not by this exception. No broad stable release and no claim of complete #613 two-Mac conformance.",
+      "removal_condition": "Superseded by Decision Entry 224 as the reviewed ongoing prebeta referral/X campaign posture. Keep this removed entry only as historical evidence; do not recreate it as active or expired to authorize live flags.",
+      "rollback_command": "Use the Entry 224 / SPEC-034 rollback path for the active campaign: disable `enable_public_validation`, `enable_join_links`, and `enable_social_invite_bonus` without deleting committed referral state or disabling the B6 `require_for_registration` gate while fresh mint surfaces remain enabled. Do not print HMAC secrets or referral codes.",
+      "post_removal_validation": "Exception authority is removed. #960 must record current live referral flag values, Vercel `/j` fragment-only/static behavior, coordinator alternate-origin rejection, immutable release/download identities, rollback evidence, and absence of invite/challenge material in server logs before SPEC-034-R001 promotion.",
+      "blocks_stable_promotion": false,
       "evidence": [
         "beta/DECISION_CRITERIA.md Entry 172",
+        "beta/DECISION_CRITERIA.md Entry 224",
         "specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance",
         "ops/runbooks/entry-172-referral-activation.md",
         "ops/runbooks/entry-172-activation-evidence-20260721.md",
         "ops/runbooks/entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21",
-        "https://github.com/Augustas11/macprovider/issues/615"
+        "https://github.com/Augustas11/macprovider/issues/615",
+        "https://github.com/Augustas11/macprovider/issues/960"
       ]
     }
   ],
@@ -354,7 +356,7 @@
       "question": "If Entry 172 activation has started, what exact prior/live referral flag values and campaign metadata were recorded without exposing HMAC secrets or referral codes?",
       "owner": "referral activation/security",
       "status": "answered",
-      "evidence_target": "`ops/runbooks/entry-172-activation-evidence-20260721.md` records redacted PASS LIVE activation plus Air5 fresh invite-earn PASS; `exc-entry172-air-referral-activation` is `expired` on terminal journey success and stays `expired` until flag roll-off + `post_removal_validation` allow `removed`."
+      "evidence_target": "`ops/runbooks/entry-172-activation-evidence-20260721.md` records redacted PASS LIVE activation plus Air5 fresh invite-earn PASS. `exc-entry172-air-referral-activation` is now removed as exception authority because Decision Entry 224 governs the ongoing prebeta referral/X campaign; #960 owns current live posture evidence."
     }
   ]
 }

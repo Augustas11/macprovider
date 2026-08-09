@@ -1,22 +1,27 @@
-# Entry 172 Referral Activation Runbook
+# Prebeta Referral/X Campaign Activation Runbook
 
 ## 0. Status / Scope Banner
 
-Docs-only activation checklist for Decision Entry 172 and [SPEC-034 §8](../../specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance).
+Docs-only activation and verification checklist for Decision Entries 172 and
+224 and [SPEC-034 §8](../../specs/SPEC-034-referral-gated-prebeta.md#8-activation-rollback-and-acceptance).
 
 This runbook does not flip production flags, deploy services, create seed codes, write live databases, or cut a release. It describes the operator path for a later controlled private-prebeta activation.
 
-Air exception is not #613 complete. It does not close #613 or mark the two-Mac
-journey conformant. The first fresh referred-provider invite-earn journey has
-PASSed; see the evidence file below.
+Entry 172 is historical activation evidence, not ongoing exception authority.
+Decision Entry 224 makes invite links and X posting an ongoing reviewed
+provider-prebeta campaign posture when current deployment identity, flag, route,
+capability, immutable-release, and rollback evidence are recorded. The campaign
+does not close #613 or mark the two-Mac journey conformant. The first fresh
+referred-provider invite-earn journey has PASSed; see the evidence file below.
 
-Register row: [`exc-entry172-air-referral-activation`](../exceptions/production-exceptions.json) in the #615 production exception register (`status: expired` on terminal journey PASS; remains `expired` until flag roll-off + post-removal validation allow `removed`).
+Register row: [`exc-entry172-air-referral-activation`](../exceptions/production-exceptions.json) in the #615 production exception register is historical/removed as exception authority. Ongoing prebeta campaign exposure is governed by Decision Entry 224 and #960.
 
 Expiry condition met by terminal journey PASS (calendar expiry was
-`2026-07-26T23:59:59Z`). Keeping or re-enabling referral flags afterward
-requires complete #613 evidence or a new reviewed decision.
+`2026-07-26T23:59:59Z`). Keeping referral flags enabled afterward requires the
+reviewed Entry 224 campaign posture and current #960 evidence, not reuse of the
+expired Entry 172 exception.
 
-Last successful activation evidence: [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md) records the redacted PASS LIVE activation result for the v1.8.56 baseline plus the Air5 fresh invite-earn PASS. Future re-runs must still re-confirm current release tags, asset hashes, deploy IDs, and live flag state before any operation.
+Last successful activation evidence: [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md) records the redacted PASS LIVE activation result for the v1.8.56 baseline plus the Air5 fresh invite-earn PASS. Current operation must still re-confirm current release tags, asset hashes, deploy IDs, and live flag state before relying on the campaign.
 
 Fail closed if any checklist item below is unmet.
 
@@ -39,7 +44,9 @@ Fail closed if any checklist item below is unmet.
   - `referrals.hmac_keys.<KEY_ID>` sourced from `$MAL_REFERRAL_SECRET`
   - optional `referrals.x_api_bearer_token` sourced from `$X_API_BEARER_TOKEN`
 - [ ] Checked-in config keeps public exposure disabled while B6 keeps fresh
-  provider registration invite-gated:
+  provider registration invite-gated. Live Pearl may intentionally override
+  these values for the reviewed Entry 224 prebeta campaign only after current
+  #960 evidence records the active deployment posture:
   - `referrals.require_for_registration: true` whenever
     `auth.allow_tokenless_provisional_bootstrap` or
     `onboarding.app_track_register_enabled` is enabled
@@ -171,8 +178,8 @@ Do not edit checked-in `phase4-coordinator/dist/coordinator.yaml`. Edit only Pea
 Current coordinator config validation requires `enable_join_links=true` to have both `require_for_registration=true` and `enable_public_validation=true`. B6 also requires `require_for_registration=true` whenever `auth.allow_tokenless_provisional_bootstrap` or `onboarding.app_track_register_enabled` is enabled. Therefore:
 
 - Default posture: keep `require_for_registration=true` while any fresh provider-token mint surface remains enabled, and keep public exposure flags false.
-- If the operator does not choose public Entry 172 activation, stop here; `enable_join_links=true` is not valid without public validation.
-- If the operator explicitly chooses Entry 172 public activation, set the live Pearl overlay as one reviewed config transaction:
+- If the operator does not choose public prebeta campaign activation, stop here; `enable_join_links=true` is not valid without public validation.
+- If the operator explicitly chooses or confirms Entry 224 public prebeta campaign activation, set or verify the live Pearl overlay as one reviewed config transaction:
 
 ```yaml
 referrals:
@@ -278,7 +285,9 @@ Restart or reload through the same coordinator procedure and record the config b
 
 ### G. Decision Point
 
-PASS: the operator may keep the reversible private-prebeta flags live under Entry 172 until the earliest expiry condition.
+PASS: the operator may keep the reversible private-prebeta flags live under
+Entry 224 when #960 records the current deployment posture. Entry 172 remains
+historical evidence only and must not be reused as exception authority.
 
 FAIL or expiry: immediately roll back public exposure flags to prior values:
 
@@ -286,7 +295,7 @@ FAIL or expiry: immediately roll back public exposure flags to prior values:
 - `enable_join_links`
 - `enable_social_invite_bonus`
 
-`require_for_registration` is not an Entry 172 public-exposure flag after B6. It remains governed by the B6 fresh-registration admission invariant: keep it true while any fresh provider-token mint surface remains enabled. Setting it false is valid only in the same reviewed config transaction that disables all fresh mint surfaces, or under a later reviewed normative exception.
+`require_for_registration` is not a public-exposure flag after B6. It remains governed by the B6 fresh-registration admission invariant: keep it true while any fresh provider-token mint surface remains enabled. Setting it false is valid only in the same reviewed config transaction that disables all fresh mint surfaces, or under a later reviewed normative exception.
 
 ## 4. Immediate Rollback
 
@@ -299,7 +308,7 @@ referrals:
   enable_social_invite_bonus: <PRIOR_ENABLE_SOCIAL_INVITE_BONUS>
 ```
 
-If Entry 172 started from checked-in defaults, rollback values are:
+If the active campaign started from checked-in defaults, rollback values are:
 
 ```yaml
 referrals:
@@ -359,7 +368,7 @@ durable-state preservation check:
 
 - This runbook does not close #613, #658, #582, #617, #661, or any Lane C work.
 - #658 still needs the trust-preserving bridge plus physical update, rollback, buyer-serving, and renewal evidence for continuous discovery.
-- The first available fresh referred-provider invite-earn journey PASSed on Air5 (`mp-90542c0bcf7c4d303795cd10bda3830d`); see [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21). That PASS expires `exc-entry172-air-referral-activation` but does not claim #613 two-Mac conformance; Pearl flag roll-off remains an operator follow-up before `removed`.
+- The first available fresh referred-provider invite-earn journey PASSed on Air5 (`mp-90542c0bcf7c4d303795cd10bda3830d`); see [`entry-172-activation-evidence-20260721.md`](./entry-172-activation-evidence-20260721.md#fresh-referred-provider-invite-earn-pass-2026-07-21). That PASS expired `exc-entry172-air-referral-activation`; Entry 224 now governs ongoing prebeta referral/X exposure, and #960 owns current evidence before `SPEC-034-R001` promotion.
 - Lane C / #615 owns exception inventory. Do not implement #615 from this runbook.
 - This runbook does not implement the #658 discovery bridge.
 - This runbook does not deploy, tag, publish, change nginx, change checked-in flag defaults, write live DB rows, create real HMAC secrets, or create real seed codes.
