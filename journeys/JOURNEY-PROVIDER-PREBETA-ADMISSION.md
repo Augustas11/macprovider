@@ -4,7 +4,7 @@ Mapped SPECs: SPEC-010, SPEC-023, SPEC-032, SPEC-033, SPEC-034
 Mapped authority domains: model-catalog-identity, installer-autotune-policy, hardware-evidence-admission, hardware-evidence-verifier, referral-advocacy-policy
 Related provider-prebeta context: SPEC-003, SPEC-013, SPEC-025, SPEC-026
 Issue: https://github.com/Augustas11/macprovider/issues/895
-Status: contract-defined; physical evidence pending
+Status: core physical admission journey captured and signed; requirement-specific variants tracked separately
 
 ## Purpose
 
@@ -19,6 +19,33 @@ It is not itself evidence. The mapped requirements stay pending until a real
 run on physical Macs produces a redacted, recomputable artifact under
 `journeys/evidence/` and any sensitive conformance promotion also satisfies
 the signed journey-result contract required by `specs/PROCESS.md`.
+
+## Current evidence and residual ownership
+
+The core provider-prebeta admission journey passed on a physical M4 Pro 24 GB
+provider on 2026-08-06. The redacted artifact
+`journeys/evidence/provider-prebeta-admission-m4pro-20260806T065625Z.redacted.json`
+records private-prebeta authorization posture, install/launch identity,
+registration, catalog selection, hardware verification, route eligibility,
+buyer serving smoke, and redaction/correlation as passing. Protected workflow
+run `31079621386` signed the requirement-scoped result at
+`journeys/evidence/provider-prebeta-admission-m4pro-20260806T065625Z.spec-033-r001.journey-result.signed.json`,
+and `SPEC-033-R001` is conformant.
+
+That signed result intentionally does not promote requirement variants it did
+not exercise. Their pending evidence ownership is split from issue #895:
+
+- #957 — `SPEC-010-R004` through `SPEC-010-R006`, exact route/model identity,
+  bounded legacy-bridge posture, and explicitly enabled warm-swap evidence;
+- #958 — `SPEC-023-R001` and `SPEC-023-R002`, physical autotune transcript,
+  provenance, and warning evidence;
+- #959 — `SPEC-032-R001` through `SPEC-032-R003`, the default-off strict
+  admission-gate evidence matrix under a separately approved run plan;
+- #960 — `SPEC-034-R001`, the enabled exact referral authority, capability,
+  immutable-release, activation, and rollback path. Disabled or not-required
+  cohort evidence records posture only and cannot promote this requirement.
+
+Those rows remain pending and must not reuse the SPEC-033-only result as proof.
 
 ## Required Roles
 
