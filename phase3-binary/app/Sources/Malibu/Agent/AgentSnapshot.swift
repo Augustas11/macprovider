@@ -168,6 +168,7 @@ struct AgentSnapshot: Equatable {
     var payoutRegisteredAddress: String? = nil
     var payoutPendingUntilUTC: String? = nil
     var payoutRegistrationInProgress: Bool = false
+    var payoutRegistrationCanCancel: Bool = false
     var payoutLastError: String? = nil
     var payoutLastStatus: String? = nil
 
@@ -283,6 +284,7 @@ struct AgentSnapshot: Equatable {
         payoutRegisteredAddress = nil
         payoutPendingUntilUTC = nil
         payoutRegistrationInProgress = false
+        payoutRegistrationCanCancel = false
         payoutLastError = nil
         payoutLastStatus = nil
     }
