@@ -1,7 +1,7 @@
 {
   "schema_version": "macprovider-removed-exception-tombstones-v1",
-  "updated_at": "2026-07-23T23:40:33Z",
-  "updated_by": "fix/609-clear-hash-containment",
+  "updated_at": "2026-08-09T00:00:00Z",
+  "updated_by": "fix/960-permanent-referral-posture",
   "environment": "pearl-production",
   "tombstones": [
     {
@@ -15,6 +15,12 @@
       "removed_at": "2026-07-23T23:40:33Z",
       "removal_evidence": "https://github.com/Augustas11/macprovider/issues/608#issuecomment-5064599896",
       "authority_surface": "Pearl tier2.require_hash_verified, tier2.model_hash_legacy_until / MODEL_HASH_LEGACY_UNTIL, and model_hash_algorithm_legacy_bridge compatibility authority."
+    },
+    {
+      "id": "exc-entry172-air-referral-activation",
+      "removed_at": "2026-08-09T00:00:00Z",
+      "removal_evidence": "https://github.com/Augustas11/macprovider/issues/960",
+      "authority_surface": "Pearl public provider waitlist/invite flags, Vercel /j referral landing flow, referral validation/join endpoints, and associated X/social campaign posture."
     }
   ],
   "notes": "IDs listed here were removed from production authority. Config sync, overlay merge, rollback restore, or register edits must not recreate them as active/planned/expired without a new reviewed exception ID."
