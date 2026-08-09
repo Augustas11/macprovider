@@ -19,6 +19,10 @@ private enum ModelFeatureUI {
     static let backgroundRecommendations = String(localized: "Background recommendations", comment: "Model settings toggle")
     static let backgroundExplanation = String(localized: "Malibu checks only when the provider advertises the isolated recommendation adapter and local conditions are safe. Manual model switching remains available.", comment: "Model settings explanation")
     static let updateRequired = String(localized: "Recommendation checks require a provider update. Model switching is still available when the provider is running with warm swap.", comment: "Model recommendation capability state")
+    static let recommended = String(localized: "Recommended", comment: "Recommendation callout title")
+    static let adopt = String(localized: "Adopt", comment: "Recommendation action")
+    static let notNow = String(localized: "Not now", comment: "Recommendation snooze action")
+    static let stopBackground = String(localized: "Stop background recommendations", comment: "Recommendation opt-out action")
 
     static func operationLabel(_ raw: String) -> String {
         switch raw {
@@ -70,6 +74,11 @@ struct ModelSwitcherSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.updatesFrequently)
+
+            if let recommendation = store.recommendation,
+               let target = recommendation.recommendedModel {
+                recommendationCallout(recommendation, target: target)
+            }
 
             if store.listState == .checking {
                 ProgressView(ModelFeatureUI.checking)
@@ -139,12 +148,66 @@ struct ModelSwitcherSheet: View {
                 currentModelID: agent.snapshot.currentModelID,
                 peer: MalibuModelPeerEvidence(snapshot: agent.snapshot)
             )
-            store.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
+            await store.startBackgroundCheckIfEligible(thermalState: agent.snapshot.thermalState)
         }
     }
 
     private var canAct: Bool {
         store.canPerformModelAction
+    }
+
+    private func recommendationCallout(
+        _ recommendation: MalibuRecommendationDocument,
+        target: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(ModelFeatureUI.recommended)
+                .font(.headline)
+            Text(target)
+                .font(.body.monospaced())
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            if let why = recommendation.recommendedCandidate?.why {
+                Text(why)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(String(localized: "Scope: signed catalog \(recommendation.inputs.candidateCatalogVersion) for \(recommendation.hardware.chip), \(recommendation.hardware.memoryGB) GB.", comment: "Recommendation evidence scope"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let prompt = recommendation.promptRateUSDPerMillionTokens,
+               let completion = recommendation.completionRateUSDPerMillionTokens {
+                Text(String(localized: "Estimated rates: prompt $\(prompt, format: .number.precision(.fractionLength(2...4))) / 1M; completion $\(completion, format: .number.precision(.fractionLength(2...4))) / 1M.", comment: "Recommendation estimated rates"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if !recommendation.warnings.isEmpty {
+                Text(String(localized: "Warnings: \(recommendation.warnings.joined(separator: ", "))", comment: "Recommendation warnings"))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Button(ModelFeatureUI.adopt) {
+                    Task { await store.adoptRecommendation() }
+                }
+                .disabled(!store.canAdoptRecommendation)
+                .keyboardShortcut(.defaultAction)
+                .accessibilityHint(Text(String(localized: "The provider validates, applies, switches, and verifies this recommendation as one transaction.", comment: "Adopt accessibility hint")))
+                Button(ModelFeatureUI.notNow) { store.snoozeRecommendation() }
+                Button(ModelFeatureUI.stopBackground) { store.stopBackgroundRecommendations() }
+            }
+            if let unavailableReason = store.recommendationAdoptionUnavailableReason {
+                Text(unavailableReason)
+                    .font(.caption2)
+                    .foregroundStyle(recommendation.isActionable ? Color.secondary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.09)))
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
@@ -256,7 +319,7 @@ private struct ModelRowView: View {
 }
 
 struct ModelSettingsView: View {
-    @StateObject private var store = ModelManagementStore()
+    @ObservedObject private var store = ModelManagementStore.shared
 
     var body: some View {
         Form {

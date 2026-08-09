@@ -97,6 +97,65 @@ final class ControlSocketTests: XCTestCase {
         ))
     }
 
+    func testEncodeDecodeModelAdoptionFrames() throws {
+        let authority = makeAdoptionAuthority()
+        try assertRoundTrip(.prepareModelAdoptionRequest(authority))
+        try assertRoundTrip(.prepareModelAdoptionResult(ModelAdoptionPrepareResultWire(
+            transactionID: authority.transactionID,
+            accepted: true,
+            reason: nil,
+            targetModelID: authority.targetModelID,
+            targetArtifactPath: authority.targetArtifactPath,
+            targetArtifactSHA256: authority.targetArtifactSHA256,
+            targetCatalogRevision: authority.targetCatalogRevision,
+            serveKnobsSHA256: authority.serveKnobsSHA256,
+            catalogIdentitySHA256: authority.catalogIdentitySHA256
+        )))
+        try assertRoundTrip(.applyModelAdoptionRequest(transactionID: authority.transactionID, requestedAtMs: 456))
+        try assertRoundTrip(.cancelModelAdoptionRequest(transactionID: authority.transactionID, requestedAtMs: 457))
+        try assertRoundTrip(.cancelModelAdoptionResult(
+            transactionID: authority.transactionID,
+            accepted: true,
+            reason: nil
+        ))
+        try assertRoundTrip(.finalizeModelAdoptionRequest(
+            transactionID: authority.transactionID,
+            requestedAtMs: 458
+        ))
+        try assertRoundTrip(.finalizeModelAdoptionResult(
+            transactionID: authority.transactionID,
+            accepted: true,
+            reason: nil
+        ))
+        try assertRoundTrip(.claimModelAdoptionRecoveryRequest(
+            transactionID: authority.transactionID,
+            fromModelID: authority.expectedIncumbentModelID,
+            targetModelID: authority.targetModelID,
+            requestedAtMs: 459
+        ))
+        try assertRoundTrip(.claimModelAdoptionRecoveryResult(
+            transactionID: authority.transactionID,
+            accepted: true,
+            reason: nil,
+            currentModelID: authority.targetModelID,
+            runtimeState: .ready
+        ))
+        try assertRoundTrip(.modelAdoptionProgress(ModelAdoptionProgressWire(
+            transactionID: authority.transactionID,
+            state: "loaded",
+            elapsedMS: 7,
+            reason: nil,
+            targetModelID: authority.targetModelID,
+            targetArtifactPath: authority.targetArtifactPath,
+            targetArtifactSHA256: authority.targetArtifactSHA256,
+            targetCatalogRevision: authority.targetCatalogRevision,
+            serveKnobsSHA256: authority.serveKnobsSHA256,
+            catalogIdentitySHA256: authority.catalogIdentitySHA256,
+            loadedModelID: authority.targetModelID,
+            loadedModelSHA256: authority.targetArtifactSHA256
+        )))
+    }
+
     func testDecodeRejectsMissingType() {
         XCTAssertThrowsError(try ControlSocketCodec.decode(Data(#"{"target_model_id":"X"}"#.utf8))) { error in
             XCTAssertEqual(error as? ControlSocketError, .missingType)
@@ -408,6 +467,200 @@ final class ControlSocketTests: XCTestCase {
         await server.stop()
 
         XCTAssertEqual(response, .statusResponse(currentModelID: "ready-model", runtimeState: .ready))
+    }
+
+    func testServerPreparesAndAppliesTransactionScopedModelAdoption() async throws {
+        let socketPath = try makeSocketPath()
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: authority.expectedIncumbentModelID,
+            targetAuthorities: [
+                authority.targetModelID: ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: [authority.targetModelID]
+        )
+        let server = makeServer(
+            socketPath: socketPath,
+            modelRuntime: runtime,
+            supportedModels: [authority.targetModelID]
+        )
+        try await server.start()
+
+        let prepare = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await prepare.send(.prepareModelAdoptionRequest(authority))
+        let prepareResponse = try await prepare.receive(timeout: 1)
+        await prepare.close()
+        guard case let .prepareModelAdoptionResult(result) = prepareResponse else {
+            await server.stop()
+            return XCTFail("unexpected prepare response: \(prepareResponse)")
+        }
+        XCTAssertTrue(result.accepted)
+        XCTAssertEqual(result.targetArtifactPath, authority.targetArtifactPath)
+        XCTAssertEqual(result.targetArtifactSHA256, authority.targetArtifactSHA256)
+
+        let apply = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await apply.send(.applyModelAdoptionRequest(transactionID: authority.transactionID, requestedAtMs: nowMs()))
+        let loading = try await apply.receive(timeout: 1)
+        let draining = try await apply.receive(timeout: 1)
+        let loaded = try await apply.receive(timeout: 1)
+        await apply.close()
+
+        guard case let .modelAdoptionProgress(loadingProgress) = loading,
+              case let .modelAdoptionProgress(drainingProgress) = draining,
+              case let .modelAdoptionProgress(loadedProgress) = loaded else {
+            return XCTFail("unexpected adoption progress: \(loading), \(draining), \(loaded)")
+        }
+        XCTAssertEqual(loadingProgress.transactionID, authority.transactionID)
+        XCTAssertEqual(loadingProgress.state, "loading")
+        XCTAssertEqual(drainingProgress.state, "draining")
+        XCTAssertEqual(loadedProgress.state, "loaded")
+        XCTAssertEqual(loadedProgress.targetArtifactPath, authority.targetArtifactPath)
+        XCTAssertEqual(loadedProgress.targetArtifactSHA256, authority.targetArtifactSHA256)
+        XCTAssertEqual(loadedProgress.targetCatalogRevision, authority.targetCatalogRevision)
+        XCTAssertEqual(loadedProgress.loadedModelID, authority.targetModelID)
+        XCTAssertEqual(loadedProgress.loadedModelSHA256, "hash")
+
+        do {
+            _ = try await runtime.beginSwap(targetModelID: "manual-model")
+            XCTFail("Expected reservation to block a manual switch until finalize")
+        } catch let error as ModelRuntimeAdoptionError {
+            XCTAssertEqual(error, .adoptionReservationConflict)
+        }
+        let finalize = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await finalize.send(.finalizeModelAdoptionRequest(
+            transactionID: authority.transactionID,
+            requestedAtMs: nowMs()
+        ))
+        let finalizeResponse = try await finalize.receive(timeout: 1)
+        await finalize.close()
+        await server.stop()
+        XCTAssertEqual(finalizeResponse, .finalizeModelAdoptionResult(
+            transactionID: authority.transactionID,
+            accepted: true,
+            reason: nil
+        ))
+    }
+
+    func testApplyRejectsUnpreparedModelAdoptionTransaction() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.applyModelAdoptionRequest(transactionID: "tx-missing", requestedAtMs: nowMs()))
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        guard case let .modelAdoptionProgress(progress) = response else {
+            return XCTFail("unexpected response: \(response)")
+        }
+        XCTAssertEqual(progress.state, "failed")
+        XCTAssertEqual(progress.reason, ModelRuntimeAdoptionError.transactionNotPrepared.description)
+    }
+
+    func testApplyFailurePreservesPreparedAdoptionAuthority() async throws {
+        let socketPath = try makeSocketPath()
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: authority.expectedIncumbentModelID,
+            targetAuthorities: [
+                authority.targetModelID: ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: [authority.targetModelID],
+            warmSwapEnabled: false
+        )
+        let server = makeServer(
+            socketPath: socketPath,
+            modelRuntime: runtime,
+            supportedModels: [authority.targetModelID]
+        )
+        try await server.start()
+
+        let prepare = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await prepare.send(.prepareModelAdoptionRequest(authority))
+        _ = try await prepare.receive(timeout: 1)
+        await prepare.close()
+
+        let apply = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await apply.send(.applyModelAdoptionRequest(
+            transactionID: authority.transactionID,
+            requestedAtMs: nowMs()
+        ))
+        let response = try await apply.receive(timeout: 1)
+        await apply.close()
+        await server.stop()
+
+        guard case let .modelAdoptionProgress(progress) = response else {
+            return XCTFail("unexpected response: \(response)")
+        }
+        XCTAssertEqual(progress.state, "failed")
+        XCTAssertEqual(progress.targetModelID, authority.targetModelID)
+        XCTAssertEqual(progress.targetArtifactPath, authority.targetArtifactPath)
+        XCTAssertEqual(progress.serveKnobsSHA256, authority.serveKnobsSHA256)
+    }
+
+    func testServerCancellationConsumesPreparedModelAdoption() async throws {
+        let socketPath = try makeSocketPath()
+        let authority = makeAdoptionAuthority()
+        let runtime = makeRuntime(
+            modelID: authority.expectedIncumbentModelID,
+            targetAuthorities: [
+                authority.targetModelID: ModelRuntimeTargetAuthority(
+                    modelArgument: authority.targetArtifactPath,
+                    artifactSHA256: authority.targetArtifactSHA256,
+                    catalogRevision: authority.targetCatalogRevision
+                )
+            ],
+            authorizedSwitchModelIDs: [authority.targetModelID]
+        )
+        let server = makeServer(
+            socketPath: socketPath,
+            modelRuntime: runtime,
+            supportedModels: [authority.targetModelID]
+        )
+        try await server.start()
+
+        let prepare = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await prepare.send(.prepareModelAdoptionRequest(authority))
+        _ = try await prepare.receive(timeout: 1)
+        try await prepare.send(.cancelModelAdoptionRequest(
+            transactionID: authority.transactionID,
+            requestedAtMs: nowMs()
+        ))
+        let cancellation = try await prepare.receive(timeout: 1)
+        await prepare.close()
+
+        guard case let .cancelModelAdoptionResult(transactionID, accepted, reason) = cancellation else {
+            await server.stop()
+            return XCTFail("unexpected cancellation response: \(cancellation)")
+        }
+        XCTAssertEqual(transactionID, authority.transactionID)
+        XCTAssertTrue(accepted)
+        XCTAssertNil(reason)
+
+        let apply = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await apply.send(.applyModelAdoptionRequest(
+            transactionID: authority.transactionID,
+            requestedAtMs: nowMs()
+        ))
+        let response = try await apply.receive(timeout: 1)
+        await apply.close()
+        await server.stop()
+
+        guard case let .modelAdoptionProgress(progress) = response else {
+            return XCTFail("unexpected apply response: \(response)")
+        }
+        XCTAssertEqual(progress.state, "failed")
+        XCTAssertEqual(progress.reason, ModelRuntimeAdoptionError.transactionNotPrepared.description)
     }
 
     func testServerRefusesStartIfSocketAlreadyExists() async throws {
@@ -1182,8 +1435,17 @@ final class ControlSocketTests: XCTestCase {
         return status.st_mode & mode_t(0o777)
     }
 
-    private func makeServer(socketPath: URL, modelRuntime: ModelRuntime) -> ControlSocketServer {
-        ControlSocketServer(socketPath: socketPath, modelRuntime: modelRuntime, idleTimeoutSeconds: 0.2)
+    private func makeServer(
+        socketPath: URL,
+        modelRuntime: ModelRuntime,
+        supportedModels: [String]? = nil
+    ) -> ControlSocketServer {
+        ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: modelRuntime,
+            supportedModels: supportedModels,
+            idleTimeoutSeconds: 0.2
+        )
     }
 
     /// Binds and listens on `path` like a real serve process would, then
@@ -1294,18 +1556,52 @@ final class ControlSocketTests: XCTestCase {
         XCTFail("Timed out waiting for condition")
     }
 
-    private func makeRuntime(modelID: String?) -> ModelRuntime {
+    private func makeRuntime(
+        modelID: String?,
+        targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
+        authorizedSwitchModelIDs: [String] = [],
+        warmSwapEnabled: Bool = true
+    ) -> ModelRuntime {
         ModelRuntime(
             modelID: modelID,
-            warmSwapEnabled: true,
+            warmSwapEnabled: warmSwapEnabled,
+            targetAuthorities: targetAuthorities,
+            authorizedSwitchModelIDs: authorizedSwitchModelIDs,
             loader: { _ in throw ControlSocketTestError.unexpectedContainerLoader },
             testLoader: { target in (target, "hash") }
+        )
+    }
+
+    private func makeAdoptionAuthority() -> ModelAdoptionAuthorityWire {
+        ModelAdoptionAuthorityWire(
+            transactionID: "c13c5d4c-3e4f-47ac-b72d-7f8f172747a0",
+            recommendationSHA256: String(repeating: "a", count: 64),
+            expectedIncumbentModelID: "old-model",
+            targetModelID: "new-model",
+            targetArtifactPath: "/verified/new-model",
+            targetArtifactSHA256: String(repeating: "b", count: 64),
+            targetCatalogRevision: "catalog-r1",
+            targetKVBits: 4,
+            targetMaxContext: 4_000,
+            targetMaxBatch: 2,
+            targetDonorMode: false,
+            serveKnobsSHA256: ModelAdoptionAuthorityWire.serveKnobsDigest(
+                kvBits: 4,
+                maxContext: 4_000,
+                maxBatch: 2,
+                donorMode: false
+            ),
+            catalogIdentitySHA256: String(repeating: "d", count: 64)
         )
     }
 }
 
 private enum ControlSocketTestError: Error {
     case unexpectedContainerLoader
+}
+
+private func nowMs() -> Int64 {
+    Int64(Date().timeIntervalSince1970 * 1_000)
 }
 
 private final class LockedBool: @unchecked Sendable {

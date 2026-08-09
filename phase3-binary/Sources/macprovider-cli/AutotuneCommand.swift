@@ -95,6 +95,18 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "With --recommend and --candidate-models, download and verify the exact signed model artifacts without loading or benchmarking them.")
     var prefetch = false
 
+    @Flag(help: "With --recommend, emit a recommendation without applying config or updating recommendation state.")
+    var checkOnly = false
+
+    @Flag(help: "With --recommend --check-only, emit model_recommendation_check_event.v1 progress frames before the final recommendation JSON.")
+    var progressJSON = false
+
+    @Flag(help: "With --recommend --check-only, evaluate only candidates with verified signed artifacts already present locally.")
+    var installedOnly = false
+
+    @Option(help: "Private cache staging root for --recommend --check-only progress runs.")
+    var isolatedCacheRoot: String?
+
     @Option(help: "Private receipt path written by --prefetch and required by a cache-only constrained --apply.")
     var prefetchReceipt: String?
 
@@ -158,6 +170,10 @@ struct AutotuneCommand: AsyncParsableCommand {
             }
             if prefetch {
                 try await runRecommendationPrefetch()
+                return
+            }
+            if checkOnly {
+                try await runAutotuneRecommendCheckOnly()
                 return
             }
             try await runAutotuneRecommend()
@@ -767,6 +783,29 @@ struct AutotuneCommand: AsyncParsableCommand {
         if prefetchReceipt != nil && apply && candidateModels == nil {
             throw ValidationError("cache-only --apply requires an explicit --candidate-models allowlist")
         }
+        if checkOnly && !recommend {
+            throw ValidationError("--check-only requires --recommend")
+        }
+        if checkOnly && (apply || prefetch || freshnessCheck || recoverHardwareAdmission) {
+            throw ValidationError("--check-only cannot be combined with mutating or recovery recommendation modes")
+        }
+        if checkOnly && submitHardwareEvidence {
+            throw ValidationError("--check-only requires --no-submit-hardware-evidence")
+        }
+        if progressJSON && !checkOnly {
+            throw ValidationError("--progress-json requires --check-only")
+        }
+        if installedOnly && !checkOnly {
+            throw ValidationError("--installed-only requires --check-only")
+        }
+        if let isolatedCacheRoot {
+            guard checkOnly else {
+                throw ValidationError("--isolated-cache-root requires --check-only")
+            }
+            guard isolatedCacheRoot.hasPrefix("/") else {
+                throw ValidationError("--isolated-cache-root must be an absolute path")
+            }
+        }
         if requireHardwareEvidence && !recommend {
             throw ValidationError("--require-hardware-evidence requires --recommend")
         }
@@ -891,6 +930,9 @@ struct AutotuneCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("[warn] Model readiness check: \(modelKey): \(reason)\n".utf8))
         }
         var result = AutotuneRecommendEngine().recommend(request)
+        if installedOnly {
+            result = Self.disclosingInstalledOnlyEstimate(result)
+        }
         result.probeDiagnostics = outcomes.diagnostics
         try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
         if AutotuneRecommendEngine.networkSubmissionBlocks(Set(result.warnings)) {
@@ -984,6 +1026,199 @@ struct AutotuneCommand: AsyncParsableCommand {
         for warning in result.warnings {
             FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
         }
+    }
+
+    private func runAutotuneRecommendCheckOnly() async throws {
+        guard emitJSON else {
+            throw ValidationError("--check-only requires --json")
+        }
+        guard installedOnly else {
+            throw ValidationError("--check-only requires --installed-only; background checks never benchmark or populate shared caches")
+        }
+        let checkID = UUID().uuidString.lowercased()
+        let candidateModelFilter = try recommendCandidateModelFilter()
+        let candidateEventID = candidateModelFilter?.sorted().joined(separator: ",")
+        let startedAt = Date()
+        var terminalEventEmitted = false
+
+        func emitEvent(_ type: String, phase: String? = nil, reason: String? = nil, stagingDiscarded: Bool? = nil) throws {
+            guard progressJSON else { return }
+            try ModelSwitchingWireCodec.printJSON(ModelRecommendationCheckEventWire(
+                type: type,
+                checkID: checkID,
+                candidateModelID: candidateEventID,
+                isolatedCacheRoot: isolatedCacheRoot.map { _ in "redacted" },
+                stagingOwner: type == "accepted" ? "cli" : nil,
+                phase: phase,
+                elapsedMS: Int(Date().timeIntervalSince(startedAt) * 1000),
+                cancellable: false,
+                downloadBytesWritten: nil,
+                downloadBytesTotal: nil,
+                reason: reason,
+                stagingDiscarded: stagingDiscarded,
+                installedOnly: installedOnly ? true : nil
+            ))
+            if type == "completed" || type == "failed" || type == "cancelled" {
+                terminalEventEmitted = true
+            }
+        }
+
+        do {
+            try emitEvent("accepted")
+            try emitEvent("progress", phase: "planning")
+
+            let staticInputs = AutotuneStaticInputs()
+            let inputs = await staticInputs.loadRecommendationInputs()
+            let demand = inputs.demand
+            let catalog = inputs.candidate
+            let rateCard = inputs.rateCard
+            let fingerprint = MachineFingerprinter().sample()
+            let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+            let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
+            let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
+            let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
+            let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+            var warnings = Set<AutotuneRecommendWarning>()
+            warnings.formUnion(demand.warnings)
+            warnings.formUnion(catalog.warnings)
+            warnings.formUnion(rateCard.warnings)
+            if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
+                try emitEvent("failed", reason: "benchmark_failed", stagingDiscarded: true)
+                throw ValidationError(AutotuneRecommendEngine.paidTrustBlockMessage(warnings))
+            }
+
+            var request = AutotuneRecommendRequest(
+                hardware: hardware,
+                demandRank: demand.value,
+                candidateCatalog: catalog.value,
+                candidateCatalogSHA256: catalogSHA,
+                rateCard: rateCard.value,
+                benchmarks: [:],
+                warnings: warnings,
+                generatedAt: Date(),
+                donorMode: donorMode,
+                buyerTTFTCeilingMS: buyerTTFTCeilingMS
+            )
+            let outcomes: BenchmarkOutcomes
+            if installedOnly {
+                outcomes = try Self.installedOnlyBenchmarkOutcomes(
+                    request: request,
+                    candidateModelIDs: candidateModelFilter,
+                    catalogSHA: catalogSHA,
+                    artifactResolver: CachedModelArtifactResolver()
+                )
+            } else {
+                try emitEvent("progress", phase: "benchmarking")
+                outcomes = try await AutotuneRecommendationBenchmarker(
+                    runnerFactory: { try CandidateProviderRunner() }
+                ).benchmarks(
+                    request: request,
+                    targetContext: Self.spec023RecommendationProbeContext,
+                    gateTTFTMS: resolvedGateTTFTMS(forRecommend: true),
+                    replicates: stage1Replicates,
+                    port: port,
+                    interruptFlag: AutotuneInterruptFlag(),
+                    candidateModelIDs: candidateModelFilter
+                )
+            }
+            request.benchmarks = outcomes.benchmarks
+            for modelKey in outcomes.diagnostics.keys.sorted() {
+                let reason = outcomes.diagnostics[modelKey]!
+                FileHandle.standardError.write(Data("[warn] Model readiness check: \(modelKey): \(reason)\n".utf8))
+            }
+            var result = AutotuneRecommendEngine().recommend(request)
+            if installedOnly {
+                result = Self.disclosingInstalledOnlyEstimate(result)
+            }
+            result.probeDiagnostics = outcomes.diagnostics
+            let selectedForConfig = result.selectedCandidate
+            let serveConfig: RecommendationCore?
+            if let selected = selectedForConfig,
+               let selectedBenchmark = request.benchmarks[selected.catalogKey],
+               let selectedRow = catalog.value.rows[selected.catalogKey] {
+                serveConfig = Self.recommendationCoreForConfig(
+                    selected: selected,
+                    selectedBenchmark: selectedBenchmark,
+                    selectedRow: selectedRow,
+                    catalogVersion: catalog.value.version,
+                    catalogHash: catalogSHA,
+                    hardware: hardware
+                )
+            } else {
+                serveConfig = nil
+            }
+            print(result.jsonString(serveConfig: serveConfig, donorMode: false))
+            try emitEvent("completed", phase: "completed", stagingDiscarded: true)
+        } catch {
+            if !terminalEventEmitted {
+                try? emitEvent("failed", reason: "check_failed", stagingDiscarded: true)
+            }
+            throw error
+        }
+    }
+
+    static func installedOnlyBenchmarkOutcomes(
+        request: AutotuneRecommendRequest,
+        candidateModelIDs: Set<String>?,
+        catalogSHA: String,
+        artifactResolver: CachedModelArtifactResolver
+    ) throws -> BenchmarkOutcomes {
+        var benchmarks: [String: CandidateBenchmark] = [:]
+        var diagnostics: [String: String] = [:]
+        for modelKey in request.candidateCatalog.rows.keys.sorted() {
+            guard let row = request.candidateCatalog.rows[modelKey] else { continue }
+            if let candidateModelIDs, !candidateModelIDs.contains(row.modelID) {
+                continue
+            }
+            if request.hardware.memoryGB < row.minRAMGB {
+                diagnostics[modelKey] = "requires \(row.minRAMGB)GB RAM"
+                continue
+            }
+            if !request.hardware.bandwidthTier.satisfies(minimum: row.minBandwidthTier) {
+                diagnostics[modelKey] = "requires bandwidth tier \(row.minBandwidthTier.rawValue)"
+                continue
+            }
+            do {
+                let artifact = try artifactResolver.verifiedExistingArtifact(for: row)
+                let tps = max(row.benchGate.minSustainedTPS, 0.001)
+                benchmarks[modelKey] = CandidateBenchmark(
+                    modelKey: modelKey,
+                    sustainedTPS: tps,
+                    ttftMS: row.benchGate.max4KTTFTMS,
+                    swapDetected: false,
+                    thermalThrottleDetected: false,
+                    artifactSHA256: artifact.sha256,
+                    modelArtifactPath: artifact.modelArgument,
+                    benchmarkID: "installed-only-\(modelKey)",
+                    generatedAt: request.generatedAt,
+                    candidateCatalogSHA256: catalogSHA,
+                    binaryVersion: request.hardware.binaryVersion,
+                    modelID: row.modelID,
+                    hardwareIdentityHash: request.hardware.hardwareIdentityHash,
+                    candidateRowIdentity: request.candidateCatalog.rowIdentity(for: modelKey) ?? ""
+                )
+            } catch {
+                diagnostics[modelKey] = "installed_only_missing_verified_artifact"
+            }
+        }
+        return BenchmarkOutcomes(benchmarks: benchmarks, diagnostics: diagnostics)
+    }
+
+    static func disclosingInstalledOnlyEstimate(_ result: AutotuneRecommendResult) -> AutotuneRecommendResult {
+        var disclosed = result
+        func disclose(_ candidate: AutotuneCandidateScore) -> AutotuneCandidateScore {
+            guard candidate.eligible else { return candidate }
+            var updated = candidate
+            updated.confidence = "catalog_estimate"
+            updated.why = "\(candidate.model) is the strongest verified installed candidate from signed catalog estimates and current hardware fit."
+            return updated
+        }
+        disclosed.candidates = disclosed.candidates.map(disclose)
+        disclosed.allCandidates = disclosed.allCandidates.map(disclose)
+        if let selectedKey = disclosed.selectedCandidate?.catalogKey {
+            disclosed.selectedCandidate = disclosed.candidates.first { $0.catalogKey == selectedKey }
+        }
+        return disclosed
     }
 
     private func runRecommendationPrefetch() async throws {

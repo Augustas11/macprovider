@@ -76,6 +76,30 @@ final class ProviderTokenPersistTests: XCTestCase {
         )
     }
 
+    func testRemoveThroughSymlinkMutatesCanonicalConfigWithoutReplacingAlias() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        let aliasPath = tempDir + "/config-link.yaml"
+        let token = String(repeating: "a", count: 64)
+        try "provider_id: provider-a\nprovider_token: \(token)\nmodel: m\n".write(
+            toFile: configPath,
+            atomically: true,
+            encoding: .utf8
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: aliasPath,
+            withDestinationPath: configPath
+        )
+
+        XCTAssertTrue(try ProviderTokenPersist.remove(expectedToken: token, configPath: aliasPath))
+        XCTAssertFalse(try String(contentsOfFile: configPath).contains("provider_token:"))
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: aliasPath),
+            configPath
+        )
+    }
+
     func testApplyProviderTokenLineAppendsWhenAbsent() {
         let existing = """
         port: 8080

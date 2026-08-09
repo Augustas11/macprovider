@@ -49,11 +49,30 @@ public enum ProviderTokenPersistError: Error, CustomStringConvertible {
 /// the final rename, so credential cleanup cannot overwrite a concurrent model
 /// or lifecycle update with a stale snapshot.
 public enum ProviderConfigMutationLock {
-    public static func withExclusiveLock<T>(
+    public final class Handle {
+        public let configPath: String
+        private let fileDescriptor: Int32
+
+        fileprivate init(configPath: String, fileDescriptor: Int32) {
+            self.configPath = configPath
+            self.fileDescriptor = fileDescriptor
+        }
+
+        deinit {
+            _ = flock(fileDescriptor, LOCK_UN)
+            _ = close(fileDescriptor)
+        }
+    }
+
+    public static func acquireExclusive(
         configPath: String,
-        _ body: () throws -> T
-    ) throws -> T {
-        let resolved = ConfigLoader.expandTilde(configPath)
+        timeoutSeconds: TimeInterval? = nil
+    ) throws -> Handle {
+        let expanded = ConfigLoader.expandTilde(configPath)
+        let resolved = URL(fileURLWithPath: expanded)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
         let parent = (resolved as NSString).deletingLastPathComponent
         guard FileManager.default.fileExists(atPath: parent) else {
             throw ProviderTokenPersistError.parentDirectoryMissing(path: parent)
@@ -67,20 +86,40 @@ public enum ProviderConfigMutationLock {
                 underlying: String(cString: strerror(errno))
             )
         }
-        defer { close(lockFD) }
         guard fchmod(lockFD, mode_t(0o600)) == 0 else {
-            throw ProviderTokenPersistError.lockFailed(
-                path: lockPath,
-                underlying: String(cString: strerror(errno))
-            )
+            let failure = String(cString: strerror(errno))
+            _ = close(lockFD)
+            throw ProviderTokenPersistError.lockFailed(path: lockPath, underlying: failure)
         }
-        guard flock(lockFD, LOCK_EX) == 0 else {
-            throw ProviderTokenPersistError.lockFailed(
-                path: lockPath,
-                underlying: String(cString: strerror(errno))
-            )
+
+        if let timeoutSeconds {
+            let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
+            while flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+                let lockErrno = errno
+                guard lockErrno == EWOULDBLOCK || lockErrno == EAGAIN,
+                      Date() < deadline else {
+                    _ = close(lockFD)
+                    let detail = lockErrno == EWOULDBLOCK || lockErrno == EAGAIN
+                        ? "timed out acquiring exclusive lock"
+                        : String(cString: strerror(lockErrno))
+                    throw ProviderTokenPersistError.lockFailed(path: lockPath, underlying: detail)
+                }
+                usleep(50_000)
+            }
+        } else if flock(lockFD, LOCK_EX) != 0 {
+            let failure = String(cString: strerror(errno))
+            _ = close(lockFD)
+            throw ProviderTokenPersistError.lockFailed(path: lockPath, underlying: failure)
         }
-        defer { flock(lockFD, LOCK_UN) }
+        return Handle(configPath: resolved, fileDescriptor: lockFD)
+    }
+
+    public static func withExclusiveLock<T>(
+        configPath: String,
+        _ body: () throws -> T
+    ) throws -> T {
+        let handle = try acquireExclusive(configPath: configPath)
+        defer { withExtendedLifetime(handle) {} }
         return try body()
     }
 }
@@ -98,7 +137,7 @@ public enum ProviderTokenPersist {
     /// `rename(2)` is POSIX-atomic on same-filesystem renames and the
     /// temp file shares the parent directory.
     public static func write(token: String, configPath: String) throws {
-        let resolved = ConfigLoader.expandTilde(configPath)
+        let resolved = canonicalConfigPath(configPath)
         let parent = (resolved as NSString).deletingLastPathComponent
         try ProviderConfigMutationLock.withExclusiveLock(configPath: resolved) {
             let existingText: String
@@ -124,7 +163,7 @@ public enum ProviderTokenPersist {
     /// of another token.
     @discardableResult
     public static func remove(expectedToken: String, configPath: String) throws -> Bool {
-        let resolved = ConfigLoader.expandTilde(configPath)
+        let resolved = canonicalConfigPath(configPath)
         let parent = (resolved as NSString).deletingLastPathComponent
         return try ProviderConfigMutationLock.withExclusiveLock(configPath: resolved) {
             try sanitizeAutotuneBackups(resolved: resolved, parent: parent)
@@ -152,6 +191,13 @@ public enum ProviderTokenPersist {
             try replaceAtomically(removingProviderTokenLines(in: existingText), resolved: resolved, parent: parent)
             return true
         }
+    }
+
+    private static func canonicalConfigPath(_ configPath: String) -> String {
+        URL(fileURLWithPath: ConfigLoader.expandTilde(configPath))
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
     }
 
     private static func replaceAtomically(_ newText: String, resolved: String, parent: String) throws {

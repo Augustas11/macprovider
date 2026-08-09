@@ -18,6 +18,18 @@
       "local_status_capabilities": ["model_status_v1", "model_catalog_json_v1", "model_ready_switch_v1", "service_instance_v1", "status_observation_v1"],
       "command_schemas": ["models list.v1", "models switch.v1"],
       "control_frame_schemas": ["status_request", "status_response", "models_request", "models_response", "switch_request", "switch_ack", "switch_progress"]
+    },
+    "model_recommendation_check_v1": {
+      "first_supporting_binary_version": "1.8.90",
+      "local_status_capabilities": ["model_status_v1", "model_recommendation_check_v1", "service_instance_v1", "status_observation_v1"],
+      "command_schemas": ["autotune recommend installed-only check.v1", "model_recommendation_check_event.v1", "autotune_recommend.v1"],
+      "control_frame_schemas": ["status_request", "status_response"]
+    },
+    "model_recommendation_apply_switch_v1": {
+      "first_supporting_binary_version": "1.8.90",
+      "local_status_capabilities": ["model_status_v1", "model_catalog_json_v1", "model_ready_switch_v1", "model_recommendation_check_v1", "model_recommendation_apply_switch_v1", "service_instance_v1", "status_observation_v1"],
+      "command_schemas": ["autotune_recommend.v1", "models adopt-recommendation.v1", "model_adoption_event.v1"],
+      "control_frame_schemas": ["status_request", "status_response", "model_recommendation_apply_switch.v1", "recommendation_apply_switch_prepare_request", "recommendation_apply_switch_prepare_result", "recommendation_apply_switch_apply_request", "recommendation_apply_switch_cancel_request", "recommendation_apply_switch_cancel_result", "recommendation_apply_switch_finalize_request", "recommendation_apply_switch_finalize_result", "recommendation_apply_switch_recovery_claim_request", "recommendation_apply_switch_recovery_claim_result", "recommendation_apply_switch_progress"]
     }
   }
 }
