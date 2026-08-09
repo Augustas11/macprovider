@@ -1347,6 +1347,11 @@ struct ServeCommand: AsyncParsableCommand {
             operationID: lifecycleOperationID
         )
         let modelRuntime: ModelRuntime
+        // Upstream mlx-swift-lm #424 can corrupt speculative rollback after a
+        // model-specific rotating-cache wrap. Keep one source of truth for both
+        // execution and advertised heartbeat capability until the tagged fix and
+        // cache-wrap parity gate are green.
+        let speculativeCacheWrapValidated = ModelRuntime.productionSpeculativeCacheWrapValidated
         do {
             modelRuntime = try await ModelRuntime(
                 modelID: resolved.model,
@@ -1354,6 +1359,7 @@ struct ServeCommand: AsyncParsableCommand {
                 draftModelID: resolved.draftModel,
                 draftModelLoadPath: verifiedDraftModelLoadPath,
                 numDraftTokens: resolved.numDraftTokens,
+                speculativeCacheWrapValidated: speculativeCacheWrapValidated,
                 maxContextTokensOverride: resolved.maxContextOverride,
                 kvBitsOverride: effectiveKVBits,
                 pagedKVConfig: resolved.pagedKV,
@@ -1458,8 +1464,8 @@ struct ServeCommand: AsyncParsableCommand {
             modelHashAlgorithm: await modelRuntime.loadedModelHashAlgorithm,
             weightsManifestSHA256: await modelRuntime.loadedWeightsManifestSHA256,
             thermalGate: thermalGate,
-            specDecodeDraftModelID: resolved.draftModel,
-            specDecodeNumDraftTokens: resolved.numDraftTokens,
+            specDecodeDraftModelID: speculativeCacheWrapValidated ? resolved.draftModel : nil,
+            specDecodeNumDraftTokens: speculativeCacheWrapValidated ? resolved.numDraftTokens : nil,
             providerID: resolved.providerID
         )
         if operatorPausedInitially {

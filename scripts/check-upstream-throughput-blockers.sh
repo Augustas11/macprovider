@@ -33,18 +33,7 @@ need python3
 need curl
 
 read_pin() {
-  python3 - "$ROOT/phase3-binary/Package.resolved" <<'PY'
-import json, sys
-data = json.load(open(sys.argv[1]))
-pins = {}
-for p in data.get("pins", []):
-    ident = p.get("identity", "")
-    if ident == "mlx-swift-lm":
-        pins["mlx_swift_lm"] = p.get("version", "")
-    elif ident == "mlx-swift":
-        pins["mlx_swift"] = p.get("version", "")
-print(json.dumps(pins))
-PY
+  python3 "$ROOT/scripts/read_swiftpm_pins.py" "$ROOT/phase3-binary/Package.resolved"
 }
 
 PINS="$(read_pin)"
@@ -60,39 +49,44 @@ def gh_json(args):
     return json.loads(out)
 
 def latest_release(repo):
-    try:
-        r = gh_json(["release", "view", "--repo", repo, "--json", "tagName,publishedAt,name"])
-        return {"tag": r["tagName"], "published_at": r["publishedAt"]}
-    except subprocess.CalledProcessError:
-        return {"tag": None, "published_at": None}
+    r = gh_json(["release", "view", "--repo", repo, "--json", "tagName,publishedAt,name"])
+    if not r.get("tagName") or not r.get("publishedAt"):
+        raise RuntimeError(f"latest release missing required fields for {repo}")
+    return {"tag": r["tagName"], "published_at": r["publishedAt"]}
 
 issue = gh_json(["issue", "view", "406", "--repo", "ml-explore/mlx-swift-lm",
                  "--json", "number,state,title,updatedAt,closedAt"])
 pr = gh_json(["pr", "view", "364", "--repo", "ml-explore/mlx-swift-lm",
               "--json", "number,state,title,updatedAt,mergedAt"])
+issue312 = gh_json(["issue", "view", "312", "--repo", "ml-explore/mlx-swift-lm",
+                    "--json", "number,state,title,updatedAt,closedAt"])
+pr453 = gh_json(["pr", "view", "453", "--repo", "ml-explore/mlx-swift-lm",
+                 "--json", "number,state,title,updatedAt,mergedAt"])
+issue424 = gh_json(["issue", "view", "424", "--repo", "ml-explore/mlx-swift-lm",
+                    "--json", "number,state,title,updatedAt,closedAt"])
+issue518 = gh_json(["issue", "view", "518", "--repo", "ml-explore/mlx-swift-lm",
+                    "--json", "number,state,title,updatedAt,closedAt"])
 
 lm_rel = latest_release("ml-explore/mlx-swift-lm")
 swift_rel = latest_release("ml-explore/mlx-swift")
+transformers_rel = latest_release("huggingface/swift-transformers")
+jinja_rel = latest_release("huggingface/swift-jinja")
 
 # Heuristic: fetch KVCache.swift and look for graph-traceable offset patterns.
 kvcache_url = "https://raw.githubusercontent.com/ml-explore/mlx-swift-lm/main/Libraries/MLXLMCommon/KVCache.swift"
-try:
-    body = urllib.request.urlopen(kvcache_url, timeout=30).read().decode("utf-8", "replace")
-    graph_traceable = (
-        "offsetMLX" in body
-        or "offset: MLXArray" in body
-        or "var offset: MLXArray" in body
-        or "CompilableKVCache" in body
-    )
-    note = "KVCache.swift heuristic on upstream main"
-except Exception as e:
-    graph_traceable = False
-    note = f"KVCache fetch failed: {e}"
+body = urllib.request.urlopen(kvcache_url, timeout=30).read().decode("utf-8", "replace")
+graph_traceable = (
+    "offsetMLX" in body
+    or "offset: MLXArray" in body
+    or "var offset: MLXArray" in body
+    or "CompilableKVCache" in body
+)
+note = "KVCache.swift heuristic on upstream main"
 
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 out = {
-    "schema_version": 1,
+    "schema_version": 2,
     "last_checked_at": now,
     "last_changed_at": now,
     "macprovider_pins": pins,
@@ -119,6 +113,34 @@ out = {
             "updated_at": pr["updatedAt"],
             "merged_at": pr.get("mergedAt"),
         },
+        "mlx_swift_lm_312_quantized_cache_ownership": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 312,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/issues/312",
+            "state": issue312["state"], "title": issue312["title"],
+            "runbook_tasks": ["quantized_reusable_kv"],
+            "updated_at": issue312["updatedAt"], "closed_at": issue312.get("closedAt"),
+        },
+        "mlx_swift_lm_453_typed_cache_storage": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 453,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/453",
+            "state": pr453["state"], "title": pr453["title"],
+            "runbook_tasks": ["quantized_reusable_kv"],
+            "updated_at": pr453["updatedAt"], "merged_at": pr453.get("mergedAt"),
+        },
+        "mlx_swift_lm_424_speculative_cache_wrap": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 424,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/issues/424",
+            "state": issue424["state"], "title": issue424["title"],
+            "runbook_tasks": ["speculative_cache_wrap"],
+            "updated_at": issue424["updatedAt"], "closed_at": issue424.get("closedAt"),
+        },
+        "mlx_swift_lm_518_remote_package_unsafe_flags": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 518,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/issues/518",
+            "state": issue518["state"], "title": issue518["title"],
+            "runbook_tasks": ["T1-01", "TG1"],
+            "updated_at": issue518["updatedAt"], "closed_at": issue518.get("closedAt"),
+        },
     },
     "releases": {
         "mlx_swift_lm_latest": {
@@ -128,6 +150,14 @@ out = {
         "mlx_swift_latest": {
             "repo": "ml-explore/mlx-swift",
             **swift_rel,
+        },
+        "swift_transformers_latest": {
+            "repo": "huggingface/swift-transformers",
+            **transformers_rel,
+        },
+        "swift_jinja_latest": {
+            "repo": "huggingface/swift-jinja",
+            **jinja_rel,
         },
     },
     "implementation_signals": {
@@ -145,54 +175,10 @@ if $JSON_ONLY; then
   exit 0
 fi
 
-result="$(python3 - <<'PY' "$snapshot" "$COMPARE"
-import json, sys
-
-new = json.loads(sys.argv[1])
-compare_path = sys.argv[2]
-
-def material(old, new):
-    if old is None:
-        return True, "no prior baseline"
-    reasons = []
-
-    for key in ("mlx_swift_lm_406_compile_kv_offset", "mlx_swift_lm_364_gemma_moe"):
-        o, n = old["blockers"][key], new["blockers"][key]
-        if o.get("state") != n.get("state"):
-            reasons.append(f"{key} state {o.get('state')} -> {n.get('state')}")
-        if n.get("closed_at") and not o.get("closed_at"):
-            reasons.append(f"{key} closed")
-        if n.get("merged_at") and not o.get("merged_at"):
-            reasons.append(f"{key} merged")
-
-    for rel_key in ("mlx_swift_lm_latest", "mlx_swift_latest"):
-        ot, nt = old["releases"][rel_key].get("tag"), new["releases"][rel_key].get("tag")
-        pin_key = "mlx_swift_lm" if "lm" in rel_key else "mlx_swift"
-        pin = new["macprovider_pins"].get(pin_key)
-        if nt and pin and nt != ot:
-            reasons.append(f"{rel_key} tag {ot} -> {nt} (pin {pin})")
-        if nt and pin and nt != pin:
-            reasons.append(f"new upstream tag {nt} above pin {pin}")
-
-    o_sig = old.get("implementation_signals", {}).get("kvcache_offset_graph_traceable")
-    n_sig = new.get("implementation_signals", {}).get("kvcache_offset_graph_traceable")
-    if not o_sig and n_sig:
-        reasons.append("KVCache compile-fix heuristic now true")
-
-    return (len(reasons) > 0, "; ".join(reasons) if reasons else "unchanged")
-
-try:
-    with open(compare_path) as f:
-        old = json.load(f)
-except FileNotFoundError:
-    old = None
-
-changed, reason = material(old, new)
-print(json.dumps({"changed": changed, "reason": reason, "snapshot": new}, indent=2))
-if changed:
-    sys.exit(2)
-PY
-)"
+set +e
+result="$(printf '%s\n' "$snapshot" | python3 "$ROOT/scripts/compare_upstream_watch.py" "$COMPARE")"
+compare_rc=$?
+set -e
 
 printf '%s\n' "$result"
-exit 0
+exit "$compare_rc"

@@ -6,6 +6,14 @@
 **Status:** COMPLETE — see VERDICT below  
 **Executor:** Cursor agent (Sonnet 4.6)
 
+> **2026-08-09 correction:** this is a historical benchmark record, not the
+> production dependency authority. Current `origin/main` resolves
+> `mlx-swift-lm 3.31.4` and **`mlx-swift 0.31.4`**. PR #553 intentionally
+> restored `0.31.4` because `0.31.5/0.31.6` require Swift 6.3 while protected
+> release builds use Xcode 16.4 / Swift 6.1. The 0.31.6 values below describe
+> this July experiment only. Future candidates must use
+> `docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`.
+
 ---
 
 ## Before / After Pins
@@ -13,10 +21,11 @@
 | Package | Before (origin/main) | After | Delta |
 |---------|----------------------|-------|-------|
 | `mlx-swift-lm` | `3.31.4` (exact) | `3.31.4` (exact) | **no change** |
-| `mlx-swift` (transitive) | `0.31.6` | `0.31.6` | **no change** |
+| `mlx-swift` (transitive) | `0.31.6` (historical experiment) | `0.31.6` | **no change in this experiment** |
 
 **No pin bump was performed.**  
-The current pins on `origin/main` are already the latest ml-explore release tags.
+At the time of this experiment, its worktree resolved the latest release tags.
+This statement no longer describes production; see the correction above.
 See § *Release survey* for full analysis.
 
 ---
@@ -31,7 +40,9 @@ See § *Release survey* for full analysis.
 | 3.31.3 | 2026-04-15 | |
 | 2.31.3 | 2026-04-01 | |
 
-Latest main-branch commit after 3.31.4 tag: `Set indentConditionalCompilationBlocks to false in .swift-format` (2026-06-30T17:17Z) — trivial formatting only. **Nothing substantive post-3.31.4.**
+As of 2026-08-09, main is materially ahead of 3.31.4; no newer tag has been
+published. Gemma text-path MoE PR #364 merged on 2026-07-21, and package issue
+#518 currently blocks treating main as a normal remote-package upgrade.
 
 ### ml-explore/mlx-swift
 
@@ -136,11 +147,13 @@ Note: The 3.31.4 release included "fix Gemma 4 MoE router -- softmax order + fus
 
 | PR | Title | Status | Head SHA |
 |----|-------|--------|----------|
-| [#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | MLXLLM Gemma4Text: add MoE block (router + experts) for the text path | **OPEN** (mergeable) | `3a4afb8a` |
+| [#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | MLXLLM Gemma4Text: add MoE block (router + experts) for the text path | **MERGED 2026-07-21; unreleased as of 2026-08-09** | `3a4afb8a` |
 
 PR #364 (by `@neuromechanist`, reviewed by `@aleroot`) adds exactly the required components: `Gemma4TextRouter`, `Gemma4TextExperts` (SwitchGLU), `enable_moe_block` config, and the fused-expert weight remap. The PR description confirms it was verified against `mlx-community/gemma-4-26b-a4b-it-4bit`. It has no merge conflicts (`mergeable: true`).
 
-**Fix path:** WAIT for ml-explore to merge PR #364 and cut a new release tag (expected `3.31.5` or `3.32.x`). Then bump `Package.swift` `exact:` pin and re-run T1-01 bench.
+**Fix path:** WAIT for a tagged, remotely consumable release containing #364
+and for package issue #518 to be resolved. Then run the full engine-upgrade
+matrix; do not treat this as a one-line pin bump.
 
 **Do NOT:** Pin to the fork branch (`yooz-labs/mlx-swift-lm @ upstream/gemma4-llm-moe`) — this would violate the clean-room / ml-explore-only policy in AGENTS.md.
 
@@ -159,7 +172,9 @@ No API changes were observed in mlx-swift-lm 3.31.4 that would require `ModelRun
 | `phase3-binary/Package.swift` | **none** | Already at latest ml-explore releases |
 | `phase3-binary/Package.resolved` | **none** | No pin change to resolve |
 
-This PR carries no code changes — it is a measurement/survey result documenting that origin/main is already at HEAD of ml-explore releases.
+This historical PR carried no code changes. Its claim that origin/main was at
+HEAD applied only to the July experiment and is superseded by the correction
+at the top of this record.
 
 ---
 
@@ -185,16 +200,20 @@ This PR carries no code changes — it is a measurement/survey result documentin
 
 ### T1-02 (MoE decode delta)
 
-**BLOCKED** until ml-explore/mlx-swift-lm PR #364 merges and a new release is cut.  
+**BLOCKED** until a tagged, remotely consumable release contains merged PR #364
+and the full engine-upgrade matrix passes.
 No Gemma-4 TPS number can be established with the current 3.31.4 pin.
 
 **Tracking:** Watch [ml-explore/mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364).  
-When merged: bump `Package.swift` `exact:` to the new version, re-run T1-01 build+test+bench (should be quick; no structural change needed in our code), then proceed to T1-02.
+When released: create a dedicated migration PR and run
+`docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`; API/cache changes mean this is not
+assumed to be a quick or structure-free pin edit.
 
 ### T1-03 (Metallib rebuild)
 
-**Unblocked** — metallib build confirmed working via `scripts/build-mlx-metallib.sh` → `mlx.metallib`.  
-T1-03 can proceed independently on the current pins. The metallib was rebuilt in ~119s from the 0.31.6 mlx-swift checkout.
+**Historical result:** metallib build worked for the experiment's 0.31.6 graph.
+Any current/future production artifact must rebuild and verify metallib parity
+against the authoritative resolved graph (currently 0.31.4).
 
 ---
 

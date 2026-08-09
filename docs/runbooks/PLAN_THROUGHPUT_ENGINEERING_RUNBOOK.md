@@ -26,7 +26,8 @@
    - Runs the **audit loop** (code + security + architect) before marking implementation tasks GREEN.
    - Posts artifact paths + PASS/FAIL; does **not** edit this plan unless asked.
 3. **Do not skip T0.** Phases T1–T3 assume measurement harness and baseline JSON exist.
-4. **Clean-room:** read Darkbloom diffs only via `/Users/augstar/darkbloom-watch/repo` (`git show origin/master:…`). Do **not** inspect `d-inference` source.
+4. **Clean-room:** use only Macprovider and upstream `ml-explore` sources. Do
+   **not** inspect Darkbloom, Layr-Labs forks, or `d-inference` source.
 
 ### Artifact layout
 
@@ -205,7 +206,8 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 > **Goal:** Bump to MLX **0.32.0** / latest compatible **`mlx-swift-lm`** without correctness regression.  
 > **Current pins:** `mlx-swift` 0.31.4, `mlx-swift-lm` 3.31.4 (`Package.resolved`). The 0.31.4 compatibility pin is required by the production Xcode 16.4 / Swift 6.1 release toolchain; performance evidence recorded against 0.31.6 remains historical and must not be silently attributed to this release.
-> **Target reference (Darkbloom):** `libs/mlx` @ `d5a24040…`, `mlx-swift-lm` @ `bc1c0ee6…` — adopt via **ml-explore releases**, not Layr-Labs fork submodule, unless ml-explore lacks equivalent commits.
+> **Source policy:** adopt only tagged, remotely consumable **ml-explore** releases;
+> no Darkbloom or Layr-Labs source inspection/fallback is permitted.
 
 ---
 
@@ -220,19 +222,25 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 ### Procedure
 
-1. Survey `gh release list` for `mlx-swift-lm` and `mlx-swift`; read changelogs for breaking API in `generate`, `TokenIterator`, `GenerateParameters`.
-2. Bump `exact:` pin in `Package.swift`; `swift build -c release && swift test`.
-3. Token-exact greedy check: Qwen2.5-7B, 512 prefill, 64 decode — compare output token ids to T0-02 baseline **before bump** JSON.
-4. Run full audit loop (code, security, architect).
-5. PR to `main`; **no** compiled decode or config default changes in this PR.
+1. Require a tagged, remotely consumable `mlx-swift-lm` release; upstream #518
+   must be closed/released, and the resolved graph must build under protected
+   Xcode 16.4 / Swift 6.1.
+2. Bump the MLX pins without changing `swift-transformers`; tokenizer migration
+   is owned independently by #966.
+3. Run every required row in
+   `docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md`, including token/settlement
+   parity, cache ownership/wrap, model/template coverage, metallib and immutable
+   release-artifact parity.
+4. Run the full audit loop (code, security, architect).
+5. PR to `main`; **no** compiled-decode or config-default changes in this PR.
 
 ### Pass / fail
 
 | Result | Criteria |
 |--------|----------|
-| **GREEN** | Build + tests green; token-exact on dense control |
-| **YELLOW** | MoE token drift on Gemma — document; may still proceed to T1-02 with waiver |
-| **RED** | Build break or dense token drift — revert pin |
+| **GREEN** | Every mandatory matrix row passes; no waivers |
+| **BLOCKED** | No compatible tagged/package-consumable release or protected-toolchain build |
+| **RED** | Any token, settlement, cache, artifact, model/template, or performance gate fails — revert pin |
 
 ### Artifacts
 
@@ -343,7 +351,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 ### Procedure
 
-1. Add `DecodeBandwidthModel.swift` under `phase3-binary/Sources/MacProviderCore/` (pure Foundation — port from upstream `ProviderBenchmark/DecodeBandwidthModel.swift` via `git show`, not d-inference checkout).
+1. Add a clean-room `DecodeBandwidthModel.swift` under `phase3-binary/Sources/MacProviderCore/` from documented bandwidth equations and Macprovider measurements only; do not inspect external provider forks.
 2. Unit tests for forward/inverse model.
 3. Optional: `decode-bench --report-sparsity` flag emitting implied active params.
 
@@ -406,7 +414,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 ### Procedure
 
-1. Read upstream `AdaptivePrefillPolicy.swift` via `git show origin/master:…` (Darkbloom watch clone).
+1. Read only the upstream `ml-explore` adaptive-prefill implementation and PR #466.
 2. Prototype: optional chunked `processor.prepare` or mlx-swift-lm API if available; else document blocker.
 3. Benchmark TTFT p50/p95 on 4096-token prompt (Stage1 probe shape).
 4. Max 3 engineering days — if no API hook, record **NO-GO** and WAIVE.
@@ -434,7 +442,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 ### Procedure
 
-1. Map catalog models → recommended `GenerateParameters.kvBits` (reference upstream `KVQuantEngineScheme` concepts via watch clone).
+1. Map catalog models → recommended `GenerateParameters.kvBits` using only tagged upstream `ml-explore` APIs and Macprovider measurements.
 2. Run autotune-style sweep: nil vs 4 vs 8 on Gemma long-context probe.
 3. Gate on quality: no rise in autotune TTFT failures / stop anomalies.
 
@@ -468,7 +476,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 ### Procedure
 
-1. Map upstream: `EngineV2Config.swift`, `EngineV2Bridge.swift`, `EngineV2Factory+Production.swift` via watch clone.
+1. Map only Engine V2 APIs present in tagged upstream `ml-explore` releases; if the required APIs are unreleased, record **BLOCKED** without inspecting forks.
 2. List MacProvider integration points: `ModelRuntime`, `InferenceRelay`, `ConversationCache`, `ProviderStatus.throughputTPSSinceLast`.
 3. Prototype: load Gemma in CBv2 on branch; single-stream parity vs current path.
 4. Decision record: **GO** / **NO-GO** / **DEFER** with cost estimate.
@@ -535,14 +543,23 @@ Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM
 |----------|------|---------|-------------------|
 | [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) | Issue | T2-01 / TG2 | Weekday blocker watch |
 | [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR (**merged**, awaiting release tag) | T1-02 / TG1 | Weekday blocker watch |
+| [mlx-swift-lm#312](https://github.com/ml-explore/mlx-swift-lm/issues/312) + [#453](https://github.com/ml-explore/mlx-swift-lm/pull/453) | Issue + PR (**PR merged**, awaiting release tag) | #965 / reusable quantized KV | Weekday blocker watch |
+| [mlx-swift-lm#424](https://github.com/ml-explore/mlx-swift-lm/issues/424) | Issue | #377 / speculative rollback | Weekday blocker watch |
+| [mlx-swift-lm#518](https://github.com/ml-explore/mlx-swift-lm/issues/518) | Issue | #700 / package consumption | Weekday blocker watch |
 | ml-explore release tags | Release | T1-01 pin bump | Weekly discovery watch |
+| `swift-transformers` release tags | Release | #966 token-exact migration | Weekly discovery watch |
 
-When the checker exits **2** (material change: issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation must **open or update a GitHub issue only — never open a draft PR**. Concretely:
+When the checker exits **2** (material change: issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation must first **open or update the sticky GitHub issue**, then persist the reviewed snapshot through a normal feature-branch PR. It must never open a draft dependency-bump or implementation PR. Concretely:
 
 1. `gh issue list --repo Augustas11/macprovider --search "<sticky title>" --state all` to find the existing sticky issue for that blocker.
 2. If found, add a comment with the new checker snapshot (state, timestamps, pin status) and update checkboxes; if not found, create it fresh.
 3. For the mlx-swift-lm #364 (Gemma MoE) blocker specifically, the sticky issue is [#700](https://github.com/Augustas11/macprovider/issues/700) — "Awaiting mlx-swift-lm release containing #364 (Gemma MoE) — then T1-01 + T1-02". Always comment/update that issue rather than opening a new one while it stays open.
-4. Track blocker `status` as `awaiting_release_tag` once the upstream PR/issue is merged/closed but no release tag yet contains it, and flip it to `release_ready` once a tag > the current pin does contain it. Only `release_ready` clears the way for a pin bump (T1-01) and unblocking T1-02.
+4. Track blocker `status` as `awaiting_release_tag` once the upstream PR/issue
+   is merged/closed but no release tag yet contains it. `release_ready` requires
+   all of: a newer tag containing the fix, upstream #518 closed/released, normal
+   remote SwiftPM consumption, and a protected Xcode 16.4 / Swift 6.1 build.
+   Even then, the pin bump remains blocked until every mandatory row in
+   `docs/runbooks/MLX_ENGINE_UPGRADE_MATRIX.md` passes.
 
 See `beta/throughput-engineering/CURSOR_AUTOMATION_UPSTREAM_WATCH_PROMPT.md` for the paste-ready automation prompt implementing this contract.
 
@@ -570,7 +587,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | T0-02 | T0 | **`YELLOW`** | TG0 | `T0-02-baseline-matrix.json` | Merged #467 |
 | T0-03 | T0 | **`GREEN` (structural)** | TG0 | `T0-03-egress-profile.md` | Merged #468 |
 | T0 rollup | T0 | **`DONE`** | **TG0** | `T0_SUMMARY.md` | CLOSED |
-| T1-01 | T1 | **`YELLOW`** | TG1 | `T1-01-mlx-pin-bump.md` | At ml-explore latest; Gemma → #364 |
+| T1-01 | T1 | **`BLOCKED`** | TG1 | `T1-01-mlx-pin-bump.md` | No tagged/package-consumable/protected-toolchain-compatible release passing the mandatory matrix |
 | T1-02 | T1 | `BLOCKED` | TG1 | — | Waits mlx-swift-lm#364 release |
 | T1-03 | T1 | **`GREEN`** | TG1 | `T1-03-metallib-rebuild.md` | Merged — metallib preflight GREEN |
 | T2-01 | T2 | **`YELLOW`** | TG2 | `T2-01-compiled-decode-wire-in.md` | Merged #471 — flag OFF; blocked on [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) |
@@ -586,7 +603,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | Gate | Status | Signed off |
 |------|--------|------------|
 | TG0 | **`CLOSED`** | 2026-07-07 (#467+#468) |
-| TG1 | **`OPEN`** | T1-01 YELLOW; #364 blocker |
+| TG1 | **`OPEN`** | T1-01 BLOCKED on #364/#518/#312/#424 and protected-toolchain/matrix gates |
 | TG2 | **`OPEN`** | T2-01 blocked on [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) |
 | TG3 | **`CLOSED`** | 2026-07-07 (#472+#473 + T3-02 wire-in) |
 | TG4 | `OPEN` | — |

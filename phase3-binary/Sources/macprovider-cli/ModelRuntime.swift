@@ -584,6 +584,39 @@ actor ModelRuntime: ModelRuntimeServing {
         return .speculative
     }
 
+    /// mlx-swift-lm #424: classic speculative rollback silently fails after a
+    /// RotatingKVCache wraps. Stay strictly below the wrap boundary, including
+    /// transient draft tokens that may need to be rejected and trimmed.
+    static func speculativeCacheWindowSafe(
+        promptTokens: Int,
+        maxTokens: Int?,
+        maxContextTokens: Int,
+        numDraftTokens: Int
+    ) -> Bool {
+        guard promptTokens >= 0,
+              let maxTokens,
+              maxTokens >= 0,
+              numDraftTokens >= 0,
+              promptTokens < maxContextTokens else {
+            return false
+        }
+        let remaining = maxContextTokens - promptTokens
+        guard numDraftTokens < remaining else { return false }
+        return maxTokens < remaining - numDraftTokens
+    }
+
+    static var productionSpeculativeCacheWrapValidated: Bool {
+        false
+    }
+
+    /// mlx-swift-lm #312: TokenIterator can replace its local cache array when
+    /// dynamic KV quantization begins, leaving a caller-owned reusable cache
+    /// without generated-token state. Quantization remains available for
+    /// one-shot requests, but reusable conversation keys fail closed to fp16.
+    static func effectiveKVBits(configured: Int?, conversationKey: String?) -> Int? {
+        conversationKey == nil ? configured : nil
+    }
+
     struct HarmonyTerminalPreservingTokenizer: MLXLMCommon.Tokenizer {
         let base: any MLXLMCommon.Tokenizer
 
@@ -677,6 +710,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private static let activeAdoptionTransactionLifetime: TimeInterval = 15 * 60
     private static let maximumConsumedAdoptionTransactionIDs = 64
     private var maxContextTokens: Int
+    /// Upstream #424 makes classic speculative rollback unsafe across unknown
+    /// model-specific cache windows. Production stays disabled until a tagged
+    /// fix and a real cache-wrap parity proof explicitly set this gate.
+    private let speculativeCacheWrapValidated: Bool
     // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
     // quantization (mlx-swift default). maxBatch defaults to 1, the
     // pre-knob behavior; lifting above 1 widens the autotune search.
@@ -992,6 +1029,7 @@ actor ModelRuntime: ModelRuntimeServing {
         draftModelID: String? = nil,
         draftModelLoadPath: String? = nil,
         numDraftTokens: Int = 3,
+        speculativeCacheWrapValidated: Bool = false,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
@@ -1019,6 +1057,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
         self.numDraftTokens = numDraftTokens
+        self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.prefillStepSize = max(1, prefillStepSize)
@@ -1157,6 +1196,7 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsManifestSHA256: String? = nil,
         draftModelID: String? = nil,
         numDraftTokens: Int = 3,
+        speculativeCacheWrapValidated: Bool = false,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         pagedKVConfig: PagedKVConfig = .defaults(),
@@ -1188,6 +1228,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = nil
         self.numDraftTokens = numDraftTokens
+        self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.currentModelHash = modelHash
         self.currentModelHashAlgorithm = modelHashAlgorithm
         self.currentWeightsManifestSHA256 = weightsManifestSHA256
@@ -2035,8 +2076,8 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: weightsManifestSHA256,
             maxContextTokens: adoptionKnobs?.maxContext,
             maxConcurrency: adoptionKnobs?.maxBatch,
-            specDecodeDraftModelID: draftModelID,
-            specDecodeNumDraftTokens: draftModelID == nil ? nil : numDraftTokens
+            specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
+            specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
         )
         signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
     }
@@ -2356,7 +2397,8 @@ actor ModelRuntime: ModelRuntimeServing {
         try applyContinuousBatchingPolicy(request: request, snapshot: snapshot, emitTelemetry: true)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
-        if let testSpeculativeCompletion,
+        if speculativeCacheWrapValidated,
+           let testSpeculativeCompletion,
            Self.speculativeRoute(
                for: request,
                draftLoaded: snapshot.hasTargetCompatibleDraft,
@@ -2386,7 +2428,11 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
+        let kvBitsOverride = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey
+        )
+        let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context, captured before the
@@ -2421,7 +2467,14 @@ actor ModelRuntime: ModelRuntimeServing {
                         numDraftTokens: snapshot.numDraftTokens
                     ) == .speculative,
                        let draftContainer = snapshot.draftContainer,
-                       let numDraftTokens = snapshot.numDraftTokens {
+                       let numDraftTokens = snapshot.numDraftTokens,
+                       speculativeCacheWrapValidated,
+                       Self.speculativeCacheWindowSafe(
+                           promptTokens: promptTokenIds.count,
+                           maxTokens: request.maxTokens,
+                           maxContextTokens: maxContextTokens,
+                           numDraftTokens: numDraftTokens
+                       ) {
                         do {
                             return try await Self.runSpeculativeCompletion(
                                 input: lmInput,
@@ -2772,7 +2825,8 @@ actor ModelRuntime: ModelRuntimeServing {
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
-        if let testSpeculativeStream,
+        if speculativeCacheWrapValidated,
+           let testSpeculativeStream,
            Self.speculativeRoute(
                for: request,
                draftLoaded: snapshot.hasTargetCompatibleDraft,
@@ -2828,7 +2882,11 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let kvBitsOverride = kvBitsOverride
+        let kvBitsOverride = Self.effectiveKVBits(
+            configured: kvBitsOverride,
+            conversationKey: request.conversationKey
+        )
+        let speculativeCacheWrapValidated = speculativeCacheWrapValidated
         let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
         // SPEC-037 stage 5 — per-request cold-tier context (streaming endpoint).
@@ -2890,7 +2948,14 @@ actor ModelRuntime: ModelRuntimeServing {
                         numDraftTokens: snapshot.numDraftTokens
                     ) == .speculative,
                        let draftContainer = snapshot.draftContainer,
-                       let numDraftTokens = snapshot.numDraftTokens {
+                       let numDraftTokens = snapshot.numDraftTokens,
+                       speculativeCacheWrapValidated,
+                       Self.speculativeCacheWindowSafe(
+                           promptTokens: promptTokenIds.count,
+                           maxTokens: request.maxTokens,
+                           maxContextTokens: maxContextTokens,
+                           numDraftTokens: numDraftTokens
+                       ) {
                         var emittedText = ""
                         var stoppedByRequestStop = false
                         let generated = try await Self.collectSpeculativeText(
