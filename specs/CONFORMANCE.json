@@ -3155,8 +3155,7 @@
       "implementation": [
         "phase4-coordinator/internal/payout/addresses.go:AddressesService",
         "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
-        "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress",
-        "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift:PayoutWalletFlow"
+        "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress"
       ],
       "tests": [
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_HappyPath_FirstRegistration",
@@ -3182,8 +3181,7 @@
         "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_WrongNonceRejected",
         "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_MatchesCommitted",
         "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_RoundTripJSSignature",
-        "phase4-coordinator/internal/payout/attempts_test.go:TestSelectReadyPayouts_FiltersByHotWalletAndCoolingOff",
-        "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:PayoutWalletFlowTests"
+        "phase4-coordinator/internal/payout/attempts_test.go:TestSelectReadyPayouts_FiltersByHotWalletAndCoolingOff"
       ],
       "journeys": [
         "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"
