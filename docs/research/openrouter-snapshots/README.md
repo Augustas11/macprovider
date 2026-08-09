@@ -14,8 +14,11 @@ snapshot and must not be represented by a hand-created placeholder. The
 proposal step must not run unless fetch emitted a validated snapshot. There is
 no apply operation in this archive workflow.
 
-For a failed run, archive a credential-redacted receipt named
-`openrouter-pricing-fetch-failure-YYYY-MM-DDTHH-MM-SSZ.json`. It records the
-command, UTC window, engine revision, exit status, sanitized stderr, empty
-artifact listing, and an evidence digest; it is a blocker record, never a
-snapshot substitute.
+For each successful operation, archive a credential-redacted receipt named
+`openrouter-pricing-fetch-success-YYYY-MM-DDTHH-MM-SSZ.json` or
+`openrouter-pricing-compute-success-YYYY-MM-DDTHH-MM-SSZ.json`. It records the
+command, UTC window or generation time, engine revision, exit status,
+sanitized stdout/stderr, output listing, artifact checksum, and evidence
+digest. For a failed fetch, use
+`openrouter-pricing-fetch-failure-YYYY-MM-DDTHH-MM-SSZ.json`; it is a blocker
+record, never a snapshot substitute.

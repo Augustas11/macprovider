@@ -1,174 +1,172 @@
-# RESEARCH_227 - Rate-card v4 failed-run hand-back and blocker record
+# RESEARCH_227 - Rate-card v4 live-run record and review handoff
 
 Date: 2026-08-09
 
-Status: blocked failed-run hand-back; no rate-card or policy changes applied
+Status: Components 1 and 2 complete; review-only proposal emitted; no rate-card
+or policy change applied.
 
 ## Executive conclusion
 
-The attempted live OpenRouter refresh did not produce a trusted pricing
-snapshot. The engine failed closed while resolving a dated ranking identity
-against the catalog and endpoint data. This is the correct outcome: no alias was
-guessed, no market price was invented, and no proposal was generated from
-incomplete identity coverage.
+The repaired engine completed an authenticated, normalized OpenRouter top-50
+fetch and computed a proposal from that exact snapshot and the current policy
+and rate-card reference. It does not apply the proposal. Component 3 retains
+the decision, guardrail, and write authority for
+`phase3-binary/catalog/autotune/rate-card.json`.
 
-This is not an operational rate-card close-out. RESEARCH_227 remains blocked
-until the identity issue is repaired and a successful authenticated `fetch` then
-`compute` run produces a validated snapshot, proposal, priced-row movements,
-and candidate-coverage diff. Candidate additions are blocked pending that
-validated demand cohort. Existing policy license evidence is recorded below only
-as confirmation of the pre-existing policy, not as a policy update.
+The result is not a rate-card edit recommendation by itself. The complete
+proposal has one eligible unchanged row and three policy rows dropped because
+they are absent from the validated demand cohort. No hand-built price, partial
+snapshot, policy edit, or rate-card write was made.
 
-## 1. Evidence boundary and attempted live run
+## 1. Durable live-run evidence
 
-No raw rankings response is archived in this repository because the attempt did
-not produce a schema-valid engine snapshot. The durable evidence is the
-credential-redacted machine-generated receipt at
-`docs/research/openrouter-snapshots/openrouter-pricing-fetch-failure-2026-08-09T10-06-40Z.json`.
-The engine requires a normalized distinct top-50 cohort, exact catalog identity
-coverage, and a complete endpoints response for every selected model before it
-publishes a snapshot. Those conditions were not met.
+The following machine-generated files are committed unchanged under
+`docs/research/openrouter-snapshots/`:
 
-### Reproduction of the authenticated fetch fail-close
-
-On 2026-08-09 I reran the documented fetch command from the repository with the
-operator-provided API key supplied only to the child process environment. The
-key is intentionally not recorded here. The run used an isolated temporary
-output directory and these parameters:
-
-```text
-python scripts/openrouter_pricing_engine.py fetch --output-dir <temporary-dir> \
-  --top-n 50 --demand-window-days 30 --retries 3 \
-  --timeout-seconds 20 --generation-timeout-seconds 900
-```
-
-The authenticated command exited with status `2` and failed closed while
-resolving the dated ranking identity:
-
-```text
-openrouter pricing engine: catalog response cannot uniquely resolve ranked model 'z-ai/glm-5.2-20260616' to an endpoint model id
-```
-
-The temporary output directory contained no artifacts (`ARTIFACTS=[]`), so no
-snapshot was published.
-
-### Concrete GLM-5.2 resolver collision
-
-The current catalog maps canonical slug `z-ai/glm-5.2-20260616` to both
-`z-ai/glm-5.2` and `z-ai/glm-5.2:batch`. The dated endpoint resolves to the
-regular `z-ai/glm-5.2` identity. The resolver has a deliberately narrow rule
-for preferring the regular paid identity over an explicit `:free` variant, but
-it has no corresponding regular-versus-`:batch` rule. Both catalog candidates
-therefore remain valid and the resolver correctly fails closed rather than
-guessing.
-
-The follow-up blocker is an owner-reviewed resolver repair with fixtures/tests
-covering this regular-versus-`:batch` canonical-slug collision. This hand-back
-does not implement that rule, alter the policy, or manufacture a snapshot.
-
-### Priced-row movements and proposal status
-
-No live priced-row movement can be reported for any of the four policy models:
-
-| Policy model | Shipped rate versus live proposal | Reason |
-| --- | --- | --- |
-| `openai/gpt-oss-20b` | Not computed | No validated snapshot was published, so there is no trusted cheapest-active-endpoint input for the undercut formula. |
-| `google/gemma-4-26b-a4b-it` | Not computed | Same fail-closed snapshot prerequisite. |
-| `nvidia/nemotron-3-nano-30b-a3b` | Not computed | Same fail-closed snapshot prerequisite; its license remains resolved and is not the blocker. |
-| `qwen/qwen2.5-coder-32b-instruct` | Not computed | Same fail-closed snapshot prerequisite, including the coding baseline, market cap, and provider-payout floor calculations. |
-
-Accordingly, `compute` was not run and no live proposal artifact exists to
-archive. Reporting a numeric movement from raw rankings, a prior proposal, or a
-hand-built price would violate the snapshot-digest and endpoint-provenance
-contract. The clean hand-back is the exact fetch failure above; after identity
-resolution is repaired, rerun `fetch`, then `compute` against that fresh
-snapshot and the unchanged policy and rate-card references.
-
-### Fail-closed/data-quality findings
-
-The following separates what the pull actually established from what could not
-be established because the run failed closed:
-
-| Requested check | Live-pull result | Operational meaning |
-| --- | --- | --- |
-| Schema/provenance completeness | No schema-valid normalized snapshot was published. The complete catalog/endpoint contract was not established for the selected cohort. | Treat the run as provenance-incomplete; do not bypass allowlists or manually repair fields. |
-| Missing endpoints | Endpoint completeness for every selected model was not established; the run stopped during identity/catalog resolution before a complete endpoint-backed snapshot could be produced. | Do not infer a missing endpoint or price. Re-run `fetch` and retain the failed-run logs. |
-| Demand-cohort completeness | Completeness of the required normalized distinct top-50 cohort cannot be claimed after the fetch failure. | Do not construct a replacement snapshot by hand; a successful engine fetch is required before `compute`. |
-| Identity resolution | `z-ai/glm-5.2` and `z-ai/glm-5.2:batch` share canonical slug `z-ai/glm-5.2-20260616`; the resolver has no approved regular-versus-`:batch` rule. | Fail closed; add an owner-reviewed resolver rule and fixture before rerunning. |
-
-| Finding | Consequence |
+| Purpose | Artifact |
 | --- | --- |
-| Dated/permaslug identities | A ranking slug can be absent or represented differently in the current catalog. Alias guessing is prohibited. |
-| GLM-5.2 regular-versus-`:batch` collision | Fetch correctly failed closed rather than guessing which shared-canonical catalog identity to use. |
-| Catalog/endpoint coupling | Every selected model needs exact endpoint data; partial coverage cannot become a snapshot. |
-| No published snapshot | `compute` must not be run against a hand-edited or reconstructed snapshot. |
+| Historical fail-closed attempt | `openrouter-pricing-fetch-failure-2026-08-09T10-06-40Z.json` |
+| Successful fetch receipt | `openrouter-pricing-fetch-success-2026-08-09T10-21-21Z.json` |
+| Validated snapshot | `openrouter-pricing-snapshot-2026-08-09T10-21-21Z-11d59af120144995.json` |
+| Successful compute receipt | `openrouter-pricing-compute-success-2026-08-09T10-21-42Z.json` |
+| Proposal from that snapshot | `openrouter-rate-card-proposal-2026-08-09T10-21-42Z-a92e86c20cf53c5b.json` |
 
-## 2. Candidate screening
+The successful fetch used the documented daily rankings endpoint for the UTC
+window 2026-07-10 through 2026-08-08. It produced 50 distinct ranked models
+and 52 successful required source responses (rankings, catalog, and one
+endpoint response per ranked model). Its normalized content digest is
+`sha256:f8ce23f9e462b08ed8457f48a272664274149d5508c89590425e75f8ac0f0027`.
+The success receipts record a credential-redacted command, engine revision,
+exit status, output listing, and SHA-256 file checksum. The API credential was
+provided only as `OPENROUTER_API_KEY` to the child process and is not recorded.
 
-No candidate can be treated as newly demanded until a validated snapshot exists.
-Demand alone would not admit a candidate in any event: verified
-MLX/GGUF serving evidence, commercial-license evidence, and the current hardware
-profile gates remain required.
+Compute used exactly that archived snapshot,
+`scripts/openrouter_pricing_policy.json`, and the current reference
+`phase3-binary/catalog/autotune/rate-card.json`. It emitted proposal summary:
+`added=0`, `changed=0`, `unchanged=1`, `dropped=3`, `eligible=1`, and
+`blocked=55`.
 
-### Component-2 verification: nearest candidate, not an addition
+## 2. Resolver repair and retained historical failure
 
-This is illustrative offline research only, not a demand-backed candidate
-addition. `mistralai/mistral-nemo` has an Apache-2.0 base card and an MLX
-conversion:
+The first authenticated attempt at 2026-08-09T10:06:40Z failed closed with no
+artifact because catalog canonical slug `z-ai/glm-5.2-20260616` mapped to both
+`z-ai/glm-5.2` and `z-ai/glm-5.2:batch`. That failure receipt remains useful
+historical evidence.
 
-- Base: https://huggingface.co/mistralai/Mistral-Nemo-Instruct-2407
-- MLX: https://huggingface.co/mlx-community/Mistral-Nemo-Instruct-2407-4bit
-- OpenRouter identity: https://openrouter.ai/mistralai/mistral-nemo
+The resolver now requests the endpoint document for the exact dated ranking
+permaslug. It accepts the returned endpoint ID only when it exactly and
+uniquely matches one of the ambiguous catalog candidates. The live endpoint
+returned `z-ai/glm-5.2`, selecting the regular identity. It does not strip or
+ignore `:batch`, and an unmatched, missing, or malformed endpoint identity
+continues to fail closed. Offline tests cover the regular-versus-`:batch`
+success path, a mismatched endpoint ID, a malformed endpoint document, the
+existing explicit-`:free` rule, and the existing dated-alias fallback.
 
-The base model is approximately 12.25B parameters and the MLX Community 4-bit
-repository reports a 6.89 GB artifact. The model is dense, so active parameters
-are approximately 12B. No verified throughput benchmark or hardware-specific
-derivation is recorded here; TPS is therefore not asserted. It already exceeds
-the broad-fleet ≤8B active-parameter gate and is not marked as a coding
-specialist. It is illustrative blocked research, not a proposed policy addition.
+During the successful retry, `tencent/hy3:free` returned a schema-valid empty
+endpoint list. This is retained as `pricing_status:
+no_active_priced_endpoint` and is blocked by compute; it is not treated as a
+partial global fetch and no price is invented. Non-list or malformed endpoint
+objects still fail closed.
 
-### Proposed policy additions
+## 3. Proposal interpretation and policy coverage
+
+The current policy defines four source models. Their complete results are:
+
+| Policy source model | Cohort result | Current completion rate | Live cheapest completion price | Proposal result |
+| --- | --- | ---: | ---: | --- |
+| `openai/gpt-oss-20b` | Absent from top-50 | 100000 credits/M | N/A | Dropped; no trusted live market input in this cohort. |
+| `google/gemma-4-26b-a4b-it` | Rank 33 | 240000 credits/M | $0.30/M (Cloudflare) | Eligible and unchanged at 240000 credits/M ($0.24/M), the 20% broad-fleet undercut target. |
+| `nvidia/nemotron-3-nano-30b-a3b` | Absent from top-50 | 160000 credits/M | N/A | Dropped; no trusted live market input in this cohort. |
+| `qwen/qwen2.5-coder-32b-instruct` | Absent from top-50 | 850000 credits/M | N/A | Dropped; no trusted live market input in this cohort. |
+
+The policy-coverage diff is one policy model present in the complete top-50 and
+three policy models absent. The remaining 49 ranked models have no verified
+policy mapping and are explicitly blocked rather than silently proposed. The
+proposal also reports six existing rate-card rows without policy metadata as
+blocked. These are coverage findings for owner review, not instructions to
+remove, add, or reprice rows.
+
+## 4. Candidate screening
+
+No new policy row is proposed from this run. A ranked model needs all of the
+following before it can enter `scripts/openrouter_pricing_policy.json`: a
+verified MLX/GGUF serving path, commercially permissive license evidence, and
+a profile that clears the applicable parameter, residency, and TPS gate. The
+snapshot proves demand but does not prove the other conditions.
+
+`mistralai/mistral-nemo` is rank 43 and is the nearest fully documented
+illustrative candidate, but is not an addition. Its base card is Apache-2.0
+and the MLX Community 4-bit serving artifact is 6.89 GB
+([base](https://huggingface.co/mistralai/Mistral-Nemo-Instruct-2407),
+[MLX](https://huggingface.co/mlx-community/Mistral-Nemo-Instruct-2407-4bit)).
+It is a roughly 12B dense model, so it exceeds the broad-fleet 8B active
+parameter gate; no verified coding-specialist profile or hardware-specific TPS
+derivation is available in this record. Its policy-row-shaped screening record
+is intentionally non-admissible:
 
 ```json
-[]
+{
+  "source_model_id": "mistralai/mistral-nemo",
+  "canonical_model_id": "mistralai/mistral-nemo",
+  "serving_path": {
+    "verification_status": "verified",
+    "reference": "https://huggingface.co/mlx-community/Mistral-Nemo-Instruct-2407-4bit"
+  },
+  "license": {
+    "commercial_permitted": true,
+    "source_url": "https://huggingface.co/mistralai/Mistral-Nemo-Instruct-2407",
+    "verification_note": "Apache-2.0 base model card."
+  },
+  "profile": {
+    "kind": "not-admissible-broad-fleet",
+    "active_params_b": "approximately 12",
+    "residency_gb": "6.89",
+    "projected_tps": "unverified"
+  },
+  "blocking_reasons": [
+    "broad-fleet active parameters exceed 8B",
+    "no verified coding-specialist profile",
+    "no hardware-specific projected TPS evidence"
+  ]
+}
 ```
 
-This empty proposal is intentional. The live fetch did not satisfy the evidence
-contract, so no demand-backed candidate-coverage diff or policy addition can be
-proposed. Re-run `fetch` successfully before considering any addition.
+This separates a realistic serving/license lead from an admissible policy
+addition. It must not be copied into the machine-read policy without completing
+the missing profile evidence.
 
-## 3. Existing policy license confirmations
+## 5. License confirmations for existing policy rows
 
-- `openai/gpt-oss-20b`: Apache-2.0 on the model card; commercial use is allowed
-  under Apache-2.0 obligations. Source: https://huggingface.co/openai/gpt-oss-20b
-- `google/gemma-4-26b-a4b-it`: the Gemma 4 model card identifies Apache-2.0;
-  commercial use remains permitted subject to that license and Google’s stated
-  terms. Source: https://ai.google.dev/gemma/docs/core/model_card_4
-- `nvidia/nemotron-3-nano-30b-a3b`: the NVIDIA Nemotron 3 model card identifies
-  the governing agreement as the **NVIDIA Nemotron Open Model License** and
-  describes the model as ready for commercial use, subject to those terms.
-  **Resolved; not blocked.** Source: https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md
-  The pre-existing policy references a generic NVIDIA Open Model License URL;
-  that evidence-reference mismatch is for owner follow-up and is not changed in
+- `openai/gpt-oss-20b`: Apache-2.0 model card; commercial use is permitted
+  under Apache-2.0. Source: https://huggingface.co/openai/gpt-oss-20b
+- `google/gemma-4-26b-a4b-it`: the Gemma 4 model card identifies Apache-2.0.
+  Source: https://ai.google.dev/gemma/docs/core/model_card_4
+- `nvidia/nemotron-3-nano-30b-a3b`: the governing agreement is the **NVIDIA
+  Nemotron Open Model License**, and the pinned NVIDIA model card describes
+  commercial readiness subject to those terms. Source:
+  https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md
+  The current policy still references a generic NVIDIA Open Model License URL;
+  that evidence-reference mismatch is owner follow-up, not a policy change in
   this PR.
-- `qwen/qwen2.5-coder-32b-instruct`: Apache-2.0 on the model card; commercial
-  use is allowed under Apache-2.0 obligations. Source:
+- `qwen/qwen2.5-coder-32b-instruct`: Apache-2.0 model card; commercial use is
+  permitted under Apache-2.0. Source:
   https://huggingface.co/Qwen/Qwen2.5-Coder-32B-Instruct
 
 License permission does not replace serving-path verification, performance
-benchmarks, or legal review of downstream packaging.
+evidence, or legal review of downstream packaging.
 
-## 4. Blocker and next action
+## 6. Operational boundary
 
-Keep the current policy unchanged. Do not modify
-`phase3-binary/catalog/autotune/rate-card.json`. Repair or clarify the OpenRouter
-dated-model/catalog/endpoint identity contract, add the resolver fixture/test,
-then run a fresh authenticated `fetch`. Only a successfully validated snapshot
-should be passed to `compute`. RESEARCH_227 is not closed by this failed run.
+Artifacts older than 48 hours are stale for a pricing decision. A future
+operator run must first complete authenticated `fetch`, archive its validated
+snapshot and receipt, then run `compute` from that exact snapshot and archive
+its proposal and receipt. A failed fetch ends the chain. This tool has no apply
+mode; Component 3 owns bounded-delta review, staleness enforcement, approval,
+and any live rate-card write.
 
 ## Sources
 
 - OpenRouter daily rankings: https://openrouter.ai/api/v1/datasets/rankings-daily
 - OpenRouter catalog: https://openrouter.ai/api/v1/models
-- V3 baseline and prior eligibility research:
+- V3 policy and eligibility baseline:
   `docs/research/RESEARCH_227_RATE_CARD_V3_MEMO.md`

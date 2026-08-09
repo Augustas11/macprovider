@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "receipt_type": "openrouter-pricing-fetch-success",
+  "snapshot_fetched_at": "2026-08-09T10:21:21Z",
+  "engine_commit": "69ba3f9d53500e9c94bf3ae14d9538209dab4a21",
+  "command": ["python", "scripts/openrouter_pricing_engine.py", "fetch", "--output-dir", "<temporary-dir>", "--top-n", "50", "--demand-window-days", "30", "--retries", "3", "--timeout-seconds", "20", "--generation-timeout-seconds", "900"],
+  "source": {
+    "rankings_url": "https://openrouter.ai/api/v1/datasets/rankings-daily",
+    "ranking_window_start_date": "2026-07-10",
+    "ranking_window_end_date": "2026-08-08",
+    "openrouter_api_key_configured": true
+  },
+  "exit_status": 0,
+  "stdout": "openrouter-pricing-snapshot-2026-08-09T10-21-21Z-11d59af120144995.json",
+  "stderr": "",
+  "output_directory_listing": ["openrouter-pricing-snapshot-2026-08-09T10-21-21Z-11d59af120144995.json"],
+  "snapshot_content_digest": "sha256:f8ce23f9e462b08ed8457f48a272664274149d5508c89590425e75f8ac0f0027",
+  "snapshot_file_sha256": "sha256:1c43e08f6c1e9b561ee2d58c165c358f8e3a5a61caee31854f0e8b3d601e8b8f",
+  "evidence_digest": "sha256:ac4dad744530da4a244207f68b202ba6b9f49768e20fbfdbb061fbea7f7250a2"
+}

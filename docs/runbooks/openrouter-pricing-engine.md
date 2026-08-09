@@ -125,7 +125,7 @@ The snapshot schema is version `4`:
         "ranking_model_permaslug": "provider/model",
         "catalog_canonical_slug": "provider/model",
         "catalog_name": "Provider: Model",
-        "identity_resolution": "catalog|catalog_paid_variant|endpoint_alias_fallback"
+        "identity_resolution": "catalog|catalog_paid_variant|endpoint_alias_fallback|endpoint_confirmed_catalog_candidate"
       }
     }
   ]
@@ -142,12 +142,16 @@ If a dated ranking model is no longer present in the catalog, the engine may
 use the endpoint response for that exact dated ID only when OpenRouter returns
 a valid current model ID. The snapshot records this as
 `endpoint_alias_fallback` and leaves catalog-only metadata `null`; it never
-guesses an alias from the model name.
+guesses an alias from the model name. If the dated permaslug instead maps to
+multiple catalog candidates, the engine accepts the endpoint-returned ID only
+when it exactly and uniquely identifies one of those candidates. The snapshot
+records that case as `endpoint_confirmed_catalog_candidate`; an unmatched,
+missing, or malformed identity fails closed.
 
-An endpoint response that succeeds but has no active priced provider is retained
-with `pricing_status: "no_active_priced_endpoint"` and `pricing: null`. This is
-not treated as a partial fetch; Component 2 blocks that model rather than
-inventing a market price.
+An endpoint response that succeeds but has an empty endpoint list or no active
+priced provider is retained with `pricing_status: "no_active_priced_endpoint"`
+and `pricing: null`. This is not treated as a partial fetch; Component 2 blocks
+that model rather than inventing a market price.
 
 ## Fail-closed behavior
 
