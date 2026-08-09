@@ -1,0 +1,477 @@
+{
+  "schema_version": "macprovider.provider-prebeta-admission-evidence.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "run_id": "provider-prebeta-admission-air5-qwen-spec034-r001-20260809T171520Z",
+  "requirement_ids": [
+    "SPEC-034-R001"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "b60f4fd1672fb230e8cf392b8d0afcec0ef3782b"
+  },
+  "captured_at": "2026-08-09T17:15:20Z",
+  "expires_at": "2026-11-09",
+  "operator": {
+    "role": "provider-prebeta-operator",
+    "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+  },
+  "environment": {
+    "class": "physical-provider-prebeta-admission",
+    "hardware_profile": "apple-silicon-32gb-qwen3-redacted",
+    "candidate": "provider-cli:v1.8.90"
+  },
+  "result": {
+    "status": "pass",
+    "summary": "SPEC-034-R001 live referral posture passed on Pearl production for the ongoing prebeta referral/X campaign. Pearl required referral admission, served exact Malibu fragment-join public validation, preserved the incumbent provider identity through a v1.8.90 Malibu/CLI update, accepted and matured a live X advocacy verification into a post-specific invite bonus grant, rejected disabled public/social surfaces during rollback, restored the enabled posture, and kept the provider serving buyers with hash-verified Qwen3 routing."
+  },
+  "steps": [
+    {
+      "id": "step-01-private-prebeta-authorization",
+      "status": "pass",
+      "assertion": "Decision Entry 224 makes the prebeta referral/X posture an ongoing reviewed campaign rather than an expired Entry 172 exception. Pearl production required referral admission, enabled public validation, enabled Malibu join links, enabled social invite bonus, and pinned the campaign to prebeta_20260719 with join_base_url https://malibu.tech/j.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-02-install-launch-identity",
+      "status": "pass",
+      "assertion": "The local provider was updated to Malibu.app v1.8.90 and standalone provider-cli v1.8.90, the embedded CLI hash matched the standalone CLI hash, Gatekeeper and codesign accepted Malibu.app, the local status contract advertised SPEC-034 referral capabilities, and the same redacted provider identity remained ready from cli_keychain after restart.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-03-provider-registration-admission",
+      "status": "pass",
+      "assertion": "Pearl recorded the same redacted provider identity as admitted by referral with decision referred under campaign prebeta_20260719, retained an unrevoked credential row, kept first-serving qualification present, and publicly validated the active invite code hash as valid with required=true from the exact Malibu origin.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-04-catalog-autotune-readiness",
+      "status": "pass",
+      "assertion": "The provider served qwen3-8b from the live autotune catalog row for mlx-community/Qwen3-8B-4bit with catalog state live_verified, model hash 1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877, catalog digest 56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720, and weights manifest 269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-05-hardware-evidence-verifier",
+      "status": "pass",
+      "assertion": "For this SPEC-034 referral posture slice, Pearl's live serving qualification table showed first-serving evidence for the same redacted provider identity, and local safety telemetry reported a 32GB hardware tier, model_loaded=true, runtime_state=ready, nominal thermal state, and buyer-serving network state after rollback restore.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-06-provider-runtime-routing",
+      "status": "pass",
+      "assertion": "After the v1.8.90 update and rollback restore, Pearl health remained ok, the provider reconnected as ready, local health returned ready for twelve consecutive checks, and the buyer route snapshot for the Qwen3 smoke request selected the same redacted provider identity with route_snapshot_mode=enforce and spec008_hash_status=hash_verified.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-07-buyer-serving-smoke",
+      "status": "pass",
+      "assertion": "A public authenticated buyer smoke request at 2026-08-09T16:40:59Z returned HTTP 200 for mlx-community/Qwen3-8B-4bit, and Pearl request_log plus settlement_route_snapshots correlated the request hash to the same redacted provider identity with the expected catalog model hash.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-08-redaction-and-correlation",
+      "status": "pass",
+      "assertion": "The artifact excludes raw invite codes, raw invite URLs, raw X post URLs, raw X post IDs, raw provider IDs, raw session IDs, credential material, and local account secrets while retaining stable SHA-256 fingerprints for referral, X verification, rollback, route, catalog, and provider identity correlation.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    }
+  ],
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true
+  },
+  "observations": {
+    "evidence_scope": "spec034-r001-live-referral-x-posture-and-rollback",
+    "issue": {
+      "url": "https://github.com/Augustas11/macprovider/issues/960",
+      "owner": "SPEC-034-R001",
+      "previous_partial_artifact": "journeys/evidence/provider-prebeta-referral-posture-live-20260809T161124Z.partial.json",
+      "previous_partial_sha256": "a3512acaf38ad63116aecb406ec8c5bff2133eb7462c5db3c695ea837363d394",
+      "governance_pr": "https://github.com/Augustas11/macprovider/pull/970",
+      "partial_evidence_pr": "https://github.com/Augustas11/macprovider/pull/972"
+    },
+    "pearl": {
+      "class": "Pearl production coordinator",
+      "host_fingerprint": "ubuntu-s-2vcpu-4gb-120gb-intel-nyc1",
+      "coordinator_version": "v1.8.91",
+      "recommended_binary_version": "1.8.90",
+      "restored_overlay_sha256": "296af0a6c944ae06d1ec6f5163d5b3c10c1b0b5d0cb718327e27482b03a10d62",
+      "disabled_overlay_sha256": "21a5e003d22c6c12fc5b771d5d9e0b2da1f7f2706e13fbf436664a316caff6d3",
+      "coordinator_service_active_after_restore": true,
+      "health_after_social_grant": {
+        "observed_at": "2026-08-09T17:15:01Z",
+        "status": "ok",
+        "pool_size": 5,
+        "pool_ready": 3,
+        "pool_policy_ready": 3
+      },
+      "referral_policy_enabled": {
+        "require_for_registration": true,
+        "enable_public_validation": true,
+        "enable_join_links": true,
+        "enable_social_invite_bonus": true,
+        "campaign": "prebeta_20260719",
+        "policy_version": "v1",
+        "provider_base_uses": 1,
+        "social_bonus_uses": 2,
+        "social_bonus_max_grants_per_provider": 4,
+        "social_verification_dwell_s": 1800,
+        "challenge_ttl_s": 900,
+        "grandfather_before": "2026-07-18T22:28:55Z",
+        "join_base_url": "https://malibu.tech/j",
+        "hmac_key_present": true,
+        "x_api_credential_present": true
+      }
+    },
+    "provider": {
+      "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+      "provider_name_redacted": true,
+      "local_config_sha256": "532beeca4b24e843e01fae0ea17c67be962d7bfefe42bd48a5db3cc697878bfb",
+      "local_config_contains_same_provider_identity": true,
+      "local_config_contains_pearl_wss": true,
+      "local_config_contains_qwen3_8b": true,
+      "binary_version": "1.8.90",
+      "status": "ready",
+      "network_state": "buyer_serving",
+      "lifecycle_state": "serving_buyers",
+      "lifecycle_reason_code": "coordinator_buyer_serving_confirmed",
+      "credential": {
+        "state": "ready",
+        "source": "cli_keychain",
+        "configured": true,
+        "restart_safe": true,
+        "migration_pending": false
+      },
+      "admission_identity": {
+        "state": "ready",
+        "source": "cli_keychain",
+        "owner": "macprovider_cli",
+        "public_key_sha256": "fb182e52fdbae510ce3fc32c1380d09d0c870453b701ac44fb4373e70ed84a72",
+        "coordinator_public_key_sha256": "fb182e52fdbae510ce3fc32c1380d09d0c870453b701ac44fb4373e70ed84a72",
+        "recovery_action": "none"
+      },
+      "capacity": {
+        "ram_gb": 32,
+        "ram_tier": "32GB",
+        "max_concurrency": 1,
+        "max_context_tokens": 16000,
+        "throughput_tps_estimate": 17.947159949583433
+      },
+      "safety_telemetry": {
+        "runtime_state": "ready",
+        "thermal_state": "nominal",
+        "model_loaded": true,
+        "hardware_tier": "32GB",
+        "safety_provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3"
+      },
+      "local_ready_after_restore_checks": {
+        "iterations": 12,
+        "observed_after": "2026-08-09T17:15:01Z",
+        "all_status": "ready",
+        "model": "qwen3-8b",
+        "model_loaded": true
+      },
+      "capabilities": [
+        "buyer_serving_authority_v1",
+        "catalog_status_v1",
+        "compatibility_set_v1",
+        "credential_status_v1",
+        "admission_identity_v1",
+        "lifecycle_transition_v1",
+        "persisted_lifecycle_state_v1",
+        "lifecycle_significant_events_v1",
+        "lifecycle_lease_v1",
+        "legacy_reader_fallback_v1",
+        "service_instance_v1",
+        "status_observation_v1",
+        "provider_safety_telemetry_v1",
+        "referral_bootstrap_v1",
+        "referral_status_v1",
+        "referral_advocacy_v1",
+        "referral_repeatable_advocacy_v1",
+        "referral_fragment_links_v1",
+        "provider_safety_telemetry_v2"
+      ]
+    },
+    "release_artifacts": {
+      "github_release_tag": "v1.8.90",
+      "malibu_app_version": "1.8.90",
+      "standalone_cli_version": "1.8.90",
+      "malibu_dmg_sha256": "4cbe757232047314ca09772d08accd96683097a4777c90057b6c67e9aa8ac20e",
+      "cli_tarball_sha256": "26357edb0d7de44fcfabee72a9afb3792f20fb91c5142861ba6d36bbd27afd6b",
+      "embedded_cli_sha256": "6be80e274348031e9b76035b300c01c24eb22e151dc52812297337f965bc3ab6",
+      "standalone_cli_sha256": "6be80e274348031e9b76035b300c01c24eb22e151dc52812297337f965bc3ab6",
+      "embedded_cli_matches_standalone_cli": true,
+      "codesign_strict_deep": "pass",
+      "gatekeeper_result": "accepted",
+      "gatekeeper_source": "Notarized Developer ID",
+      "prior_app_backup_path_redacted": true,
+      "prior_cli_backup_path_redacted": true
+    },
+    "referral_admission": {
+      "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+      "admission_rows": [
+        {
+          "campaign": "prebeta_20260719",
+          "policy_version": "v1",
+          "decision": "referred",
+          "applied_at": "2026-07-18T22:32:03Z"
+        }
+      ],
+      "credential_rows": [
+        {
+          "provider_name_redacted": true,
+          "created_at": "2026-07-18T22:32:03Z",
+          "last_used_at": "2026-08-09T16:46:21Z",
+          "revoked_at": null,
+          "bootstrap_issued": true,
+          "bootstrap_expires_at": "2026-07-18T22:42:03Z"
+        }
+      ],
+      "serving_qualifications": [
+        {
+          "evidence_id_sha256": "11d2b5f592f7bf7d735d8b435b230d80cb95d28ea18b2a5803c2f4dc933a1979",
+          "evidence_at": "2026-07-19T18:17:14.091074981Z",
+          "qualified_at": "2026-07-19T18:21:06.870204Z"
+        }
+      ]
+    },
+    "public_referral_validation": {
+      "endpoint": "https://coordinator.streamvc.live/v1/referrals/validate",
+      "allowed_origin": "https://malibu.tech",
+      "active_invite_code_sha256": "047a648f4557d2f7887b14f91de2a70344a95a0301a5e4547753f083a6374292",
+      "active_invite_url_sha256": "60334d5942ad918704bfd1eac373d29143674c46963adbfa5a7654071192fd9c",
+      "baseline_valid_probe": {
+        "observed_at": "2026-08-09T16:44:47Z",
+        "http_status": 200,
+        "access_control_allow_origin": "https://malibu.tech",
+        "cache_control": "no-store",
+        "response": {
+          "valid": true,
+          "required": true,
+          "reason": "valid"
+        }
+      },
+      "restored_valid_probe": {
+        "observed_at": "2026-08-09T17:15:01Z",
+        "http_status": 200,
+        "access_control_allow_origin": "https://malibu.tech",
+        "cache_control": "no-store",
+        "response": {
+          "valid": true,
+          "required": true,
+          "reason": "valid"
+        }
+      },
+      "final_provider_referral_status": {
+        "observed_at": "2026-08-09T17:15:01.731Z",
+        "campaign": "prebeta_20260719",
+        "join_base_url": "https://malibu.tech/j",
+        "join_links_enabled": true,
+        "social_bonus_enabled": true,
+        "social_state": "matured",
+        "first_serving_seen": true,
+        "base_capacity": 1,
+        "configured_bonus_capacity": 2,
+        "bonus_capacity": 6,
+        "redemptions": 4,
+        "remaining": 3,
+        "social_bonus_grants_remaining": 3,
+        "invite_code_sha256": "047a648f4557d2f7887b14f91de2a70344a95a0301a5e4547753f083a6374292",
+        "invite_url_sha256": "60334d5942ad918704bfd1eac373d29143674c46963adbfa5a7654071192fd9c"
+      }
+    },
+    "x_social_verification": {
+      "challenge_created_at": "2026-08-09T16:37:42Z",
+      "challenge_expires_at": "2026-08-09T16:52:42Z",
+      "challenge_sha256": "038055ea4a6559ee361df4f32be4ea5605542a5ca986008c508558c53724eed9",
+      "intent_url_sha256": "0fac74ac6f861fc220621d59dae81974ef2ec6cef26ba7a85b70fd368fff7fc6",
+      "post_url_sha256": "989167fa900e113a66a6a84d808504b384d5aa619bdfff291bdb6106cecf96e3",
+      "post_id_sha256": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df",
+      "author_id_sha256": "1b71c4cd4b57debd39de6581f8fa1a0c212482c59963a23ffa524d65b759bd60",
+      "share_url_hash": "1ea9bd7cfe1bb84109468e18882b9b70f78713a10cefc3c0c53de1b1a7ed0611",
+      "verification_method": "x_api",
+      "submitted_at": "2026-08-09T16:39:02Z",
+      "pending_since": "2026-08-09T16:39:02Z",
+      "next_check_at": "2026-08-09T17:09:02Z",
+      "granted_at": "2026-08-09T17:14:20Z",
+      "failed_at": null,
+      "recheck_attempts": 0,
+      "grant": {
+        "amount": 2,
+        "bonus_kind": "x_verified_post:26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df",
+        "verification_post_hash": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df",
+        "granted_at": "2026-08-09T17:14:20Z"
+      },
+      "audit": [
+        {
+          "created_at": "2026-08-09T16:39:02Z",
+          "event_kind": "submission",
+          "outcome": "accepted",
+          "reason": "x_api",
+          "subject_hash": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df"
+        },
+        {
+          "created_at": "2026-08-09T16:39:02Z",
+          "event_kind": "external_verify",
+          "outcome": "verified",
+          "reason": "x_api",
+          "subject_hash": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df"
+        },
+        {
+          "created_at": "2026-08-09T17:14:20Z",
+          "event_kind": "recheck",
+          "outcome": "claimed",
+          "reason": "",
+          "subject_hash": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df"
+        },
+        {
+          "created_at": "2026-08-09T17:14:20Z",
+          "event_kind": "bonus",
+          "outcome": "granted",
+          "reason": "x_verified_post",
+          "subject_hash": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df"
+        },
+        {
+          "created_at": "2026-08-09T17:14:20Z",
+          "event_kind": "recheck",
+          "outcome": "verified",
+          "reason": "author_continuity",
+          "subject_hash": "26936d3abd82776171b9b289325098fd816ac36237bd5f97e48cc9372393e5df"
+        }
+      ]
+    },
+    "rollback_disable_restore": {
+      "backup_path_redacted": true,
+      "backup_created_at": "2026-08-09T16:41:33Z",
+      "baseline_overlay_sha256": "296af0a6c944ae06d1ec6f5163d5b3c10c1b0b5d0cb718327e27482b03a10d62",
+      "disabled_overlay_sha256": "21a5e003d22c6c12fc5b771d5d9e0b2da1f7f2706e13fbf436664a316caff6d3",
+      "restored_overlay_sha256": "296af0a6c944ae06d1ec6f5163d5b3c10c1b0b5d0cb718327e27482b03a10d62",
+      "disabled_flags": {
+        "require_for_registration": true,
+        "enable_public_validation": false,
+        "enable_join_links": false,
+        "enable_social_invite_bonus": false,
+        "campaign": "prebeta_20260719",
+        "policy_version": "v1",
+        "join_base_url": "https://malibu.tech/j"
+      },
+      "disabled_public_validation_probe": {
+        "observed_at": "2026-08-09T16:45:46Z",
+        "http_status": 404,
+        "access_control_allow_origin": null,
+        "cache_control": "no-store",
+        "body_sha256": "b16e15764b8bc06c5c3f9f19bc8b99fa48e7894aa5a6ccdad65da49bbf564793",
+        "body_len": 19
+      },
+      "disabled_provider_referral_status": {
+        "observed_at": "2026-08-09T16:45:46.607Z",
+        "join_links_enabled": false,
+        "social_bonus_enabled": false,
+        "configured_bonus_capacity": 0,
+        "social_state": "pending",
+        "invite_code_sha256": "047a648f4557d2f7887b14f91de2a70344a95a0301a5e4547753f083a6374292"
+      },
+      "disabled_provider_challenge": {
+        "operation": "challenge",
+        "code": "feature_unavailable"
+      },
+      "provider_health_during_disabled_window": {
+        "observed_at": "2026-08-09T16:45:46Z",
+        "status": "ready",
+        "model": "qwen3-8b",
+        "model_loaded": true
+      },
+      "pearl_health_during_disabled_window": {
+        "observed_at": "2026-08-09T16:45:46Z",
+        "status": "ok",
+        "pool_size": 5,
+        "pool_ready": 5,
+        "pool_policy_ready": 5
+      },
+      "restored_validation_probe": {
+        "observed_at": "2026-08-09T16:46:21Z",
+        "http_status": 200,
+        "access_control_allow_origin": "https://malibu.tech",
+        "cache_control": "no-store",
+        "response": {
+          "valid": true,
+          "required": true,
+          "reason": "valid"
+        }
+      }
+    },
+    "catalog_autotune": {
+      "catalog_key": "qwen3-8b",
+      "model_id": "mlx-community/Qwen3-8B-4bit",
+      "model_revision": "545dc4251c05440727734bcd94334791f6ab0192",
+      "artifact_sha256": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "digest": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+      "row_identity": "902b83ecfd20acbccbcfe2c85c0faf6725c8a1955b430689445ce65726ea17b0",
+      "policy_version": "autotune-policy-v1",
+      "release_id": "published-2026-07-29-inband-provenance-v1",
+      "signer_key_id": "streamvc-autotune-static-v4",
+      "state": "live_verified",
+      "weights_manifest_sha256": "269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81",
+      "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1"
+    },
+    "buyer_serving_smoke": {
+      "observed_at": "2026-08-09T16:40:59.820242898Z",
+      "gateway": "https://api.streamvc.live/v1/chat/completions",
+      "http_status": 200,
+      "model": "mlx-community/Qwen3-8B-4bit",
+      "request_id_sha256": "4809d2dfa1806f7040bbc77d05256173ffb434880aedb0a8ab6079e016f76e83",
+      "request_log": {
+        "ts_utc": "2026-08-09T16:40:59.820242898Z",
+        "status": 200,
+        "prompt_tokens": 14,
+        "completion_tokens": 8,
+        "total_tokens": 22,
+        "latency_ms": 850.0,
+        "routing_ms": 0.0,
+        "provider_assigned_id_sha256": "0e5856344197be4a336623d75480fc133174841dfe1fe6c3dc427912399524ad"
+      },
+      "route_snapshot": {
+        "id": 23328,
+        "created_at_utc": "2026-08-09T16:41:00.004Z",
+        "request_id_sha256": "4809d2dfa1806f7040bbc77d05256173ffb434880aedb0a8ab6079e016f76e83",
+        "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+        "model_id": "mlx-community/Qwen3-8B-4bit",
+        "provider_reported_model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+        "expected_catalog_model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+        "catalog_id": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b",
+        "catalog_body_digest": "5e3b04bd4847b1d621682bd725863f9a2b6b1312461f8e8cdd9b82be56678d8e",
+        "catalog_signature_key_id": "catalog-key-2026q2",
+        "spec008_hash_status": "hash_verified",
+        "route_snapshot_mode": "enforce",
+        "route_snapshot_digest": "f903636edcdfeae259d6e5d7819a9c22994083c875d42b90afd411611bdd3e7d"
+      }
+    },
+    "redaction_controls": {
+      "raw_invite_code_absent": true,
+      "raw_invite_url_absent": true,
+      "raw_x_post_url_absent": true,
+      "raw_x_post_id_absent": true,
+      "raw_provider_id_absent": true,
+      "raw_session_id_absent": true,
+      "credential_material_absent": true,
+      "local_account_paths_redacted": true,
+      "correlation_method": "sha256 fingerprints over original identifiers"
+    }
+  }
+}
