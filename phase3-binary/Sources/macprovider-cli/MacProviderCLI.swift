@@ -501,6 +501,15 @@ struct ServeCommand: AsyncParsableCommand {
         resolved.draftModelArtifactSHA256 = nil
     }
 
+    static func applySpeculativeSafetyGate(
+        _ resolved: inout AppConfig,
+        cacheWrapValidated: Bool
+    ) {
+        guard !cacheWrapValidated else { return }
+        resolved.draftModel = nil
+        resolved.draftModelArtifactSHA256 = nil
+    }
+
     static func runDrainTimeoutPreflight(_ resolved: AppConfig) throws {
         if !(5...600).contains(resolved.swapDrainTimeoutSeconds) {
             FileHandle.standardError.write(Data((
@@ -1248,6 +1257,14 @@ struct ServeCommand: AsyncParsableCommand {
             modelID: resolved.model,
             operationID: lifecycleOperationID
         )
+        // Keep disabled speculative configuration out of every production
+        // preflight as well as runtime execution. Otherwise a stale draft can
+        // downshift target-only capacity or prevent ordinary serving.
+        let speculativeCacheWrapValidated = ModelRuntime.productionSpeculativeCacheWrapValidated
+        Self.applySpeculativeSafetyGate(
+            &resolved,
+            cacheWrapValidated: speculativeCacheWrapValidated
+        )
         let startupPreflight: Self.ServeStartupPreflightResult
         let startupProviderID = resolved.providerID
         var acquiredStartupLease: ProviderLifecycleLeaseRecord?
@@ -1351,7 +1368,6 @@ struct ServeCommand: AsyncParsableCommand {
         // model-specific rotating-cache wrap. Keep one source of truth for both
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
-        let speculativeCacheWrapValidated = ModelRuntime.productionSpeculativeCacheWrapValidated
         do {
             modelRuntime = try await ModelRuntime(
                 modelID: resolved.model,
