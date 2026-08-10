@@ -494,6 +494,13 @@ enum AgentSnapshotPresenter {
                 executableAction: updateAvailable(s) ? .updateProviderSoftware : nil
             )
         }
+        if isTemporarilyNotBuyerServing(s) {
+            return PublicStatus(
+                title: "Customer availability is temporarily interrupted",
+                detail: "The coordinator is not routing customer work to this Mac right now, often during reconnect or maintenance windows.",
+                safeNextAction: "Keep Malibu open while status updates."
+            )
+        }
         if isIneligibleForCustomerWork(s) {
             return PublicStatus(
                 title: "This Mac is not currently eligible",
@@ -606,6 +613,11 @@ enum AgentSnapshotPresenter {
             && (s.statusObservationFresh == false || !s.isLocalStatusObservationCurrent())
     }
 
+    private static func isTemporarilyNotBuyerServing(_ s: AgentSnapshot) -> Bool {
+        guard s.state == .serving || s.state == .reconnecting else { return false }
+        return s.networkState == "not_buyer_serving"
+    }
+
     private static func isSoftwareUpdateRequired(_ s: AgentSnapshot) -> Bool {
         // Reason-specific #582 outcomes reuse catalog_incompatible on the v1
         // wire; do not collapse them into generic software-update guidance.
@@ -640,7 +652,7 @@ enum AgentSnapshotPresenter {
 
     private static func isIneligibleForCustomerWork(_ s: AgentSnapshot) -> Bool {
         switch s.networkState {
-        case "not_buyer_serving", "local_donor", "safe_offline_fallback", "catalog_integrity_failure":
+        case "local_donor", "safe_offline_fallback", "catalog_integrity_failure":
             return true
         default:
             return false

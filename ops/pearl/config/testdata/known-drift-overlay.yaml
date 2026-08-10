@@ -4,6 +4,8 @@ coordinator:
     accepted_ids:
       - "Augustas11/macprovider:v1.8.61@example"
 pool:
+  heartbeat_interval_s: 30
+  heartbeat_miss_threshold_s: 90
   canary_enabled: false
   canary_interval_s: 300
   canary_timeout_s: 30
