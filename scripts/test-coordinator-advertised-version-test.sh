@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version_guard="$repo_root/scripts/test-coordinator-advertised-version.sh"
+policy_guard="$repo_root/scripts/release-staged-version-policy.sh"
 source_file="$repo_root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 app_project_file="$repo_root/phase3-binary/app/project.yml"
 binary_version="$(sed -nE 's/^[[:space:]]*static let binaryVersion = "([^"]+)".*$/\1/p' "$source_file" | head -n 1)"
@@ -11,10 +12,15 @@ app_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION: "?([0-9]+)"?.*$/\1
 future_version="${app_version%.*}.$((${app_version##*.} + 1))"
 future_build="$((app_build + 1))"
 future_version_pattern="${future_version//./\\.}"
-staged_coordinator_policy="--allow-previous-stable=1.8.90"
-staged_candidate_policy="--staged-candidate=1.8.92"
 work="$(mktemp -d "${TMPDIR:-/tmp}/release-version-cohesion.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+
+policy_file="$work/release-policy.env"
+bash "$policy_guard" "v$binary_version" > "$policy_file"
+source "$policy_file"
+[[ "$MACPROVIDER_RELEASE_STAGED" == true ]]
+staged_coordinator_policy="--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+staged_candidate_policy="--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
 
 fixture="$work/repo"
 reset_fixture() {
@@ -47,9 +53,9 @@ if bash "$version_guard" "v$binary_version" >"$work/strict-staging.out" 2>&1; th
   echo "strict version guard accepted an unpublished candidate against the previous recommendation" >&2
   exit 1
 fi
-grep -q "advertises 1.8.90; expected $binary_version" "$work/strict-staging.out"
+grep -q "advertises $MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION; expected $binary_version" "$work/strict-staging.out"
 base_output="$(bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" "$staged_candidate_policy")"
-grep -q "staged with previous stable coordinator recommendation 1.8.90" <<<"$base_output"
+grep -q "staged with previous stable coordinator recommendation $MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION" <<<"$base_output"
 
 if bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" --staged-candidate=1.8.91 >"$work/candidate-drift.out" 2>&1; then
   echo "version guard accepted a staged exception for a different candidate" >&2
@@ -57,7 +63,7 @@ if bash "$version_guard" "v$binary_version" "$staged_coordinator_policy" --stage
 fi
 grep -q "does not match CLI binary" "$work/candidate-drift.out"
 
-if bash "$version_guard" "v$binary_version" --staged-candidate=1.8.92 >"$work/missing-previous.out" 2>&1; then
+if bash "$version_guard" "v$binary_version" "$staged_candidate_policy" >"$work/missing-previous.out" 2>&1; then
   echo "version guard accepted a staged candidate without a previous stable policy" >&2
   exit 1
 fi

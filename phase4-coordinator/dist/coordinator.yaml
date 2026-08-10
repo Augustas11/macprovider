@@ -366,8 +366,8 @@ providers:
 # the already-true rejection explicit and machine-readable instead of leaving
 # a legacy build to fail later, opaquely, on catalog admission.
 #
-# It is deliberately pinned to the previous stable recommendation (1.8.90)
-# until the signed 1.8.92 assets have been published and byte-identity
+# It is deliberately pinned to the previous stable recommendation (1.8.92)
+# until the signed 1.8.93 assets have been published and byte-identity
 # verified, and remains below the
 # #610 first-hop bridge build (1.8.48, which is additionally exempt from the
 # floor by construction — see prepareProviderAdmission's firstHopOnly skip),
@@ -376,5 +376,5 @@ providers:
 # reconnecting and tells its operator to upgrade, and one without it
 # reconnect-loops.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.90"
+  latest_binary_version: "1.8.92"
   required_binary_version: "1.8.33"

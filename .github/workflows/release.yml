@@ -114,10 +114,19 @@ jobs:
         shell: bash
         # Keep this a literal block: YAML folds plain multiline scalars before Bash parses them.
         run: |
-          bash scripts/test-coordinator-advertised-version.sh \
-            "${{ steps.release_source.outputs.tag }}" \
-            --allow-previous-stable=1.8.90 \
-            --staged-candidate=1.8.92
+          set -euo pipefail
+          policy_file="$RUNNER_TEMP/release-staged-policy.env"
+          bash scripts/release-staged-version-policy.sh \
+            "${{ steps.release_source.outputs.tag }}" > "$policy_file"
+          source "$policy_file"
+          coordinator_args=("${{ steps.release_source.outputs.tag }}")
+          if [ "$MACPROVIDER_RELEASE_STAGED" = true ]; then
+            coordinator_args+=(
+              "--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+              "--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
+            )
+          fi
+          bash scripts/test-coordinator-advertised-version.sh "${coordinator_args[@]}"
 
       - name: Select and verify reviewed release toolchain
         shell: bash
@@ -1327,10 +1336,6 @@ jobs:
             python3 scripts/verify-malibu-sparkle-signature.py \
               "$tag" "$dmg" "$appcast" \
               scripts/dist/malibu-v1.8.32-sparkle-public-key
-            bash scripts/test-coordinator-advertised-version.sh \
-              "$tag" \
-              --allow-previous-stable=1.8.88 \
-              --staged-candidate=1.8.90
           elif [ -e phase3-binary/app/dist/appcast.xml ]; then
             echo "::error::legacy appcast must exist only for v1.8.39" >&2
             exit 1
@@ -1878,6 +1883,15 @@ jobs:
 
           if [ "$PRERELEASE_INPUT" = false ]; then
             echo "::group::Verify pre-publication live coordinator feed gate"
+            policy_file="$RUNNER_TEMP/release-staged-policy.env"
+            bash scripts/release-staged-version-policy.sh "$tag" > "$policy_file"
+            source "$policy_file"
+            prepublication_recommendation_args=()
+            if [ "$MACPROVIDER_RELEASE_STAGED" = true ]; then
+              prepublication_recommendation_args=(
+                --expected-previous-recommendation "$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+              )
+            fi
             env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
               python3 scripts/verify-live-coordinator-release-gate.py \
               --tag "$tag" \
@@ -1885,7 +1899,7 @@ jobs:
               --trusted-keys trusted-keys.json \
               --coordinator-url https://coordinator.streamvc.live \
               --openssl "$OPENSSL_BIN" \
-              --expected-previous-recommendation 1.8.88 \
+              "${prepublication_recommendation_args[@]}" \
               --publication-phase pre-publication
             echo "::endgroup::"
           fi
@@ -1923,8 +1937,6 @@ jobs:
           MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
           MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
           MALIBU_PUBLICATION_EXPECTED_REPOSITORY: ${{ github.repository }}
-          MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.8.88"
-          MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.8.90"
           OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}
         shell: bash
         run: |
@@ -1948,6 +1960,11 @@ jobs:
               exit 1
             fi
           fi
+          policy_file="$RUNNER_TEMP/release-staged-policy.env"
+          bash scripts/release-staged-version-policy.sh "$tag" > "$policy_file"
+          source "$policy_file"
+          export MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE="$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+          export MALIBU_PUBLICATION_STAGED_CANDIDATE="$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
           bash scripts/publish-malibu-latest-dmg.sh \
             publication-manifest.json "Malibu-${tag}.dmg" "$appcast" \
             compatibility-artifact-index.json checksums.txt checksums.txt.sig \
