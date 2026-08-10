@@ -24,14 +24,56 @@ credential-redacted receipts before that deadline.
 
 ## Receipt contract
 
-Receipts are manually assembled operator metadata, not engine output and not a
-substitute for the replayable snapshot/proposal. Use these names:
+New runs use the executable schema-version 2 contract implemented by
+`scripts/openrouter_pricing_receipt.py`. The runner refuses a dirty worktree,
+binds both receipts to the full committed HEAD, binds the fetch receipt to the
+exact policy bytes used for normalization, captures and redacts both process
+streams, validates an exact compute replay, and verifies byte identity after
+copying both receipts and both artifacts into this archive.
+
+Run the authenticated top-50/30-day operation from a clean committed worktree:
+
+```powershell
+python scripts/openrouter_pricing_receipt.py run
+```
+
+`OPENROUTER_API_KEY` must be configured in the process environment. It is
+passed only through the child-process environment and is never written to a
+command array, receipt, or artifact. The command defaults are the reviewed
+contract: top 50, 30 days, three retries, 20-second request timeout, and
+900-second generation deadline. It has no apply mode.
+
+Independently validate the archived result and exact proposal replay:
+
+```powershell
+python scripts/openrouter_pricing_receipt.py validate `
+  --receipt docs/research/openrouter-snapshots/<fetch-receipt>.json `
+  --receipt docs/research/openrouter-snapshots/<compute-receipt>.json
+```
+
+Schema-version 2 adds `execution: {"worktree_clean": true}` to both receipts,
+adds `policy_path` and `policy_file_sha256` to fetch `source`, and adds
+`snapshot_path` to compute `inputs`. The validator requires the current policy
+and rate-card bytes to match the receipt, validates the snapshot, and rebuilds
+the proposal at its recorded `generated_at`; any unequal field fails closed.
+The runner validates the temporary evidence first, copies it without editing,
+then compares the archived receipt and artifact byte counts and SHA-256 values
+to their temporary sources before validating the archived copies again.
+
+The schema-version 1 receipts already committed here are historical evidence
+created before the executable runner existed. The manual contract below
+documents those receipts; it is retained for auditability, not as the procedure
+for a new run.
+
+Historical schema-version 1 receipts are manually assembled operator metadata,
+not engine output and not a substitute for the replayable snapshot/proposal.
+They use these names:
 
 - `openrouter-pricing-fetch-success-YYYY-MM-DDTHH-MM-SSZ.json`
 - `openrouter-pricing-fetch-failure-YYYY-MM-DDTHH-MM-SSZ.json`
 - `openrouter-pricing-compute-success-YYYY-MM-DDTHH-MM-SSZ.json`
 
-Every receipt has schema version 1 and these common fields:
+Every historical receipt has schema version 1 and these common fields:
 
 | Field | Requirement |
 | --- | --- |
@@ -245,3 +287,15 @@ if ($archivedBytes -ne $outputInventory[0].bytes -or
 Historical receipts in this directory were manually assembled from captured
 process metadata and validated against this type-specific contract. Only the
 snapshot/proposal files themselves are independently replayable engine output.
+
+## Governance mapping
+
+No current normative requirement directly governs this standalone,
+non-money-path OpenRouter ingestion/proposal evidence tool. SPEC-023-R001 and
+the `installer-autotune-policy` authority domain are the nearest structural
+governance route because the output is reviewed autotune pricing research; they
+are not claimed as semantic conformance authority for OpenRouter receipts.
+Owner Option 2 in Decision Entry 225 is therefore an explicit
+`DECISION_REQUIRED` policy choice in addition to the endpoint-validation
+`CODE_BUG` repair. Component 3 remains the only authority that may apply a
+proposal to the live rate card.
