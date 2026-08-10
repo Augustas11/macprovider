@@ -182,6 +182,18 @@ import sys
 
 candidate = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 current = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+def tag_version(row, label):
+    tag = row.get("tag")
+    if not isinstance(tag, str) or not tag.startswith("v"):
+        raise SystemExit(f"{label} publication tag is invalid")
+    try:
+        version = tuple(int(part) for part in tag[1:].split("."))
+    except ValueError:
+        raise SystemExit(f"{label} publication tag is invalid")
+    if len(version) != 3:
+        raise SystemExit(f"{label} publication tag is invalid")
+    return version
+
 if candidate.get("publication_id") == current.get("publication_id"):
     raise SystemExit(0)
 candidate_sequence = candidate.get("release_sequence")
@@ -191,6 +203,10 @@ if candidate_sequence is None and candidate.get("tag") == current.get("tag") == 
 if type(candidate_sequence) is not int or candidate_sequence <= 0:
     raise SystemExit("candidate publication sequence is invalid")
 if current_sequence is None and current.get("tag") == "v1.8.39":
+    current_sequence = 0
+elif current_sequence is None:
+    if tag_version(candidate, "candidate") <= tag_version(current, "current"):
+        raise SystemExit("publication sequence did not advance")
     current_sequence = 0
 if type(current_sequence) is not int or current_sequence < 0:
     raise SystemExit("current publication sequence is invalid")
