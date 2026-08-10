@@ -24,10 +24,11 @@ distinct status `no_provider_endpoints`; it must never produce a provider
 floor, undercut target, policy addition, or rate proposal. Missing, null,
 non-array, mismatched, malformed, or unconfirmed data still fails closed.
 
-The prior snapshot/proposal were removed because they predated the approved
-confirmation semantics and schema-v5 provenance. A fresh authenticated top-50
-fetch and compute have now regenerated both artifacts. Component 3 remains the
-sole apply authority.
+The earlier successful snapshot/proposal remain as historical evidence, but
+they predate the malformed-inactive-row repair and are superseded for close-out
+purposes. A fresh authenticated top-50 fetch and exact compute from clean fixed
+commit `c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805` generated the final artifacts.
+Component 3 remains the sole apply authority.
 
 ## 1. Durable evidence and exact blocker
 
@@ -44,29 +45,49 @@ The subsequent generation established the empty-provider condition:
 data.id = "tencent/hy3:free"; data.endpoints = []
 ```
 
-The final authenticated run used engine commit
-`0453190e8384ca05d0cb7be0813fbd22e10d2c1f` and the UTC ranking window
+The final authenticated run used clean engine commit
+`c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805` and the UTC ranking window
 2026-07-11 through 2026-08-09. It emitted 50 contiguous ranked rows after 55
 successful source requests: rankings, catalog, 50 initial endpoint documents,
 and three empty-set confirmations. The confirmed-empty identities are
 `tencent/hy3:free`, `inclusionai/ling-3.0-flash:free`, and
 `poolside/laguna-m.1:free`.
+Of the 50 rows, 47 are `active_priced` and three are
+`no_provider_endpoints`; none is `no_active_priced_endpoint` in this cohort.
+
+The schema-version 2 fetch receipt also binds normalization to the exact
+`scripts/openrouter_pricing_policy.json` bytes at
+`sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75`.
+The compute receipt binds the exact snapshot, policy, and read-only rate-card
+bytes and passes an exact proposal replay.
 
 Committed evidence:
 
 | Purpose | Artifact |
 | --- | --- |
 | Historical GLM failure | `openrouter-pricing-fetch-failure-2026-08-09T10-06-40Z.json` |
-| Final fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T10-05-13Z.json` |
-| Final snapshot | `openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json` |
-| Final compute receipt | `openrouter-pricing-compute-success-2026-08-10T10-06-14Z.json` |
-| Final proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json` |
+| Superseded pre-fix fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T10-05-13Z.json` |
+| Superseded pre-fix snapshot | `openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json` |
+| Superseded pre-fix compute receipt | `openrouter-pricing-compute-success-2026-08-10T10-06-14Z.json` |
+| Superseded pre-fix proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json` |
+| Final post-fix fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T17-19-52Z.json` |
+| Final post-fix snapshot | `openrouter-pricing-snapshot-2026-08-10T17-20-06Z-e1fe9caa0e710957.json` |
+| Final post-fix compute receipt | `openrouter-pricing-compute-success-2026-08-10T17-20-07Z.json` |
+| Final post-fix proposal | `openrouter-rate-card-proposal-2026-08-10T17-20-07Z-ceaa10b2bef721f1.json` |
 
-The snapshot semantic digest is
-`sha256:37a1bef90beafd2cf16e2e3b53ed27bce022f8118151f7b1ecbd14ad2c0069b7`;
-the proposal references that exact digest. File checksums and receipt
-self-digests are recorded in the receipts. The exact receipt procedure and
-canonical digest algorithm are specified in the archive README.
+The final snapshot was fetched at `2026-08-10T17:20:06Z`; its semantic digest
+is `sha256:b3b620810102afd2055acfad169ab1ed08f89e66f33f5aa8febacbc039808d04`
+and its serialized-file SHA-256 is
+`sha256:98379baf240dd7966b9fef4a68413e21b1e464a249306917cc97e36c18b4df3a`.
+The proposal was generated at `2026-08-10T17:20:07Z`, references that exact
+semantic digest, and has serialized-file SHA-256
+`sha256:1b0d3f27435674a4e4d248ad0f0e9f7fbd75bbb9935098552c6a0870471bb875`.
+The fetch and compute receipt evidence digests are respectively
+`sha256:72e394f6356f0ef5294033de75401d682e3cb7bb6507bf12a6bfdadb21b27fad`
+and `sha256:25a985af8dc01c91eb17405837bc88bab444d452cbd57a6aef07f6b68c1d383b`.
+The executable validator verified both archived copies and rebuilt the proposal
+exactly from the bound inputs. The receipt contract and canonical digest
+algorithm are specified in the archive README.
 
 ## 2. Resolver repair
 
