@@ -31,6 +31,13 @@ exact policy bytes used for normalization, captures and redacts both process
 streams, validates an exact compute replay, and verifies byte identity after
 copying both receipts and both artifacts into this archive.
 
+The validator also requires the recorded commit to exist and be an ancestor of
+the current validator worktree, requires that commit to contain the engine and
+receipt runner, requires the current engine bytes to equal the committed engine
+bytes, and matches the recorded command exactly to the receipt type and bound
+paths/options. A recomputed self-digest cannot make an invented commit or
+command valid.
+
 Run the authenticated top-50/30-day operation from a clean committed worktree:
 
 ```powershell
@@ -51,7 +58,7 @@ python scripts/openrouter_pricing_receipt.py validate `
   --receipt docs/research/openrouter-snapshots/<compute-receipt>.json
 ```
 
-Schema-version 2 adds `execution: {"worktree_clean": true}` to both receipts,
+Schema-version 2 adds `execution: {"worktree_clean": true}` to every receipt,
 adds `policy_path` and `policy_file_sha256` to fetch `source`, and adds
 `snapshot_path` to compute `inputs`. The validator requires the current policy
 and rate-card bytes to match the receipt, validates the snapshot, and rebuilds
@@ -59,6 +66,25 @@ the proposal at its recorded `generated_at`; any unequal field fails closed.
 The runner validates the temporary evidence first, copies it without editing,
 then compares the archived receipt and artifact byte counts and SHA-256 values
 to their temporary sources before validating the archived copies again.
+Publication is transactional: every source is first copied to a private
+temporary file in the archive and verified, then atomically linked to its final
+non-overwriting name. Any copy, publication, or post-publication verification
+failure removes every final name published by that operation while preserving
+a concurrently created target.
+
+Fetch and compute failures emit and archive credential-redacted schema-version
+2 receipts before the runner exits nonzero:
+
+- `openrouter-pricing-fetch-failure-YYYY-MM-DDTHH-MM-SSZ.json` has `source`, a
+  nonzero `exit_status`, captured streams, and an empty artifact inventory.
+- `openrouter-pricing-compute-failure-YYYY-MM-DDTHH-MM-SSZ.json` has the same
+  exact `inputs` binding as compute success, a nonzero `exit_status`, captured
+  streams, and an empty artifact inventory. The already validated fetch receipt
+  and snapshot remain durable when compute fails.
+
+Failure receipts never stand in for snapshots or proposals. They prove the
+bounded attempt and preserve its redacted error; a later successful stage still
+requires its real validated artifact.
 
 The schema-version 1 receipts already committed here are historical evidence
 created before the executable runner existed. The manual contract below

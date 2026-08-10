@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import contextlib
 import importlib.util
+import io
 import json
 import shutil
 import sys
@@ -23,6 +25,9 @@ SNAPSHOT = ARCHIVE / "openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58a
 PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json"
 POLICY = REPO / "scripts" / "openrouter_pricing_policy.json"
 RATE_CARD = REPO / "phase3-binary" / "catalog" / "autotune" / "rate-card.json"
+RUN_COMMIT = "c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805"
+REAL_COPYFILE = shutil.copyfile
+REAL_LINK = receipt.os.link
 
 
 class ReceiptTests(unittest.TestCase):
@@ -32,13 +37,13 @@ class ReceiptTests(unittest.TestCase):
             "receipt_type": receipt_type,
             "started_at": "2026-08-10T10:00:00Z",
             "finished_at": "2026-08-10T10:00:01Z",
-            "engine_commit": "a" * 40,
+            "engine_commit": RUN_COMMIT,
             "execution": {"worktree_clean": True},
-            "command": ["python", "scripts/openrouter_pricing_engine.py"],
+            "command": [],
             "exit_status": 0,
-            "stdout": str(artifact.name),
+            "stdout": str(artifact.name) if artifact is not None else "",
             "stderr": "",
-            "output_directory_listing": [receipt.inventory(artifact)],
+            "output_directory_listing": [receipt.inventory(artifact)] if artifact is not None and artifact.exists() else [],
         }
 
     def write(self, directory, value, name="receipt.json"):
@@ -62,6 +67,7 @@ class ReceiptTests(unittest.TestCase):
                 "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
                 "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
             }
+            value["command"] = receipt.expected_compute_command(value["inputs"])
             path = self.write(directory, value)
             receipt.validate_receipt(path, REPO)
 
@@ -92,6 +98,7 @@ class ReceiptTests(unittest.TestCase):
                 "policy_path": POLICY.relative_to(REPO).as_posix(),
                 "policy_file_sha256": receipt.sha256_file(POLICY),
             }
+            value["command"] = receipt.expected_fetch_command(value["source"]["policy_path"])
             path = self.write(directory, value)
             receipt.validate_receipt(path, REPO)
 
@@ -102,6 +109,7 @@ class ReceiptTests(unittest.TestCase):
             shutil.copyfile(PROPOSAL, copied)
             value = self.base("openrouter-pricing-compute-success", copied)
             value["inputs"] = {}
+            value["command"] = ["invalid"]
             path = self.write(directory, value)
             data = json.loads(path.read_text(encoding="utf-8"))
             data["stderr"] = "changed after digest"
@@ -132,6 +140,197 @@ class ReceiptTests(unittest.TestCase):
             archived = receipt.archive_pair(receipt_path, artifact_path, archive)
             self.assertEqual(receipt_path.read_bytes(), archived[0].read_bytes())
             self.assertEqual(artifact_path.read_bytes(), archived[1].read_bytes())
+
+    def valid_compute_receipt(self, directory):
+        copied = directory / PROPOSAL.name
+        shutil.copyfile(PROPOSAL, copied)
+        snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+        value = self.base(receipt.COMPUTE_SUCCESS, copied)
+        value["inputs"] = {
+            "snapshot_path": SNAPSHOT.relative_to(REPO).as_posix(),
+            "snapshot_content_digest": snapshot["content_digest"],
+            "snapshot_file_sha256": receipt.sha256_file(SNAPSHOT),
+            "policy_path": POLICY.relative_to(REPO).as_posix(),
+            "policy_file_sha256": receipt.sha256_file(POLICY),
+            "rate_card_path": RATE_CARD.relative_to(REPO).as_posix(),
+            "rate_card_file_sha256": receipt.sha256_file(RATE_CARD),
+        }
+        value["command"] = receipt.expected_compute_command(value["inputs"])
+        return value
+
+    def test_forged_commit_and_command_are_rejected(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            value = self.valid_compute_receipt(directory)
+            value["engine_commit"] = "a" * 40
+            path = self.write(directory, value)
+            with self.assertRaisesRegex(receipt.ReceiptError, "cat-file"):
+                receipt.validate_receipt(path, REPO)
+
+            value = self.valid_compute_receipt(directory)
+            value["command"] = ["not-the-engine", "--forged"]
+            path = self.write(directory, value, "forged-command.json")
+            with self.assertRaisesRegex(receipt.ReceiptError, "command does not match"):
+                receipt.validate_receipt(path, REPO)
+
+    def test_archive_pair_rolls_back_when_second_copy_fails(self):
+        with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
+            source = Path(source_name)
+            archive = Path(archive_name)
+            first = source / "receipt.json"
+            second = source / "artifact.json"
+            first.write_bytes(b"receipt\n")
+            second.write_bytes(b"artifact\n")
+            calls = 0
+
+            def fail_second_copy(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("forced second-copy failure")
+                return REAL_COPYFILE(src, dst)
+
+            with mock.patch.object(receipt.shutil, "copyfile", side_effect=fail_second_copy):
+                with self.assertRaisesRegex(OSError, "forced second-copy"):
+                    receipt.archive_pair(first, second, archive)
+            self.assertEqual([], [path for path in archive.iterdir()])
+
+    def test_archive_pair_rolls_back_after_post_copy_verification_failure(self):
+        with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
+            source = Path(source_name)
+            archive = Path(archive_name)
+            first = source / "receipt.json"
+            second = source / "artifact.json"
+            first.write_bytes(b"receipt\n")
+            second.write_bytes(b"artifact\n")
+            real_hash = receipt.sha256_file
+
+            def mismatch_archived_target(path):
+                value = real_hash(path)
+                if path.parent == archive and not path.name.endswith(".tmp"):
+                    return "sha256:" + "0" * 64
+                return value
+
+            with mock.patch.object(receipt, "sha256_file", side_effect=mismatch_archived_target):
+                with self.assertRaisesRegex(receipt.ReceiptError, "archived evidence"):
+                    receipt.archive_pair(first, second, archive)
+            self.assertEqual([], [path for path in archive.iterdir()])
+
+    def test_archive_pair_does_not_overwrite_concurrent_target(self):
+        with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
+            source = Path(source_name)
+            archive = Path(archive_name)
+            first = source / "receipt.json"
+            second = source / "artifact.json"
+            first.write_bytes(b"receipt\n")
+            second.write_bytes(b"artifact\n")
+            calls = 0
+
+            def race_on_second_link(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    Path(dst).write_bytes(b"concurrent\n")
+                return REAL_LINK(src, dst)
+
+            with mock.patch.object(receipt.os, "link", side_effect=race_on_second_link):
+                with self.assertRaisesRegex(receipt.ReceiptError, "concurrently created"):
+                    receipt.archive_pair(first, second, archive)
+            self.assertFalse((archive / first.name).exists())
+            self.assertEqual(b"concurrent\n", (archive / second.name).read_bytes())
+
+    def test_schema_v2_fetch_and_compute_failure_receipts_validate(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            fetch = self.base(receipt.FETCH_FAILURE, None)
+            fetch["exit_status"] = 2
+            fetch["output_directory_listing"] = []
+            fetch["source"] = {
+                "rankings_url": receipt.engine.RANKINGS_URL,
+                "openrouter_api_key_configured": True,
+                "policy_path": POLICY.relative_to(REPO).as_posix(),
+                "policy_file_sha256": receipt.sha256_file(POLICY),
+            }
+            fetch["command"] = receipt.expected_fetch_command(fetch["source"]["policy_path"])
+            receipt.validate_receipt(self.write(directory, fetch, "fetch-failure.json"), REPO)
+
+            compute = self.valid_compute_receipt(directory)
+            compute["receipt_type"] = receipt.COMPUTE_FAILURE
+            compute["exit_status"] = 2
+            compute["output_directory_listing"] = []
+            receipt.validate_receipt(self.write(directory, compute, "compute-failure.json"), REPO)
+
+    def test_run_archives_redacted_schema_v2_fetch_failure_receipt(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            archive = directory / "archive"
+            key_file = directory / "key.txt"
+            key_file.write_text("sk-or-v1-" + "a" * 64, encoding="utf-8")
+            args = receipt.argparse.Namespace(
+                repo=str(REPO), archive_dir=str(archive),
+                policy=POLICY.relative_to(REPO).as_posix(),
+                rate_card=RATE_CARD.relative_to(REPO).as_posix(),
+                api_key_file=str(key_file), top_n=50, demand_window_days=30,
+                retries=3, timeout_seconds=20.0, generation_timeout_seconds=900.0,
+            )
+            failed = receipt.subprocess.CompletedProcess(
+                args=[], returncode=2, stdout="", stderr="Authorization: Bearer sk-or-v1-secret",
+            )
+            now = receipt.datetime(2026, 8, 10, 10, 0, 0, tzinfo=receipt.timezone.utc)
+            with mock.patch.object(receipt, "clean_commit", return_value=RUN_COMMIT), mock.patch.object(
+                receipt, "run_child", return_value=(now, now, failed)
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(receipt.ReceiptError, "archived redacted failure receipt"):
+                        receipt.command_run(args)
+            receipts = list(archive.glob("openrouter-pricing-fetch-failure-*.json"))
+            self.assertEqual(1, len(receipts))
+            self.assertNotIn("sk-or-", receipts[0].read_text(encoding="utf-8").lower())
+            receipt.validate_receipt(receipts[0], REPO)
+
+    def test_run_archives_schema_v2_compute_failure_receipt(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            failure_archive = directory / "failure-archive"
+            failure_archive.mkdir()
+            key_file = directory / "key.txt"
+            key_file.write_text("sk-or-v1-" + "a" * 64, encoding="utf-8")
+            args = receipt.argparse.Namespace(
+                repo=str(REPO), archive_dir=ARCHIVE.relative_to(REPO).as_posix(),
+                policy=POLICY.relative_to(REPO).as_posix(),
+                rate_card=RATE_CARD.relative_to(REPO).as_posix(),
+                api_key_file=str(key_file), top_n=50, demand_window_days=30,
+                retries=3, timeout_seconds=20.0, generation_timeout_seconds=900.0,
+            )
+            now = receipt.datetime(2026, 8, 10, 10, 0, 0, tzinfo=receipt.timezone.utc)
+            calls = 0
+
+            def child_result(repo, arguments, api_key, temporary):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    output = Path(arguments[arguments.index("--output-dir") + 1])
+                    copied = output / SNAPSHOT.name
+                    REAL_COPYFILE(SNAPSHOT, copied)
+                    return now, now, receipt.subprocess.CompletedProcess([], 0, str(copied), "")
+                return now, now, receipt.subprocess.CompletedProcess([], 2, "", "forced compute failure")
+
+            def archive_failure(path, archive):
+                target = failure_archive / path.name
+                REAL_COPYFILE(path, target)
+                return target
+
+            with mock.patch.object(receipt, "clean_commit", return_value=RUN_COMMIT), mock.patch.object(
+                receipt, "run_child", side_effect=child_result
+            ), mock.patch.object(
+                receipt, "archive_pair", return_value=(ARCHIVE / "synthetic-fetch-receipt.json", SNAPSHOT)
+            ), mock.patch.object(receipt, "archive_receipt", side_effect=archive_failure):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(receipt.ReceiptError, "archived redacted failure receipt"):
+                        receipt.command_run(args)
+            receipts = list(failure_archive.glob("openrouter-pricing-compute-failure-*.json"))
+            self.assertEqual(1, len(receipts))
+            receipt.validate_receipt(receipts[0], REPO)
 
 
 if __name__ == "__main__":

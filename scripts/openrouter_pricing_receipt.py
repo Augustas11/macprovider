@@ -34,6 +34,13 @@ COMMON_KEYS = {
     "engine_commit", "execution", "command", "exit_status", "stdout",
     "stderr", "output_directory_listing", "evidence_digest",
 }
+FETCH_SUCCESS = "openrouter-pricing-fetch-success"
+FETCH_FAILURE = "openrouter-pricing-fetch-failure"
+COMPUTE_SUCCESS = "openrouter-pricing-compute-success"
+COMPUTE_FAILURE = "openrouter-pricing-compute-failure"
+RECEIPT_TYPES = {FETCH_SUCCESS, FETCH_FAILURE, COMPUTE_SUCCESS, COMPUTE_FAILURE}
+ENGINE_PATH = "scripts/openrouter_pricing_engine.py"
+RUNNER_PATH = "scripts/openrouter_pricing_receipt.py"
 
 
 class ReceiptError(RuntimeError):
@@ -151,8 +158,59 @@ def resolve_repo_path(repo: Path, value: Any, field: str) -> Path:
     return path
 
 
-def validate_inventory(receipt: Mapping[str, Any], archive: Path) -> Path:
+def git_bytes(repo: Path, *arguments: str) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments], cwd=repo, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ReceiptError(f"git {' '.join(arguments)} failed: {detail}")
+    return completed.stdout
+
+
+def validate_execution_binding(receipt: Mapping[str, Any], repo: Path, expected_command: list[str]) -> None:
+    commit = receipt["engine_commit"]
+    git_bytes(repo, "cat-file", "-e", f"{commit}^{{commit}}")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=repo,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False,
+    )
+    if ancestor.returncode != 0:
+        raise ReceiptError("engine_commit must be an ancestor of the validator worktree HEAD")
+    committed_engine = git_bytes(repo, "show", f"{commit}:{ENGINE_PATH}")
+    committed_runner = git_bytes(repo, "show", f"{commit}:{RUNNER_PATH}")
+    if not committed_runner:
+        raise ReceiptError("engine_commit does not contain the receipt runner")
+    if committed_engine != (repo / ENGINE_PATH).read_bytes():
+        raise ReceiptError("current engine bytes differ from the engine bound by engine_commit")
+    if receipt["command"] != expected_command:
+        raise ReceiptError("receipt command does not match its type and bound inputs")
+
+
+def expected_fetch_command(policy_path: str) -> list[str]:
+    return [
+        "python", ENGINE_PATH, "fetch", "--policy", policy_path,
+        "--output-dir", "<temporary-artifact-directory>", "--top-n", "50",
+        "--demand-window-days", "30", "--retries", "3",
+        "--timeout-seconds", "20.0", "--generation-timeout-seconds", "900.0",
+    ]
+
+
+def expected_compute_command(inputs: Mapping[str, Any]) -> list[str]:
+    return [
+        "python", ENGINE_PATH, "compute", "--snapshot", inputs["snapshot_path"],
+        "--policy", inputs["policy_path"], "--rate-card", inputs["rate_card_path"],
+        "--output-dir", "<temporary-artifact-directory>",
+    ]
+
+
+def validate_inventory(receipt: Mapping[str, Any], archive: Path, success: bool) -> Path | None:
     listing = receipt.get("output_directory_listing")
+    if not success:
+        if listing != []:
+            raise ReceiptError("failure receipt must have an empty artifact inventory")
+        return None
     if not isinstance(listing, list) or len(listing) != 1 or not isinstance(listing[0], dict):
         raise ReceiptError("success receipt must inventory exactly one artifact")
     item = listing[0]
@@ -170,10 +228,13 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     receipt = read_object(receipt_path, "receipt")
     if receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION:
         raise ReceiptError("executable validator accepts schema-version 2 receipts")
-    if set(receipt) != COMMON_KEYS | ({"source"} if receipt.get("receipt_type") == "openrouter-pricing-fetch-success" else {"inputs"}):
-        raise ReceiptError("receipt has missing or unexpected top-level fields")
-    if receipt.get("receipt_type") not in {"openrouter-pricing-fetch-success", "openrouter-pricing-compute-success"}:
+    receipt_type = receipt.get("receipt_type")
+    if receipt_type not in RECEIPT_TYPES:
         raise ReceiptError("receipt type is unsupported")
+    type_field = "source" if receipt_type in {FETCH_SUCCESS, FETCH_FAILURE} else "inputs"
+    if set(receipt) != COMMON_KEYS | {type_field}:
+        raise ReceiptError("receipt has missing or unexpected top-level fields")
+    success = receipt_type in {FETCH_SUCCESS, COMPUTE_SUCCESS}
     started = parse_time(receipt.get("started_at"), "started_at")
     finished = parse_time(receipt.get("finished_at"), "finished_at")
     if started > finished:
@@ -186,35 +247,45 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     command = receipt.get("command")
     if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
         raise ReceiptError("command must be a non-empty string array")
-    if receipt.get("exit_status") != 0 or not isinstance(receipt.get("stdout"), str) or not isinstance(receipt.get("stderr"), str):
-        raise ReceiptError("success receipt must contain captured streams and exit status zero")
+    exit_status = receipt.get("exit_status")
+    if isinstance(exit_status, bool) or not isinstance(exit_status, int):
+        raise ReceiptError("receipt exit_status must be an integer")
+    if success != (exit_status == 0):
+        raise ReceiptError("receipt type and exit_status disagree")
+    if not isinstance(receipt.get("stdout"), str) or not isinstance(receipt.get("stderr"), str):
+        raise ReceiptError("receipt must contain captured stdout and stderr")
     reject_secrets(receipt)
     if receipt.get("evidence_digest") != evidence_digest(receipt):
         raise ReceiptError("receipt evidence_digest mismatch")
-    artifact = validate_inventory(receipt, receipt_path.parent)
+    artifact = validate_inventory(receipt, receipt_path.parent, success)
 
     policy_path: Path
-    if receipt["receipt_type"] == "openrouter-pricing-fetch-success":
+    if receipt_type in {FETCH_SUCCESS, FETCH_FAILURE}:
         source = receipt["source"]
-        expected = {
-            "rankings_url", "ranking_window_start_date", "ranking_window_end_date",
-            "openrouter_api_key_configured", "confirmed_empty_model_ids",
-            "confirmation_request_count", "successful_source_count", "policy_path",
-            "policy_file_sha256",
-        }
+        expected = {"rankings_url", "openrouter_api_key_configured", "policy_path", "policy_file_sha256"}
+        if success:
+            expected |= {
+                "ranking_window_start_date", "ranking_window_end_date",
+                "confirmed_empty_model_ids", "confirmation_request_count",
+                "successful_source_count",
+            }
         if not isinstance(source, dict) or set(source) != expected or source["openrouter_api_key_configured"] is not True:
             raise ReceiptError("fetch receipt source binding is malformed")
         policy_path = resolve_repo_path(repo, source["policy_path"], "source.policy_path")
         if sha256_file(policy_path) != source["policy_file_sha256"]:
             raise ReceiptError("fetch receipt policy bytes do not match")
+        if source["rankings_url"] != engine.RANKINGS_URL:
+            raise ReceiptError("fetch receipt rankings URL mismatch")
+        validate_execution_binding(receipt, repo, expected_fetch_command(source["policy_path"]))
+        if not success:
+            return
+        assert artifact is not None
         snapshot = read_object(artifact, "snapshot")
         try:
             engine.validate_snapshot(snapshot)
         except engine.EngineError as error:
             raise ReceiptError(f"snapshot validation failed: {error}") from error
         metadata = snapshot["source"]["fetch_metadata"]
-        if source["rankings_url"] != engine.RANKINGS_URL:
-            raise ReceiptError("fetch receipt rankings URL mismatch")
         for key in ("ranking_window_start_date", "ranking_window_end_date", "successful_source_count"):
             if source[key] != metadata[key]:
                 raise ReceiptError(f"fetch receipt {key} does not match snapshot")
@@ -247,9 +318,17 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
         if sha256_file(path) != inputs[field]:
             raise ReceiptError(f"compute receipt {field} does not match exact input bytes")
     snapshot = read_object(snapshot_path, "snapshot")
-    proposal = read_object(artifact, "proposal")
     if snapshot.get("content_digest") != inputs["snapshot_content_digest"]:
         raise ReceiptError("compute receipt snapshot semantic digest mismatch")
+    try:
+        engine.validate_snapshot(snapshot)
+    except engine.EngineError as error:
+        raise ReceiptError(f"snapshot validation failed: {error}") from error
+    validate_execution_binding(receipt, repo, expected_compute_command(inputs))
+    if not success:
+        return
+    assert artifact is not None
+    proposal = read_object(artifact, "proposal")
     generated_at = parse_time(proposal.get("generated_at"), "proposal.generated_at")
     try:
         replay = engine.build_proposal(
@@ -281,19 +360,59 @@ def unique_artifact(directory: Path, pattern: str) -> Path:
     return matches[0]
 
 
-def archive_pair(receipt_path: Path, artifact_path: Path, archive: Path) -> tuple[Path, Path]:
+def archive_files(paths: tuple[Path, ...], archive: Path) -> tuple[Path, ...]:
     archive.mkdir(parents=True, exist_ok=True)
-    targets = (archive / receipt_path.name, archive / artifact_path.name)
+    targets = tuple(archive / path.name for path in paths)
     for target in targets:
         if target.exists():
             raise ReceiptError(f"refusing to overwrite archived evidence {target.name}")
-    before = [(path.stat().st_size, sha256_file(path)) for path in (receipt_path, artifact_path)]
-    shutil.copyfile(receipt_path, targets[0])
-    shutil.copyfile(artifact_path, targets[1])
-    after = [(path.stat().st_size, sha256_file(path)) for path in targets]
-    if before != after:
-        raise ReceiptError("archived receipt or artifact is not byte-identical to validated temporary evidence")
-    return targets
+    before = [(path.stat().st_size, sha256_file(path)) for path in paths]
+    temporary_paths: list[Path] = []
+    published: list[Path] = []
+    try:
+        for source, target in zip(paths, targets):
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=archive,
+            )
+            os.close(descriptor)
+            temporary_path = Path(temporary_name)
+            temporary_paths.append(temporary_path)
+            shutil.copyfile(source, temporary_path)
+        staged = [(path.stat().st_size, sha256_file(path)) for path in temporary_paths]
+        if before != staged:
+            raise ReceiptError("staged archive evidence is not byte-identical to its validated source")
+        for temporary_path, target in zip(temporary_paths, targets):
+            try:
+                os.link(temporary_path, target)
+            except FileExistsError as error:
+                raise ReceiptError(f"refusing to overwrite concurrently created evidence {target.name}") from error
+            published.append(target)
+        after = [(path.stat().st_size, sha256_file(path)) for path in targets]
+        if before != after:
+            raise ReceiptError("archived evidence is not byte-identical to its validated source")
+        return targets
+    except BaseException:
+        for target in published:
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        for temporary_path in temporary_paths:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def archive_pair(receipt_path: Path, artifact_path: Path, archive: Path) -> tuple[Path, Path]:
+    archived = archive_files((receipt_path, artifact_path), archive)
+    return archived[0], archived[1]
+
+
+def archive_receipt(receipt_path: Path, archive: Path) -> Path:
+    return archive_files((receipt_path,), archive)[0]
 
 
 def command_validate(args: argparse.Namespace) -> int:
@@ -313,6 +432,8 @@ def command_run(args: argparse.Namespace) -> int:
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key or not SECRET_RE.fullmatch(api_key):
         raise ReceiptError("a valid OpenRouter API key is required via environment or --api-key-file")
+    if (args.top_n, args.demand_window_days, args.retries, args.timeout_seconds, args.generation_timeout_seconds) != (50, 30, 3, 20.0, 900.0):
+        raise ReceiptError("schema-version 2 receipts require the reviewed top-50/30-day/default-timeout run contract")
     commit = clean_commit(repo)
     archive = (repo / args.archive_dir).resolve()
     policy = (repo / args.policy).resolve()
@@ -337,8 +458,29 @@ def command_run(args: argparse.Namespace) -> int:
         ]
         fetch_started, fetch_finished, fetched = run_child(repo, fetch_args, api_key, temporary)
         if fetched.returncode != 0:
-            message = redact(fetched.stderr, api_key, temporary)
-            raise ReceiptError(f"authenticated fetch failed with exit {fetched.returncode}: {message}")
+            fetch_failure = {
+                "schema_version": RECEIPT_SCHEMA_VERSION,
+                "receipt_type": FETCH_FAILURE,
+                "started_at": rfc3339(fetch_started), "finished_at": rfc3339(fetch_finished),
+                "engine_commit": commit, "execution": {"worktree_clean": True},
+                "command": expected_fetch_command(policy_relative),
+                "source": {
+                    "rankings_url": engine.RANKINGS_URL,
+                    "openrouter_api_key_configured": True,
+                    "policy_path": policy_relative, "policy_file_sha256": policy_hash,
+                },
+                "exit_status": fetched.returncode,
+                "stdout": redact(fetched.stdout, api_key, temporary),
+                "stderr": redact(fetched.stderr, api_key, temporary),
+                "output_directory_listing": [],
+            }
+            failure_path = fetch_dir / f"openrouter-pricing-fetch-failure-{receipt_stamp(fetch_started)}.json"
+            write_receipt(failure_path, fetch_failure)
+            validate_receipt(failure_path, repo)
+            archived_failure = archive_receipt(failure_path, archive)
+            validate_receipt(archived_failure, repo)
+            print(archived_failure)
+            raise ReceiptError(f"authenticated fetch failed with exit {fetched.returncode}; archived redacted failure receipt")
         snapshot_path = unique_artifact(fetch_dir, "openrouter-pricing-snapshot-*.json")
         snapshot = read_object(snapshot_path, "snapshot")
         engine.validate_snapshot(snapshot)
@@ -347,7 +489,7 @@ def command_run(args: argparse.Namespace) -> int:
         confirmation_count = sum(row["source_metadata"]["endpoint_set_confirmation"] != "not_required" for row in snapshot["rows"])
         fetch_receipt = {
             "schema_version": RECEIPT_SCHEMA_VERSION,
-            "receipt_type": "openrouter-pricing-fetch-success",
+            "receipt_type": FETCH_SUCCESS,
             "started_at": rfc3339(fetch_started), "finished_at": rfc3339(fetch_finished),
             "engine_commit": commit, "execution": {"worktree_clean": True},
             "command": ["python", *["<temporary-artifact-directory>" if item == str(fetch_dir) else item for item in fetch_args]],
@@ -369,61 +511,66 @@ def command_run(args: argparse.Namespace) -> int:
         fetch_receipt_path = fetch_dir / f"openrouter-pricing-fetch-success-{receipt_stamp(fetch_started)}.json"
         write_receipt(fetch_receipt_path, fetch_receipt)
 
-        copied: list[Path] = []
-        try:
-            validate_receipt(fetch_receipt_path, repo)
-            archived_fetch, archived_snapshot = archive_pair(fetch_receipt_path, snapshot_path, archive)
-            copied.extend((archived_fetch, archived_snapshot))
+        validate_receipt(fetch_receipt_path, repo)
+        archived_fetch, archived_snapshot = archive_pair(fetch_receipt_path, snapshot_path, archive)
 
-            archive_relative = archive.relative_to(repo).as_posix()
-            snapshot_relative = f"{archive_relative}/{snapshot_path.name}"
-            compute_args = [
-                "scripts/openrouter_pricing_engine.py", "compute", "--snapshot", str(archived_snapshot),
-                "--policy", policy_relative, "--rate-card", rate_card_relative,
-                "--output-dir", str(compute_dir),
-            ]
-            compute_started, compute_finished, computed = run_child(repo, compute_args, api_key, temporary)
-            if computed.returncode != 0:
-                message = redact(computed.stderr, api_key, temporary)
-                raise ReceiptError(f"compute failed with exit {computed.returncode}: {message}")
-            proposal_path = unique_artifact(compute_dir, "openrouter-rate-card-proposal-*.json")
-            compute_receipt = {
+        archive_relative = archive.relative_to(repo).as_posix()
+        snapshot_relative = f"{archive_relative}/{snapshot_path.name}"
+        compute_inputs = {
+            "snapshot_path": snapshot_relative,
+            "snapshot_content_digest": snapshot["content_digest"],
+            "snapshot_file_sha256": sha256_file(snapshot_path),
+            "policy_path": policy_relative, "policy_file_sha256": policy_hash,
+            "rate_card_path": rate_card_relative, "rate_card_file_sha256": rate_card_hash,
+        }
+        compute_args = [
+            ENGINE_PATH, "compute", "--snapshot", str(archived_snapshot),
+            "--policy", policy_relative, "--rate-card", rate_card_relative,
+            "--output-dir", str(compute_dir),
+        ]
+        compute_started, compute_finished, computed = run_child(repo, compute_args, api_key, temporary)
+        if computed.returncode != 0:
+            compute_failure = {
                 "schema_version": RECEIPT_SCHEMA_VERSION,
-                "receipt_type": "openrouter-pricing-compute-success",
+                "receipt_type": COMPUTE_FAILURE,
                 "started_at": rfc3339(compute_started), "finished_at": rfc3339(compute_finished),
                 "engine_commit": commit, "execution": {"worktree_clean": True},
-                "command": [
-                    "python", "scripts/openrouter_pricing_engine.py", "compute", "--snapshot", snapshot_relative,
-                    "--policy", policy_relative, "--rate-card", rate_card_relative,
-                    "--output-dir", "<temporary-artifact-directory>",
-                ],
-                "inputs": {
-                    "snapshot_path": snapshot_relative,
-                    "snapshot_content_digest": snapshot["content_digest"],
-                    "snapshot_file_sha256": sha256_file(snapshot_path),
-                    "policy_path": policy_relative, "policy_file_sha256": policy_hash,
-                    "rate_card_path": rate_card_relative, "rate_card_file_sha256": rate_card_hash,
-                },
+                "command": expected_compute_command(compute_inputs),
+                "inputs": compute_inputs,
                 "exit_status": computed.returncode,
                 "stdout": redact(computed.stdout, api_key, temporary),
                 "stderr": redact(computed.stderr, api_key, temporary),
-                "output_directory_listing": [inventory(proposal_path)],
+                "output_directory_listing": [],
             }
-            compute_receipt_path = compute_dir / f"openrouter-pricing-compute-success-{receipt_stamp(compute_started)}.json"
-            write_receipt(compute_receipt_path, compute_receipt)
-            validate_receipt(compute_receipt_path, repo)
-            archived_compute, archived_proposal = archive_pair(compute_receipt_path, proposal_path, archive)
-            copied.extend((archived_compute, archived_proposal))
-            validate_receipt(archived_fetch, repo)
-            validate_receipt(archived_compute, repo)
-        except BaseException:
-            for path in copied:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-            raise
-        for path in copied:
+            failure_path = compute_dir / f"openrouter-pricing-compute-failure-{receipt_stamp(compute_started)}.json"
+            write_receipt(failure_path, compute_failure)
+            validate_receipt(failure_path, repo)
+            archived_failure = archive_receipt(failure_path, archive)
+            validate_receipt(archived_failure, repo)
+            print(archived_fetch)
+            print(archived_snapshot)
+            print(archived_failure)
+            raise ReceiptError(f"compute failed with exit {computed.returncode}; archived redacted failure receipt")
+        proposal_path = unique_artifact(compute_dir, "openrouter-rate-card-proposal-*.json")
+        compute_receipt = {
+            "schema_version": RECEIPT_SCHEMA_VERSION,
+            "receipt_type": COMPUTE_SUCCESS,
+            "started_at": rfc3339(compute_started), "finished_at": rfc3339(compute_finished),
+            "engine_commit": commit, "execution": {"worktree_clean": True},
+            "command": expected_compute_command(compute_inputs),
+            "inputs": compute_inputs,
+            "exit_status": computed.returncode,
+            "stdout": redact(computed.stdout, api_key, temporary),
+            "stderr": redact(computed.stderr, api_key, temporary),
+            "output_directory_listing": [inventory(proposal_path)],
+        }
+        compute_receipt_path = compute_dir / f"openrouter-pricing-compute-success-{receipt_stamp(compute_started)}.json"
+        write_receipt(compute_receipt_path, compute_receipt)
+        validate_receipt(compute_receipt_path, repo)
+        archived_compute, archived_proposal = archive_pair(compute_receipt_path, proposal_path, archive)
+        validate_receipt(archived_fetch, repo)
+        validate_receipt(archived_compute, repo)
+        for path in (archived_fetch, archived_snapshot, archived_compute, archived_proposal):
             print(path)
     return 0
 
