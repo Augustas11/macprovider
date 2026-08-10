@@ -1,0 +1,135 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEYCIQCd4G1GPFFxnjHqggWt5VWiP3k8lb9B8ZmHIcY2e+lc9AIhAOudSpuQDRYnXbQ4xG49jofM+YBezMLFXC2TlqBliF3V",
+      "signed_sha256": "4a26b9be6cc1b7749b56f6b7b94980f42c31c7ff43d31dd8db7801fa598615da",
+      "verified_at": "2026-08-10T12:52:15Z",
+      "verifier": ".github/workflows/promote-signed-provider-prebeta-journey.yml:31390002177:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+    "requirement_ids": [
+      "SPEC-023-R001",
+      "SPEC-023-R002"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71"
+    },
+    "captured_at": "2026-08-10T12:17:03Z",
+    "expires_at": "2026-11-10",
+    "operator": {
+      "role": "provider-prebeta-operator",
+      "identity_fingerprint": "4a4c2acde319b75aba3b59abf9072043d4079f0c2cc845b681f34910e0dc54a9"
+    },
+    "environment": {
+      "class": "physical-provider-prebeta-admission",
+      "hardware_profile": "Apple M5, 32 GB unified memory, Tier C",
+      "candidate": "qwen3-8b / mlx-community/Qwen3-8B-4bit",
+      "binary_version": "1.8.92",
+      "compatibility_set": "Augustas11/macprovider:v1.8.92@4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+      "operating_system": "Version 26.5 (Build 25F71)",
+      "production_equivalent_conditions": {
+        "provider_service": "launchd-managed macprovider-cli serve",
+        "network_state_before": "buyer_serving",
+        "network_state_after": "buyer_serving",
+        "coordinator_connected_before": true,
+        "coordinator_connected_after": true,
+        "model_loaded_before": true,
+        "model_loaded_after": true,
+        "thermal_state": "nominal",
+        "thermally_throttled": false,
+        "memory_pressure": "normal"
+      }
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-prebeta-admission",
+        "sha256": "67c4593e5092f68a07bb540565cbe65750b0b1a336fc9ef3a164988ecb81679e",
+        "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "Physical autotune transcript evidence passed for SPEC-023-R001/R002: Qwen3 8B remained eligible while the operator-visible transcript and JSON carried the advisory TTFT drift warning, signed-row provenance, benchmark-count semantics, and no config mutation."
+    },
+    "steps": [
+      {
+        "id": "step-01-private-prebeta-authorization",
+        "status": "pass",
+        "assertion": "Operator explicitly authorized a separate SPEC-023 physical autotune transcript evidence run for issue #958 after SPEC-010 issue #957 was closed.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-02-install-launch-identity",
+        "status": "pass",
+        "assertion": "Installed signed provider CLI 1.8.92 from source commit 4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71 was running under launchd with the Qwen3 8B signed catalog selector.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-03-provider-registration-admission",
+        "status": "pass",
+        "assertion": "Before and after the autotune run, the provider was coordinator-connected and buyer-serving with Qwen3 8B loaded.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-04-catalog-autotune-readiness",
+        "status": "pass",
+        "assertion": "The physical autotune recommendation used the signed Qwen3 8B catalog row, benchmarked one local result, rendered bench-gate provenance and drift, emitted ttft_above_gate as an advisory warning, and still recommended Qwen3 8B.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-05-hardware-evidence-verifier",
+        "status": "pass",
+        "assertion": "The run captured raw recomputable JSON and human transcript output from current physical hardware; hardware-evidence network submission was disabled to keep this SPEC-023 transcript run non-mutating and requirement-scoped.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-06-provider-runtime-routing",
+        "status": "pass",
+        "assertion": "Provider runtime routing remained stable: final status reported Qwen3 8B loaded, model hash bound to the Qwen snapshot, catalog key qwen3-8b, and network_state buyer_serving.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-07-buyer-serving-smoke",
+        "status": "pass",
+        "assertion": "The autotune evidence run did not interrupt buyer-serving readiness; post-run status remained ready with coordinator connectivity true and requests in flight/queued at zero.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-08-redaction-and-correlation",
+        "status": "pass",
+        "assertion": "Provider identifiers, local paths, local account names, and credentials are omitted or redacted; correlation is preserved through source commit, catalog row identity, signed snapshot hashes, command output hashes, and requirement IDs.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z",
+    "execution_mode": "physical-provider-prebeta-admission"
+  }
+}

@@ -1334,7 +1334,7 @@
     {
       "requirement_id": "SPEC-010-R004",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/ws/server.go:expectedAdmissionModelHash",
         "phase4-coordinator/internal/ws/server.go:expectedProviderModelHash",
@@ -1351,18 +1351,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/957",
-        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row. The core provider-prebeta admission and serving-smoke journey passed under #895, but its signed result did not claim this requirement. Issue #957 owns requirement-scoped proof that the exact admitted row remains authoritative through heartbeat and route-snapshot binding. Full receipt-chain reconciliation remains outside provider pre-beta unless separately enabled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c59568b83b511a78ab07f9ef40939911200a7091",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:9f2a34034503b2f31df29ba1b7a5287dca0f38c121b340fbe9e4056024a84c00",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z.spec-010-r004-spec-010-r005.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R005",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/modelidentity/identity.go:LegacyMissingAlgorithmAllowed",
         "phase4-coordinator/internal/ws/server.go:verifyProviderModelIdentity",
@@ -1376,18 +1384,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/957",
-        "rationale": "Issue #609 implements the finite bridge and deploy preflight. The core provider-prebeta admission and serving-smoke journey passed under #895, but it did not promote the bridge posture. Issue #957 must record whether any admitted cohort provider still depends on the bridge and prove the applicable deadline/count or zero-bridge state. The broader legacy fleet retirement proof remains pending outside this slice."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c59568b83b511a78ab07f9ef40939911200a7091",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:9f2a34034503b2f31df29ba1b7a5287dca0f38c121b340fbe9e4056024a84c00",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z.spec-010-r004-spec-010-r005.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R006",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
@@ -1400,13 +1416,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/957",
-        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row. The core provider-prebeta journey under #895 proved startup model readiness only. Issue #957 owns a separately approved production-equivalent warm-swap run proving atomic target row, digest, algorithm, and model publication; operator-pushed production enablement remains outside this slice unless explicitly authorized."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:dff0d65ef3bfa481b05d289b05af9215a442753ea1638f03996205db81cb4f55",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-llama-warmswap-spec010-r006-20260810T111538Z.spec-010-r006.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-018-R001",
@@ -1678,7 +1702,7 @@
     {
       "requirement_id": "SPEC-023-R001",
       "spec_id": "SPEC-023",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func isEligible(",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func advisoryBenchmarkWarnings(",
@@ -1695,18 +1719,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/958",
-        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired in code and tests. The core provider-prebeta journey passed under #895, but its signed result excluded the broader physical autotune transcript claim. Issue #958 owns the operator-visible advisory gate and model-readiness evidence on a real provider; real-X dwell reward evidence remains outside the provider-admission subset unless explicitly enabled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:7585c2ccdcb24e4f7067999dfe223e543bed133d65479bf1221e71dea8941a6b",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z.spec-023-r001-spec-023-r002.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-023-R002",
       "spec_id": "SPEC-023",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
@@ -1722,13 +1754,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/958",
-        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests. The core provider-prebeta journey passed under #895, but it did not promote this transcript requirement. Conformance remains pending until #958 captures the operator-visible transcript, provenance/drift fields, and applicable warning copy in production-equivalent conditions."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:7585c2ccdcb24e4f7067999dfe223e543bed133d65479bf1221e71dea8941a6b",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z.spec-023-r001-spec-023-r002.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-032-R001",

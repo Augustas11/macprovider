@@ -1,0 +1,120 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEYCIQCysghG7/wk6mCKYmbrnc7QiN5RFTRktX3ss4S0J8R4iQIhANi326vPQGTsmYER6MJFfcA45IidAekTBcEarn0ZHy+u",
+      "signed_sha256": "bc7c6c2921d54cd9e0a3815e603c87f1d981b7b7c9dea315d701fd96013f8ee1",
+      "verified_at": "2026-08-10T10:33:03Z",
+      "verifier": ".github/workflows/promote-signed-provider-prebeta-journey.yml:31379555041:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+    "requirement_ids": [
+      "SPEC-010-R004",
+      "SPEC-010-R005"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "c59568b83b511a78ab07f9ef40939911200a7091"
+    },
+    "captured_at": "2026-08-10T10:00:00Z",
+    "expires_at": "2026-11-10",
+    "operator": {
+      "role": "provider-prebeta-operator",
+      "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+    },
+    "environment": {
+      "class": "physical-provider-prebeta-admission",
+      "hardware_profile": "apple-silicon-32gb-qwen3-redacted",
+      "candidate": "provider-cli:v1.8.90"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-prebeta-admission",
+        "sha256": "8d271242a6c07902edf5b719e48f2b0493d529e9641774374b069c42ffd940b8",
+        "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "SPEC-010-R004/R005 passed on Pearl production for the Air5 Qwen provider: admission selected the exact signed current catalog row, later heartbeat and safety telemetry retained the same model digest and algorithm as session authority, an authenticated buyer request bound its route snapshot to the same expected catalog digest, and the live pool had zero providers using the missing model_hash_algorithm legacy bridge."
+    },
+    "steps": [
+      {
+        "id": "step-01-private-prebeta-authorization",
+        "status": "pass",
+        "assertion": "The run used Pearl production coordinator and the existing private-prebeta operator path for provider-prebeta admission evidence; no new admission policy or public referral claim is promoted by this artifact.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-02-install-launch-identity",
+        "status": "pass",
+        "assertion": "The local provider was running provider-cli v1.8.90 with ready lifecycle state, buyer-serving network state, qwen3-8b selected locally, and a stable redacted provider/admission identity.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-03-provider-registration-admission",
+        "status": "pass",
+        "assertion": "Pearl admitted the redacted provider identity in catalog_admission_mode=current, hash_status=hash_verified, auth_state=bearer_validated, encrypted_leg=true, and routing_eligible=true for mlx-community/Qwen3-8B-4bit.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-04-catalog-autotune-readiness",
+        "status": "pass",
+        "assertion": "Admission and heartbeat evidence selected the exact signed current Qwen catalog row with model hash 1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877, model_hash_algorithm=macprovider.snapshot-manifest.v1, catalog row identity 902b83ecfd20acbccbcfe2c85c0faf6725c8a1955b430689445ce65726ea17b0, and weights manifest 269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-05-hardware-evidence-verifier",
+        "status": "pass",
+        "assertion": "Local safety telemetry for the same redacted provider reported runtime_state=ready, model_loaded=true, hardware_tier=32GB, nominal thermal state, and the same model digest, algorithm, and weights manifest as Pearl admission.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-06-provider-runtime-routing",
+        "status": "pass",
+        "assertion": "A later Pearl heartbeat for the same redacted provider/session retained the admitted Qwen model, digest, algorithm, catalog row identity, and hash_verified status; Pearl pool posture showed four ready providers, four hash_verified providers, and no provider missing model_hash_algorithm.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-07-buyer-serving-smoke",
+        "status": "pass",
+        "assertion": "An authenticated buyer smoke request at 2026-08-10T10:00:00Z returned HTTP 200 for mlx-community/Qwen3-8B-4bit, and Pearl request_log plus settlement_route_snapshots correlated the request hashes to the same redacted provider/session with provider_reported_model_hash equal to expected_catalog_model_hash.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-08-redaction-and-correlation",
+        "status": "pass",
+        "assertion": "The artifact omits raw provider IDs, session IDs, request IDs, receipt keys, account scope, buyer IP, operator credentials, local account names, prompts, and response bodies while retaining stable SHA-256 fingerprints for cross-checking admission, heartbeat, pool, and route-snapshot evidence.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z",
+    "execution_mode": "physical-provider-prebeta-admission"
+  }
+}

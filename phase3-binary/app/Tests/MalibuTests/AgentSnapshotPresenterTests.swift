@@ -29,6 +29,41 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.earningsLine(s), "Today: reward status unavailable")
     }
 
+    func testMalibuDailyMissingExplainsProjectionInsteadOfShowingNA() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.providerEarningsFresh = true
+        s.malibuProjectionFresh = true
+        s.earningsUsdcToday = 0.04
+        s.malibuAccruedToday = nil
+        s.malibuAccruedAllTime = 12.5
+        s.malibuHeld = 12.5
+        s.trustTier = .provisional
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.earningsLine(s),
+            "Today: $0.04 USDC · MALIBU daily not reported yet"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.malibuFullLine(s),
+            "MALIBU daily not reported yet · 12.50 all-time · [locked] unlocks at Trusted"
+        )
+    }
+
+    func testUptimeLineLabelsProviderProcessRuntimeAsCurrentRun() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.uptimeSec = 75
+        s.uptime7dPct = 99.5
+        s.declinedRequests = 0
+        s.restartCount = 2
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.uptimeLine(s),
+            "1m current run · 99.5% uptime (7d) · 0 declined · 2 restarts"
+        )
+    }
+
     func testShortShowsServingWhenNoEarningsYet() {
         var s = AgentSnapshot.empty
         s.state = .serving

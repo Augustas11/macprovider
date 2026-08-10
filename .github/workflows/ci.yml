@@ -358,11 +358,13 @@ jobs:
   dist-tooling:
     name: deploy tooling (check-deploy-config gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     # Guards the fail-closed C2 pre-deploy gate
     # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
     # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
-    # build — so it stays a fast, isolated job. Closes the 2026-06-17
+    # build — so it stays isolated. The full dist shell/e2e matrix now runs
+    # just over five minutes on hosted runners, so keep a 10-minute cap rather
+    # than canceling a passing regression suite near completion. Closes the 2026-06-17
     # regression where an env:NAME-indirected operator_key false-failed the
     # gate and pushed operators into SKIP_C2_CHECK=1. Catalog release tests now
     # authenticate Tier-2 with the reviewed Go verifier, so install the pinned

@@ -1009,16 +1009,69 @@ def _validate_signed_journey_result(
 
     environment = signed.get("environment")
     if _expect_object(environment, f"{location}.signed.environment", result):
+        base_environment_fields = {"class", "hardware_profile", "candidate"}
+        provider_prebeta_environment_fields = {
+            "binary_version",
+            "compatibility_set",
+            "operating_system",
+            "production_equivalent_conditions",
+        }
         _expect_keys(
             environment,
-            {"class", "hardware_profile", "candidate"},
-            {"class", "hardware_profile", "candidate"},
+            base_environment_fields,
+            base_environment_fields | provider_prebeta_environment_fields,
             f"{location}.signed.environment",
             result,
         )
         _string(environment.get("class"), None, f"{location}.signed.environment.class", result)
         _string(environment.get("hardware_profile"), None, f"{location}.signed.environment.hardware_profile", result)
         _string(environment.get("candidate"), None, f"{location}.signed.environment.candidate", result)
+        if "binary_version" in environment:
+            _string(environment.get("binary_version"), None, f"{location}.signed.environment.binary_version", result)
+        if "compatibility_set" in environment:
+            _string(environment.get("compatibility_set"), None, f"{location}.signed.environment.compatibility_set", result)
+        if "operating_system" in environment:
+            _string(environment.get("operating_system"), None, f"{location}.signed.environment.operating_system", result)
+        production_equivalent = environment.get("production_equivalent_conditions")
+        if production_equivalent is not None and _expect_object(
+            production_equivalent,
+            f"{location}.signed.environment.production_equivalent_conditions",
+            result,
+        ):
+            string_fields = {
+                "provider_service",
+                "network_state_before",
+                "network_state_after",
+                "thermal_state",
+                "memory_pressure",
+            }
+            bool_fields = {
+                "coordinator_connected_before",
+                "coordinator_connected_after",
+                "model_loaded_before",
+                "model_loaded_after",
+                "thermally_throttled",
+            }
+            _expect_keys(
+                production_equivalent,
+                string_fields | bool_fields,
+                string_fields | bool_fields,
+                f"{location}.signed.environment.production_equivalent_conditions",
+                result,
+            )
+            for field in sorted(string_fields):
+                _string(
+                    production_equivalent.get(field),
+                    None,
+                    f"{location}.signed.environment.production_equivalent_conditions.{field}",
+                    result,
+                )
+            for field in sorted(bool_fields):
+                _bool_value(
+                    production_equivalent.get(field),
+                    f"{location}.signed.environment.production_equivalent_conditions.{field}",
+                    result,
+                )
 
     repository = signed.get("repository")
     if _expect_object(repository, f"{location}.signed.repository", result):
