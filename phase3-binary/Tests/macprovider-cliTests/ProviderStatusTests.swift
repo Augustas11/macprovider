@@ -651,6 +651,15 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertNil(CoordinatorReadinessClient.verdict(
             data: body(mode: "current"), response: redirected, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ))
+        let staleAssignedSession = try XCTUnwrap(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 404,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        XCTAssertNil(CoordinatorReadinessClient.verdict(
+            data: Data(), response: staleAssignedSession, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
+        ))
         XCTAssertEqual(CoordinatorReadinessClient.verdict(
             data: body(mode: "legacy", serving: false), response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ), false)

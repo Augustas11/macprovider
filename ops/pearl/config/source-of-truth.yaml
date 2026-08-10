@@ -116,7 +116,7 @@ known_config_drift:
     owner: pearl_production_overlay
     category: Evidence
     classification: intentional Pearl production posture
-    rationale: Current Pearl runtime posture; PR C should migrate it field-scope into the overlay.
+    rationale: Pearl base config may retain the pre-overlay 1s value, but production runtime must override it through /etc/macprovider/coordinator.pearl-overlays.yaml to the reviewed 30s heartbeat cadence.
   - path: coordinator_advertised_version.latest_binary_version
     drift_kind: value_mismatch
     tracked: "1.8.66"
@@ -266,6 +266,16 @@ pearl_overlay_classifications:
     category: Evidence
     classification: overlay-owned Pearl production setting
     expected_type: boolean
+  - path: pool.heartbeat_interval_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
+  - path: pool.heartbeat_miss_threshold_s
+    owner: pearl_production_overlay
+    category: Evidence
+    classification: overlay-owned Pearl production setting
+    expected_type: integer
   - path: pool.canary_cold_start_grace_s
     owner: pearl_production_overlay
     category: Evidence

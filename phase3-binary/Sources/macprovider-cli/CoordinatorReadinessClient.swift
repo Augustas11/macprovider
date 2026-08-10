@@ -124,7 +124,13 @@ enum CoordinatorReadinessClient {
         else {
             return nil
         }
-        if http.statusCode == 404 { return false }
+        // A 404 here usually means the coordinator no longer has the specific
+        // assigned session the app last observed (for example immediately after
+        // a coordinator drain/restart or provider reconnect). Treat that as an
+        // indeterminate readiness refresh instead of authoritative
+        // not_buyer_serving so Malibu does not tell a verified provider it is
+        // ineligible during assigned_id churn.
+        if http.statusCode == 404 { return nil }
         guard (200 ..< 300).contains(http.statusCode),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["provider_id"] as? String == providerID,

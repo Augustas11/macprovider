@@ -2605,8 +2605,8 @@ struct LocalStatusFormatter {
                 ? "Run `macprovider-cli autotune --recommend --recover-hardware-admission` while online."
                 : "Run `macprovider-cli update`, or choose a catalog-supported model."
         } else if networkState == "not_buyer_serving" {
-            title = "This Mac is not currently eligible"
-            nextStep = "Open Malibu to review the recommended next step."
+            title = "Customer availability is temporarily interrupted"
+            nextStep = "Keep Malibu open while the coordinator refreshes this Mac's routing status."
         } else if !modelLoaded || ["draining", "unavailable"].contains(localState) {
             title = "Model is preparing"
             nextStep = "Keep this Mac awake while preparation completes."
