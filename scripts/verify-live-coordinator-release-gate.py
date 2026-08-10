@@ -395,10 +395,20 @@ def main() -> int:
         live_version = parse_semver(healthz.get("version"), "/healthz version")
         required_version = parse_semver(expected_version, "release version")
         if live_version < required_version:
-            fail(
-                f"/healthz version {healthz.get('version')!r} is older than "
-                f"release {expected_version}"
-            )
+            previous_version = None
+            if (
+                args.publication_phase == "pre-publication"
+                and args.expected_previous_recommendation is not None
+            ):
+                previous_version = parse_advertised_version(
+                    args.expected_previous_recommendation,
+                    "expected previous recommendation",
+                )
+            if previous_version is None or live_version != previous_version:
+                fail(
+                    f"/healthz version {healthz.get('version')!r} is older than "
+                    f"release {expected_version}"
+                )
         recommended_value = healthz.get("recommended_binary_version")
         if (
             args.publication_phase == "pre-publication"

@@ -243,6 +243,20 @@ fi
 grep -q 'recommended_binary_version=1.8.67 publication_phase=pre-publication' \
   "$work/previous-recommended.out"
 
+make_fixture "$work/previous-healthz-and-recommended" v1.8.68 v1.8.67 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if ! run_guard_phase "$work/previous-healthz-and-recommended" pre-publication >"$work/previous-healthz-and-recommended.out" 2>&1; then
+  fail "pre-publication gate rejected a live coordinator still pinned to the previous stable version"
+fi
+grep -q 'healthz_version=v1.8.67 recommended_binary_version=1.8.67 publication_phase=pre-publication' \
+  "$work/previous-healthz-and-recommended.out"
+
+make_fixture "$work/too-old-prepublication-healthz" v1.8.68 v1.8.66 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 1.8.67
+if run_guard_phase "$work/too-old-prepublication-healthz" pre-publication >"$work/too-old-prepublication-healthz.out" 2>&1; then
+  fail "pre-publication gate accepted a coordinator older than the previous stable version"
+fi
+grep -q "/healthz version 'v1.8.66' is older than release 1.8.68" \
+  "$work/too-old-prepublication-healthz.out"
+
 make_fixture "$work/malformed-recommended" v1.8.68 v1.8.68 2026-07-30T12:00:00Z 2026-07-30T12:00:00Z streamvc-autotune-static-v4 latest
 if run_guard "$work/malformed-recommended" >"$work/malformed-recommended.out" 2>&1; then
   fail "accepted a malformed recommended_binary_version"
