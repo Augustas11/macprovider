@@ -470,6 +470,15 @@ jobs:
             exit 1
           fi
           echo "::group::Verify pre-publication live coordinator feed gate"
+          policy_file="$RUNNER_TEMP/release-staged-policy.env"
+          bash scripts/release-staged-version-policy.sh "$TAG" > "$policy_file"
+          source "$policy_file"
+          prepublication_recommendation_args=()
+          if [ "$MACPROVIDER_RELEASE_STAGED" = true ]; then
+            prepublication_recommendation_args=(
+              --expected-previous-recommendation "$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+            )
+          fi
           env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN \
             python3 scripts/verify-live-coordinator-release-gate.py \
             --tag "$TAG" \
@@ -477,7 +486,7 @@ jobs:
             --trusted-keys "$accepted/trusted-keys.json" \
             --coordinator-url https://coordinator.streamvc.live \
             --openssl "$OPENSSL_BIN" \
-            --expected-previous-recommendation 1.8.88 \
+            "${prepublication_recommendation_args[@]}" \
             --publication-phase pre-publication
           echo "::endgroup::"
           # Repository rules and the production-release environment serialize

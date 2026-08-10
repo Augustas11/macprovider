@@ -136,7 +136,9 @@ for requirement in (
     "--trusted-keys \"$accepted/trusted-keys.json\"",
     "--coordinator-url https://coordinator.streamvc.live",
     "--openssl \"$OPENSSL_BIN\"",
-    "--expected-previous-recommendation 1.8.88",
+    "scripts/release-staged-version-policy.sh",
+    "prepublication_recommendation_args",
+    "--expected-previous-recommendation \"$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION\"",
 ):
     if requirement not in publish_step[pre_gate_label:]:
         raise SystemExit(f"promotion live coordinator gate omits: {requirement}")

@@ -805,10 +805,15 @@ if "if: needs.build.outputs.prerelease == 'false'" not in pearl_bridge:
     raise SystemExit("Pearl Malibu alias publication is not stable-only")
 if "MALIBU_PUBLICATION_EXPECTED_REPOSITORY: ${{ github.repository }}" not in pearl_bridge:
     raise SystemExit("Pearl Malibu alias publication is not bound to the workflow repository")
-if 'MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.8.88"' not in pearl_bridge:
-    raise SystemExit("Pearl Malibu alias publication lacks staged previous-stable policy")
-if 'MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.8.90"' not in pearl_bridge:
-    raise SystemExit("Pearl Malibu alias publication lacks staged candidate policy")
+if "scripts/release-staged-version-policy.sh" not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication does not derive staged policy")
+if "MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE=\"$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION\"" not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication does not export derived previous-stable policy")
+if "MALIBU_PUBLICATION_STAGED_CANDIDATE=\"$MACPROVIDER_RELEASE_CANDIDATE_VERSION\"" not in pearl_bridge:
+    raise SystemExit("Pearl Malibu alias publication does not export derived candidate policy")
+for stale_literal in ('MALIBU_PUBLICATION_ALLOW_PREVIOUS_STABLE: "1.', 'MALIBU_PUBLICATION_STAGED_CANDIDATE: "1.'):
+    if stale_literal in pearl_bridge:
+        raise SystemExit("Pearl Malibu alias publication hardcodes stale staged policy")
 if 'appcast="scripts/dist/malibu-frozen-bridge-appcast.xml"' not in pearl_bridge:
     raise SystemExit("current provider publication does not use the frozen bridge appcast")
 if 'current provider release must not publish a generated appcast asset' not in pearl_bridge:

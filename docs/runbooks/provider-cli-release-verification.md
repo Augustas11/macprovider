@@ -98,10 +98,11 @@ unpublished version. Once the v2 handler is active, v1 hardware-evidence
 submissions are no longer accepted for refresh; those providers must upgrade
 to a signed v1.8.82-or-newer release before they can renew admission evidence.
 
-The release workflow's staged version-cohesion exception is bound to the exact
-`--staged-candidate=1.8.88` release. A later release must update both the
-previous-stable and staged-candidate values; the guard rejects an unbound
-candidate.
+The release workflow derives its staged version-cohesion exception from the
+checked-in coordinator `latest_binary_version` and the CLI source version via
+`scripts/release-staged-version-policy.sh`. A later release must update the
+checked-in coordinator examples to the previous stable recommendation; the
+workflow no longer carries per-release hardcoded previous/candidate literals.
 
 After immutable publication, deploy Pearl's recommendation update, then
 dispatch `.github/workflows/verify-live-coordinator-release-rollout.yml` with

@@ -91,10 +91,19 @@ jobs:
           set -euo pipefail
           [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          policy_file="$RUNNER_TEMP/release-staged-policy.env"
+          bash scripts/release-staged-version-policy.sh "$CLI_TAG" > "$policy_file"
+          source "$policy_file"
+          coordinator_args=()
+          if [ "$MACPROVIDER_RELEASE_STAGED" = true ]; then
+            coordinator_args+=(
+              "--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+              "--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
+            )
+          fi
           bash scripts/validate-malibu-release-cli-inputs.sh \
             "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256" \
-            --allow-previous-stable=1.8.90 \
-            --staged-candidate=1.8.92
+            "${coordinator_args[@]}"
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
@@ -448,10 +457,19 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$EXPECTED_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          policy_file="$RUNNER_TEMP/release-staged-policy.env"
+          bash scripts/release-staged-version-policy.sh "$CLI_TAG" > "$policy_file"
+          source "$policy_file"
+          coordinator_args=()
+          if [ "$MACPROVIDER_RELEASE_STAGED" = true ]; then
+            coordinator_args+=(
+              "--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+              "--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
+            )
+          fi
           bash scripts/validate-malibu-release-cli-inputs.sh \
             "$CLI_TAG" "$CLI_VERSION" "$CLI_SHA256" "$CLI_ARCHIVE_SHA256" \
-            --allow-previous-stable=1.8.90 \
-            --staged-candidate=1.8.92
+            "${coordinator_args[@]}"
           test "$GITHUB_REF" = refs/heads/main
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"

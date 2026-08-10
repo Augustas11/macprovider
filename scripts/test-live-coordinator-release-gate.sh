@@ -512,7 +512,9 @@ def require_stable_gate(
         trusted_keys_arg,
         "--coordinator-url https://coordinator.streamvc.live",
         "--openssl \"$OPENSSL_BIN\"",
-        "--expected-previous-recommendation 1.8.88",
+        "scripts/release-staged-version-policy.sh",
+        "prepublication_recommendation_args",
+        "--expected-previous-recommendation \"$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION\"",
         "env -u GH_TOKEN -u RELEASE_POSTURE_TOKEN",
     ):
         if required not in publish[pre_gate_label:]:
