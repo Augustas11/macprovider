@@ -26,6 +26,13 @@ enum DashboardCopy {
     static let meaningTitle = "What this means"
     static let nextActionTitle = "Next safe action"
 
+    static func modelRowStatusLine(currentModelID: String?, switcherStatusLine: String) -> String {
+        if currentModelID != nil {
+            return String(localized: "Current model shown. Change Model shows switching availability.", comment: "Dashboard stable current-model status")
+        }
+        return switcherStatusLine
+    }
+
     static func defaultPublicStrings(_ snapshot: AgentSnapshot) -> [String] {
         let publicStatus = AgentSnapshotPresenter.publicStatus(snapshot)
         return [
@@ -88,7 +95,10 @@ private struct DashboardView: View {
                         .truncationMode(.middle)
                         .textSelection(.enabled)
                         .accessibilityLabel(Text(String(localized: "Current provider model", comment: "Dashboard model accessibility label")))
-                    Text(modelStore.statusLine)
+                    Text(DashboardCopy.modelRowStatusLine(
+                        currentModelID: modelStore.currentModelID ?? agent.snapshot.currentModelID,
+                        switcherStatusLine: modelStore.statusLine
+                    ))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -101,7 +111,7 @@ private struct DashboardView: View {
                 .accessibilityHint(Text(String(localized: "Opens the model switcher and shows provider guards before any action.", comment: "Dashboard model action hint")))
                 Menu {
                     Button(String(localized: "Settings…", comment: "Dashboard settings action")) {
-                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                        SettingsWindowPresenter.shared.present()
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -324,7 +334,7 @@ private struct DashboardView: View {
                             }
                             MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
                             MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
-                            MetricRow(title: "Uptime", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
+                            MetricRow(title: "Current run", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
                             HStack(spacing: 8) {
                                 MetricChip(text: AgentSnapshotPresenter.queueChip(agent.snapshot), tone: queueTone)
                                 MetricChip(text: AgentSnapshotPresenter.thermalChip(agent.snapshot), tone: thermalTone)

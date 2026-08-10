@@ -238,7 +238,7 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot), "$4.00")
         XCTAssertNil(AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot))
         XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("$4.00 USDC"))
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("n/a MALIBU"))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(agent.snapshot).contains("MALIBU reward status unavailable"))
 
         let accrualOnly = ProviderEarnings(
             walletBound: false,
@@ -284,7 +284,7 @@ final class ControlFrameCodecTests: XCTestCase {
             AgentSnapshotPresenter.malibuAvailabilityLine(agent.snapshot),
             "MALIBU: 1.00 available · 8.00 held"
         )
-        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(agent.snapshot).contains("n/a MALIBU today"))
+        XCTAssertTrue(AgentSnapshotPresenter.malibuFullLine(agent.snapshot).contains("MALIBU daily not reported yet"))
         XCTAssertEqual(AgentSnapshotPresenter.earningsLine(agent.snapshot), "Today: reward status unavailable")
     }
 

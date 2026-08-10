@@ -121,6 +121,22 @@ final class PayoutWalletFlowTests: XCTestCase {
         XCTAssertEqual(loaded?.pendingUntilUTC, "2026-01-09T00:00:00Z")
     }
 
+    func testRawSwiftCancellationErrorIsPresentedAsFriendlyWalletCancellation() {
+        let raw = "The operation couldn’t be completed. (Swift.CancellationError error 1.)"
+
+        XCTAssertEqual(
+            PayoutWalletFlow.publicErrorMessage(.challengeFailed(raw)),
+            "Wallet registration was cancelled."
+        )
+        XCTAssertEqual(
+            PayoutWalletFlow.publicErrorMessage(.registerFailed(raw)),
+            "Wallet registration was cancelled."
+        )
+        XCTAssertFalse(
+            PayoutWalletFlow.publicErrorMessage(.loopbackFailed(raw)).contains("Swift.CancellationError")
+        )
+    }
+
     // MARK: - M1: exact structural ts_utc decoding (JSONDecoder)
 
     func testCallbackBodyDecodesTimestampExactly() {
