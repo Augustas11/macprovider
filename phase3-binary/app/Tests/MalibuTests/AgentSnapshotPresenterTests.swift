@@ -60,11 +60,14 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         waiting.networkState = "live_verified"
         XCTAssertEqual(AgentSnapshotPresenter.publicStatus(waiting).title, "Waiting for network approval")
 
-        var ineligible = AgentSnapshot.empty
-        ineligible.state = .reconnecting
-        ineligible.currentModelID = "llama"
-        ineligible.networkState = "not_buyer_serving"
-        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(ineligible).title, "This Mac is not currently eligible")
+        var interrupted = AgentSnapshot.empty
+        interrupted.state = .reconnecting
+        interrupted.currentModelID = "llama"
+        interrupted.networkState = "not_buyer_serving"
+        XCTAssertEqual(
+            AgentSnapshotPresenter.publicStatus(interrupted).title,
+            "Customer availability is temporarily interrupted"
+        )
 
         var preparing = AgentSnapshot.empty
         preparing.state = .starting
@@ -663,7 +666,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
         XCTAssertEqual(
             AgentSnapshotPresenter.publicStatus(snapshot).title,
-            "This Mac is not currently eligible"
+            "Customer availability is temporarily interrupted"
         )
     }
 
@@ -713,7 +716,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot, at: now))
         XCTAssertEqual(
             AgentSnapshotPresenter.publicStatus(snapshot).title,
-            "This Mac is not currently eligible"
+            "Customer availability is temporarily interrupted"
         )
 
         // Coordinator disconnect while still within retention: authoritative

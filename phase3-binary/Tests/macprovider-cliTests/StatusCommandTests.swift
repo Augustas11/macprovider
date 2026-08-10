@@ -149,7 +149,7 @@ final class StatusCommandTests: XCTestCase {
         let prohibited = policy.terms.map(\.internalTerm)
         let cases: [(String, String, Bool, Bool, String)] = [
             ("buyer_serving", "ready", true, true, "Provider is ready"),
-            ("not_buyer_serving", "ready", true, true, "This Mac is not currently eligible"),
+            ("not_buyer_serving", "ready", true, true, "Customer availability is temporarily interrupted"),
             ("buyer_serving_unknown", "ready", true, true, "Waiting for network approval"),
             ("catalog_update_required", "ready", true, true, "This Mac is not currently eligible"),
             ("live_verified", "unavailable", true, false, "Model is preparing"),
@@ -184,7 +184,7 @@ final class StatusCommandTests: XCTestCase {
         let output = LocalStatusFormatter.format(payload)
 
         XCTAssertEqual(output.components(separatedBy: "Next step:").count - 1, 1, output)
-        XCTAssertTrue(output.contains("Open Malibu to review the recommended next step."), output)
+        XCTAssertTrue(output.contains("Keep Malibu open while the coordinator refreshes this Mac's routing status."), output)
     }
 
     func testDefaultStatusSurfacesHardwareVerificationLifecycle() {
