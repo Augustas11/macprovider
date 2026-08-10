@@ -1035,12 +1035,17 @@ final class MalibuAgent: ObservableObject {
     func registerPayoutWallet(pasted: PayoutSignedPayload? = nil) async {
         guard !snapshot.payoutRegistrationInProgress else { return }
         snapshot.payoutRegistrationInProgress = true
+        snapshot.payoutRegistrationCanCancel = true
         snapshot.payoutLastError = nil
         snapshot.payoutLastStatus = nil
-        defer { snapshot.payoutRegistrationInProgress = false }
+        defer {
+            snapshot.payoutRegistrationInProgress = false
+            snapshot.payoutRegistrationCanCancel = false
+        }
 
         do {
             let challenge = try await PayoutWalletFlow.fetchChallenge()
+            try Task.checkCancellation()
             if let existing = challenge.registeredAddress {
                 snapshot.payoutRegisteredAddress = existing
                 snapshot.payoutPendingUntilUTC = challenge.pendingUntilUTC
@@ -1073,6 +1078,11 @@ final class MalibuAgent: ObservableObject {
                 )
             }
 
+            try Task.checkCancellation()
+            // Registration is the remote commit boundary. From this point the
+            // sheet may be closed, but it must not promise cancellation: the
+            // coordinator could commit even if the local CLI were terminated.
+            snapshot.payoutRegistrationCanCancel = false
             let result = try await PayoutWalletFlow.register(
                 address: signed.address,
                 nonce: signed.nonce,
@@ -1088,6 +1098,8 @@ final class MalibuAgent: ObservableObject {
                 address: result.address,
                 pendingUntilUTC: result.pendingUntilUTC
             )
+        } catch is CancellationError {
+            snapshot.payoutLastError = Self.payoutErrorMessage(.cancelled)
         } catch let error as PayoutWalletFlowError {
             snapshot.payoutLastError = Self.payoutErrorMessage(error)
         } catch {

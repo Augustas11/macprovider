@@ -102,6 +102,11 @@ struct PayoutChallengeResponse: Decodable {
 enum PayoutWalletFlow {
     static let callbackTimeout: TimeInterval = 5 * 60
     static let chain = "base-mainnet"
+    static let chainID: UInt64 = 8453
+
+    static func isSupportedChallengeChain(chainID: UInt64, chain: String) -> Bool {
+        chainID == self.chainID && chain == self.chain
+    }
 
     /// CSPRNG nonce (0x + 32 bytes). Fail-closed: a CSPRNG failure
     /// ABORTS the flow (SPEC-016 §3 non-custodial correlation token
@@ -203,6 +208,9 @@ enum PayoutWalletFlow {
         else {
             throw PayoutWalletFlowError.challengeFailed("Unexpected challenge response.")
         }
+        guard isSupportedChallengeChain(chainID: resp.chainID, chain: resp.chain) else {
+            throw PayoutWalletFlowError.challengeFailed("Coordinator returned an unsupported payout chain.")
+        }
         return PayoutChallengeView(
             providerID: providerID,
             verifyingContract: resp.verifyingContract,
@@ -254,27 +262,83 @@ enum PayoutWalletFlow {
         )
     }
 
-    private static func runCLI(_ executable: URL, arguments: [String]) async throws -> (Data, Data, Int32) {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = executable
-                process.arguments = arguments
-                let out = Pipe()
-                let err = Pipe()
-                process.standardOutput = out
-                process.standardError = err
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let stdout = out.fileHandleForReading.readDataToEndOfFile()
-                    let stderr = err.fileHandleForReading.readDataToEndOfFile()
-                    continuation.resume(returning: (stdout, stderr, process.terminationStatus))
-                } catch {
-                    continuation.resume(throwing: PayoutWalletFlowError.cliNotFound)
+    private final class ProcessHold: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func register(_ process: Process) {
+            lock.lock()
+            self.process = process
+            let shouldTerminate = cancelled
+            lock.unlock()
+            if shouldTerminate { Self.terminate(process) }
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let process = process
+            lock.unlock()
+            if let process { Self.terminate(process) }
+        }
+
+        private static func terminate(_ process: Process) {
+            guard process.isRunning else { return }
+            process.terminate()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
                 }
             }
         }
+    }
+
+    static func runCLI(_ executable: URL, arguments: [String]) async throws -> (Data, Data, Int32) {
+        try Task.checkCancellation()
+        let hold = ProcessHold()
+        let result = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<(Data, Data, Int32), Error>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let process = Process()
+                    process.executableURL = executable
+                    process.arguments = arguments
+                    let out = Pipe()
+                    let err = Pipe()
+                    process.standardOutput = out
+                    process.standardError = err
+                    do {
+                        try process.run()
+                        hold.register(process)
+                        process.waitUntilExit()
+                        let stdout = out.fileHandleForReading.readDataToEndOfFile()
+                        let stderr = err.fileHandleForReading.readDataToEndOfFile()
+                        if hold.isCancelled {
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        continuation.resume(returning: (stdout, stderr, process.terminationStatus))
+                    } catch {
+                        if hold.isCancelled {
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        continuation.resume(throwing: PayoutWalletFlowError.cliNotFound)
+                    }
+                }
+            }
+        } onCancel: {
+            hold.cancel()
+        }
+        try Task.checkCancellation()
+        return result
     }
 
     private static func parseCLIError(stderr: Data, stdout: Data) -> String {

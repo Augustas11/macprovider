@@ -1,0 +1,119 @@
+{
+  "schema_version": "macprovider.journey-result-envelope.v1",
+  "signatures": [
+    {
+      "algorithm": "ecdsa-p256-sha256",
+      "key_id": "macprovider-acceptance-p256-v1",
+      "signature": "MEUCIQCDE/m4SWvPFvPBgvAuC7LSrSXipS9YACc7+wDiOnwGdgIgJtAMiqnp+D5CURpOUmOzvGjxe7Ups2EUY2ivN15ENmk=",
+      "signed_sha256": "97b11f766cc6dfec669b5e27d9c7a81a4477e2e70e1259a3c8b63998a2e823c5",
+      "verified_at": "2026-08-09T17:43:37Z",
+      "verifier": ".github/workflows/promote-signed-provider-prebeta-journey.yml:31327136830:1"
+    }
+  ],
+  "signed": {
+    "schema_version": "macprovider.journey-result.v1",
+    "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+    "requirement_ids": [
+      "SPEC-034-R001"
+    ],
+    "repository": {
+      "name": "Augustas11/macprovider",
+      "commit": "b60f4fd1672fb230e8cf392b8d0afcec0ef3782b"
+    },
+    "captured_at": "2026-08-09T17:15:20Z",
+    "expires_at": "2026-11-09",
+    "operator": {
+      "role": "provider-prebeta-operator",
+      "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+    },
+    "environment": {
+      "class": "physical-provider-prebeta-admission",
+      "hardware_profile": "apple-silicon-32gb-qwen3-redacted",
+      "candidate": "provider-cli:v1.8.90"
+    },
+    "artifacts": [
+      {
+        "id": "redacted-provider-prebeta-admission",
+        "sha256": "f674d78deccbce2fda3ab427444c7bc0e564fc5b831b7069bfe69b3750a13496",
+        "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec034-r001-20260809T171520Z.redacted.json"
+      }
+    ],
+    "result": {
+      "status": "pass",
+      "summary": "SPEC-034-R001 live referral posture passed on Pearl production for the ongoing prebeta referral/X campaign. Pearl required referral admission, served exact Malibu fragment-join public validation, preserved the incumbent provider identity through a v1.8.90 Malibu/CLI update, accepted and matured a live X advocacy verification into a post-specific invite bonus grant, rejected disabled public/social surfaces during rollback, restored the enabled posture, and kept the provider serving buyers with hash-verified Qwen3 routing."
+    },
+    "steps": [
+      {
+        "id": "step-01-private-prebeta-authorization",
+        "status": "pass",
+        "assertion": "Decision Entry 224 makes the prebeta referral/X posture an ongoing reviewed campaign rather than an expired Entry 172 exception. Pearl production required referral admission, enabled public validation, enabled Malibu join links, enabled social invite bonus, and pinned the campaign to prebeta_20260719 with join_base_url https://malibu.tech/j.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-02-install-launch-identity",
+        "status": "pass",
+        "assertion": "The local provider was updated to Malibu.app v1.8.90 and standalone provider-cli v1.8.90, the embedded CLI hash matched the standalone CLI hash, Gatekeeper and codesign accepted Malibu.app, the local status contract advertised SPEC-034 referral capabilities, and the same redacted provider identity remained ready from cli_keychain after restart.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-03-provider-registration-admission",
+        "status": "pass",
+        "assertion": "Pearl recorded the same redacted provider identity as admitted by referral with decision referred under campaign prebeta_20260719, retained an unrevoked credential row, kept first-serving qualification present, and publicly validated the active invite code hash as valid with required=true from the exact Malibu origin.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-04-catalog-autotune-readiness",
+        "status": "pass",
+        "assertion": "The provider served qwen3-8b from the live autotune catalog row for mlx-community/Qwen3-8B-4bit with catalog state live_verified, model hash 1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877, catalog digest 56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720, and weights manifest 269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-05-hardware-evidence-verifier",
+        "status": "pass",
+        "assertion": "For this SPEC-034 referral posture slice, Pearl's live serving qualification table showed first-serving evidence for the same redacted provider identity, and local safety telemetry reported a 32GB hardware tier, model_loaded=true, runtime_state=ready, nominal thermal state, and buyer-serving network state after rollback restore.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-06-provider-runtime-routing",
+        "status": "pass",
+        "assertion": "After the v1.8.90 update and rollback restore, Pearl health remained ok, the provider reconnected as ready, local health returned ready for twelve consecutive checks, and the buyer route snapshot for the Qwen3 smoke request selected the same redacted provider identity with route_snapshot_mode=enforce and spec008_hash_status=hash_verified.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-07-buyer-serving-smoke",
+        "status": "pass",
+        "assertion": "A public authenticated buyer smoke request at 2026-08-09T16:40:59Z returned HTTP 200 for mlx-community/Qwen3-8B-4bit, and Pearl request_log plus settlement_route_snapshots correlated the request hash to the same redacted provider identity with the expected catalog model hash.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      },
+      {
+        "id": "step-08-redaction-and-correlation",
+        "status": "pass",
+        "assertion": "The artifact excludes raw invite codes, raw invite URLs, raw X post URLs, raw X post IDs, raw provider IDs, raw session IDs, credential material, and local account secrets while retaining stable SHA-256 fingerprints for referral, X verification, rollback, route, catalog, and provider identity correlation.",
+        "artifacts": [
+          "redacted-provider-prebeta-admission"
+        ]
+      }
+    ],
+    "redaction": {
+      "secrets_redacted": true,
+      "operator_identity_redacted": true,
+      "local_account_names_redacted": true
+    },
+    "run_id": "provider-prebeta-admission-air5-qwen-spec034-r001-20260809T171520Z",
+    "execution_mode": "physical-provider-prebeta-admission"
+  }
+}

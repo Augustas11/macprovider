@@ -1,12 +1,16 @@
 # SPEC-034 — Referral admission, provider invites, and advocacy rewards
 
-Version: v0.4.6
-Status: recovery implementation; production activation prohibited except §8 one-time exception
+Version: v0.4.7
+Status: recovery implementation; public prebeta campaign activation reviewed under §8
 Owner: coordinator admission and referral services
 Product parent: https://github.com/MalibuAI/malibu/issues/46
 
 Changelog:
 
+- v0.4.7 (2026-08-09): supersedes the expired Entry 172 one-time exception with
+  an ongoing reviewed public prebeta referral/X campaign posture. The campaign
+  remains reversible and evidence-gated; it does not by itself promote
+  `SPEC-034-R001` without current requirement-scoped signed evidence.
 - v0.4.6 (2026-07-29): closes the B6 identity re-registration wash by
   requiring referral admission whenever a coordinator deployment enables a
   fresh provider-token mint surface (`auth.allow_tokenless_provisional_bootstrap`
@@ -333,15 +337,36 @@ attaches to the existing launchd provider.
 
 ## 8. Activation, rollback, and acceptance
 
-Production public-validation, join-link, and social-reward flags remain disabled
-until all server and client PRs are merged and the exact signed artifacts pass
-the following physical journey. `referrals.require_for_registration` may be
-enabled independently as the §1.1 anti-wash admission gate when fresh
-provider-token mint surfaces are enabled; that setting alone is not public
-referral activation. Public configuration activation is a separate reviewed
-change with an explicit rollback. Rollback restores the prior public exposure
-policy, removes public validation/join and new social-reward exposure, and
-preserves committed attribution, tokens, invites, grants, and audit.
+Production public-validation, join-link, and social-reward flags are disabled by
+default. `referrals.require_for_registration` may be enabled independently as
+the §1.1 anti-wash admission gate when fresh provider-token mint surfaces are
+enabled; that setting alone is not public referral activation. Public
+configuration activation is a separate reviewed change with explicit rollback.
+Rollback restores the prior public exposure policy, removes public
+validation/join and new social-reward exposure, and preserves committed
+attribution, tokens, invites, grants, and audit.
+
+The private-prebeta referral/X campaign is an approved ongoing campaign posture
+after Decision Entry 224, not an expired exception, when all of the following are
+true:
+
+- the live operator config keeps `referrals.require_for_registration=true`,
+  `referrals.enable_public_validation=true`, `referrals.enable_join_links=true`,
+  and `referrals.enable_social_invite_bonus=true` for the named prebeta
+  campaign;
+- `join_base_url` is exactly `https://malibu.tech/j`, invite and X challenge
+  material stays fragment-only, and the coordinator rejects every alternate
+  public authority;
+- current signed/notarized CLI, Malibu, Vercel, and coordinator deployment
+  identities are recorded before the campaign is relied on;
+- the campaign can be rolled back by disabling the public exposure flags without
+  deleting committed referral state or disabling the B6 fresh-registration
+  admission gate; and
+- current evidence for the active deployed posture is recorded under #960 before
+  any `SPEC-034-R001` promotion attempt.
+
+If any condition is not current, public exposure must fail closed or be treated
+as an unreviewed production drift until a new reviewed decision restores it.
 
 Required automated evidence:
 
@@ -376,26 +401,18 @@ verification. Process inspection proves one provider process per Mac and secret
 inspection proves Malibu never holds the bearer. Only this complete result may
 authorize a later activation PR.
 
-One narrow exception applies only to the owner-authorized 2026-07-19
-fragment-link activation recorded in Decision Entry 172. Because the second
-acceptance Mac is unavailable, the controlled order is: deploy the exact signed
-client assets, coordinator, and Vercel source while flags remain off; keep the
-existing sponsor buyer-serving; enable public validation and join links; prove
-hostile-origin rejection, fragment-free edge requests, and Copy → Download →
-Paste; enable the social flag only for the sponsor test; then prove one real X
-initial-plus-dwell exactly-once reward. Passing that sequence may keep the
-reversible private-prebeta public flags live. Any failure or expiry restores the
-prior values of `enable_public_validation`, `enable_join_links`, and
-`enable_social_invite_bonus` immediately. The `require_for_registration` flag
-remains governed by §1.1 after the exception expires: if a fresh provider-token
-mint surface is enabled, it stays required. This exception MUST NOT close #613,
-mark the two-Mac journey conformant, claim fresh-provider redemption evidence,
-or become precedent for another release. The first available fresh referred
-provider MUST complete the missing redemption journey. This exception expires
-at `2026-07-26T23:59:59Z`, on terminal success or failure of that first fresh
-referred-provider journey, or on any earlier controlled-sequence failure,
-whichever occurs first; keeping or re-enabling public flags afterward requires
-the complete #613 journey or a new reviewed normative decision.
+Decision Entry 172 remains historical evidence for the owner-authorized
+2026-07-19 fragment-link activation order: deploy exact signed client assets,
+coordinator, and Vercel source while flags remain off; keep the sponsor
+buyer-serving; enable public validation and join links; prove hostile-origin
+rejection, fragment-free edge requests, and Copy -> Download -> Paste; enable
+the social flag only for the sponsor test; then prove one real X
+initial-plus-dwell exactly-once reward. That exception expired after the first
+fresh referred-provider invite-earn PASS and does not authorize ongoing drift by
+itself. Decision Entry 224 supersedes it only for the current private-prebeta
+campaign posture above. Neither Entry 172 nor Entry 224 closes #613, marks the
+two-Mac journey conformant, or promotes `SPEC-034-R001` without current signed
+requirement evidence.
 
 ## 9. Recovery stack
 

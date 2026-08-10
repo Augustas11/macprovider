@@ -83,6 +83,27 @@ final class PayoutWalletFlowTests: XCTestCase {
         )
     }
 
+    func testPayoutChallengeChainFailsClosedOutsideBaseMainnet() {
+        XCTAssertTrue(PayoutWalletFlow.isSupportedChallengeChain(chainID: 8453, chain: "base-mainnet"))
+        XCTAssertFalse(PayoutWalletFlow.isSupportedChallengeChain(chainID: 1, chain: "base-mainnet"))
+        XCTAssertFalse(PayoutWalletFlow.isSupportedChallengeChain(chainID: 8453, chain: "ethereum-mainnet"))
+    }
+
+    func testRegistrationPresentationCancellationPhases() {
+        XCTAssertTrue(PayoutRegistrationPresentation.isCancellable(
+            inProgress: false,
+            canCancel: false
+        ), "a locally-created task must remain cancellable before the agent starts")
+        XCTAssertTrue(PayoutRegistrationPresentation.isCancellable(
+            inProgress: true,
+            canCancel: true
+        ), "challenge and wallet-signature phases must remain cancellable")
+        XCTAssertFalse(PayoutRegistrationPresentation.isCancellable(
+            inProgress: true,
+            canCancel: false
+        ), "remote commit phase must close without cancelling registration")
+    }
+
     func testTruncateAddress() {
         let full = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
         XCTAssertEqual(PayoutWalletFlow.truncateAddress(full), "0x7099…79C8")
@@ -536,6 +557,34 @@ final class PayoutWalletFlowTests: XCTestCase {
                       "signer.html must be at Resources/payout-signer/ (H2); missing at \(signer.path)")
         XCTAssertTrue(FileManager.default.fileExists(atPath: ethers.path),
                       "ethers.min.js must be at Resources/payout-signer/ (H2); missing at \(ethers.path)")
+
+        let sourceSigner = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Malibu/Resources/payout-signer/signer.html")
+        XCTAssertEqual(try Data(contentsOf: signer), try Data(contentsOf: sourceSigner),
+                       "the packaged signer must be byte-identical to the reviewed/tested source")
+    }
+
+    func testCancelledCLIProcessReturnsPromptly() async throws {
+        let task = Task {
+            try await PayoutWalletFlow.runCLI(
+                URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["30"]
+            )
+        }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let started = Date()
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("cancelled CLI process must throw")
+        } catch is CancellationError {
+            XCTAssertLessThan(Date().timeIntervalSince(started), 5,
+                              "cancelled CLI process must not wait for normal exit")
+        }
     }
 
     // M2: the signer URL must carry the coordinator-supplied EIP-712 domain

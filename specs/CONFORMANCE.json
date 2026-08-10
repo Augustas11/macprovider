@@ -959,7 +959,7 @@
     {
       "spec_id": "SPEC-034",
       "title": "Referral admission, provider invites, and advocacy rewards",
-      "version": "v0.4.6",
+      "version": "v0.4.7",
       "path": "specs/SPEC-034-referral-gated-prebeta.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1857,7 +1857,7 @@
     {
       "requirement_id": "SPEC-034-R001",
       "spec_id": "SPEC-034",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/referralapi/xapi.go:parseJoinBaseURL",
         "phase4-coordinator/internal/referralapi/validate.go:ValidationHandler",
@@ -1873,13 +1873,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/960",
-        "rationale": "The fragment contract, capability gate, and rollback rules are implemented and unit-tested. The core provider-prebeta journey passed under #895 with referral activation not required, but its signed result did not promote this exact public-authority requirement. Issue #960 may record disabled or not-required cohort posture as non-promoting context, but conformance requires physical evidence of the enabled exact fragment authority, alternate-authority rejection, capability and immutable-release agreement, activation, and rollback path, or a future split into narrower stable requirement IDs. Real-X dwell rewards and broad advocacy economics remain outside this slice unless explicitly enabled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:b60f4fd1672fb230e8cf392b8d0afcec0ef3782b",
+          "source": null,
+          "captured_at": "2026-08-09",
+          "expires_at": "2026-11-09"
+        },
+        {
+          "artifact": "sha256:a3a7bb8dc18ddd7a0da8d7cdc337a14ca1430d03cb14c5a5289b46eb65166353",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec034-r001-20260809T171520Z.spec-034-r001.journey-result.signed.json",
+          "captured_at": "2026-08-09",
+          "expires_at": "2026-11-09"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-035-R001",
@@ -3155,8 +3163,7 @@
       "implementation": [
         "phase4-coordinator/internal/payout/addresses.go:AddressesService",
         "phase4-coordinator/internal/payout/addresses.go:ServePayoutChallenge",
-        "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress",
-        "phase3-binary/app/Sources/Malibu/Dashboard/PayoutWalletFlow.swift:PayoutWalletFlow"
+        "phase4-coordinator/internal/payout/addresses.go:ServePayoutAddress"
       ],
       "tests": [
         "phase4-coordinator/internal/payout/addresses_test.go:TestServePayoutAddress_HappyPath_FirstRegistration",
@@ -3182,8 +3189,7 @@
         "phase4-coordinator/internal/payout/eip712_test.go:TestVerifyEIP712_WrongNonceRejected",
         "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_MatchesCommitted",
         "phase4-coordinator/internal/payout/eip712_fixture_gen_test.go:TestEIP712DigestFixture_RoundTripJSSignature",
-        "phase4-coordinator/internal/payout/attempts_test.go:TestSelectReadyPayouts_FiltersByHotWalletAndCoolingOff",
-        "phase3-binary/app/Tests/MalibuTests/PayoutWalletFlowTests.swift:PayoutWalletFlowTests"
+        "phase4-coordinator/internal/payout/attempts_test.go:TestSelectReadyPayouts_FiltersByHotWalletAndCoolingOff"
       ],
       "journeys": [
         "JOURNEY-SPEC-016-PAYOUT-ADDRESS-REGISTRATION"

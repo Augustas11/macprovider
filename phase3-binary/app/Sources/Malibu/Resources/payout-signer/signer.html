@@ -150,6 +150,76 @@
 
   let ethereum = null;
   let selectedAccount = null;
+  let observedProvider = null;
+  let connectionGeneration = 0;
+
+  const expectedChainHex = "0x" + chainId.toString(16);
+
+  function chainDisplayName() {
+    return chainId === 8453 ? "Base Mainnet" : chain + " (chain " + chainId + ")";
+  }
+
+  async function ensureExpectedChain(provider) {
+    const current = await provider.request({ method: "eth_chainId" });
+    if (String(current).toLowerCase() === expectedChainHex) return;
+
+    try {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: expectedChainHex }],
+      });
+    } catch (switchError) {
+      // Base is the production payout chain. If it is not configured yet,
+      // offer the canonical public network metadata, then explicitly switch.
+      if (switchError && switchError.code === 4902 && chainId === 8453) {
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: expectedChainHex,
+            chainName: "Base Mainnet",
+            nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+            rpcUrls: ["https://mainnet.base.org"],
+            blockExplorerUrls: ["https://basescan.org"],
+          }],
+        });
+        await provider.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: expectedChainHex }],
+        });
+      } else {
+        throw new Error("Switch your wallet to " + chainDisplayName() + " to sign the registration.");
+      }
+    }
+
+    const selected = await provider.request({ method: "eth_chainId" });
+    if (String(selected).toLowerCase() !== expectedChainHex) {
+      throw new Error("Wallet did not switch to " + chainDisplayName() + ". Switch networks and try again.");
+    }
+  }
+
+  function observeProvider(provider) {
+    if (observedProvider === provider || typeof provider.on !== "function") return;
+    observedProvider = provider;
+    provider.on("chainChanged", function (nextChain) {
+      if (ethereum !== provider) return;
+      connectionGeneration += 1;
+      if (String(nextChain).toLowerCase() === expectedChainHex && selectedAccount) {
+        el("btnSign").disabled = false;
+        setStatus("info", "Connected on " + chainDisplayName() + ". Review the typed data, then sign.");
+      } else {
+        el("btnSign").disabled = true;
+        setStatus("err", "Wallet network changed. Switch back to " + chainDisplayName() + " to sign.");
+      }
+    });
+    provider.on("accountsChanged", function () {
+      if (ethereum !== provider) return;
+      connectionGeneration += 1;
+      selectedAccount = null;
+      el("account").textContent = "not connected";
+      el("btnSign").disabled = true;
+      setStatus("err", "Wallet account changed. Connect the payout account again.");
+    });
+  }
 
   function setStatus(kind, msg) {
     const s = el("status");
@@ -188,18 +258,25 @@
         : "No browser wallet detected. Install MetaMask or Rabby, then reload.");
       return;
     }
+    if (ethereum !== provider) connectionGeneration += 1;
     ethereum = provider;
     try {
-      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
       if (!accounts || !accounts.length) {
         setStatus("err", "No account returned by wallet.");
         return;
       }
+      await ensureExpectedChain(provider);
+      if (ethereum !== provider) throw new Error("Wallet provider changed. Connect again.");
       selectedAccount = accounts[0];
+      observeProvider(provider);
       el("account").textContent = selectedAccount;
       el("btnSign").disabled = false;
-      setStatus("info", "Connected. Review the typed data, then sign.");
+      setStatus("info", "Connected on " + chainDisplayName() + ". Review the typed data, then sign.");
     } catch (e) {
+      selectedAccount = null;
+      el("account").textContent = "not connected";
+      el("btnSign").disabled = true;
       setStatus("err", "Connect failed: " + (e && e.message ? e.message : String(e)));
     }
   }
@@ -296,7 +373,14 @@
     setStatus("info", "Requesting EIP-712 signature…");
 
     try {
-      const browser = new ethers.BrowserProvider(ethereum);
+      // The wallet can change networks after Connect. Enforce the challenge
+      // chain again at the actual signing boundary so MetaMask never receives
+      // typed data for a chain other than its current chain.
+      const signingProvider = ethereum;
+      await ensureExpectedChain(signingProvider);
+      if (ethereum !== signingProvider) throw new Error("Wallet provider changed. Connect again.");
+      const signingGeneration = connectionGeneration;
+      const browser = new ethers.BrowserProvider(signingProvider);
       const signer = await browser.getSigner();
       const payoutAddress = await signer.getAddress();
       if (payoutAddress.toLowerCase() !== selectedAccount.toLowerCase()) {
@@ -314,6 +398,20 @@
         setStatus("err", "Local verify failed: recovered " + recovered + " ≠ " + payoutAddress);
         el("btnSign").disabled = false;
         return;
+      }
+
+      // Wallet approval is asynchronous. Revalidate intent immediately before
+      // posting the signature in case account/network/provider state changed
+      // while the approval prompt was open.
+      const currentChain = await signingProvider.request({ method: "eth_chainId" });
+      const currentAccounts = await signingProvider.request({ method: "eth_accounts" });
+      if (ethereum !== signingProvider ||
+          connectionGeneration !== signingGeneration ||
+          String(currentChain).toLowerCase() !== expectedChainHex ||
+          !currentAccounts || !currentAccounts.length ||
+          currentAccounts[0].toLowerCase() !== payoutAddress.toLowerCase() ||
+          !selectedAccount || selectedAccount.toLowerCase() !== payoutAddress.toLowerCase()) {
+        throw new Error("Wallet account or network changed during approval. Connect again and re-sign.");
       }
 
       const payload = {

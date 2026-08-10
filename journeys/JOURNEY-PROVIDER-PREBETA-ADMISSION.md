@@ -41,9 +41,10 @@ not exercise. Their pending evidence ownership is split from issue #895:
   provenance, and warning evidence;
 - #959 — `SPEC-032-R001` through `SPEC-032-R003`, the default-off strict
   admission-gate evidence matrix under a separately approved run plan;
-- #960 — `SPEC-034-R001`, the enabled exact referral authority, capability,
-  immutable-release, activation, and rollback path. Disabled or not-required
-  cohort evidence records posture only and cannot promote this requirement.
+- #960 — `SPEC-034-R001`, the ongoing enabled prebeta referral/X campaign
+  posture, exact referral authority, capability, immutable-release, activation,
+  and rollback path. Disabled or not-required cohort evidence records posture
+  only and cannot promote this requirement.
 
 Those rows remain pending and must not reuse the SPEC-033-only result as proof.
 
