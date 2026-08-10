@@ -77,8 +77,10 @@ def reference_rate_card():
 class FakeHTTPClient:
     def __init__(self, responses):
         self.responses = {url: list(values) for url, values in responses.items()}
+        self.requested_urls = []
 
     def get(self, url, timeout_seconds):
+        self.requested_urls.append(url)
         values = self.responses[url]
         response = values.pop(0)
         if isinstance(response, Exception):
@@ -344,12 +346,21 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             engine.build_snapshot(self.rankings, self.models, partial, policy(), now=NOW, top_n=4)
         empty_pricing = copy.deepcopy(self.endpoints)
         empty_pricing["openai/gpt-oss-20b"]["data"]["endpoints"] = []
-        snapshot_with_unpriced_model = engine.build_snapshot(
-            self.rankings, self.models, empty_pricing, policy(), now=NOW, top_n=4
+        with self.assertRaisesRegex(engine.SchemaError, "empty provider set was not confirmed"):
+            engine.build_snapshot(self.rankings, self.models, empty_pricing, policy(), now=NOW, top_n=4)
+        confirmed_empty_snapshot = engine.build_snapshot(
+            self.rankings,
+            self.models,
+            empty_pricing,
+            policy(),
+            now=NOW,
+            top_n=4,
+            endpoint_confirmations={"openai/gpt-oss-20b": "confirmed_empty_second_fetch"},
         )
-        empty_endpoint_row = next(row for row in snapshot_with_unpriced_model["rows"] if row["source_model_id"] == "openai/gpt-oss-20b")
-        self.assertEqual(empty_endpoint_row["pricing_status"], "no_active_priced_endpoint")
-        self.assertIsNone(empty_endpoint_row["pricing"])
+        empty_row = next(row for row in confirmed_empty_snapshot["rows"] if row["source_model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(empty_row["pricing_status"], "no_provider_endpoints")
+        self.assertIsNone(empty_row["pricing"])
+        self.assertEqual(empty_row["source_metadata"]["endpoint_set_confirmation"], "confirmed_empty_second_fetch")
         invalid = copy.deepcopy(self.endpoints)
         invalid["openai/gpt-oss-20b"]["data"]["endpoints"][0]["pricing"]["completion"] = "-1"
         with self.assertRaises(engine.SchemaError):
@@ -410,7 +421,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(
             engine.sha256_prefixed(first),
-            "sha256:0d46711b6bbd6f31f5d3cec82b4d8cd6e887d89bbf1b676026372226ac79eb6a",
+            "sha256:e271bc7da8e7697d574882ff0174cdb1407eb00ac7730ea5aced1b5a3cfc1c9d",
         )
 
     def test_unresolved_nemotron_license_is_blocked_when_not_a_current_row(self):
@@ -497,6 +508,213 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
             client = FakeHTTPClient({engine.daily_rankings_url(NOW, 30): [engine.HTTPResponse(200, b"{", {})]})
             with self.assertRaises(engine.SchemaError):
                 engine.fetch_live_snapshot(policy(), output_dir=Path(temporary), top_n=4, retries=0, timeout_seconds=1, client=client, now=lambda: NOW, sleeper=lambda _: None)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_fetch_orchestration_endpoint_confirms_regular_candidate_over_batch(self):
+        dated_id = "z-ai/glm-5.2-20260616"
+        regular_id = "z-ai/glm-5.2"
+        rankings_url = engine.daily_rankings_url(NOW, 30)
+        endpoint_url = engine.ENDPOINTS_URL.format(model_id=dated_id)
+        rankings = {
+            "data": [{"date": "2026-08-04", "model_permaslug": dated_id, "total_tokens": "10"}],
+            "meta": {
+                "as_of": "2026-08-05T02:00:00Z",
+                "start_date": "2026-07-06",
+                "end_date": "2026-08-04",
+                "version": "v1",
+            },
+        }
+        catalog = {
+            "data": [
+                {"id": regular_id, "canonical_slug": dated_id, "name": "GLM 5.2", "pricing": None},
+                {"id": f"{regular_id}:batch", "canonical_slug": dated_id, "name": "GLM 5.2 Batch", "pricing": None},
+            ]
+        }
+        endpoint = {
+            "data": {
+                "id": regular_id,
+                "endpoints": [
+                    {"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}
+                ],
+            }
+        }
+        client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [engine.HTTPResponse(200, json.dumps(endpoint).encode(), {})],
+        })
+        policy_document = policy()
+        policy_document["models"] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            target = engine.fetch_live_snapshot(
+                policy_document,
+                output_dir=Path(temporary),
+                top_n=1,
+                retries=0,
+                timeout_seconds=1,
+                client=client,
+                now=lambda: NOW,
+                sleeper=lambda _: None,
+            )
+            snapshot = json.loads(target.read_text())
+        self.assertIn(endpoint_url, client.requested_urls)
+        self.assertNotIn(engine.ENDPOINTS_URL.format(model_id=regular_id), client.requested_urls)
+        self.assertEqual(snapshot["rows"][0]["source_model_id"], regular_id)
+        self.assertEqual(
+            snapshot["rows"][0]["source_metadata"]["identity_resolution"],
+            "endpoint_confirmed_catalog_candidate",
+        )
+
+    def test_fetch_orchestration_missing_ambiguous_endpoint_fails_closed(self):
+        dated_id = "z-ai/glm-5.2-20260616"
+        rankings_url = engine.daily_rankings_url(NOW, 30)
+        endpoint_url = engine.ENDPOINTS_URL.format(model_id=dated_id)
+        rankings = {
+            "data": [{"date": "2026-08-04", "model_permaslug": dated_id, "total_tokens": "10"}],
+            "meta": {
+                "as_of": "2026-08-05T02:00:00Z",
+                "start_date": "2026-07-06",
+                "end_date": "2026-08-04",
+                "version": "v1",
+            },
+        }
+        catalog = {
+            "data": [
+                {"id": "z-ai/glm-5.2", "canonical_slug": dated_id, "name": "GLM 5.2", "pricing": None},
+                {"id": "z-ai/glm-5.2:batch", "canonical_slug": dated_id, "name": "GLM 5.2 Batch", "pricing": None},
+            ]
+        }
+        client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [engine.FetchError("required endpoint document missing")],
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(engine.FetchError, "required endpoint document missing"):
+                engine.fetch_live_snapshot(
+                    policy(),
+                    output_dir=Path(temporary),
+                    top_n=1,
+                    retries=0,
+                    timeout_seconds=1,
+                    client=client,
+                    now=lambda: NOW,
+                    sleeper=lambda _: None,
+                )
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+        self.assertIn(endpoint_url, client.requested_urls)
+
+    def test_confirmed_empty_endpoint_set_completes_snapshot_and_is_blocked(self):
+        rankings, models, endpoints = self.expanded_inputs()
+        endpoints["openai/gpt-oss-20b"]["data"]["endpoints"] = []
+        snapshot = engine.build_snapshot(
+            rankings,
+            models,
+            endpoints,
+            policy(),
+            now=NOW,
+            top_n=50,
+            endpoint_confirmations={"openai/gpt-oss-20b": "confirmed_empty_second_fetch"},
+        )
+        row = next(item for item in snapshot["rows"] if item["source_model_id"] == "openai/gpt-oss-20b")
+        self.assertEqual(row["pricing_status"], "no_provider_endpoints")
+        self.assertIsNone(row["pricing"])
+        self.assertEqual(snapshot["source"]["fetch_metadata"]["successful_source_count"], 53)
+        proposal = engine.build_proposal(snapshot, policy(), reference_rate_card(), now=NOW)
+        blocked = next(item for item in proposal["blocked"] if item.get("source_model_id") == "openai/gpt-oss-20b")
+        self.assertIn("OpenRouter reports no provider endpoints after bounded confirmation", blocked["reasons"])
+        self.assertIsNone(blocked["market"]["benchmark_provider"])
+        self.assertIsNone(blocked["market"]["completion_per_mtok"])
+        self.assertNotIn("proposed_completion_rate", blocked)
+
+    def test_fetch_confirms_empty_endpoint_set_and_records_provenance(self):
+        rankings_url = engine.daily_rankings_url(NOW, 30)
+        model_id = "example/model"
+        endpoint_url = engine.ENDPOINTS_URL.format(model_id=model_id)
+        rankings = {
+            "data": [{"date": "2026-08-04", "model_permaslug": model_id, "total_tokens": "10"}],
+            "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-07-06", "end_date": "2026-08-04", "version": "v1"},
+        }
+        catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}
+        empty = {"data": {"id": model_id, "endpoints": []}}
+        client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [
+                engine.HTTPResponse(200, json.dumps(empty).encode(), {}),
+                engine.HTTPResponse(200, json.dumps(empty).encode(), {}),
+            ],
+        })
+        policy_document = policy()
+        policy_document["models"] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            target = engine.fetch_live_snapshot(
+                policy_document,
+                output_dir=Path(temporary),
+                top_n=1,
+                retries=0,
+                timeout_seconds=1,
+                client=client,
+                now=lambda: NOW,
+                sleeper=lambda _: None,
+            )
+            snapshot = json.loads(target.read_text())
+        self.assertEqual(client.requested_urls.count(endpoint_url), 2)
+        self.assertEqual(snapshot["rows"][0]["pricing_status"], "no_provider_endpoints")
+        self.assertEqual(snapshot["rows"][0]["source_metadata"]["endpoint_set_confirmation"], "confirmed_empty_second_fetch")
+
+    def test_fetch_empty_confirmation_recovers_or_fails_closed(self):
+        rankings_url = engine.daily_rankings_url(NOW, 30)
+        model_id = "example/model"
+        endpoint_url = engine.ENDPOINTS_URL.format(model_id=model_id)
+        rankings = {
+            "data": [{"date": "2026-08-04", "model_permaslug": model_id, "total_tokens": "10"}],
+            "meta": {"as_of": "2026-08-05T02:00:00Z", "start_date": "2026-07-06", "end_date": "2026-08-04", "version": "v1"},
+        }
+        catalog = {"data": [{"id": model_id, "canonical_slug": model_id, "name": "Example", "pricing": None}]}
+        empty = {"data": {"id": model_id, "endpoints": []}}
+        priced = {"data": {"id": model_id, "endpoints": [{"provider_name": "Provider", "status": 0, "pricing": {"prompt": "0.1", "completion": "0.2"}}]}}
+        policy_document = policy()
+        policy_document["models"] = []
+        recovered_client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [engine.HTTPResponse(200, json.dumps(empty).encode(), {}), engine.HTTPResponse(200, json.dumps(priced).encode(), {})],
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            target = engine.fetch_live_snapshot(policy_document, output_dir=Path(temporary), top_n=1, retries=0, timeout_seconds=1, client=recovered_client, now=lambda: NOW, sleeper=lambda _: None)
+            snapshot = json.loads(target.read_text())
+        self.assertEqual(snapshot["rows"][0]["pricing_status"], "active_priced")
+        self.assertEqual(snapshot["rows"][0]["source_metadata"]["endpoint_set_confirmation"], "recovered_nonempty_on_confirmation")
+
+        malformed_client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [engine.HTTPResponse(200, json.dumps(empty).encode(), {}), engine.HTTPResponse(200, b'{"data":{"id":"example/model"}}', {})],
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(engine.SchemaError, "endpoints must be an array"):
+                engine.fetch_live_snapshot(policy_document, output_dir=Path(temporary), top_n=1, retries=0, timeout_seconds=1, client=malformed_client, now=lambda: NOW, sleeper=lambda _: None)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+        mismatched_client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [engine.HTTPResponse(200, json.dumps(empty).encode(), {}), engine.HTTPResponse(200, b'{"data":{"id":"example/other","endpoints":[]}}', {})],
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(engine.SchemaError, "confirmation id mismatch"):
+                engine.fetch_live_snapshot(policy_document, output_dir=Path(temporary), top_n=1, retries=0, timeout_seconds=1, client=mismatched_client, now=lambda: NOW, sleeper=lambda _: None)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+        deadline_client = FakeHTTPClient({
+            rankings_url: [engine.HTTPResponse(200, json.dumps(rankings).encode(), {})],
+            engine.MODELS_URL: [engine.HTTPResponse(200, json.dumps(catalog).encode(), {})],
+            endpoint_url: [engine.HTTPResponse(200, json.dumps(empty).encode(), {}), engine.HTTPResponse(429, b"{}", {"Retry-After": "20"})],
+        })
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(engine.FetchError):
+                engine.fetch_live_snapshot(policy_document, output_dir=Path(temporary), top_n=1, retries=1, timeout_seconds=1, generation_timeout_seconds=10, client=deadline_client, now=lambda: NOW, sleeper=lambda _: None, clock=lambda: 0)
             self.assertEqual(list(Path(temporary).iterdir()), [])
 
     def test_live_fetch_requires_an_openrouter_api_key(self):

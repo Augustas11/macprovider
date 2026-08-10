@@ -34,7 +34,7 @@ from urllib.parse import quote, urlsplit
 RANKINGS_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
-SNAPSHOT_SCHEMA_VERSION = 4
+SNAPSHOT_SCHEMA_VERSION = 5
 PROPOSAL_SCHEMA_VERSION = 1
 TOOL_VERSION = "openrouter-pricing-engine-v1"
 DEFAULT_POLICY_PATH = Path(__file__).with_name("openrouter_pricing_policy.json")
@@ -551,6 +551,16 @@ def endpoint_response_model_id(document: Mapping[str, Any], requested_model_id: 
     return model_id
 
 
+def endpoint_set_is_empty(document: Mapping[str, Any], requested_model_id: str) -> bool:
+    """Validate the response envelope and report an explicit empty provider set."""
+    endpoint_response_model_id(document, requested_model_id)
+    data = document["data"]
+    endpoints = data.get("endpoints")
+    if not isinstance(endpoints, list):
+        raise SchemaError(f"endpoints response for {requested_model_id}: endpoints must be an array")
+    return not endpoints
+
+
 def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dict[str, str] | None:
     require_allowed_keys(document, frozenset({"data"}), f"endpoints response for {model_id}")
     data = document.get("data")
@@ -561,7 +571,9 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
         raise SchemaError(f"endpoints response for {model_id}: response id mismatch")
     endpoints = data.get("endpoints")
     if not isinstance(endpoints, list):
-        raise SchemaError(f"endpoints response for {model_id}: endpoints must be a list")
+        raise SchemaError(f"endpoints response for {model_id}: endpoints must be an array")
+    if not endpoints:
+        return None
     priced: list[tuple[Decimal, Decimal, str]] = []
     for index, endpoint in enumerate(endpoints):
         if not isinstance(endpoint, dict):
@@ -631,7 +643,7 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
     end = parse_ranking_date(fetch_metadata["ranking_window_end_date"], "snapshot fetch_metadata.ranking_window_end_date")
     if start > end or (end - start).days + 1 != fetch_metadata["demand_window_days"]:
         raise SchemaError("snapshot fetch_metadata has invalid ranking window")
-    if fetch_metadata["observed_model_count"] != len(rows) or fetch_metadata["successful_source_count"] != 2 + len(rows):
+    if fetch_metadata["observed_model_count"] != len(rows):
         raise SchemaError("snapshot fetch_metadata counts do not match rows")
     seen: set[str] = set()
     seen_source_ids: set[str] = set()
@@ -664,16 +676,16 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             raise SchemaError(f"snapshot has duplicate ranking model permaslug {demand['ranking_model_permaslug']!r}")
         seen_ranking_slugs.add(demand["ranking_model_permaslug"])
         ranks.add(demand["rank"])
-        if pricing_status not in {"active_priced", "no_active_priced_endpoint"}:
+        if pricing_status not in {"active_priced", "no_active_priced_endpoint", "no_provider_endpoints"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing status")
-        if pricing_status == "no_active_priced_endpoint":
+        if pricing_status in {"no_active_priced_endpoint", "no_provider_endpoints"}:
             if pricing is not None:
                 raise SchemaError(f"snapshot.rows[{index}] unavailable pricing must be null")
         elif not isinstance(pricing, dict) or set(pricing) != {"input_per_token", "completion_per_token", "input_per_mtok", "completion_per_mtok", "currency", "benchmark_provider"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing")
         if pricing_status == "active_priced" and (pricing["currency"] != "USD" or not isinstance(pricing["benchmark_provider"], str) or not pricing["benchmark_provider"]):
             raise SchemaError(f"snapshot.rows[{index}] has invalid pricing provenance")
-        if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution"}:
+        if not isinstance(row.get("source_metadata"), dict) or set(row["source_metadata"]) != {"ranking_model_permaslug", "catalog_canonical_slug", "catalog_name", "identity_resolution", "endpoint_set_confirmation"}:
             raise SchemaError(f"snapshot.rows[{index}] has invalid source metadata")
         source_metadata = row["source_metadata"]
         if not isinstance(source_metadata["ranking_model_permaslug"], str) or not MODEL_ID_RE.fullmatch(source_metadata["ranking_model_permaslug"]):
@@ -689,11 +701,25 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
             "endpoint_confirmed_catalog_candidate",
         }:
             raise SchemaError(f"snapshot.rows[{index}] has invalid identity resolution")
+        confirmation = source_metadata["endpoint_set_confirmation"]
+        if confirmation not in {"not_required", "confirmed_empty_second_fetch", "recovered_nonempty_on_confirmation"}:
+            raise SchemaError(f"snapshot.rows[{index}] has invalid endpoint-set confirmation")
+        if pricing_status == "no_provider_endpoints" and confirmation != "confirmed_empty_second_fetch":
+            raise SchemaError(f"snapshot.rows[{index}] empty provider set lacks bounded confirmation")
+        if confirmation == "confirmed_empty_second_fetch" and pricing_status != "no_provider_endpoints":
+            raise SchemaError(f"snapshot.rows[{index}] confirmed empty provider set has inconsistent status")
+        if confirmation == "recovered_nonempty_on_confirmation" and pricing_status == "no_provider_endpoints":
+            raise SchemaError(f"snapshot.rows[{index}] recovered provider set has inconsistent status")
         if pricing_status == "active_priced":
             parse_decimal(pricing.get("input_per_mtok"), f"snapshot.rows[{index}].pricing.input_per_mtok")
             parse_decimal(pricing.get("completion_per_mtok"), f"snapshot.rows[{index}].pricing.completion_per_mtok")
     if ranks != set(range(1, len(rows) + 1)):
         raise SchemaError("snapshot ranks must be contiguous from 1 through row count")
+    confirmation_count = sum(
+        row["source_metadata"]["endpoint_set_confirmation"] != "not_required" for row in rows
+    )
+    if fetch_metadata["successful_source_count"] != 2 + len(rows) + confirmation_count:
+        raise SchemaError("snapshot fetch_metadata source count does not include endpoint confirmations")
 
 
 def build_snapshot(
@@ -705,6 +731,7 @@ def build_snapshot(
     now: datetime,
     top_n: int,
     demand_window_days: int | None = None,
+    endpoint_confirmations: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     rankings = normalize_rankings(rankings_document, top_n)
     ranking_meta = rankings_metadata(rankings_document)
@@ -717,6 +744,11 @@ def build_snapshot(
     requested_endpoint_ids = {demand["source_model_id"] for demand in endpoint_requests}
     if set(endpoints_documents) != requested_endpoint_ids:
         raise SchemaError("endpoints response set does not exactly match selected ranking models")
+    confirmations = dict(endpoint_confirmations or {})
+    if not set(confirmations).issubset(requested_endpoint_ids):
+        raise SchemaError("endpoint confirmation set contains an unrequested model")
+    if any(value not in {"confirmed_empty_second_fetch", "recovered_nonempty_on_confirmation"} for value in confirmations.values()):
+        raise SchemaError("endpoint confirmation provenance is invalid")
     rankings = resolve_rankings_to_catalog(rankings, catalog, endpoints_documents)
     resolved_endpoints: dict[str, Mapping[str, Any]] = {}
     for demand in rankings:
@@ -735,7 +767,19 @@ def build_snapshot(
         source_model_id = demand["source_model_id"]
         if source_model_id not in resolved_endpoints:
             raise SchemaError(f"partial pull: endpoints response missing for {source_model_id!r}")
-        endpoint_pricing = cheapest_endpoint_pricing(resolved_endpoints[source_model_id], source_model_id)
+        endpoint_document = resolved_endpoints[source_model_id]
+        endpoint_pricing = cheapest_endpoint_pricing(endpoint_document, source_model_id)
+        request_id = (
+            demand["ranking_model_permaslug"]
+            if demand["_identity_resolution"] in {"endpoint_alias_fallback", "endpoint_confirmed_catalog_candidate"}
+            else source_model_id
+        )
+        confirmation = confirmations.get(request_id, "not_required")
+        empty_provider_set = endpoint_set_is_empty(endpoint_document, source_model_id)
+        if empty_provider_set and confirmation != "confirmed_empty_second_fetch":
+            raise SchemaError(f"endpoints response for {source_model_id}: empty provider set was not confirmed")
+        if not empty_provider_set and confirmation == "confirmed_empty_second_fetch":
+            raise SchemaError(f"endpoints response for {source_model_id}: confirmation provenance contradicts provider set")
         catalog_row = catalog.get(source_model_id)
         if catalog_row is None and demand["_identity_resolution"] != "endpoint_alias_fallback":
             raise SchemaError(f"catalog response lacks ranked model {source_model_id!r}")
@@ -754,12 +798,19 @@ def build_snapshot(
                 ),
                 "demand": snapshot_demand,
                 "pricing": endpoint_pricing,
-                "pricing_status": "active_priced" if endpoint_pricing else "no_active_priced_endpoint",
+                "pricing_status": (
+                    "no_provider_endpoints"
+                    if empty_provider_set
+                    else "active_priced"
+                    if endpoint_pricing
+                    else "no_active_priced_endpoint"
+                ),
                 "source_metadata": {
                     "ranking_model_permaslug": demand["ranking_model_permaslug"],
                     "catalog_canonical_slug": catalog_row["canonical_slug"] if catalog_row else None,
                     "catalog_name": catalog_row.get("name") if catalog_row else None,
                     "identity_resolution": demand["_identity_resolution"],
+                    "endpoint_set_confirmation": confirmation,
                 },
             }
         )
@@ -774,7 +825,7 @@ def build_snapshot(
             "observed_schema_version_or_fingerprint": SCHEMA_CONTRACT_FINGERPRINT,
             "generator_version": TOOL_VERSION,
             "fetch_metadata": {
-                "successful_source_count": 2 + len(endpoints_documents),
+                "successful_source_count": 2 + len(endpoints_documents) + len(confirmations),
                 "observed_model_count": len(normalized_rows),
                 "requested_top_n": top_n,
                 "demand_window_days": resolved_window_days,
@@ -999,6 +1050,9 @@ def eligibility(model: Mapping[str, Any], row: Mapping[str, Any], policy: Mappin
     else:
         reasons.append("model profile kind is not eligible")
     pricing = row.get("pricing")
+    if row.get("pricing_status") == "no_provider_endpoints":
+        reasons.append("OpenRouter reports no provider endpoints after bounded confirmation")
+        return False, reasons, None
     if row.get("pricing_status") != "active_priced" or not isinstance(pricing, dict):
         reasons.append("no active priced OpenRouter endpoint is available")
         return False, reasons, None
@@ -1084,15 +1138,20 @@ def build_proposal(
     # blocked rather than guessed into an internal model identity or price.
     for row in snapshot["rows"]:
         if row["source_model_id"] not in policy_models:
+            row_reasons = ["no verified policy metadata/mapping for this OpenRouter model"]
+            if row["pricing_status"] == "no_provider_endpoints":
+                row_reasons.append("OpenRouter reports no provider endpoints after bounded confirmation")
+            elif row["pricing_status"] == "no_active_priced_endpoint":
+                row_reasons.append("no active priced OpenRouter endpoint is available")
             result["blocked"].append(
                 {
                     "model_id": row["canonical_model_id"],
                     "source_model_id": row["source_model_id"],
                     "action": "blocked",
                     "market": market_from_snapshot_row(row),
-                    "eligibility": {"eligible": False, "reasons": ["no verified policy metadata/mapping for this OpenRouter model"]},
+                    "eligibility": {"eligible": False, "reasons": row_reasons},
                     "policy_evidence": policy_evidence(None),
-                    "reasons": ["no verified policy metadata/mapping for this OpenRouter model"],
+                    "reasons": row_reasons,
                 }
             )
 
@@ -1133,6 +1192,7 @@ def build_proposal(
                 "MLX/GGUF serving path is not verified",
                 "commercial license is not verified as permitted",
                 "no active priced OpenRouter endpoint is available",
+                "OpenRouter reports no provider endpoints after bounded confirmation",
                 "cheapest active completion endpoint is free; no paid-market undercut can be computed",
             }
             action = "blocked" if any(reason in block_reasons for reason in reasons) else "dropped" if canonical_id in rate_rows else "blocked"
@@ -1277,14 +1337,28 @@ def fetch_live_snapshot(
     catalog_index = validate_catalog(catalog)
     ranking_rows = resolve_rankings_to_catalog(normalize_rankings(rankings, top_n), catalog_index)
     endpoints: dict[str, Mapping[str, Any]] = {}
+    endpoint_confirmations: dict[str, str] = {}
     for demand in ranking_rows:
         model_id = demand["source_model_id"]
         # The documented endpoint is /models/{provider}/{model}/endpoints; the
         # one validated provider/model slash must remain a path separator.
         url = ENDPOINTS_URL.format(model_id=quote(model_id, safe="/"))
-        endpoints[model_id] = fetch_json(client, url, f"endpoints {model_id}", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
+        first_document = fetch_json(client, url, f"endpoints {model_id}", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
+        if endpoint_set_is_empty(first_document, model_id):
+            first_response_id = endpoint_response_model_id(first_document, model_id)
+            confirmation_document = fetch_json(client, url, f"endpoints {model_id} empty-set confirmation", retries=retries, timeout_seconds=timeout_seconds, sleeper=sleeper, deadline=deadline, clock=clock)
+            confirmation_response_id = endpoint_response_model_id(confirmation_document, model_id)
+            if confirmation_response_id != first_response_id:
+                raise SchemaError(f"endpoints response for {model_id}: empty-set confirmation id mismatch")
+            if endpoint_set_is_empty(confirmation_document, model_id):
+                endpoint_confirmations[model_id] = "confirmed_empty_second_fetch"
+            else:
+                endpoint_confirmations[model_id] = "recovered_nonempty_on_confirmation"
+            endpoints[model_id] = confirmation_document
+        else:
+            endpoints[model_id] = first_document
     fetched_at = now()
-    snapshot = build_snapshot(rankings, catalog, endpoints, policy, now=fetched_at, top_n=top_n, demand_window_days=demand_window_days)
+    snapshot = build_snapshot(rankings, catalog, endpoints, policy, now=fetched_at, top_n=top_n, demand_window_days=demand_window_days, endpoint_confirmations=endpoint_confirmations)
     target = output_dir / snapshot_filename(fetched_at, snapshot)
     atomic_write_json(target, snapshot)
     return target

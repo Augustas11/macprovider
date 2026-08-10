@@ -81,7 +81,7 @@ The snapshot schema is version `4`:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "snapshot_type": "openrouter-pricing",
   "fetched_at": "2026-08-05T12:00:00Z",
   "content_digest": "sha256:<normalized-content-hash>",
@@ -125,7 +125,8 @@ The snapshot schema is version `4`:
         "ranking_model_permaslug": "provider/model",
         "catalog_canonical_slug": "provider/model",
         "catalog_name": "Provider: Model",
-        "identity_resolution": "catalog|catalog_paid_variant|endpoint_alias_fallback|endpoint_confirmed_catalog_candidate"
+        "identity_resolution": "catalog|catalog_paid_variant|endpoint_alias_fallback|endpoint_confirmed_catalog_candidate",
+        "endpoint_set_confirmation": "not_required|confirmed_empty_second_fetch|recovered_nonempty_on_confirmation"
       }
     }
   ]
@@ -148,20 +149,27 @@ when it exactly and uniquely identifies one of those candidates. The snapshot
 records that case as `endpoint_confirmed_catalog_candidate`; an unmatched,
 missing, or malformed identity fails closed.
 
-An endpoint response that succeeds but has an empty endpoint list or no active
-priced provider is retained with `pricing_status: "no_active_priced_endpoint"`
-and `pricing: null`. This is not treated as a partial fetch; Component 2 blocks
-that model rather than inventing a market price.
+A non-empty, schema-valid endpoint list with no active priced provider is
+retained with `pricing_status: "no_active_priced_endpoint"` and a null pricing
+value. A successful response with an exact resolved `data.id` and an explicitly
+present empty `endpoints` array triggers one bounded confirmation request to
+the same URL within the generation deadline. Two empty results are retained as
+`pricing_status: "no_provider_endpoints"`, null pricing, and
+`endpoint_set_confirmation: "confirmed_empty_second_fetch"`. If confirmation
+returns providers, the second document is used and provenance records
+`recovered_nonempty_on_confirmation`. Component 2 blocks the confirmed-empty
+row and never derives a provider floor, undercut target, or proposed rate.
 
 ## Fail-closed behavior
 
 The command emits no final snapshot if any required fetch, validation,
 normalization, or coverage step fails. It rejects bounded-retry exhaustion for
 429/5xx/transport errors, malformed JSON, changed required schemas, missing
-keys, empty ranking/catalog/endpoints results, blank identities, invalid or
-negative pricing, duplicate normalized identities, and missing endpoint data
-for a selected ranked model. A fully prepared file is atomically renamed only
-after validation and digest calculation.
+keys, empty ranking/catalog results, unconfirmed or malformed endpoint sets,
+blank or mismatched identities, invalid or negative pricing, duplicate
+normalized identities, and missing endpoint data for a selected ranked model.
+A fully prepared file is atomically renamed only after validation and digest
+calculation.
 
 The source envelopes and fields used by normalization have explicit allowlists.
 An unexpected field, required-field change, or type change fails closed rather
@@ -243,7 +251,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts/tests/test_openrouter_p
 ```
 
 The suite covers valid normalization/digest behavior, 429 retry and exhaustion,
-transport failure, malformed/empty/schema-drifted input, partial endpoints,
-invalid pricing, duplicate canonical mappings, snapshot tampering, proposal
-categories, unresolved Nemotron licensing, atomic write failure, and
-rate-card-reference immutability.
+transport failure, confirmed empty provider sets, transient-empty recovery,
+malformed/schema-drifted input, partial endpoints, invalid pricing, duplicate
+canonical mappings, snapshot tampering, proposal categories, unresolved
+Nemotron licensing, atomic write failure, and rate-card-reference immutability.

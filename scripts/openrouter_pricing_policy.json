@@ -23,7 +23,7 @@
       "source_model_id": "nvidia/nemotron-3-nano-30b-a3b",
       "canonical_model_id": "nemotron-3-nano-30b-a3b",
       "serving_path": {"verification_status": "verified", "reference": "https://huggingface.co/mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit"},
-      "license": {"commercial_permitted": true, "source_url": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/", "verification_note": "NVIDIA Open Model License states that models are commercially usable, subject to its terms."},
+      "license": {"commercial_permitted": true, "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md", "verification_note": "Pinned NVIDIA model card identifies the governing NVIDIA Nemotron Open Model License and describes commercial readiness subject to those terms."},
       "profile": {"kind": "broad_fleet", "active_params_b": "3", "residency_gb": "16.55", "projected_tps": "55"}
     },
     {
