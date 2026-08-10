@@ -1,0 +1,262 @@
+{
+  "schema_version": "macprovider.provider-prebeta-admission-evidence.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "run_id": "provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z",
+  "requirement_ids": [
+    "SPEC-023-R001",
+    "SPEC-023-R002"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71"
+  },
+  "captured_at": "2026-08-10T12:17:03Z",
+  "expires_at": "2026-11-10",
+  "operator": {
+    "role": "provider-prebeta-operator",
+    "identity_fingerprint": "4a4c2acde319b75aba3b59abf9072043d4079f0c2cc845b681f34910e0dc54a9"
+  },
+  "environment": {
+    "class": "physical-provider-prebeta-admission",
+    "hardware_profile": "Apple M5, 32 GB unified memory, Tier C",
+    "candidate": "qwen3-8b / mlx-community/Qwen3-8B-4bit",
+    "binary_version": "1.8.92",
+    "compatibility_set": "Augustas11/macprovider:v1.8.92@4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+    "operating_system": "Version 26.5 (Build 25F71)",
+    "production_equivalent_conditions": {
+      "provider_service": "launchd-managed macprovider-cli serve",
+      "network_state_before": "buyer_serving",
+      "network_state_after": "buyer_serving",
+      "coordinator_connected_before": true,
+      "coordinator_connected_after": true,
+      "model_loaded_before": true,
+      "model_loaded_after": true,
+      "thermal_state": "nominal",
+      "thermally_throttled": false,
+      "memory_pressure": "normal"
+    }
+  },
+  "result": {
+    "status": "pass",
+    "summary": "Physical autotune transcript evidence passed for SPEC-023-R001/R002: Qwen3 8B remained eligible while the operator-visible transcript and JSON carried the advisory TTFT drift warning, signed-row provenance, benchmark-count semantics, and no config mutation."
+  },
+  "steps": [
+    {
+      "id": "step-01-private-prebeta-authorization",
+      "status": "pass",
+      "assertion": "Operator explicitly authorized a separate SPEC-023 physical autotune transcript evidence run for issue #958 after SPEC-010 issue #957 was closed.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-02-install-launch-identity",
+      "status": "pass",
+      "assertion": "Installed signed provider CLI 1.8.92 from source commit 4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71 was running under launchd with the Qwen3 8B signed catalog selector.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-03-provider-registration-admission",
+      "status": "pass",
+      "assertion": "Before and after the autotune run, the provider was coordinator-connected and buyer-serving with Qwen3 8B loaded.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-04-catalog-autotune-readiness",
+      "status": "pass",
+      "assertion": "The physical autotune recommendation used the signed Qwen3 8B catalog row, benchmarked one local result, rendered bench-gate provenance and drift, emitted ttft_above_gate as an advisory warning, and still recommended Qwen3 8B.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-05-hardware-evidence-verifier",
+      "status": "pass",
+      "assertion": "The run captured raw recomputable JSON and human transcript output from current physical hardware; hardware-evidence network submission was disabled to keep this SPEC-023 transcript run non-mutating and requirement-scoped.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-06-provider-runtime-routing",
+      "status": "pass",
+      "assertion": "Provider runtime routing remained stable: final status reported Qwen3 8B loaded, model hash bound to the Qwen snapshot, catalog key qwen3-8b, and network_state buyer_serving.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-07-buyer-serving-smoke",
+      "status": "pass",
+      "assertion": "The autotune evidence run did not interrupt buyer-serving readiness; post-run status remained ready with coordinator connectivity true and requests in flight/queued at zero.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-08-redaction-and-correlation",
+      "status": "pass",
+      "assertion": "Provider identifiers, local paths, local account names, and credentials are omitted or redacted; correlation is preserved through source commit, catalog row identity, signed snapshot hashes, command output hashes, and requirement IDs.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    }
+  ],
+  "evidence_details": {
+    "source_commit": "4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+    "evidence_worktree_base": "784ac998c2fa7f46f59ae45c4f690a774fa2f5d2",
+    "command_capture": {
+      "successful_json_command": [
+        "macprovider-cli",
+        "autotune",
+        "--recommend",
+        "--no-submit-hardware-evidence",
+        "--candidate-models",
+        "mlx-community/Qwen3-8B-4bit",
+        "--max-duration",
+        "600",
+        "--json"
+      ],
+      "successful_transcript_command": [
+        "macprovider-cli",
+        "autotune",
+        "--recommend",
+        "--no-submit-hardware-evidence",
+        "--candidate-models",
+        "mlx-community/Qwen3-8B-4bit",
+        "--max-duration",
+        "600"
+      ],
+      "json_exit_code": 0,
+      "transcript_exit_code": 0,
+      "json_stdout_sha256": "38c8a1d03a71e3a74b5c3e40f7dacc8fb0719ededc48aabaa7298d75118b9883",
+      "json_stderr_sha256": "1f3c6776a602563a58840db9ba3ca8e99f2c725dd3805e456eea0d68859a0497",
+      "transcript_stdout_sha256": "b2131d067345301e7341a754c275545ac8b6aea9f3d6281427f2e53add258f1c",
+      "transcript_stderr_sha256": "1f3c6776a602563a58840db9ba3ca8e99f2c725dd3805e456eea0d68859a0497",
+      "status_before_sha256": "bba2b7066af8f1e1615b8c1d4d88344c6c8443c60753dc2f6cbfe61a15e9dd49",
+      "status_after_sha256": "3adc27675acf73231e9131d5450bf8f6dcad76501a5e4fca545cc76aaaf5bb68"
+    },
+    "raw_json_output": {
+      "schema_version": "autotune_recommend.v1",
+      "generated_at": "2026-08-10T12:17:03Z",
+      "hardware": {
+        "machine": null,
+        "chip": "Apple M5",
+        "memory_gb": 32,
+        "bandwidth_tier": "C",
+        "detected": true,
+        "os_version": "Version 26.5 (Build 25F71)",
+        "binary_version": "1.8.92"
+      },
+      "recommended_model": "qwen3-8b",
+      "warnings": [
+        "ttft_above_gate"
+      ],
+      "candidates": [
+        {
+          "model": "qwen3-8b",
+          "eligible": true,
+          "why": "qwen3-8b eligible with advisory QoS warning: TTFT 4838ms exceeds advisory catalog target 4500ms",
+          "confidence": "low",
+          "bench_gate_provenance": {
+            "source": "measured_single_host",
+            "hardware": "M5 32GB",
+            "notes": "#744 audit: measured single-host row; #745 blocks trusted gate re-derivation."
+          },
+          "bench_gate_drift": [
+            "ttft_above_gate"
+          ],
+          "buyer_ttft_ceiling_exceeded": false,
+          "prompt_rate_usd_per_million_tokens": 0.0135,
+          "completion_rate_usd_per_million_tokens": 0.027
+        }
+      ]
+    },
+    "raw_human_transcript": "Detected Apple M5, 32 GB unified memory, Tier C.\nBenchmarked 1 local benchmark results against rate card 51d4eb9d29024e759c8e41610ad3f13614253e52f47bc032c92f46adb599ad42 and demand rank published-2026-07-29-inband-provenance-v1.\n\nRecommended: qwen3-8b\nRate: $0.013 per million prompt tokens\n      $0.027 per million completion tokens\nConfidence: low\nBench gate provenance: source=measured_single_host, hardware=M5 32GB, notes=#744 audit: measured single-host row; #745 blocks trusted gate re-derivation.\nBench gate drift: ttft_above_gate\nReal earnings scale with buyer demand and your uptime.\n\nTo apply this recommendation, rerun with --apply. Then start the provider with:\n              macprovider-cli serve\n",
+    "raw_stderr": "ttft_above_gate\n",
+    "catalog_and_runtime_correlation": {
+      "catalog_key": "qwen3-8b",
+      "catalog_model_id": "mlx-community/Qwen3-8B-4bit",
+      "catalog_release_id": "published-2026-07-29-inband-provenance-v1",
+      "catalog_digest": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+      "catalog_row_identity": "902b83ecfd20acbccbcfe2c85c0faf6725c8a1955b430689445ce65726ea17b0",
+      "signer_key_id": "streamvc-autotune-static-v4",
+      "model_revision": "545dc4251c05440727734bcd94334791f6ab0192",
+      "model_artifact_sha256": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "weights_manifest_sha256": "269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81",
+      "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1"
+    },
+    "status_before": {
+      "model": "qwen3-8b",
+      "model_loaded": true,
+      "status": "ready",
+      "network_state": "buyer_serving",
+      "coordinator_connected": true,
+      "catalog_key": "qwen3-8b",
+      "catalog_model_id": "mlx-community/Qwen3-8B-4bit",
+      "model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "thermal_state": "nominal",
+      "thermally_throttled": false,
+      "memory_pressure": "normal"
+    },
+    "status_after": {
+      "model": "qwen3-8b",
+      "model_loaded": true,
+      "status": "ready",
+      "network_state": "buyer_serving",
+      "coordinator_connected": true,
+      "catalog_key": "qwen3-8b",
+      "catalog_model_id": "mlx-community/Qwen3-8B-4bit",
+      "model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877"
+    },
+    "requirement_coverage": {
+      "SPEC-023-R001": {
+        "covered": true,
+        "evidence": [
+          "Qwen3 8B remained eligible while JSON warnings and stderr emitted ttft_above_gate.",
+          "The candidate why text explicitly labels the miss as an advisory QoS warning, not a hard veto.",
+          "Before/after provider status remained buyer_serving with Qwen loaded."
+        ]
+      },
+      "SPEC-023-R002": {
+        "covered": true,
+        "evidence": [
+          "Human transcript prints Benchmarked 1 local benchmark results.",
+          "Human transcript prints Confidence: low.",
+          "Human transcript prints signed bench-gate provenance.",
+          "Human transcript prints Bench gate drift: ttft_above_gate.",
+          "JSON includes bench_gate_provenance, bench_gate_drift, buyer_ttft_ceiling_exceeded, and stable warning fields."
+        ]
+      }
+    },
+    "warning_copy": {
+      "applicable_operator_warning": "ttft_above_gate",
+      "donor_mode_warning_applicability": "not-applicable: selected signed catalog row qwen3-8b is paid-recommendable and eligible; this requirement-scoped run did not use --apply or donor-mode mutation."
+    },
+    "non_promoted_requirements": {
+      "requirements": [
+        "SPEC-010-R004",
+        "SPEC-010-R005",
+        "SPEC-010-R006",
+        "SPEC-023-R003",
+        "SPEC-023-R004",
+        "SPEC-023-R005",
+        "SPEC-023-R006"
+      ],
+      "not_promoted_rationale": "This artifact is limited to SPEC-023-R001/R002 physical autotune transcript and advisory warning behavior. Other provider-prebeta rows require separate scoped evidence or were already promoted."
+    }
+  },
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true,
+    "provider_identifier_redacted": true,
+    "local_paths_redacted": true,
+    "raw_command_files_retained_locally_only": true
+  }
+}
