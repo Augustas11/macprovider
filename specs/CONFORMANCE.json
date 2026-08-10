@@ -1702,7 +1702,7 @@
     {
       "requirement_id": "SPEC-023-R001",
       "spec_id": "SPEC-023",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func isEligible(",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func advisoryBenchmarkWarnings(",
@@ -1719,18 +1719,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/958",
-        "rationale": "SPEC-023 advisory TPS/TTFT behavior is repaired in code and tests. The core provider-prebeta journey passed under #895, but its signed result excluded the broader physical autotune transcript claim. Issue #958 owns the operator-visible advisory gate and model-readiness evidence on a real provider; real-X dwell reward evidence remains outside the provider-admission subset unless explicitly enabled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:7585c2ccdcb24e4f7067999dfe223e543bed133d65479bf1221e71dea8941a6b",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z.spec-023-r001-spec-023-r002.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-023-R002",
       "spec_id": "SPEC-023",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var benchmarkedCount",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func humanTranscript",
@@ -1746,13 +1754,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/958",
-        "rationale": "A6 repairs human transcript label honesty, benchmark-count semantics, and donor-mode warning copy in code and tests. The core provider-prebeta journey passed under #895, but it did not promote this transcript requirement. Conformance remains pending until #958 captures the operator-visible transcript, provenance/drift fields, and applicable warning copy in production-equivalent conditions."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:7585c2ccdcb24e4f7067999dfe223e543bed133d65479bf1221e71dea8941a6b",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec023-r001-r002-20260810T121703Z.spec-023-r001-spec-023-r002.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-032-R001",
