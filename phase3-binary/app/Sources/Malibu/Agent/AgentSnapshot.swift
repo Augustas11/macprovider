@@ -761,9 +761,9 @@ enum AgentSnapshotPresenter {
                 ? s.earningsUsdcToday.map { formatUSDC($0) } ?? "n/a"
                 : "n/a"
             let malibu = s.malibuProjectionFresh
-                ? s.malibuAccruedToday.map { String(format: "%.2f", $0) } ?? "n/a"
-                : "n/a"
-            return "Today: \(usdc) USDC · \(malibu) MALIBU (reward status unavailable)"
+                ? malibuTodayLine(s, compact: false)
+                : "MALIBU reward status unavailable"
+            return "Today: \(usdc) USDC · \(malibu)"
         }
         switch (s.earningsUsdcToday, s.malibuAccruedToday) {
         case (nil, nil):
@@ -771,7 +771,7 @@ enum AgentSnapshotPresenter {
         case let (usdc?, malibu?):
             return "Today: \(formatUSDC(usdc)) USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
         case let (usdc?, nil):
-            return "Today: \(formatUSDC(usdc)) USDC · n/a MALIBU (reward status unavailable)"
+            return "Today: \(formatUSDC(usdc)) USDC · \(malibuTodayLine(s, compact: false))"
         case let (nil, malibu?):
             return "Today: n/a USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
         }
@@ -1157,8 +1157,7 @@ enum AgentSnapshotPresenter {
             let today = "n/a MALIBU today"
             return "\(today) · n/a all-time"
         }
-        let today = s.malibuAccruedToday.map { malibuDisplay($0, tier: s.trustTier, compact: true) }
-            ?? "n/a MALIBU today"
+        let today = malibuTodayLine(s, compact: true)
         let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
             ?? "n/a all-time"
         switch s.trustTier {
@@ -1167,6 +1166,16 @@ enum AgentSnapshotPresenter {
         case .provisional:
             return "\(today) · \(allTime) · [locked] unlocks at Trusted"
         }
+    }
+
+    private static func malibuTodayLine(_ s: AgentSnapshot, compact: Bool) -> String {
+        if let malibu = s.malibuAccruedToday {
+            return malibuDisplay(malibu, tier: s.trustTier, compact: compact)
+        }
+        if s.malibuAccruedAllTime != nil || s.malibuWithdrawable != nil || s.malibuHeld != nil {
+            return "MALIBU daily not reported yet"
+        }
+        return compact ? "n/a MALIBU today" : "n/a MALIBU"
     }
 
     static func malibuAvailabilityLine(_ s: AgentSnapshot) -> String? {
@@ -1208,9 +1217,9 @@ enum AgentSnapshotPresenter {
     static func uptimeLine(_ s: AgentSnapshot) -> String {
         var parts: [String] = []
         if let sec = s.uptimeSec, isActive(s) {
-            parts.append("\(formatDuration(sec)) up")
+            parts.append("\(formatDuration(sec)) current run")
         } else if isActive(s) {
-            parts.append("uptime n/a")
+            parts.append("current run n/a")
         }
         if let pct = s.uptime7dPct {
             parts.append(String(format: "%.1f%% uptime (7d)", pct))

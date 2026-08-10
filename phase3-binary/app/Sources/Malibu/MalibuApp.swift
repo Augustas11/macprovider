@@ -95,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .checkForUpdates, .updateCLI: Task { await agent.updateCLINow() }
         case .exportDiagnostics: exportDiagnostics()
         case .openSettings:
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            SettingsWindowPresenter.shared.present()
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
             guard confirmUninstall() else { return }

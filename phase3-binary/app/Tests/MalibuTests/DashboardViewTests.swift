@@ -2,6 +2,23 @@ import XCTest
 @testable import Malibu
 
 final class DashboardViewTests: XCTestCase {
+    func testDashboardModelSubtitleDoesNotEchoSwitcherFreshnessFlapping() {
+        XCTAssertEqual(
+            DashboardCopy.modelRowStatusLine(
+                currentModelID: "meta-llama/llama-3.2-3b-instruct",
+                switcherStatusLine: "Model controls ready."
+            ),
+            "Current model shown. Change Model shows switching availability."
+        )
+        XCTAssertEqual(
+            DashboardCopy.modelRowStatusLine(
+                currentModelID: "meta-llama/llama-3.2-3b-instruct",
+                switcherStatusLine: "Provider status is stale. Refresh the provider before switching models."
+            ),
+            "Current model shown. Change Model shows switching availability."
+        )
+    }
+
     func testOptionalDashboardFieldsRenderFriendlyZerosWhenServing() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving

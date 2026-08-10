@@ -104,6 +104,36 @@ enum PayoutWalletFlow {
     static let chain = "base-mainnet"
     static let chainID: UInt64 = 8453
 
+    static func publicErrorMessage(_ error: PayoutWalletFlowError) -> String {
+        switch error {
+        case .cliNotFound:
+            return "Provider software is not installed."
+        case let .challengeFailed(msg), let .registerFailed(msg), let .loopbackFailed(msg):
+            if isRawCancellationMessage(msg) {
+                return publicErrorMessage(.cancelled)
+            }
+            return msg
+        case .timedOut:
+            return "Wallet signing timed out. Open Add wallet and try again."
+        case .cancelled:
+            return "Wallet registration was cancelled."
+        case .invalidCallback:
+            return "The signature from the browser was incomplete or mismatched."
+        case .missingResources:
+            return "The bundled wallet signer page is missing from this app build."
+        case .missingProviderID:
+            return "Provider identity is not configured on this Mac."
+        case .rngFailure:
+            return "Secure random generation failed. Please try again."
+        }
+    }
+
+    private static func isRawCancellationMessage(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("swift.cancellationerror")
+            || (lower.contains("operation couldn") && lower.contains("error 1"))
+    }
+
     static func isSupportedChallengeChain(chainID: UInt64, chain: String) -> Bool {
         chainID == self.chainID && chain == self.chain
     }

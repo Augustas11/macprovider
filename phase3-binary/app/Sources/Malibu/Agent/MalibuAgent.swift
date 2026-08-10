@@ -1108,24 +1108,7 @@ final class MalibuAgent: ObservableObject {
     }
 
     private static func payoutErrorMessage(_ error: PayoutWalletFlowError) -> String {
-        switch error {
-        case .cliNotFound:
-            return "Provider software is not installed."
-        case let .challengeFailed(msg), let .registerFailed(msg), let .loopbackFailed(msg):
-            return msg
-        case .timedOut:
-            return "Wallet signing timed out. Open Add wallet and try again."
-        case .cancelled:
-            return "Wallet registration was cancelled."
-        case .invalidCallback:
-            return "The signature from the browser was incomplete or mismatched."
-        case .missingResources:
-            return "The bundled wallet signer page is missing from this app build."
-        case .missingProviderID:
-            return "Provider identity is not configured on this Mac."
-        case .rngFailure:
-            return "Secure random generation failed. Please try again."
-        }
+        PayoutWalletFlow.publicErrorMessage(error)
     }
 
     private func finishReferralAction() {
