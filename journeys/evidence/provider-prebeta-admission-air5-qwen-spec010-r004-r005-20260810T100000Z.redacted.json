@@ -1,0 +1,307 @@
+{
+  "schema_version": "macprovider.provider-prebeta-admission-evidence.v1",
+  "journey_id": "JOURNEY-PROVIDER-PREBETA-ADMISSION",
+  "run_id": "provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z",
+  "requirement_ids": [
+    "SPEC-010-R004",
+    "SPEC-010-R005"
+  ],
+  "repository": {
+    "name": "Augustas11/macprovider",
+    "commit": "c59568b83b511a78ab07f9ef40939911200a7091"
+  },
+  "captured_at": "2026-08-10T10:00:00Z",
+  "expires_at": "2026-11-10",
+  "operator": {
+    "role": "provider-prebeta-operator",
+    "identity_fingerprint": "6814fc63f6a471df4e22611f2d6ebc037b67395268d127dded7fda292c88b973"
+  },
+  "environment": {
+    "class": "physical-provider-prebeta-admission",
+    "hardware_profile": "apple-silicon-32gb-qwen3-redacted",
+    "candidate": "provider-cli:v1.8.90"
+  },
+  "result": {
+    "status": "pass",
+    "summary": "SPEC-010-R004/R005 passed on Pearl production for the Air5 Qwen provider: admission selected the exact signed current catalog row, later heartbeat and safety telemetry retained the same model digest and algorithm as session authority, an authenticated buyer request bound its route snapshot to the same expected catalog digest, and the live pool had zero providers using the missing model_hash_algorithm legacy bridge."
+  },
+  "steps": [
+    {
+      "id": "step-01-private-prebeta-authorization",
+      "status": "pass",
+      "assertion": "The run used Pearl production coordinator and the existing private-prebeta operator path for provider-prebeta admission evidence; no new admission policy or public referral claim is promoted by this artifact.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-02-install-launch-identity",
+      "status": "pass",
+      "assertion": "The local provider was running provider-cli v1.8.90 with ready lifecycle state, buyer-serving network state, qwen3-8b selected locally, and a stable redacted provider/admission identity.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-03-provider-registration-admission",
+      "status": "pass",
+      "assertion": "Pearl admitted the redacted provider identity in catalog_admission_mode=current, hash_status=hash_verified, auth_state=bearer_validated, encrypted_leg=true, and routing_eligible=true for mlx-community/Qwen3-8B-4bit.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-04-catalog-autotune-readiness",
+      "status": "pass",
+      "assertion": "Admission and heartbeat evidence selected the exact signed current Qwen catalog row with model hash 1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877, model_hash_algorithm=macprovider.snapshot-manifest.v1, catalog row identity 902b83ecfd20acbccbcfe2c85c0faf6725c8a1955b430689445ce65726ea17b0, and weights manifest 269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-05-hardware-evidence-verifier",
+      "status": "pass",
+      "assertion": "Local safety telemetry for the same redacted provider reported runtime_state=ready, model_loaded=true, hardware_tier=32GB, nominal thermal state, and the same model digest, algorithm, and weights manifest as Pearl admission.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-06-provider-runtime-routing",
+      "status": "pass",
+      "assertion": "A later Pearl heartbeat for the same redacted provider/session retained the admitted Qwen model, digest, algorithm, catalog row identity, and hash_verified status; Pearl pool posture showed four ready providers, four hash_verified providers, and no provider missing model_hash_algorithm.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-07-buyer-serving-smoke",
+      "status": "pass",
+      "assertion": "An authenticated buyer smoke request at 2026-08-10T10:00:00Z returned HTTP 200 for mlx-community/Qwen3-8B-4bit, and Pearl request_log plus settlement_route_snapshots correlated the request hashes to the same redacted provider/session with provider_reported_model_hash equal to expected_catalog_model_hash.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    },
+    {
+      "id": "step-08-redaction-and-correlation",
+      "status": "pass",
+      "assertion": "The artifact omits raw provider IDs, session IDs, request IDs, receipt keys, account scope, buyer IP, operator credentials, local account names, prompts, and response bodies while retaining stable SHA-256 fingerprints for cross-checking admission, heartbeat, pool, and route-snapshot evidence.",
+      "artifacts": [
+        "redacted-provider-prebeta-admission"
+      ]
+    }
+  ],
+  "redaction": {
+    "secrets_redacted": true,
+    "operator_identity_redacted": true,
+    "local_account_names_redacted": true
+  },
+  "observations": {
+    "evidence_scope": "spec010-r004-r005-current-catalog-authority-and-zero-legacy-bridge",
+    "issue": {
+      "url": "https://github.com/Augustas11/macprovider/issues/957",
+      "owners": [
+        "SPEC-010-R004",
+        "SPEC-010-R005"
+      ],
+      "not_promoted_by_this_artifact": [
+        "SPEC-010-R006"
+      ],
+      "not_promoted_rationale": "SPEC-010-R006 requires a separately authorized production-equivalent warm-swap run. This artifact did not mutate the provider model or exercise warm-swap fail-closed behavior."
+    },
+    "pearl": {
+      "class": "Pearl production coordinator",
+      "public_health": {
+        "coordinator_url": "https://coordinator.streamvc.live/healthz",
+        "gateway_url": "https://api.streamvc.live/healthz",
+        "coordinator_status": "ok",
+        "gateway_status": "ok",
+        "coordinator_version": "v1.8.92",
+        "gateway_version": "v1.8.92",
+        "recommended_binary_version": "1.8.92"
+      },
+      "service": {
+        "unit": "macprovider-coordinator.service",
+        "active": true,
+        "config_path": "/opt/macprovider/coordinator.yaml",
+        "overlay_path": "/etc/macprovider/coordinator.pearl-overlays.yaml",
+        "tier2_catalog_path_configured": true,
+        "tier2_require_hash_verified": true
+      }
+    },
+    "provider": {
+      "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+      "assigned_id_sha256": "2a7c19fa39c8ea2877789c6bffb3a7393bac42964b9784128b4d2bedf7bdc817",
+      "hostname_sha256": "8c6c9baa1dfbe27664e2ea3103af5f8e8125d62384eb3b6d963050caade6b2a8",
+      "binary_version": "1.8.90",
+      "local_model_id": "qwen3-8b",
+      "model_id": "mlx-community/Qwen3-8B-4bit",
+      "state": "ready",
+      "network_state": "buyer_serving",
+      "routing_eligible": true,
+      "auth_state": "bearer_validated",
+      "encrypted_leg": true,
+      "admitted_at": "2026-08-10T08:39:58.283543428Z",
+      "connected_at": "2026-08-10T08:39:58.283543428Z",
+      "heartbeat_observed_at": "2026-08-10T10:04:39.378509669Z",
+      "catalog_admission_mode": "current",
+      "hash_status": "hash_verified",
+      "model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "catalog_release_id": "published-2026-07-29-inband-provenance-v1",
+      "catalog_policy_version": "autotune-policy-v1",
+      "catalog_row_identity": "902b83ecfd20acbccbcfe2c85c0faf6725c8a1955b430689445ce65726ea17b0",
+      "catalog_candidate_sha256": "56c4c20a8d0b3a1944ff0539829d0f517097c5189f22d7f1453c8e491dff1720",
+      "catalog_signer_key_id": "streamvc-autotune-static-v4",
+      "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1",
+      "weights_manifest_sha256": "269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81",
+      "safety_telemetry": {
+        "runtime_state": "ready",
+        "thermal_state": "nominal",
+        "model_loaded": true,
+        "hardware_tier": "32GB",
+        "model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+        "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+        "weights_manifest_sha256": "269e8173efeb660d414177815262fa4b3a8a83400611a118f4326a38f495ae81"
+      }
+    },
+    "legacy_bridge_posture": {
+      "observed_at": "2026-08-10T10:04:39Z",
+      "pool_total_providers": 4,
+      "ready_providers": 4,
+      "hash_verified_providers": 4,
+      "qwen_ready_providers": 1,
+      "missing_model_hash_algorithm_count": 0,
+      "legacy_bridge_candidate_count": 0,
+      "all_ready_providers_have_model_hash_algorithm": true,
+      "observed_algorithms": [
+        "macprovider.snapshot-manifest.v1"
+      ],
+      "providers": [
+        {
+          "provider_id_sha256": "2d812448a57b8b32893191acd78ea6fc4735eba8db8def8993ff708ed2f3a387",
+          "session_id_sha256": "4b1753fe2ffbe8fbd2c519ca08a81f62166f9eeb012f801b5c784ee0fd05f8ba",
+          "state": "ready",
+          "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+          "hash_status": "hash_verified",
+          "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "routing_eligible": true,
+          "catalog_admission_mode": "current"
+        },
+        {
+          "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+          "session_id_sha256": "2a7c19fa39c8ea2877789c6bffb3a7393bac42964b9784128b4d2bedf7bdc817",
+          "state": "ready",
+          "model": "mlx-community/Qwen3-8B-4bit",
+          "hash_status": "hash_verified",
+          "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "routing_eligible": true,
+          "catalog_admission_mode": "current"
+        },
+        {
+          "provider_id_sha256": "0994cb6a985ada2f30574ac849de3250481e7975dedb532215ffe0282d3f861d",
+          "session_id_sha256": "9273502a3ddfadd1310891fea834b741a4c2764a7f6195c6a052901686ca5725",
+          "state": "ready",
+          "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+          "hash_status": "hash_verified",
+          "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "routing_eligible": true,
+          "catalog_admission_mode": "current"
+        },
+        {
+          "provider_id_sha256": "bc880d27dbc4f59dae81c994e6aa289d5d984e670f4e4e34c0431f20343014ad",
+          "session_id_sha256": "8c64e1de2a8cd552437b321827b5c32bfb84cad6f8af66e6fd379baecf7fe8d7",
+          "state": "ready",
+          "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+          "hash_status": "hash_verified",
+          "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+          "routing_eligible": true,
+          "catalog_admission_mode": "current"
+        }
+      ]
+    },
+    "buyer_smoke": {
+      "base": "https://api.streamvc.live",
+      "requested_model": "mlx-community/Qwen3-8B-4bit",
+      "observed_at": "2026-08-10T10:00:00Z",
+      "http_status": 200,
+      "response_model": "mlx-community/Qwen3-8B-4bit",
+      "operator_client_request_id_sha256": "c5703cfc494f1d0faf675c4f95ff25e7e4b90258ab12af6669fc2ef3542171a1",
+      "gateway_response_header_request_id_sha256": "be2d580e8853567898c28140522d416bae2b4ad22f40fede17f5ec8008f5e9cb",
+      "coordinator_request_id_sha256": "315c4f8769e322aacdbb592a94b50f2410f8110830f8c33734c7c660c9d6f55a",
+      "response_id_sha256": "300d1c4d861cc40c97dca58fa4aa65e1c37d7b29bddce011a24e93b360c916c9",
+      "usage": {
+        "prompt_tokens": 18,
+        "completion_tokens": 1,
+        "total_tokens": 19,
+        "cached_prompt_tokens": 0,
+        "macprovider_model_hash_observed": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877"
+      }
+    },
+    "coordinator_request_log": {
+      "request_id_sha256": "315c4f8769e322aacdbb592a94b50f2410f8110830f8c33734c7c660c9d6f55a",
+      "external_request_id_sha256": "be2d580e8853567898c28140522d416bae2b4ad22f40fede17f5ec8008f5e9cb",
+      "provider_assigned_id_sha256": "2a7c19fa39c8ea2877789c6bffb3a7393bac42964b9784128b4d2bedf7bdc817",
+      "account_id_sha256": "63a720867f50b6c6eaa0bc122492feba02d52986f44d43d7f2b4ac45946ce59b",
+      "buyer_ip_sha256": "12ca17b49af2289436f303e0166030a21e525d266e209267433801a8fd4071a0",
+      "ts_utc": "2026-08-10T10:00:00.838334146Z",
+      "model": "mlx-community/Qwen3-8B-4bit",
+      "status": 200,
+      "attempt_n": 0,
+      "stream": 0,
+      "prompt_tokens": 18,
+      "completion_tokens": 1,
+      "total_tokens": 19,
+      "latency_ms": 705.0,
+      "routing_ms": 0.0,
+      "queue_wait_ms": 0.0,
+      "ttft_ms": 366.0,
+      "decode_ms": 0.0,
+      "retried": 0,
+      "error": null,
+      "error_code": null
+    },
+    "settlement_route_snapshot": {
+      "request_id_sha256": "315c4f8769e322aacdbb592a94b50f2410f8110830f8c33734c7c660c9d6f55a",
+      "account_scope_sha256": "2aa008caea5cc6df4e0655b80902216699cba6090f9034117543a82fb0d442b6",
+      "provider_id_sha256": "ee7a35620f82c1b07954a5f27cb93ec213f638947ea08414134cf85c85d842d3",
+      "provider_session_id_sha256": "2a7c19fa39c8ea2877789c6bffb3a7393bac42964b9784128b4d2bedf7bdc817",
+      "provider_receipt_key_id_sha256": "427cc1687d6f9eb0af0a04bbdb6cbb12d155c7ca8ee9bc8b26657e6c28347f1f",
+      "provider_receipt_key_source_sha256": "29f74f746f56d5a3dc7944001334136c9f18828cb7a4138b89cc3c569b0d0429",
+      "created_at_utc": "2026-08-10T10:00:00.839Z",
+      "paid_entrypoint": "coordinator_buyer_v1_chat_completions",
+      "model_id": "mlx-community/Qwen3-8B-4bit",
+      "provider_reported_model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "provider_reported_model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "expected_catalog_model_hash": "1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877",
+      "expected_catalog_model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "catalog_id": "macprovider-tier2-model-catalog-2026-07-07-p2-qwen3-8b",
+      "catalog_body_digest": "5e3b04bd4847b1d621682bd725863f9a2b6b1312461f8e8cdd9b82be56678d8e",
+      "catalog_signature_key_id": "catalog-key-2026q2",
+      "catalog_signature_pubkey_fingerprint": "ed25519-sha256:707a860299e6a37f198977179eecd6c36be43f742a7148f79452fba18996aced",
+      "catalog_expires_at_unix_ms": 1791331200000,
+      "spec008_hash_status": "hash_verified",
+      "route_snapshot_policy_version": "spec022-prereq-v1",
+      "route_snapshot_mode": "enforce",
+      "route_snapshot_digest": "54dc3fe9052ea8570a2e2c80b09a2bf9fa055a7ede18961f6dcbc427f1767880",
+      "route_snapshot_canonical_json_sha256": "54dc3fe9052ea8570a2e2c80b09a2bf9fa055a7ede18961f6dcbc427f1767880",
+      "prompt_hash_basis": "coordinator_prompt_canonical_v1",
+      "prompt_hash": "95fe882ecda29e109c9f88ad6e88653033a08e18a395afb2de2ef21dcd46394d",
+      "pending_deadline_seconds": 300
+    },
+    "not_promoted_by_this_artifact": [
+      "SPEC-010-R001",
+      "SPEC-010-R002",
+      "SPEC-010-R003",
+      "SPEC-010-R006",
+      "SPEC-023-R001",
+      "SPEC-023-R002",
+      "SPEC-032-R001",
+      "SPEC-032-R002",
+      "SPEC-032-R003",
+      "SPEC-033-R001",
+      "SPEC-034-R001"
+    ],
+    "not_promoted_rationale": "This artifact is intentionally limited to current catalog authority, route snapshot binding, heartbeat retention, and zero legacy bridge count for SPEC-010-R004/R005. It does not include a warm-swap mutation transcript, SPEC-023 autotune transcript, SPEC-032 strict gate/sandbox proof, SPEC-033 hardware proof, or SPEC-034 referral proof."
+  }
+}
