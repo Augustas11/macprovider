@@ -77,7 +77,7 @@ provider endpoints, breaking ties deterministically by prompt price and
 provider name. Decimal strings—not binary floats—are used for stored money and
 all calculations.
 
-The snapshot schema is version `4`:
+The snapshot schema is version `5`:
 
 ```json
 {
@@ -91,7 +91,7 @@ The snapshot schema is version `4`:
     "observed_schema_version_or_fingerprint": "...",
     "generator_version": "openrouter-pricing-engine-v1",
     "fetch_metadata": {
-      "successful_source_count": 102,
+      "successful_source_count": 52,
       "observed_model_count": 50,
       "requested_top_n": 50,
       "demand_window_days": 30,
@@ -216,9 +216,10 @@ Component 3 owns that conversion/review boundary.
 ### Nemotron-3
 
 The policy records `nvidia/nemotron-3-nano-30b-a3b` as commercially permitted
-under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
-NVIDIA states that models under that agreement are commercially usable, subject
-to its terms. This is a policy evidence record, not a replacement for legal
+under the **NVIDIA Nemotron Open Model License** identified by the
+[pinned NVIDIA model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md).
+The card describes the model as ready for commercial use subject to those
+governing terms. This is a policy evidence record, not a replacement for legal
 review. If the policy's verification is removed or changed to non-permitted,
 the engine deterministically blocks/drops the model and records the reason.
 

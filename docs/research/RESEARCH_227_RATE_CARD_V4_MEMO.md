@@ -183,7 +183,7 @@ profile or Mac TPS result.
 
 The other observed open-weight families (Xiaomi MiMo, DeepSeek V4/V3.2,
 Tencent HY, Z-AI GLM, Nemotron Ultra/Super, MiniMax, StepFun, Kimi,
-`gpt-oss-120b`, Gemma 31B/26B, and Laguna M) were not policy-ready: they were
+`gpt-oss-120b`, Gemma 31B, and Laguna M) were not policy-ready: they were
 obviously oversized for the current broad-fleet gate, lacked a verified local
 serving/profile/license chain in this review, were free-only, or some
 combination. This is a compact dismissal, not evidence that none can ever

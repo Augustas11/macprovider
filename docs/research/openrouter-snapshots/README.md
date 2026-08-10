@@ -6,6 +6,13 @@ successful operation copies the atomically emitted file without editing it:
 - `openrouter-pricing-snapshot-YYYY-MM-DDTHH-MM-SSZ-<digest16>.json`
 - `openrouter-rate-card-proposal-YYYY-MM-DDTHH-MM-SSZ-<digest16>.json`
 
+`<digest16>` is the first 16 lowercase hexadecimal characters of the SHA-256
+of the complete artifact mapping encoded as canonical JSON (keys sorted, no
+insignificant whitespace, and non-ASCII characters preserved), as implemented
+by the engine's `artifact_suffix`. For a snapshot, this filename digest is
+distinct from its semantic `content_digest` and from the receipt's SHA-256 of
+the serialized file bytes.
+
 The snapshot is the proposal's source of truth. Its semantic digest must equal
 the proposal's `source_snapshot.content_digest`. A failed fetch produces no
 snapshot and must never be represented by a placeholder. Compute must not run
