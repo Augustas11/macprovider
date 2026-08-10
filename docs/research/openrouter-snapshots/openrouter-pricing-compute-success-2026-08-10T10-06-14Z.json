@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "receipt_type": "openrouter-pricing-compute-success",
+  "started_at": "2026-08-10T10:06:14Z",
+  "finished_at": "2026-08-10T10:06:14Z",
+  "engine_commit": "0453190e8384ca05d0cb7be0813fbd22e10d2c1f",
+  "command": ["python", "scripts/openrouter_pricing_engine.py", "compute", "--snapshot", "docs/research/openrouter-snapshots/openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json", "--policy", "scripts/openrouter_pricing_policy.json", "--rate-card", "phase3-binary/catalog/autotune/rate-card.json", "--output-dir", "<temporary-artifact-directory>"],
+  "inputs": {
+    "snapshot_content_digest": "sha256:37a1bef90beafd2cf16e2e3b53ed27bce022f8118151f7b1ecbd14ad2c0069b7",
+    "snapshot_file_sha256": "sha256:3adf1f17151f831331acb482693c7745a7654d43a44dd4c968a6f73921a006ce",
+    "policy_path": "scripts/openrouter_pricing_policy.json",
+    "policy_file_sha256": "sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75",
+    "rate_card_path": "phase3-binary/catalog/autotune/rate-card.json",
+    "rate_card_file_sha256": "sha256:68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3"
+  },
+  "exit_status": 0,
+  "stdout": "<temporary-artifact-directory>\\openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json",
+  "stderr": "",
+  "output_directory_listing": [
+    {
+      "filename": "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json",
+      "bytes": 36788,
+      "sha256": "sha256:170d437b6d7be0860e1a9e98e0fc54f4d74e1e49e863926f0743786778768235"
+    }
+  ],
+  "evidence_digest": "sha256:7574297dcf49f25d4f1b3ea7008771dae107055ae5e750ff1ec506b480042047"
+}

@@ -2,8 +2,8 @@
 
 Date: 2026-08-09
 
-Status: **Implementation repaired; authenticated artifact regeneration
-pending.** No live rate card or apply path was changed.
+Status: **Components 1 and 2 complete.** Authenticated schema-v5 snapshot and
+review-only proposal archived; no live rate card or apply path was changed.
 
 ## Executive conclusion
 
@@ -22,10 +22,10 @@ distinct status `no_provider_endpoints`; it must never produce a provider
 floor, undercut target, policy addition, or rate proposal. Missing, null,
 non-array, mismatched, malformed, or unconfirmed data still fails closed.
 
-The prior snapshot/proposal were removed because they predate the approved
-confirmation semantics and schema v5 provenance. V4 closes only after a fresh
-authenticated top-50 fetch and compute regenerate both artifacts. Component 3
-remains the sole apply authority.
+The prior snapshot/proposal were removed because they predated the approved
+confirmation semantics and schema-v5 provenance. A fresh authenticated top-50
+fetch and compute have now regenerated both artifacts. Component 3 remains the
+sole apply authority.
 
 ## 1. Durable evidence and exact blocker
 
@@ -42,12 +42,29 @@ The subsequent generation established the empty-provider condition:
 data.id = "tencent/hy3:free"; data.endpoints = []
 ```
 
-No trusted schema-v5 snapshot exists for that generation. The removed
-snapshot/proposal cannot support pricing decisions. The next authenticated run
-must confirm any empty set inside the generation deadline and archive the
-untouched emitted snapshot and receipt before compute. The exact receipt
-procedure and canonical digest algorithm are specified in
-`docs/research/openrouter-snapshots/README.md`.
+The final authenticated run used engine commit
+`0453190e8384ca05d0cb7be0813fbd22e10d2c1f` and the UTC ranking window
+2026-07-11 through 2026-08-09. It emitted 50 contiguous ranked rows after 55
+successful source requests: rankings, catalog, 50 initial endpoint documents,
+and three empty-set confirmations. The confirmed-empty identities are
+`tencent/hy3:free`, `inclusionai/ling-3.0-flash:free`, and
+`poolside/laguna-m.1:free`.
+
+Committed evidence:
+
+| Purpose | Artifact |
+| --- | --- |
+| Historical GLM failure | `openrouter-pricing-fetch-failure-2026-08-09T10-06-40Z.json` |
+| Final fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T10-05-13Z.json` |
+| Final snapshot | `openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json` |
+| Final compute receipt | `openrouter-pricing-compute-success-2026-08-10T10-06-14Z.json` |
+| Final proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json` |
+
+The snapshot semantic digest is
+`sha256:37a1bef90beafd2cf16e2e3b53ed27bce022f8118151f7b1ecbd14ad2c0069b7`;
+the proposal references that exact digest. File checksums and receipt
+self-digests are recorded in the receipts. The exact receipt procedure and
+canonical digest algorithm are specified in the archive README.
 
 ## 2. Resolver repair
 
@@ -64,25 +81,27 @@ dated-alias fallback. The resolver never strips `:batch` or guesses an alias.
 
 ## 3. Four current policy rows
 
-There is no approved schema-v5 live movement table yet. The four policy rows
-remain unchanged and their V4 outcomes are all **not computed**:
+Compute used exactly the final snapshot, current policy, and current read-only
+rate-card reference. Its summary is `added=0`, `changed=0`, `unchanged=1`,
+`dropped=3`, `blocked=55`, and `eligible=1`:
 
-| Policy source model | Current completion rate | V4 result |
-| --- | ---: | --- |
-| `openai/gpt-oss-20b` | 100000 credits/M | Not computed; no valid snapshot. |
-| `google/gemma-4-26b-a4b-it` | 240000 credits/M | Not computed; rejected generation is not pricing evidence. |
-| `nvidia/nemotron-3-nano-30b-a3b` | 160000 credits/M | Not computed; no valid snapshot. |
-| `qwen/qwen2.5-coder-32b-instruct` | 850000 credits/M | Not computed; no valid snapshot. |
+| Policy source model | Cohort result | Current completion rate | Live cheapest completion | Proposal result |
+| --- | --- | ---: | ---: | --- |
+| `openai/gpt-oss-20b` | Absent | 100000 credits/M | N/A | Dropped for review; no trusted market input in this cohort. |
+| `google/gemma-4-26b-a4b-it` | Rank 32 | 240000 credits/M | $0.30/M (Cloudflare) | Unchanged at 240000 credits/M ($0.24/M), the 20% broad-fleet undercut target. |
+| `nvidia/nemotron-3-nano-30b-a3b` | Absent | 160000 credits/M | N/A | Dropped for review; no trusted market input in this cohort. |
+| `qwen/qwen2.5-coder-32b-instruct` | Absent | 850000 credits/M | N/A | Dropped for review; no trusted market input in this cohort. |
 
-The required close-out still needs a fresh proposal that reports added,
-changed, unchanged, dropped, and blocked rows from the same valid snapshot.
+`dropped` is advisory proposal output, not an automatic deletion. No rate-card
+row was changed. The other 49 demand rows have no verified policy mapping and
+remain visible and blocked; six additional current rate-card rows lack policy
+metadata and are also blocked.
 
-## 4. Candidate screen from the pre-approval generation
+## 4. Candidate screen from the validated cohort
 
-The pre-approval generation's top-50 order is useful only for lead discovery.
-It is not the final schema-v5 cohort and cannot authorize policy additions.
-The screen below completes the requested eligibility legwork so the fresh run
-has explicit questions to resolve.
+The schema-v5 top-50 establishes demand only. It cannot by itself authorize a
+policy addition; serving, license, residency, TPS, and paid-market evidence
+remain required. No new policy row is proposed from this run.
 
 ### Strongest leads
 
@@ -105,7 +124,7 @@ no paid market price to undercut.
 }
 ```
 
-`poolside/laguna-s-2.1:free` (observed rank 19) is coding/agent focused and
+`poolside/laguna-s-2.1:free` (rank 18) is coding/agent focused and
 activates about 8.5B of 117.6B parameters. Poolside's card identifies the
 commercially usable OpenMDW-1.1 terms. The official MLX NVFP4 artifact is
 currently about 71.9 GB and the card requires 128 GB unified memory; it is far
@@ -125,7 +144,7 @@ verified macprovider autotune result.
 }
 ```
 
-`inclusionai/ling-3.0-flash:free` (observed rank 23) is described by OpenRouter
+`inclusionai/ling-3.0-flash:free` (rank 24) is described by OpenRouter
 as a 124B MoE with approximately 5.1B active parameters. The upstream Hugging
 Face record at revision `ecde16176a497adaff7419ff4de59da603c4edaa` identifies
 MIT. The community MLX 4-bit artifact at revision
@@ -180,8 +199,10 @@ class/openness filter.
 Free identity suffixes and zero prices are distinct from an empty endpoint
 list. A non-empty, schema-valid active endpoint with a numeric zero price may
 be retained as observed market data, but zero cannot produce a positive
-undercut target and the row must be blocked from rate computation. An empty
-endpoint list is instead an incomplete required source result and aborts the
+undercut target and the row is blocked from rate computation. A complete,
+exact-ID empty provider set is retained only after the bounded confirmation
+described above, as `no_provider_endpoints`; it is also blocked from pricing.
+Missing, malformed, mismatched, or unconfirmed endpoint data still aborts the
 entire snapshot generation.
 
 ## 5. Existing policy license evidence
@@ -211,9 +232,11 @@ proposal and receipt. Any required-source failure ends the chain. This tool has
 no apply mode; Component 3 owns bounded-delta review, approval, and every live
 rate-card write.
 
-V4 closes only after: successful approved fetch, committed snapshot,
-successful compute, committed proposal, four-row movement interpretation, and
-a validated policy-coverage diff. None is claimed here.
+Components 1 and 2 now satisfy the V4 close-out condition: successful approved
+fetch, committed snapshot, successful compute, committed proposal, four-row
+movement interpretation, validated policy-coverage diff, candidate screen, and
+license evidence. This is not an apply decision; Component 3 review remains
+mandatory before any money-path change.
 
 ## Sources
 
