@@ -1334,7 +1334,7 @@
     {
       "requirement_id": "SPEC-010-R004",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/ws/server.go:expectedAdmissionModelHash",
         "phase4-coordinator/internal/ws/server.go:expectedProviderModelHash",
@@ -1351,18 +1351,26 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/957",
-        "rationale": "Issue #609 binds admission, heartbeat, route snapshot, and receipt evidence to one exact signed row. The core provider-prebeta admission and serving-smoke journey passed under #895, but its signed result did not claim this requirement. Issue #957 owns requirement-scoped proof that the exact admitted row remains authoritative through heartbeat and route-snapshot binding. Full receipt-chain reconciliation remains outside provider pre-beta unless separately enabled."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c59568b83b511a78ab07f9ef40939911200a7091",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:9f2a34034503b2f31df29ba1b7a5287dca0f38c121b340fbe9e4056024a84c00",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z.spec-010-r004-spec-010-r005.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R005",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/modelidentity/identity.go:LegacyMissingAlgorithmAllowed",
         "phase4-coordinator/internal/ws/server.go:verifyProviderModelIdentity",
@@ -1376,13 +1384,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/957",
-        "rationale": "Issue #609 implements the finite bridge and deploy preflight. The core provider-prebeta admission and serving-smoke journey passed under #895, but it did not promote the bridge posture. Issue #957 must record whether any admitted cohort provider still depends on the bridge and prove the applicable deadline/count or zero-bridge state. The broader legacy fleet retirement proof remains pending outside this slice."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:c59568b83b511a78ab07f9ef40939911200a7091",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:9f2a34034503b2f31df29ba1b7a5287dca0f38c121b340fbe9e4056024a84c00",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-qwen-spec010-r004-r005-20260810T100000Z.spec-010-r004-spec-010-r005.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-010-R006",
