@@ -1,6 +1,8 @@
 # RESEARCH_227 - Rate-card v4 live-run close-out
 
-Date: 2026-08-09
+Research date: 2026-08-09
+
+Final live-run close-out: 2026-08-10
 
 Status: **Components 1 and 2 complete.** Authenticated schema-v5 snapshot and
 review-only proposal archived; no live rate card or apply path was changed.
@@ -242,6 +244,7 @@ mandatory before any money-path change.
 
 - OpenRouter daily rankings: https://openrouter.ai/api/v1/datasets/rankings-daily
 - OpenRouter catalog: https://openrouter.ai/api/v1/models
+- OpenRouter model-endpoints HTTP 200 contract: https://openrouter.ai/docs/api/api-reference/endpoints/list-all-endpoints-for-a-model
 - North Mini Code: https://huggingface.co/CohereLabs/North-Mini-Code-1.0
 - North Mini Code MLX: https://huggingface.co/mlx-community/North-Mini-Code-1.0-4bit
 - Laguna S 2.1: https://huggingface.co/poolside/Laguna-S-2.1-NVFP4

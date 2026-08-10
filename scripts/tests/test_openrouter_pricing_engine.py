@@ -259,6 +259,25 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         blocked = next(item for item in proposal["blocked"] if item["model_id"] == "openai/gpt-oss-20b")
         self.assertIn("no active priced OpenRouter endpoint is available", blocked["reasons"])
 
+    def test_malformed_inactive_endpoint_rows_abort_snapshot_generation(self):
+        mutations = {
+            "missing provider": lambda row: row.pop("provider_name"),
+            "null provider": lambda row: row.__setitem__("provider_name", None),
+            "missing pricing": lambda row: row.pop("pricing"),
+            "null pricing": lambda row: row.__setitem__("pricing", None),
+            "missing prompt": lambda row: row["pricing"].pop("prompt"),
+            "malformed completion": lambda row: row["pricing"].__setitem__("completion", "not-a-price"),
+            "unexpected pricing field": lambda row: row["pricing"].__setitem__("unreviewed_field", "1"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                endpoints = copy.deepcopy(self.endpoints)
+                row = endpoints["openai/gpt-oss-20b"]["data"]["endpoints"][0]
+                row["status"] = 1
+                mutate(row)
+                with self.assertRaises(engine.SchemaError):
+                    engine.build_snapshot(self.rankings, self.models, endpoints, policy(), now=NOW, top_n=4)
+
     def test_429_retries_then_succeeds_and_honors_retry_after(self):
         client = FakeHTTPClient({
             "https://example.test": [

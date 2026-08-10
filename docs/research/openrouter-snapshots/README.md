@@ -31,7 +31,7 @@ substitute for the replayable snapshot/proposal. Use these names:
 - `openrouter-pricing-fetch-failure-YYYY-MM-DDTHH-MM-SSZ.json`
 - `openrouter-pricing-compute-success-YYYY-MM-DDTHH-MM-SSZ.json`
 
-Every receipt has schema version 1 and these fields:
+Every receipt has schema version 1 and these common fields:
 
 | Field | Requirement |
 | --- | --- |
@@ -40,17 +40,31 @@ Every receipt has schema version 1 and these fields:
 | `started_at`, `finished_at` | UTC RFC 3339 timestamps captured immediately around the process. |
 | `engine_commit` | Full output of `git rev-parse HEAD` at execution time. |
 | `command` | JSON string array, with paths generalized if needed and no credential. |
-| `source` | Endpoint/window metadata, confirmed-empty model IDs/count, and only the boolean `openrouter_api_key_configured`; never the value. |
 | `exit_status` | Exact child-process exit status. Success is zero; failure is nonzero. |
 | `stdout`, `stderr` | UTF-8 captured streams after mandatory redaction below. |
 | `output_directory_listing` | Array of emitted filename, byte count, and `sha256` objects; empty on failed fetch. |
 | `evidence_digest` | Canonical receipt digest described below. |
 
-Successful compute receipts additionally identify the exact snapshot, policy,
-and rate-card paths/checksums. A success receipt is invalid if its expected
-artifact is absent. A failure receipt is invalid if it claims a snapshot.
+Fetch receipts additionally require `source` and prohibit `inputs`. Both fetch
+types require exactly `rankings_url`, `ranking_window_start_date`,
+`ranking_window_end_date`, and only the boolean
+`openrouter_api_key_configured` (never the key). A fetch-success receipt also
+requires exactly `confirmed_empty_model_ids`, `confirmation_request_count`, and
+`successful_source_count`, all copied from or verified against the emitted
+snapshot. A fetch-failure receipt stops at the four base fields because no
+validated snapshot exists; it must not claim confirmation or a final source
+count that the failed generation could not validate.
 
-## Exact operator capture procedure (PowerShell)
+Compute receipts additionally require `inputs` and prohibit `source`. `inputs`
+contains `snapshot_content_digest`, `snapshot_file_sha256`, `policy_path`,
+`policy_file_sha256`, `rate_card_path`, and `rate_card_file_sha256`. These must
+name and hash the exact inputs passed to `compute`.
+
+A success receipt is invalid unless its inventory contains exactly one artifact
+of the matching type. A fetch-failure receipt is invalid if its inventory is
+non-empty or a snapshot exists in its run directory.
+
+## Exact manual receipt procedure (PowerShell)
 
 Run from the repository root. The API key must already exist in the process
 environment; never place it on the command line.
@@ -75,7 +89,7 @@ python scripts/openrouter_pricing_engine.py fetch `
 $exitStatus = $LASTEXITCODE
 $finishedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
-$artifactPattern = "openrouter-pricing-snapshot-*.json" # use openrouter-rate-card-proposal-*.json for compute
+$artifactPattern = "openrouter-pricing-snapshot-*.json"
 $outputInventory = Get-ChildItem -LiteralPath $runDir -File |
   Where-Object { $_.Name -like $artifactPattern } |
   ForEach-Object {
@@ -84,13 +98,30 @@ $outputInventory = Get-ChildItem -LiteralPath $runDir -File |
       bytes = $_.Length
       sha256 = "sha256:" + (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
     }
-  }
+}
 ```
 
-Capture the ranking window from the requested rankings URL/validated snapshot,
-not from a guessed local date. For compute, repeat the same start/process/end
-capture using the exact archived snapshot, current policy, current reference
-rate card, and a new empty output directory.
+For compute, use a new empty `$runDir`, capture new start/end timestamps and
+streams around this exact command, and set `$artifactPattern` to
+`openrouter-rate-card-proposal-*.json`:
+
+```powershell
+$snapshotPath = "docs/research/openrouter-snapshots/<exact-snapshot-filename>.json"
+$policyPath = "scripts/openrouter_pricing_policy.json"
+$rateCardPath = "phase3-binary/catalog/autotune/rate-card.json"
+python scripts/openrouter_pricing_engine.py compute `
+  --snapshot $snapshotPath `
+  --policy $policyPath `
+  --rate-card $rateCardPath `
+  --output-dir $runDir `
+  1> $stdoutPath 2> $stderrPath
+```
+
+Capture the ranking window from the validated snapshot, not from a guessed
+local date. Derive the fetch `source` object from that snapshot and the exact
+fetch invocation. Derive the compute `inputs` object from `$snapshotPath`,
+`$policyPath`, and `$rateCardPath` using `Get-FileHash -Algorithm SHA256`; copy
+the snapshot's semantic `content_digest` without recomputing or editing it.
 
 When fetch observes an authoritative empty provider set, the receipt source
 must list the exact model ID and the snapshot must record
@@ -99,17 +130,55 @@ must list the exact model ID and the snapshot must record
 claim confirmation when the snapshot says `not_required`, and a
 `no_provider_endpoints` row without confirmation provenance is invalid.
 
-Before placing streams in JSON, redact in this order:
+Before assembling JSON, read both streams as UTF-8 and apply this exact
+redaction function to each:
+
+```powershell
+function Protect-OpenRouterReceiptText {
+  param([string]$Text, [string]$ApiKey)
+
+  $redacted = $Text
+  if (-not [string]::IsNullOrEmpty($ApiKey)) {
+    $redacted = $redacted.Replace($ApiKey, "<redacted>")
+  }
+  $redacted = [regex]::Replace(
+    $redacted,
+    '(?i)Authorization:\s*Bearer\s+\S+',
+    'Authorization: Bearer <redacted>'
+  )
+  $redacted = [regex]::Replace(
+    $redacted,
+    '(?i)Bearer\s+sk-or-\S+',
+    'Bearer <redacted>'
+  )
+  if ($redacted -match '(?i)sk-or-[A-Za-z0-9_-]+') {
+    throw "receipt redaction failed: OpenRouter credential remains"
+  }
+  return $redacted
+}
+
+$stdout = Protect-OpenRouterReceiptText `
+  ([IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::UTF8)) `
+  $env:OPENROUTER_API_KEY
+$stderr = Protect-OpenRouterReceiptText `
+  ([IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)) `
+  $env:OPENROUTER_API_KEY
+```
+
+The exact redaction order is:
 
 1. Replace the exact `OPENROUTER_API_KEY` value with `<redacted>` if present.
-2. Replace case-insensitive `Authorization: Bearer <non-whitespace>` and
-   `Bearer sk-or-<non-whitespace>` values with `Bearer <redacted>`.
-3. Reject the receipt instead of archiving it if any `sk-or-` token remains.
-4. Preserve all other bytes as UTF-8 text; do not paraphrase errors.
+2. Replace case-insensitive `Authorization: Bearer <non-whitespace>` with
+   `Authorization: Bearer <redacted>`.
+3. Replace case-insensitive `Bearer sk-or-<non-whitespace>` with
+   `Bearer <redacted>`.
+4. Reject the receipt instead of archiving it if any `sk-or-` token remains.
+5. Preserve all other bytes as UTF-8 text; do not paraphrase errors.
 
-The receipt writer must verify that a nonzero fetch has an empty snapshot
-inventory. Copy only the finalized receipt and legitimate engine artifact into
-this archive; the temporary stream files are not archived.
+Assemble one ordered mapping with the common fields plus exactly one of
+`source` or `inputs`, set `evidence_digest` by the algorithm below, and write it
+with UTF-8 encoding. The receipt timestamp in the filename is `started_at`
+rendered as `YYYY-MM-DDTHH-MM-SSZ`.
 
 ## Canonical evidence digest
 
@@ -131,8 +200,48 @@ canonical = json.dumps(
 receipt["evidence_digest"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
 ```
 
-Validation repeats that algorithm and requires an exact match. It also hashes
-every archived artifact named by the receipt and compares its byte count and
-SHA-256 value. Historical receipts in this directory were manually assembled
-from captured process metadata and validated with this algorithm; only the
+## Mandatory validation and archive-copy checks
+
+Before copying anything into this directory, validate all of the following:
+
+1. The receipt contains only the common fields and its type-specific field;
+   timestamps are UTC RFC 3339, `started_at <= finished_at`, `engine_commit` is
+   40 lowercase hex characters, `command` is a string array, and no string
+   contains an `sk-or-` token.
+2. Recompute `evidence_digest` with the algorithm above and require an exact
+   match.
+3. Recompute every inventory entry's byte count and SHA-256 from the temporary
+   artifact. Require one matching artifact for success and no snapshot for a
+   failed fetch.
+4. For fetch success, run the engine's snapshot validation, require the
+   snapshot ranking window/source count to match `source`, and require the
+   sorted `no_provider_endpoints` row IDs and confirmation count to match
+   `source.confirmed_empty_model_ids` and `confirmation_request_count`.
+5. For compute success, require every `inputs` file hash to match, run proposal
+   validation, and require the proposal's source snapshot digest to equal both
+   `inputs.snapshot_content_digest` and the validated snapshot.
+6. Copy the finalized receipt and the single legitimate artifact to this
+   archive. Do not copy temporary stream files. Re-hash the archived copies and
+   require their byte counts and SHA-256 values to equal the pre-copy values.
+
+The archive-copy check is literal:
+
+```powershell
+$archive = "docs/research/openrouter-snapshots"
+Copy-Item -LiteralPath $receiptPath -Destination $archive
+Copy-Item -LiteralPath $artifactPath -Destination $archive
+
+$archivedArtifact = Join-Path $archive ([IO.Path]::GetFileName($artifactPath))
+$archivedBytes = (Get-Item -LiteralPath $archivedArtifact).Length
+$archivedSha256 = "sha256:" + (
+  Get-FileHash -Algorithm SHA256 -LiteralPath $archivedArtifact
+).Hash.ToLowerInvariant()
+if ($archivedBytes -ne $outputInventory[0].bytes -or
+    $archivedSha256 -ne $outputInventory[0].sha256) {
+  throw "archived artifact does not match validated temporary artifact"
+}
+```
+
+Historical receipts in this directory were manually assembled from captured
+process metadata and validated against this type-specific contract. Only the
 snapshot/proposal files themselves are independently replayable engine output.

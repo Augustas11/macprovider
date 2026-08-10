@@ -582,15 +582,15 @@ def cheapest_endpoint_pricing(document: Mapping[str, Any], model_id: str) -> dic
         status = endpoint.get("status")
         if isinstance(status, bool) or not isinstance(status, int):
             raise SchemaError(f"endpoints response for {model_id}: endpoints[{index}].status must be an integer")
-        if status != 0:
-            continue
         provider = endpoint.get("provider_name")
         pricing = endpoint.get("pricing")
         if not isinstance(provider, str) or not provider.strip() or not isinstance(pricing, dict):
-            raise SchemaError(f"endpoints response for {model_id}: active endpoint[{index}] missing provider/pricing")
+            raise SchemaError(f"endpoints response for {model_id}: endpoint[{index}] missing provider/pricing")
         require_allowed_keys(pricing, ENDPOINT_PRICING_KEYS, f"endpoints response for {model_id}: endpoints[{index}].pricing")
         prompt = parse_decimal(pricing.get("prompt"), f"endpoints response for {model_id}: prompt")
         completion = parse_decimal(pricing.get("completion"), f"endpoints response for {model_id}: completion")
+        if status != 0:
+            continue
         priced.append((completion, prompt, provider))
     if not priced:
         return None
