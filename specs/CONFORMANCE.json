@@ -1403,7 +1403,7 @@
     {
       "requirement_id": "SPEC-010-R006",
       "spec_id": "SPEC-010",
-      "state": "pending",
+      "state": "conformant",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
@@ -1416,13 +1416,21 @@
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/957",
-        "rationale": "Issue #609 fails closed when a warm-swap target lacks an exact signed row. The core provider-prebeta journey under #895 proved startup model readiness only. Issue #957 owns a separately approved production-equivalent warm-swap run proving atomic target row, digest, algorithm, and model publication; operator-pushed production enablement remains outside this slice unless explicitly authorized."
-      }
+      "evidence": [
+        {
+          "artifact": "commit:4f4ef46d62051889dc2cd1cb3bc5e44bec4f4e71",
+          "source": null,
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        },
+        {
+          "artifact": "sha256:dff0d65ef3bfa481b05d289b05af9215a442753ea1638f03996205db81cb4f55",
+          "source": "journeys/evidence/provider-prebeta-admission-air5-llama-warmswap-spec010-r006-20260810T111538Z.spec-010-r006.journey-result.signed.json",
+          "captured_at": "2026-08-10",
+          "expires_at": "2026-11-10"
+        }
+      ],
+      "gap": null
     },
     {
       "requirement_id": "SPEC-018-R001",
