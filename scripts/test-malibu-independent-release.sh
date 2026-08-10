@@ -3,6 +3,8 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workflow="$root/.github/workflows/malibu-release.yml"
+work="$(mktemp -d "${TMPDIR:-/tmp}/malibu-independent-release.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
 
 python3 - "$workflow" <<'PY'
 import pathlib
@@ -115,12 +117,11 @@ if '"cli_version": "1.8.40"' in text:
     raise SystemExit("candidate publication must validate the dispatched CLI version")
 if text.count("scripts/validate-malibu-release-cli-inputs.sh") != 2:
     raise SystemExit("candidate and publication paths must both validate exact CLI inputs")
-for policy in (
-    "--allow-previous-stable=1.8.90",
-    "--staged-candidate=1.8.92",
-):
-    if text.count(policy) != 2:
-        raise SystemExit(f"candidate and publication paths must bind staged coordinator policy: {policy}")
+if text.count("scripts/release-staged-version-policy.sh") != 2:
+    raise SystemExit("candidate and publication paths must derive staged coordinator policy")
+for stale_literal in ("--allow-previous-stable=1.", "--staged-candidate=1."):
+    if stale_literal in text:
+        raise SystemExit(f"independent Malibu release workflow hardcodes stale policy literal: {stale_literal}")
 if "Malibu/CLI marketing-version equality is required" in text:
     raise SystemExit("Malibu release workflow must not couple app and CLI marketing versions")
 
@@ -135,8 +136,11 @@ valid_cli_version="$(
     "$root/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
 )"
 valid_cli_tag="v$valid_cli_version"
-staged_coordinator_policy="--allow-previous-stable=1.8.90"
-staged_candidate_policy="--staged-candidate=1.8.92"
+policy_file="$work/release-policy.env"
+bash "$root/scripts/release-staged-version-policy.sh" "$valid_cli_tag" > "$policy_file"
+source "$policy_file"
+staged_coordinator_policy="--allow-previous-stable=$MACPROVIDER_RELEASE_PREVIOUS_STABLE_VERSION"
+staged_candidate_policy="--staged-candidate=$MACPROVIDER_RELEASE_CANDIDATE_VERSION"
 
 "$validator" "$valid_cli_tag" "$valid_cli_version" "$valid_sha" "$valid_archive_sha" \
   "$staged_coordinator_policy" "$staged_candidate_policy" >/dev/null
