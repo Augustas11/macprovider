@@ -22,7 +22,9 @@ spec.loader.exec_module(module)
 candidate_path = pathlib.Path(sys.argv[2])
 candidate = module.catalog_release.validate_candidate(candidate_path.read_bytes(), require_provenance=True)
 catalog_sha = module.catalog_release.sha256(candidate_path.read_bytes())
-generated_at = "2026-07-30T12:00:00Z"
+evidence_generated_at = "2026-07-30T11:55:00Z"
+benchmark_generated_at = "2026-07-30T11:56:00Z"
+matrix_generated_at = "2026-07-30T12:00:00Z"
 
 for policy_field in ("draft_candidates", "workload_profiles"):
     policy_probe = copy.deepcopy(next(iter(candidate["rows"].values())))
@@ -43,7 +45,7 @@ for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 64, "S"), ("
         benchmarks.append({
             "model_key": model_key,
             "model_id": row["model_id"],
-            "sustained_tps": 20.0 + index,
+            "sustained_tps": 20 + index,
             "ttft_ms": 1000 + index,
             "model_artifact_path": f"/tmp/macprovider-model-{index}",
             "swap_detected": False,
@@ -51,20 +53,22 @@ for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 64, "S"), ("
             "artifact_sha256": row["model_sha256"],
             "candidate_catalog_sha256": catalog_sha,
             "candidate_row_identity": module.row_identity(model_key, row, candidate["policy_version"]),
-            "generated_at": generated_at,
+            "generated_at": benchmark_generated_at,
             "binary_version": "1.9.0",
             "hardware_identity_hash": hardware_hash,
         })
-    providers.append({
+    provider = {
         "provider_id": provider_id,
         "verification": {
             "status": "verified",
             "decision_reason": module.VERIFIED_DECISION_REASON,
+            "job_id": index + 100,
+            "processed_at": benchmark_generated_at,
         },
         "evidence": {
             "schema_version": "hardware_evidence.autotune.v2",
             "provider_id": provider_id,
-            "generated_at": generated_at,
+            "generated_at": evidence_generated_at,
             "probe_protocol": "spec-023-harmony-stream.v2",
             "hardware": {
                 "chip": chip,
@@ -80,12 +84,14 @@ for index, (chip, memory_gb, tier) in enumerate((("Apple M5 Ultra", 64, "S"), ("
             "recommended_model": "test-model",
             "benchmarks": benchmarks,
         },
-    })
+    }
+    provider["verification"]["evidence_sha256"] = module.evidence_sha256(provider["evidence"], f"provider-{index + 1}.evidence")
+    providers.append(provider)
 
 matrix = {
     "schema_version": module.MATRIX_SCHEMA,
     "source": "hardware_verifier_export",
-    "generated_at": generated_at,
+    "generated_at": matrix_generated_at,
     "candidate_catalog_sha256": catalog_sha,
     "providers": providers,
 }
@@ -107,17 +113,22 @@ assert report["provider_count"] == 3, report
 assert report["hardware_class_count"] == 2, report
 assert report["candidate_signature_verified"] is True, report
 assert report["matrix_sha256"], report
-assert report["matrix_authentication"] == "not_performed_export_contract_only", report
+assert report["matrix_authentication"] == "hardware_verifier_job_bindings_v1", report
 assert all(row["ready_for_matrix_review"] for row in report["rows"].values()), report
 PY
 
-python3 - "$TMP/complete.json" "$TMP/incomplete.json" <<'PY'
+python3 - "$TMP/complete.json" "$TMP/incomplete.json" "$AUDIT" <<'PY'
+import importlib.util
 import json
 import pathlib
 import sys
 
+spec = importlib.util.spec_from_file_location("gate_audit", sys.argv[3])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())
 matrix["providers"][0]["evidence"]["benchmarks"] = matrix["providers"][0]["evidence"]["benchmarks"][:-1]
+matrix["providers"][0]["verification"]["evidence_sha256"] = module.evidence_sha256(matrix["providers"][0]["evidence"], "incomplete.evidence")
 pathlib.Path(sys.argv[2]).write_text(json.dumps(matrix, separators=(",", ":")))
 PY
 if python3 "$AUDIT" --candidate "$CANDIDATE" --matrix "$TMP/incomplete.json" \
@@ -135,17 +146,22 @@ assert report["ready_for_matrix_review"] is False, report
 assert any("qwen3-coder-30b-a3b-instruct" in blocker for blocker in report["blockers"]), report
 PY
 
-python3 - "$TMP/complete.json" "$TMP/ineligible.json" <<'PY'
+python3 - "$TMP/complete.json" "$TMP/ineligible.json" "$AUDIT" <<'PY'
 import copy
+import importlib.util
 import json
 import pathlib
 import sys
 
+spec = importlib.util.spec_from_file_location("gate_audit", sys.argv[3])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())
 ineligible = copy.deepcopy(matrix)
 ineligible["providers"][0]["evidence"]["hardware"]["chip"] = "Apple M5"
 ineligible["providers"][0]["evidence"]["hardware"]["memory_gb"] = 32
 ineligible["providers"][0]["evidence"]["hardware"]["bandwidth_tier"] = "C"
+ineligible["providers"][0]["verification"]["evidence_sha256"] = module.evidence_sha256(ineligible["providers"][0]["evidence"], "ineligible.evidence")
 pathlib.Path(sys.argv[2]).write_text(json.dumps(ineligible, separators=(",", ":")))
 PY
 if python3 "$AUDIT" --candidate "$CANDIDATE" --matrix "$TMP/ineligible.json" \
@@ -164,12 +180,16 @@ assert any("qwen2.5-coder-32b-instruct:provider_quorum:2/3" in blocker for block
 assert any("qwen2.5-coder-32b-instruct:hardware_ineligible_samples:1" in warning for warning in report["warnings"]), report
 PY
 
-python3 - "$TMP/complete.json" "$TMP/bad-binding.json" "$TMP/untrusted.json" "$TMP/zero-ttft.json" "$TMP/future-benchmark.json" "$TMP/missing-path.json" "$TMP/relative-path.json" "$TMP/equivalent-chips.json" "$TMP/inflated-tier.json" <<'PY'
+python3 - "$TMP/complete.json" "$TMP/bad-binding.json" "$TMP/untrusted.json" "$TMP/zero-ttft.json" "$TMP/future-benchmark.json" "$TMP/missing-path.json" "$TMP/relative-path.json" "$TMP/equivalent-chips.json" "$TMP/inflated-tier.json" "$TMP/partial-verification-binding.json" "$TMP/tampered-evidence.json" "$AUDIT" <<'PY'
 import copy
+import importlib.util
 import json
 import pathlib
 import sys
 
+spec = importlib.util.spec_from_file_location("gate_audit", sys.argv[12])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
 matrix = json.loads(pathlib.Path(sys.argv[1]).read_text())
 bad_binding = copy.deepcopy(matrix)
 bad_binding["providers"][0]["evidence"]["benchmarks"][0]["artifact_sha256"] = "0" * 64
@@ -194,12 +214,20 @@ equivalent_chips["providers"][0]["evidence"]["hardware"]["chip"] = "  APPLE   M5
 equivalent_chips["providers"][0]["evidence"]["hardware"]["bandwidth_tier"] = "A"
 equivalent_chips["providers"][1]["evidence"]["hardware"]["chip"] = "m5 max"
 equivalent_chips["providers"][2]["evidence"]["hardware"]["chip"] = "Apple M5 Max"
+for index, provider in enumerate(equivalent_chips["providers"]):
+    provider["verification"]["evidence_sha256"] = module.evidence_sha256(provider["evidence"], f"equivalent.provider[{index}].evidence")
 pathlib.Path(sys.argv[8]).write_text(json.dumps(equivalent_chips, separators=(",", ":")))
 inflated_tier = copy.deepcopy(matrix)
 inflated_tier["providers"][2]["evidence"]["hardware"]["bandwidth_tier"] = "S"
 pathlib.Path(sys.argv[9]).write_text(json.dumps(inflated_tier, separators=(",", ":")))
+partial_verification_binding = copy.deepcopy(matrix)
+del partial_verification_binding["providers"][0]["verification"]["evidence_sha256"]
+pathlib.Path(sys.argv[10]).write_text(json.dumps(partial_verification_binding, separators=(",", ":")))
+tampered_evidence = copy.deepcopy(matrix)
+tampered_evidence["providers"][0]["evidence"]["recommended_model"] = "different-model"
+pathlib.Path(sys.argv[11]).write_text(json.dumps(tampered_evidence, separators=(",", ":")))
 PY
-for bad_matrix in "$TMP/bad-binding.json" "$TMP/untrusted.json" "$TMP/zero-ttft.json" "$TMP/future-benchmark.json" "$TMP/missing-path.json" "$TMP/relative-path.json" "$TMP/inflated-tier.json"; do
+for bad_matrix in "$TMP/bad-binding.json" "$TMP/untrusted.json" "$TMP/zero-ttft.json" "$TMP/future-benchmark.json" "$TMP/missing-path.json" "$TMP/relative-path.json" "$TMP/inflated-tier.json" "$TMP/partial-verification-binding.json" "$TMP/tampered-evidence.json"; do
   if python3 "$AUDIT" --candidate "$CANDIDATE" --matrix "$bad_matrix" \
     --min-generated-at "$MIN_GENERATED_AT" --as-of "$AS_OF" >/dev/null 2>&1; then
     echo "FAIL: invalid gate matrix was accepted: $bad_matrix" >&2

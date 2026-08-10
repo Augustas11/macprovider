@@ -10,6 +10,8 @@
 #                                      — SQLite→Postgres stats billing mirror
 #   dist/stats-hardware-verifier-linux-amd64
 #                                      — autotune hardware evidence verifier
+#   dist/stats-autotune-gate-matrix-linux-amd64
+#                                      — SPEC-023 verified-provider matrix export
 #
 # Production builds must run from exactly one numeric release tag (vX.Y.Z).
 # Set ALLOW_NON_RELEASE_COORDINATOR_BUILD=1 only for local/dev artifacts; that
@@ -159,3 +161,7 @@ echo "built $BILLING_MIRROR_OUT @ ${VERSION}"
 HARDWARE_VERIFIER_OUT="$SOURCE_DIR/dist/stats-hardware-verifier-linux-amd64"
 (cd "$BUILD_WORK_DIR" && GOENV=off GOFLAGS='' GOWORK=off GOOS=linux GOARCH=amd64 go build -o "$HARDWARE_VERIFIER_OUT" ./cmd/stats-hardware-verifier)
 echo "built $HARDWARE_VERIFIER_OUT @ ${VERSION}"
+
+AUTOTUNE_GATE_MATRIX_OUT="$SOURCE_DIR/dist/stats-autotune-gate-matrix-linux-amd64"
+(cd "$BUILD_WORK_DIR" && GOENV=off GOFLAGS='' GOWORK=off GOOS=linux GOARCH=amd64 go build -o "$AUTOTUNE_GATE_MATRIX_OUT" ./cmd/stats-autotune-gate-matrix)
+echo "built $AUTOTUNE_GATE_MATRIX_OUT @ ${VERSION}"

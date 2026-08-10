@@ -23,6 +23,7 @@ import pathlib
 import re
 import stat
 import sys
+import unicodedata
 from typing import Any
 
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -89,6 +90,50 @@ def non_empty_string(value: object, label: str) -> str:
 
 def is_sha256(value: object) -> bool:
     return isinstance(value, str) and catalog_release.HEX64.fullmatch(value) is not None
+
+
+def _utf16_sort_key(value: str) -> bytes:
+    return value.encode("utf-16-be", "surrogatepass")
+
+
+def _jcs_number(value: int | float, label: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        fail(f"{label}: expected JSON number")
+    if isinstance(value, int):
+        return str(value)
+    if not math.isfinite(value):
+        fail(f"{label}: non-finite JSON number")
+    if value == 0:
+        return "0"
+    if value.is_integer() and -(2**63) <= value <= 2**63 - 1:
+        return str(int(value))
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def jcs_bytes(value: object, label: str = "value") -> bytes:
+    if value is None:
+        return b"null"
+    if isinstance(value, str):
+        return json.dumps(unicodedata.normalize("NFC", value), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if isinstance(value, bool):
+        return b"true" if value else b"false"
+    if isinstance(value, (int, float)):
+        return _jcs_number(value, label).encode("utf-8")
+    if isinstance(value, list):
+        return b"[" + b",".join(jcs_bytes(item, f"{label}[]") for item in value) + b"]"
+    if isinstance(value, dict):
+        parts: list[bytes] = []
+        for key in sorted(value, key=_utf16_sort_key):
+            if not isinstance(key, str):
+                fail(f"{label}: object key is not a string")
+            key_bytes = json.dumps(unicodedata.normalize("NFC", key), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            parts.append(key_bytes + b":" + jcs_bytes(value[key], f"{label}.{key}"))
+        return b"{" + b",".join(parts) + b"}"
+    fail(f"{label}: unsupported JSON value type {type(value).__name__}")
+
+
+def evidence_sha256(value: dict[str, Any], label: str) -> str:
+    return hashlib.sha256(jcs_bytes(value, label)).hexdigest()
 
 
 def row_identity(row_key: str, row: dict[str, Any], policy_version: str) -> str:
@@ -284,7 +329,7 @@ def validate_benchmark(
     if generated_at < min_generated_at:
         fail(f"{label}: benchmark predates the post-#745 cutoff")
     if generated_at > max_generated_at:
-        fail(f"{label}: benchmark is newer than its enclosing evidence export")
+        fail(f"{label}: benchmark is newer than the matrix export")
     return model_key, float(benchmark["sustained_tps"]), int(benchmark["ttft_ms"])
 
 
@@ -354,12 +399,26 @@ def audit_matrix(
         verification = provider["verification"]
         if not isinstance(verification, dict):
             fail(f"{label}.verification: expected object")
-        exact_keys(verification, {"status", "decision_reason"}, {"status", "decision_reason"}, f"{label}.verification")
+        exact_keys(
+            verification,
+            {"status", "decision_reason", "job_id", "evidence_sha256", "processed_at"},
+            {"status", "decision_reason", "job_id", "evidence_sha256", "processed_at"},
+            f"{label}.verification",
+        )
         if verification["status"] != "verified" or verification["decision_reason"] != VERIFIED_DECISION_REASON:
             fail(f"{label}.verification: provider is not trusted hardware evidence")
+        if not isinstance(verification["job_id"], int) or isinstance(verification["job_id"], bool) or verification["job_id"] <= 0:
+            fail(f"{label}.verification.job_id: expected a positive integer")
+        if not is_sha256(verification["evidence_sha256"]):
+            fail(f"{label}.verification.evidence_sha256: expected lowercase SHA-256")
+        processed_at = parse_time(verification["processed_at"], f"{label}.verification.processed_at")
+        if processed_at > matrix_generated_at:
+            fail(f"{label}.verification.processed_at: verifier decision is newer than the matrix export")
         evidence = provider["evidence"]
         if not isinstance(evidence, dict):
             fail(f"{label}.evidence: expected object")
+        if evidence_sha256(evidence, f"{label}.evidence") != verification["evidence_sha256"]:
+            fail(f"{label}.verification.evidence_sha256: does not match canonical evidence payload")
         exact_keys(evidence, {"schema_version", "provider_id", "generated_at", "hardware", "candidate_catalog_sha256", "recommended_model", "probe_protocol", "benchmarks"}, {"schema_version", "provider_id", "generated_at", "hardware", "candidate_catalog_sha256", "recommended_model", "probe_protocol", "benchmarks"}, f"{label}.evidence")
         if evidence["schema_version"] != "hardware_evidence.autotune.v2" or evidence["probe_protocol"] != "spec-023-harmony-stream.v2" or evidence["provider_id"] != provider_id:
             fail(f"{label}.evidence: unsupported schema or provider binding")
@@ -390,7 +449,7 @@ def audit_matrix(
                 binary_version=binary_version,
                 hardware_identity_hash=hardware_identity_hash,
                 min_generated_at=min_generated_at,
-                max_generated_at=evidence_generated_at,
+                max_generated_at=matrix_generated_at,
                 candidate=candidate,
             )
             if model_key in seen_models:
@@ -450,7 +509,7 @@ def audit_matrix(
         "candidate_catalog_version": candidate["version"],
         "matrix_sha256": hashlib.sha256(matrix_bytes).hexdigest(),
         "matrix_generated_at": matrix["generated_at"],
-        "matrix_authentication": "not_performed_export_contract_only",
+        "matrix_authentication": "hardware_verifier_job_bindings_v1",
         "as_of": as_of.isoformat().replace("+00:00", "Z"),
         "min_generated_at": min_generated_at.isoformat().replace("+00:00", "Z"),
         "required_providers": MIN_PROVIDERS,

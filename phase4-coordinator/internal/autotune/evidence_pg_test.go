@@ -134,8 +134,10 @@ func openAutotuneEvidenceTestDB(t *testing.T) *sql.DB {
             chip_normalized TEXT NOT NULL,
             unified_memory_gb INTEGER NOT NULL,
             generated_at TIMESTAMP NOT NULL,
+            processed_at TIMESTAMP NULL,
             decision_reason TEXT NOT NULL,
-            evidence BLOB NOT NULL
+            evidence BLOB NOT NULL,
+            evidence_sha256 TEXT NOT NULL DEFAULT '` + strings.Repeat("f", 64) + `'
         )`,
 		`CREATE TABLE hardware_verification_trust (
             provider_id TEXT NOT NULL,

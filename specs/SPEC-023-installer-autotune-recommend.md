@@ -1,11 +1,16 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.9.3
+version: v0.9.4
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-08-02
 
 ## Change log
+
+- **v0.9.4 (2026-08-10)** — Verified-provider matrix export and promotion formula (#744 first PR).
+  1. **Exporter-bound matrix shape.** §12.5 defines the `hardware_verifier_export` matrix produced from authenticated `hardware_verification_jobs` rows only after the current verified profile and live trust tuple match. Each provider entry binds the verifier `job_id`, `evidence_sha256`, `processed_at`, and raw `hardware_evidence.autotune.v2` payload consumed by `scripts/audit-autotune-gate-matrix.py`.
+  2. **Promotion formula specified, not exercised.** The deterministic threshold formula is now normative: `min_sustained_tps = floor(nearest-rank-p25(sustained_tps) * 0.90)` and `max_4k_ttft_ms = ceil_to_100ms(nearest-rank-p95(ttft_ms) * 1.25)` over eligible verified samples only. The release still MUST NOT change catalog gates until a passed post-#745 matrix, observed-serving cross-check, evidence record, signed catalog release, and release verification exist.
+  3. **Evidence-record bindings.** A promotion evidence record must bind candidate catalog SHA-256, matrix SHA-256, row identity, sample verifier job IDs/evidence hashes/benchmark IDs, sample hardware classes, measured TPS/TTFT values, formula constants, and the promoted output thresholds. This closes the prior "formula deferred" gap without publishing `verified_provider_matrix` rows in this PR.
 
 - **v0.9.3 (2026-08-02)** — oMLX activation-gate hardening (#687, r5 convergence).
   1. **Provenance-erasure laundering closed.** The §12.2 activation gate now bans deriving a catalog row from oMLX data in ANY form before activation — not only the `omlx_seeded` schema but any value laundered into a `policy` / `measured_single_host` / other provenance label with `gate_seed` stripped. Authoring-process prohibition (AC-OMLX-16), plus an immutable provenance-lineage Stage-2 prerequisite §12.2(b)(v) so post-activation detection is possible.
@@ -350,7 +355,7 @@ Field rules:
 - Every downloadable row (`candidate`, `listed`, or `recommendable`) MUST include both `model_revision` and `model_sha256`. If either is absent, the row is ineligible before download or benchmark, including donor mode.
 - `min_ram_gb` and `min_bandwidth_tier` are authoritative for §5. `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets only; they do not veto paid or donor selection.
 - `bench_gate.provenance.source` is one of `measured_single_host`, `runtime_validated_only`, `policy`, `no_throughput_bench`, `never_benched`, `legacy_unverified`, `omlx_seeded`, or `verified_provider_matrix`. Optional `hardware`, `measured_at`, and `notes` explain where the advisory gate came from. Provenance is support/operator metadata and does not by itself admit or reject cached benchmarks. Newly generated catalog releases, direct CLI catalog decoding, and current coordinator feed loading MUST fail closed when `bench_gate.provenance` is absent. During A4 feed activation only, implementations MAY accept the exact `published-2026-07-10-catalog-recovery-v1` candidate catalog with SHA-256 `776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda` as a signed live fetch or `previous-target` rollback input; every other missing-provenance candidate catalog remains an integrity failure.
-- `verified_provider_matrix` is the canonical provenance value denoting a gate recomputed solely from `N` verified provider autotune measurements on eligible hardware (§12 promotion). It is the required value a row promoted away from `omlx_seeded` MUST carry (§5, §12). Unlike `measured_single_host` (one host) or `runtime_validated_only` (no trusted throughput gate), it denotes the verified-provider matrix that is the sole promotion/admission authority for a formerly provisional row. It is RESERVED and inert in Stage 1: any newly created or modified row carrying `verified_provider_matrix` MUST be rejected at catalog authoring, lint, and signing until the Stage-2 evidence binding ships (§12.4, AC-OMLX-12).
+- `verified_provider_matrix` is the canonical provenance value denoting a gate recomputed solely from `N` verified provider autotune measurements on eligible hardware (§12 promotion). It is the required value a row promoted away from `omlx_seeded` MUST carry (§5, §12). Unlike `measured_single_host` (one host) or `runtime_validated_only` (no trusted throughput gate), it denotes the verified-provider matrix that is the sole promotion/admission authority for a formerly provisional row. It is RESERVED and inert in Stage 1: any newly created or modified row carrying `verified_provider_matrix` MUST be rejected at catalog authoring, lint, and signing until the complete §12.5 matrix/evidence-record/release-verification path passes (§12.4, AC-OMLX-12).
 - `bench_gate.gate_seed` is REQUIRED when `bench_gate.provenance.source == "omlx_seeded"` and MUST be absent for every other provenance source. The requirement is symmetric: a row with `bench_gate.provenance.source == "omlx_seeded"` and a missing, malformed, or incomplete `gate_seed` is a catalog-integrity failure at the SAME boundaries as the forbidden-seed-on-non-oMLX-row case — it MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode (and is likewise ineligible before download or benchmark). A row whose `bench_gate.provenance.source != "omlx_seeded"` that nonetheless carries a `bench_gate.gate_seed` is equally a catalog-integrity failure that MUST fail closed at catalog authoring, lint, and signing, and at CLI catalog decode (it MUST NOT be treated as a benign extra field — carrying seed identity on a non-provisional row is exactly the provenance-laundering this rule closes). `gate_seed` records the oMLX snapshot and derivation inputs used to produce the provisional advisory `min_sustained_tps`; it is not runtime evidence and does not admit or promote a provider.
 - `bench_gate.gate_seed.target_cell` is the canonical normalized cell identity the seed is derived from and MUST carry `chip_normalized`, `ram_gb`, `model_key`, `quant`, and `context`. It binds the seed to exactly ONE normalized chip/RAM/model/quant/context cell; `board_p25_tg` and `observations_used_n` are the p25 and observation count OF THAT ONE cell. `target_cell.model_key` MUST equal the enclosing catalog row's normalized `model_key`, and `target_cell` model/quant/context MUST be consistent with the row's model identity; a seed whose `target_cell` targets a different model than its row is a catalog-integrity failure (§12.4, AC-OMLX-14). `bench_gate.gate_seed.omlx_snapshot_sha256` is a lowercase 64-hex digest of the immutable oMLX snapshot / observation manifest the observations were drawn from, so a validator can pin the observation set. Observations spanning more than one normalized cell (a mix of chips, RAM classes, models, quants, or context lengths) MUST NOT be aggregated into one seed; a `gate_seed` whose observations are not all within its declared `target_cell` is a catalog-integrity failure.
 - `bench_gate.gate_seed.observations_used_n` is a positive integer (`>= 1`; and it MUST be `>= K`, the §12 oMLX seed threshold). It is the minimum post-dedup/outlier oMLX **observation** count within the single `target_cell` above (not a count of distinct cells). `board_release_tag` MUST identify a stable oMLX release, not a `.dev` prerelease. `board_p25_tg` MUST be the filtered 4k-token, matching-quantization p25 generation (decode) throughput of that cell after duplicate and outlier handling. `engine_delta_applied` MUST record the runtime delta used by the §12 seed formula and MUST be the exact `engine_delta` value bound into that formula. `mtp_discounted` MUST be `true` when MTP or speculative-decode board rows were discounted; accelerated rows that cannot be excluded or discounted MUST NOT seed a gate.
@@ -617,9 +622,22 @@ A row is eligible only if every gate passes:
 
 Rows with `bench_gate.provenance.source == "omlx_seeded"` are provisional rows. They MAY appear only with `runtime_status` equal to `candidate` or `listed`; they MUST NOT appear as `recommendable` and MUST NOT become paid defaults. They MAY still be selected in local-only, unpaid donor mode (§7.2, §8), which is not a paid-default and does not admit a network-connected paid provider. The oMLX seed MUST NOT be sole or partial evidence for promotion.
 
-Promotion from `listed` to `recommendable` depends solely on at least `N` verified provider autotune measurements on eligible hardware as defined in §12; the oMLX seed is neither a pass/fail criterion for promotion nor an input to the promoted gate. On promotion, the advisory gate is recomputed solely from those verified provider measurements, `bench_gate.provenance.source` is set to `verified_provider_matrix` (§3.2), and `bench_gate.gate_seed` is removed.
+Promotion from `listed` to `recommendable` depends solely on a passed §12.5
+`hardware_verifier_export` matrix: at least `N = 3` distinct verified providers
+across at least two eligible hardware classes for that row. The oMLX seed is
+neither a pass/fail criterion nor an input to the promoted gate. On promotion,
+the advisory gate is recomputed by the §12.5 formula, `bench_gate.provenance.source`
+is set to `verified_provider_matrix` (§3.2), and `bench_gate.gate_seed` is
+removed.
 
-**Promotion is DEFINED but PROHIBITED in Stage 1 (fail-closed deferral).** An `omlx_seeded` (or formerly-`omlx_seeded`) row MUST NOT be promoted to `recommendable` until the Stage-2 verified-evidence-record mechanism — signed immutable per-measurement references plus deterministic aggregation of the `N` verified provider autotune measurements — exists. The promotion transition and its target provenance (`verified_provider_matrix`) are specified here so the contract is complete, but the transition is inert and MUST NOT be exercised in Stage 1: with no verifiable evidence-record mechanism, a promotion cannot be proven backed by the `N` measurements, so it fails closed (stays `listed`). The evidence-record mechanism is deferred to a later stage.
+**Promotion remains fail-closed until the whole Stage-2 release path exists.**
+This version defines the evidence-record and deterministic aggregation mechanism,
+but a signed/served catalog MUST NOT publish a `verified_provider_matrix` row or
+changed gate until a post-#745 matrix passes audit, the observed-serving
+cross-check passes, a row-level promotion evidence record is generated, the
+signed catalog release binds that record, and catalog release verification
+passes. Until those artifacts exist for the row, promotion fails closed (the row
+stays `listed` or retains its current release status and thresholds).
 
 Note: `bench_gate.min_sustained_tps` and `bench_gate.max_4k_ttft_ms` are advisory drift targets, never a coordinator admission veto. SPEC-032's autotune hello-gate no longer hard-gates admission on the advisory `bench_gate` (SPEC-032 FR-HG3/FR-HG4); any hard performance admission gate is a separate field backed by verified-provider evidence.
 
@@ -973,7 +991,7 @@ AC-OMLX-2: A row with `bench_gate.provenance.source == "omlx_seeded"` and a miss
 
 AC-OMLX-3: `autotune --recommend` never selects an `omlx_seeded` row as the default recommendation.
 
-AC-OMLX-4: In Stage 1, promotion of an `omlx_seeded` (or formerly-`omlx_seeded`) row to `recommendable` is PROHIBITED and fails closed (the row stays `listed`) because the Stage-2 verified-evidence-record mechanism (signed immutable per-measurement references + deterministic aggregation) does not yet exist, so no promotion can be proven backed by the `N = 3` verified measurements. The transition is DEFINED but inert. When that mechanism exists, promotion is refused unless at least `N = 3` verified provider autotune measurements on eligible hardware exist and promotion depends solely on those measurements: the oMLX seed is NEVER the pass/fail criterion and is NEVER an input to the promoted gate — the promoted `min_sustained_tps` is recomputed solely from the `N` verified measurements, the promoted row has `bench_gate.provenance.source == "verified_provider_matrix"`, and it carries no `gate_seed`. A promotion computed by testing verified runs against the provisional oMLX gate, that reuses the oMLX seed value in the promoted gate, or that is performed before the Stage-2 evidence-record mechanism exists, is rejected.
+AC-OMLX-4: In Stage 1, promotion of an `omlx_seeded` (or formerly-`omlx_seeded`) row to `recommendable` is PROHIBITED and fails closed (the row stays `listed`) unless the complete §12.5 Stage-2 release path exists for that row. The transition is DEFINED but inert until a post-#745 `hardware_verifier_export` matrix passes with at least `N = 3` distinct verified providers across at least two eligible hardware classes, the observed-serving cross-check passes, the signed row-level promotion evidence record binds the verifier job/evidence IDs, and catalog release verification recomputes the promoted gates exactly. Promotion depends solely on those verified measurements: the oMLX seed is NEVER the pass/fail criterion and is NEVER an input to the promoted gate. The promoted `min_sustained_tps` and `max_4k_ttft_ms` are recomputed solely by §12.5, the promoted row has `bench_gate.provenance.source == "verified_provider_matrix"`, and it carries no `gate_seed`. A promotion computed by testing verified runs against the provisional oMLX gate, that reuses the oMLX seed value in the promoted gate, or that is performed before the complete §12.5 path exists, is rejected.
 
 AC-OMLX-5: Seeded `min_sustained_tps` equals `max(8, floor(board_p25_tg * engine_delta_applied * 0.90))` computed from the row's own `gate_seed` values; a row whose stored `min_sustained_tps` does not equal that computed value is rejected as a catalog-integrity failure. (This AC is NOT satisfied by always emitting `8`: a well-formed seed whose computed value exceeds 8 MUST store that higher value, and a row that stores `8` when the formula yields a higher number is rejected.) A seed derived from a `.dev` oMLX board release or from undiscounted MTP/speculative-decode observations is rejected.
 
@@ -995,7 +1013,7 @@ AC-OMLX-10 (semantic-failure fail-closed): An `omlx_seeded` row with a `.dev` `b
 
 AC-OMLX-11 (Stage-1 activation-gate safety boundary): Before the §12.2 activation gate is satisfied, a signed or served candidate catalog contains NO `omlx_seeded` row; a release process that publishes or serves an `omlx_seeded` row (or any `gate_seed` / `verified_provider_matrix` value) into a signed/served catalog before all activation-gate conditions (forward-compat across coordinator Go validators and CLI Swift decoders, plus the shipped Stage-2 enforcement (i)-(v)) are met is a release-process violation and is rejected.
 
-AC-OMLX-12 (`verified_provider_matrix` reserved): Any newly created or modified catalog row with `bench_gate.provenance.source == "verified_provider_matrix"` is rejected at catalog authoring, lint, and signing. In Stage 1 no such row may exist; the value is inert until the Stage-2 verified-evidence-record mechanism ships.
+AC-OMLX-12 (`verified_provider_matrix` reserved): Any newly created or modified catalog row with `bench_gate.provenance.source == "verified_provider_matrix"` is rejected at catalog authoring, lint, and signing unless that same signed release binds a passed §12.5 row-level promotion evidence record and catalog release verification recomputes the promoted gates exactly. In Stage 1 no such row may exist without the complete §12.5 path; the provenance value is otherwise inert.
 
 AC-OMLX-13 (field-laundering forbidden): An `omlx_seeded` row (or its `gate_seed`) that creates or changes any field other than `bench_gate.min_sustained_tps` and its `gate_seed` metadata — in particular `min_ram_gb`, `min_bandwidth_tier`, `runtime_status`, `model_key` / `model_revision` / `model_sha256`, demand-rank, or rate-card/pricing/admission/routing fields — is a catalog-integrity failure. Specifically, an oMLX-derived or oMLX-modified `min_ram_gb` (which SPEC-032 would use for `autotune_model_cap_exceeded`) is rejected.
 
@@ -1072,22 +1090,20 @@ Promotion from `listed` to `recommendable` depends solely on at least `N = 3`
 verified provider autotune measurements on eligible hardware. The oMLX seed is
 NEVER the pass/fail criterion for promotion and is NEVER an input to the
 promoted gate: the promoted `min_sustained_tps` (and any `max_4k_ttft_ms`) is
-recomputed solely from those `N` verified provider measurements. On promotion,
+recomputed solely from those verified provider measurements by §12.5. On promotion,
 the operator MUST recompute the advisory gate from the verified provider
 measurements alone, set `bench_gate.provenance.source` to
 `verified_provider_matrix` (§3.2), and remove `bench_gate.gate_seed`. The oMLX
 seed is discarded at promotion.
 
-**Promotion is PROHIBITED until the Stage-2 evidence-record mechanism exists
-(fail-closed deferral).** The concrete evidence-record binding the `N` verified
-measurements — signed immutable per-measurement references plus deterministic
-aggregation of those measurements — is deferred to a later stage. Until that
-mechanism exists, a promotion cannot be verifiably proven backed by the `N`
-measurements, so promotion MUST NOT be performed: the transition and its target
-provenance (`verified_provider_matrix`) are fully specified here, but in Stage 1
-the transition is inert and any attempted promotion fails closed (the row stays
-`listed`). A row is promoted only once the Stage-2 mechanism can prove the `N`
-verified measurements back the recomputed gate.
+**Promotion is PROHIBITED until the whole Stage-2 release path exists
+(fail-closed deferral).** §12.5 now defines the concrete evidence-record binding
+and deterministic aggregation formula, but that definition alone does not
+authorize a catalog change. A promotion cannot be performed until the row has a
+passed post-#745 verifier export, observed-serving cross-check, signed
+promotion evidence record, signed catalog release with
+`bench_gate.provenance.source == "verified_provider_matrix"`, and catalog
+release verification.
 
 ### 12.1 K/N threshold justification
 
@@ -1219,18 +1235,77 @@ provider on unattested community data — exactly the invariant violation this
 prohibition forecloses (AC-OMLX-13).
 
 **`verified_provider_matrix` reserved in Stage 1.** No catalog row may carry
-`bench_gate.provenance.source == "verified_provider_matrix"` yet, because the
-Stage-2 evidence binding that justifies it does not exist. Any newly created or
-modified catalog row using that provenance value MUST be rejected at catalog
-authoring, lint, and signing (AC-OMLX-12). The value is inert until Stage-2
-evidence binding ships; it closes the provenance-laundering path at the
-schema/signing layer, not merely in prose.
+`bench_gate.provenance.source == "verified_provider_matrix"` yet unless the
+complete Stage-2 release path in §12.5 has passed for that row. Any newly
+created or modified catalog row using that provenance value without that record
+MUST be rejected at catalog authoring, lint, and signing (AC-OMLX-12). The value
+is inert until a separately reviewed catalog release binds the verified-provider
+matrix evidence; it closes the provenance-laundering path at the schema/signing
+layer, not merely in prose.
 
 **Seed↔row binding.** `bench_gate.gate_seed.target_cell.model_key` MUST equal the
 enclosing catalog row's normalized `model_key`, and the cell's model / quant /
 context MUST be consistent with the row's own model identity. A `gate_seed`
 whose `target_cell` targets a different model than the row that carries it is a
 catalog-integrity failure (AC-OMLX-14).
+
+### 12.5 Verified-provider matrix export and threshold promotion
+
+The only Stage-2 input that may promote a provisional row or refresh an advisory
+`bench_gate` is a post-#745 `hardware_verifier_export` matrix produced from the
+coordinator stats database by an authenticated verifier/operator path. The
+exporter MUST read finalized `hardware_verification_jobs` rows only when all of
+the following bindings hold:
+
+- `status == "verified"` and `decision_reason == "hardware-verifier.v2:verified_trusted_hardware"`.
+- The current `provider_hardware_profiles` row is still `verified = TRUE` and
+  matches the job's `(provider_id, chip_normalized, unified_memory_gb)` tuple.
+- A live `hardware_verification_trust` row still matches
+  `(provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb)` at
+  export `as_of`.
+- The raw evidence is `hardware_evidence.autotune.v2`,
+  `probe_protocol == "spec-023-harmony-stream.v2"`, and its
+  `candidate_catalog_sha256` matches the signed catalog being reviewed.
+- The matrix provider entry carries `verification.job_id`,
+  `verification.evidence_sha256`, and `verification.processed_at` alongside the
+  raw evidence payload.
+
+For each active row, the audit harness includes only samples whose benchmark
+model identity, artifact SHA-256, candidate-row identity, catalog SHA-256,
+binary version, and hardware identity match the row and evidence envelope; whose
+hardware fits the row using §5 RAM/tier rules; whose generated timestamp is at
+or after the canonical post-#745 cutoff and no later than the matrix export
+`generated_at`; and whose swap/thermal flags are clean.
+Hardware-ineligible samples are warnings and never count toward quorum. A row is
+eligible for promotion review only with at least three distinct provider IDs and
+at least two distinct normalized hardware classes.
+
+For a row with eligible samples `S`, sorted ascending by measured value, use
+nearest-rank percentiles with one-based rank `ceil(p * len(S))`:
+
+```text
+p25_tps = nearest_rank_percentile(S.sustained_tps, 0.25)
+p95_ttft = nearest_rank_percentile(S.ttft_ms, 0.95)
+
+promoted_min_sustained_tps = max(1, floor(p25_tps * 0.90))
+promoted_max_4k_ttft_ms = ceil_to_100ms(p95_ttft * 1.25)
+```
+
+`ceil_to_100ms(x)` rounds positive milliseconds up to the next integer multiple
+of 100. The 10% TPS haircut and 25% TTFT slack are fixed formula constants, not
+operator-tunable release knobs. The formula may lower or raise an advisory gate
+only when all evidence and release gates pass; it is never a local provider
+admission veto and never a buyer-facing TTFT ceiling.
+
+Each promoted row MUST have a row-level promotion evidence record bound into the
+same signed catalog release process. The record MUST include: row key, row
+identity, candidate catalog SHA-256, matrix SHA-256, matrix `generated_at`,
+review `as_of`, sample count, provider count, hardware-class count, every sample
+binding (`provider_id`, verifier `job_id`, `evidence_sha256`, optional
+`benchmark_id`, benchmark `generated_at`, hardware class, `sustained_tps`,
+`ttft_ms`), formula constants, `p25_tps`, `p95_ttft`, and the two promoted gate
+values. Catalog release verification MUST recompute these values exactly before
+accepting any `bench_gate.provenance.source == "verified_provider_matrix"` row.
 
 Therefore `N = 3` is adopted as a conservative verification policy rather than a value derived from the oMLX dataset. One run cannot distinguish a repeatable result from a transient outlier, while two runs provide no tie-break when they disagree. Three independent verified provider autotune measurements provide a majority-consistency check before promotion while keeping verification operationally practical.
 
