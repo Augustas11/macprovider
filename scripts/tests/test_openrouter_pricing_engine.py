@@ -420,7 +420,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         with self.assertRaises(engine.SchemaError):
             engine.validate_snapshot(duplicate_source_snapshot)
 
-    def test_proposal_contains_added_changed_dropped_unchanged_and_blocked(self):
+    def test_proposal_contains_added_changed_retained_unchanged_and_blocked(self):
         proposal_policy = policy()
         proposal_policy["models"][2]["license"]["commercial_permitted"] = False
         snapshot = self.snapshot(proposal_policy)
@@ -428,11 +428,72 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual([row["model_id"] for row in proposal["changed"]], ["openai/gpt-oss-20b"])
         self.assertEqual([row["model_id"] for row in proposal["unchanged"]], ["google-gemma-4-26b-a4b-it"])
         self.assertEqual([row["model_id"] for row in proposal["added"]], ["example/new-model"])
-        self.assertEqual({row["model_id"] for row in proposal["dropped"]}, {"qwen2.5-coder-32b-instruct"})
+        # A served row absent from the demand cohort is RETAINED, never dropped:
+        # cohort absence is not evidence to delist a model the fleet serves.
+        self.assertEqual(proposal["dropped"], [])
+        self.assertEqual({row["model_id"] for row in proposal["retained"]}, {"qwen2.5-coder-32b-instruct"})
+        retained = proposal["retained"][0]
+        self.assertEqual(retained["action"], "retained")
+        self.assertIsNone(retained["market"]["completion_per_mtok"])
+        self.assertEqual(retained["current_completion_rate"]["rate_card_completion_rate_per_mtok"], 850000)
         self.assertEqual(len(proposal["blocked"]), 47)
         nemotron = next(row for row in proposal["blocked"] if row["model_id"] == "nemotron-3-nano-30b-a3b")
         self.assertTrue(nemotron["policy_evidence"]["available"])
         self.assertEqual(proposal["changed"][0]["proposed_completion_rate"]["rate_card_completion_rate_per_mtok"], 104000)
+
+    def test_served_row_is_never_dropped_by_the_proposal(self):
+        # Regression lock for the false-drop fix: across the fixed fixture, no
+        # currently-served rate-card row may ever appear under "dropped". Drops
+        # require positive delisting evidence the engine does not derive from the
+        # OpenRouter demand cohort.
+        card = reference_rate_card()
+        served = set(card["rows"]) - {"default"}
+        proposal = engine.build_proposal(self.snapshot(), policy(), card, now=NOW)
+        self.assertEqual(proposal["dropped"], [])
+        dropped_ids = {row.get("model_id") for row in proposal["dropped"]}
+        self.assertEqual(dropped_ids & served, set())
+
+    def test_absent_served_row_routing_matrix(self):
+        # A served row absent from the cohort is retained ONLY while its policy
+        # serving/license evidence is still valid. A fatal serving/license failure
+        # routes it to blocked (surfaced for a human), never silently retained --
+        # and never dropped.
+        QWEN = "qwen2.5-coder-32b-instruct"  # the absent-from-cohort served row
+
+        def proposal_for(mutate):
+            pol = policy()
+            mutate(pol["models"][4])
+            return engine.build_proposal(self.snapshot(pol), pol, reference_rate_card(), now=NOW)
+
+        def ids(prop, bucket):
+            return {r["model_id"] for r in prop[bucket]}
+
+        valid = proposal_for(lambda m: None)
+        self.assertIn(QWEN, ids(valid, "retained"))
+        self.assertNotIn(QWEN, ids(valid, "blocked"))
+        self.assertEqual(valid["dropped"], [])
+
+        revoked_license = proposal_for(lambda m: m["license"].__setitem__("commercial_permitted", False))
+        self.assertIn(QWEN, ids(revoked_license, "blocked"))
+        self.assertNotIn(QWEN, ids(revoked_license, "retained"))
+        self.assertEqual(revoked_license["dropped"], [])
+
+        unverified_serving = proposal_for(lambda m: m["serving_path"].__setitem__("verification_status", "unverified"))
+        self.assertIn(QWEN, ids(unverified_serving, "blocked"))
+        self.assertNotIn(QWEN, ids(unverified_serving, "retained"))
+        self.assertEqual(unverified_serving["dropped"], [])
+
+    def test_proposal_schema_is_v2_with_retained_bucket(self):
+        proposal = engine.build_proposal(self.snapshot(), policy(), reference_rate_card(), now=NOW)
+        self.assertEqual(engine.PROPOSAL_SCHEMA_VERSION, 2)
+        self.assertEqual(proposal["schema_version"], 2)
+        for bucket in ("added", "changed", "dropped", "retained", "blocked", "unchanged"):
+            self.assertIn(bucket, proposal)
+            self.assertIn(bucket, proposal["summary"])
+        self.assertEqual(
+            proposal["summary"]["eligible"],
+            len(proposal["added"]) + len(proposal["changed"]) + len(proposal["unchanged"]),
+        )
 
     def test_fixed_snapshot_policy_and_rate_card_emit_the_expected_complete_proposal(self):
         first = engine.build_proposal(self.snapshot(), policy(), reference_rate_card(), now=NOW)
@@ -440,7 +501,7 @@ class OpenRouterPricingEngineTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(
             engine.sha256_prefixed(first),
-            "sha256:e271bc7da8e7697d574882ff0174cdb1407eb00ac7730ea5aced1b5a3cfc1c9d",
+            "sha256:2434950d405790c92b75ed20ad15eb9abf8eae57ada61e4554c0552a18a8d9da",
         )
 
     def test_unresolved_nemotron_license_is_blocked_when_not_a_current_row(self):

@@ -221,24 +221,39 @@ under the **NVIDIA Nemotron Open Model License** identified by the
 The card describes the model as ready for commercial use subject to those
 governing terms. This is a policy evidence record, not a replacement for legal
 review. If the policy's verification is removed or changed to non-permitted,
-the engine deterministically blocks/drops the model and records the reason.
+the engine deterministically blocks the model (never drops it) and records the
+reason.
 
 ## Proposal contract
 
-The proposal schema is version `1` and contains:
+The proposal schema is version `2` and contains:
 
 - source snapshot digest, policy version, and rate-card reference digest;
 - summary counts;
-- `added`, `changed`, `dropped`, `blocked`, and `unchanged` arrays;
+- `added`, `changed`, `dropped`, `retained`, `blocked`, and `unchanged` arrays;
 - per-row demand/market inputs (or explicit `null` values when market data is
   unavailable), eligibility reasons, policy-evidence availability and URLs,
   and a computed completion-rate proposal where eligible.
 
-`dropped` is strictly an advisory request for Component 3 review. It does not
-remove a rate-card row. Every dropped row includes its current completion rate.
+`retained` (new in schema v2) means "keep this currently-served rate-card row
+unchanged": there is no demand signal to reprice it (it is absent from the
+cohort, or observed but ineligible only on demand-rank/fleet-profile grounds)
+and no fatal serving/license failure. It carries the current completion rate and
+no proposed replacement. Component 3 takes no action on a `retained` row.
+
+`dropped` is reserved for an explicit positive delisting determination that this
+engine does not derive from demand data; it is empty in practice. A served model
+is never placed in `dropped` merely for being absent from the OpenRouter demand
+cohort (that was the schema-v1 defect this contract fixes).
+
 `blocked` records missing policy evidence, an unresolved license, failed
-eligibility, free-only market pricing, missing economics, or an existing
-rate-card row with no verified policy mapping.
+eligibility, free-only market pricing, missing economics, an existing rate-card
+row with no verified policy mapping, or an absent served row whose serving path
+or commercial license is no longer verified (a fatal failure that must be
+surfaced for review rather than retained).
+
+Schema v1 proposals (five buckets, no `retained`) are not forward-compatible
+with a v2 consumer; regenerate any archived v1 proposal evidence under v2.
 
 ## Offline verification
 
