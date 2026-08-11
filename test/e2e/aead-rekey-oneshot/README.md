@@ -14,16 +14,28 @@ The live runner is intentionally narrow:
   running coordinator process, plus the exact gateway config, both executable
   digests, and the PIDs that own all three loopback listener ports;
 - it requires an isolated SQLite `request_log`, generates gateway-valid UUIDv4
-  external request IDs, and proves the logged internal trigger ID is the one on
-  `aead_rekey` while a distinct streaming sentinel admitted before the trigger
-  drains before commit;
+  external request IDs, accepts the logged internal trigger ID either exactly
+  or with the relay's deterministic `req-` wire framing, and proves it is the
+  unique row on `aead_rekey`; it separately proves a distinct streaming
+  sentinel was admitted before the trigger and remained active at rekey start,
+  while the mapped coordinator trigger interval remained outstanding through
+  commit; every mapped coordinator row and live buyer record requires explicit
+  UTC timestamps, live event ordering requires the monitor's subsecond UTC
+  timestamps, and live captures must preserve the complete validated invocation
+  bounds; only dedicated requests dispatched after commit count toward the
+  required post-commit successes;
 - it requires gateway `retry_503.enabled: false` and consumes each gate-specific
   approval once in a mode-0600 local ledger before buyer traffic begins;
 - it requires the operator-approved coordinator/gateway executable SHA-256
   values plus exact provider CLI version and compatibility-set ID, and rejects
-  any observed identity mismatch before buyer traffic;
-- it permits at most 100 requests, 300 seconds, eight workers, and 128 output
-  tokens per request (the defaults are smaller);
+  any observed identity mismatch before buyer traffic; the final live oracle
+  also requires the trusted live mode plus the captured approval, process,
+  config, listener, digest, and no-retry identities;
+- it permits at most 100 requests, 300 seconds, and 128 output tokens per
+  request, with concurrency fixed at 2 for the sentinel/trigger proof (the
+  remaining defaults are smaller); direct SSE admission proves the sentinel
+  occupies one slot, so pool `ready` correctly permits the second-slot trigger
+  and Busy-before-trigger is not required;
 - it performs one HTTP attempt per buyer request, follows no redirects, stops
   new dispatch on the first buyer/pool/event failure, and never retries a full
   probe;
