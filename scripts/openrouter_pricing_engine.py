@@ -35,7 +35,7 @@ RANKINGS_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
 SNAPSHOT_SCHEMA_VERSION = 5
-PROPOSAL_SCHEMA_VERSION = 1
+PROPOSAL_SCHEMA_VERSION = 2
 TOOL_VERSION = "openrouter-pricing-engine-v1"
 DEFAULT_POLICY_PATH = Path(__file__).with_name("openrouter_pricing_policy.json")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._~:-]+/[A-Za-z0-9._~:-]+$")
@@ -1008,6 +1008,24 @@ def provider_hourly_usd(internal_rate_per_mtok: int, tps: Decimal, rate_card: Ma
     return buyer_usd_per_mtok * provider_share_bps / Decimal("10000") * tps * Decimal("3600") / Decimal("1000000")
 
 
+def static_policy_block_reasons(model: Mapping[str, Any]) -> list[str]:
+    """Serving/license failures that block a row regardless of demand observation.
+
+    These are the same fatal, market-independent conditions eligibility() checks,
+    extracted so the cohort-absence branch can also honour them: a served model
+    whose serving path or commercial license is no longer verified must be
+    surfaced for human intervention (blocked), never silently retained.
+    """
+    reasons: list[str] = []
+    serving = model.get("serving_path")
+    if not isinstance(serving, dict) or serving.get("verification_status") != "verified":
+        reasons.append("MLX/GGUF serving path is not verified")
+    license_info = model.get("license")
+    if not isinstance(license_info, dict) or license_info.get("commercial_permitted") is not True:
+        reasons.append("commercial license is not verified as permitted")
+    return reasons
+
+
 def eligibility(model: Mapping[str, Any], row: Mapping[str, Any], policy: Mapping[str, Any]) -> tuple[bool, list[str], Decimal | None]:
     reasons: list[str] = []
     rank = row["demand"]["rank"]
@@ -1107,7 +1125,7 @@ def build_proposal(
     rate_rows = rate_card["rows"]
     policy_models = policy_model_index(policy)
     rows_by_source = {row["source_model_id"]: row for row in snapshot["rows"]}
-    result: dict[str, list[dict[str, Any]]] = {key: [] for key in ("added", "changed", "dropped", "blocked", "unchanged")}
+    result: dict[str, list[dict[str, Any]]] = {key: [] for key in ("added", "changed", "dropped", "retained", "blocked", "unchanged")}
     assessed_current_ids: set[str] = set()
 
     def market_unavailable() -> dict[str, None]:
@@ -1161,22 +1179,49 @@ def build_proposal(
             assessed_current_ids.add(canonical_id)
         row = rows_by_source.get(source_model_id)
         if row is None:
-            if canonical_id in rate_rows and canonical_id != "default":
-                result["dropped"].append(
+            # Absence from the daily top-50 demand cohort is NOT evidence that a
+            # served model should be delisted. OpenRouter's demand chart is
+            # dominated by frontier and oversized models the fleet cannot serve,
+            # so the fleet's small-open catalog is routinely absent from it. A
+            # currently-served rate-card row is therefore RETAINED unchanged, never
+            # dropped, on cohort absence: there is simply no demand signal to
+            # reprice it. Dropping a served row requires an explicit, positive
+            # delisting determination this engine does not derive from demand data.
+            absent_reason = "absent from the documented daily top-50 demand cohort; no demand signal to reprice, and absence is not evidence to delist a served model"
+            # A fatal serving/license failure blocks even an absent served row:
+            # "retained" means keep-unchanged, which must not silently preserve a
+            # served model whose serving path or license is no longer verified.
+            static_blockers = static_policy_block_reasons(model)
+            if canonical_id in rate_rows and canonical_id != "default" and not static_blockers:
+                result["retained"].append(
                     {
                         "model_id": canonical_id,
                         "source_model_id": source_model_id,
-                        "action": "dropped",
+                        "action": "retained",
                         "current_completion_rate": current_completion_rate(rate_rows, canonical_id),
-                        "eligibility": {"eligible": False, "reasons": ["model is absent from complete documented daily top-50 demand snapshot"]},
+                        "eligibility": {"eligible": False, "reasons": [absent_reason]},
                         "market": market_unavailable(),
                         "policy_evidence": policy_evidence(model),
-                        "reasons": ["model is absent from complete documented daily top-50 demand snapshot"],
+                        "reasons": [absent_reason],
+                    }
+                )
+            elif canonical_id in rate_rows and canonical_id != "default":
+                blocked_reasons = static_blockers + [absent_reason]
+                result["blocked"].append(
+                    {
+                        "model_id": canonical_id,
+                        "source_model_id": source_model_id,
+                        "action": "blocked",
+                        "current_completion_rate": current_completion_rate(rate_rows, canonical_id),
+                        "eligibility": {"eligible": False, "reasons": blocked_reasons},
+                        "market": market_unavailable(),
+                        "policy_evidence": policy_evidence(model),
+                        "reasons": blocked_reasons,
                     }
                 )
             else:
                 result["blocked"].append(
-                    {"model_id": canonical_id, "source_model_id": source_model_id, "action": "blocked", "market": market_unavailable(), "eligibility": {"eligible": False, "reasons": ["model is absent from complete documented daily top-50 demand snapshot"]}, "policy_evidence": policy_evidence(model), "reasons": ["model is absent from complete documented daily top-50 demand snapshot"]}
+                    {"model_id": canonical_id, "source_model_id": source_model_id, "action": "blocked", "market": market_unavailable(), "eligibility": {"eligible": False, "reasons": [absent_reason]}, "policy_evidence": policy_evidence(model), "reasons": [absent_reason]}
                 )
             continue
         allowed, reasons, market_completion = eligibility(model, row, policy)
@@ -1195,7 +1240,11 @@ def build_proposal(
                 "OpenRouter reports no provider endpoints after bounded confirmation",
                 "cheapest active completion endpoint is free; no paid-market undercut can be computed",
             }
-            action = "blocked" if any(reason in block_reasons for reason in reasons) else "dropped" if canonical_id in rate_rows else "blocked"
+            # A served row observed in the cohort but ineligible only on
+            # demand-rank or fleet-profile grounds (not a market/serving/license
+            # block) is RETAINED, never dropped: those are not positive delisting
+            # evidence for a model the fleet already serves.
+            action = "blocked" if any(reason in block_reasons for reason in reasons) else "retained" if (canonical_id in rate_rows and canonical_id != "default") else "blocked"
             base.update({"action": action, "reasons": reasons})
             if canonical_id in rate_rows:
                 base["current_completion_rate"] = current_completion_rate(rate_rows, canonical_id)
