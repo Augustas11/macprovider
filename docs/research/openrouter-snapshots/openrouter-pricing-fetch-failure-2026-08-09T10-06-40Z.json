@@ -1,13 +1,15 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "receipt_type": "openrouter-pricing-fetch-failure",
   "started_at": "2026-08-09T10:06:40Z",
   "finished_at": "2026-08-09T10:06:44Z",
-  "engine_commit": "75370dca8501dd56e5f8b87edd581ca5ce15f080",
+  "engine_commit": "6638ac0ab6b935730f0a8ba1e0bedcdaf59dd7b6",
   "command": [
     "python",
     "scripts/openrouter_pricing_engine.py",
     "fetch",
+    "--policy",
+    "scripts/openrouter_pricing_policy.json",
     "--output-dir",
     "<temporary-artifact-directory>",
     "--top-n",
@@ -17,19 +19,22 @@
     "--retries",
     "3",
     "--timeout-seconds",
-    "20",
+    "20.0",
     "--generation-timeout-seconds",
-    "900"
+    "900.0"
   ],
   "source": {
     "rankings_url": "https://openrouter.ai/api/v1/datasets/rankings-daily",
-    "ranking_window_start_date": "2026-07-10",
-    "ranking_window_end_date": "2026-08-08",
-    "openrouter_api_key_configured": true
+    "openrouter_api_key_configured": true,
+    "policy_path": "scripts/openrouter_pricing_policy.json",
+    "policy_file_sha256": "sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75"
   },
   "exit_status": 2,
   "stdout": "",
   "stderr": "openrouter pricing engine: catalog response cannot uniquely resolve ranked model 'z-ai/glm-5.2-20260616' to an endpoint model id",
   "output_directory_listing": [],
-  "evidence_digest": "sha256:b6eff045f8281f38c56da3a5bddd842bc68a91599d8800e3711eb7d70ec82a66"
+  "execution": {
+    "worktree_clean": true
+  },
+  "evidence_digest": "sha256:96b0b4754b2a7f5164d0f3c6e66d08125ef8ec259a19931d53b55be566584ab0"
 }

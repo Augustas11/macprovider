@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,10 +23,16 @@ SPEC.loader.exec_module(receipt)
 
 ARCHIVE = REPO / "docs" / "research" / "openrouter-snapshots"
 SNAPSHOT = ARCHIVE / "openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json"
-PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json"
+PROPOSAL = ARCHIVE / "openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json"
 POLICY = REPO / "scripts" / "openrouter_pricing_policy.json"
 RATE_CARD = REPO / "phase3-binary" / "catalog" / "autotune" / "rate-card.json"
-RUN_COMMIT = "c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805"
+# The engine_commit bound in synthetic test receipts must be an ancestor of the
+# validator's HEAD whose committed engine bytes match the working tree. Derive it
+# from HEAD so the suite survives squash-merges (which discard branch commits) --
+# a hardcoded branch SHA breaks the moment its PR is squashed onto main.
+RUN_COMMIT = subprocess.run(
+    ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True
+).stdout.strip()
 REAL_COPYFILE = shutil.copyfile
 REAL_LINK = receipt.os.link
 REAL_RENAME = receipt.os.rename

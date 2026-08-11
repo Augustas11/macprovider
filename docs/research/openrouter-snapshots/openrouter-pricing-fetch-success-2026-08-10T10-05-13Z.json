@@ -1,18 +1,42 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "receipt_type": "openrouter-pricing-fetch-success",
   "started_at": "2026-08-10T10:05:13Z",
   "finished_at": "2026-08-10T10:05:29Z",
-  "engine_commit": "0453190e8384ca05d0cb7be0813fbd22e10d2c1f",
-  "command": ["python", "scripts/openrouter_pricing_engine.py", "fetch", "--output-dir", "<temporary-artifact-directory>", "--top-n", "50", "--demand-window-days", "30", "--retries", "3", "--timeout-seconds", "20", "--generation-timeout-seconds", "900"],
+  "engine_commit": "6638ac0ab6b935730f0a8ba1e0bedcdaf59dd7b6",
+  "command": [
+    "python",
+    "scripts/openrouter_pricing_engine.py",
+    "fetch",
+    "--policy",
+    "scripts/openrouter_pricing_policy.json",
+    "--output-dir",
+    "<temporary-artifact-directory>",
+    "--top-n",
+    "50",
+    "--demand-window-days",
+    "30",
+    "--retries",
+    "3",
+    "--timeout-seconds",
+    "20.0",
+    "--generation-timeout-seconds",
+    "900.0"
+  ],
   "source": {
     "rankings_url": "https://openrouter.ai/api/v1/datasets/rankings-daily",
     "ranking_window_start_date": "2026-07-11",
     "ranking_window_end_date": "2026-08-09",
     "openrouter_api_key_configured": true,
-    "confirmed_empty_model_ids": ["inclusionai/ling-3.0-flash:free", "poolside/laguna-m.1:free", "tencent/hy3:free"],
+    "confirmed_empty_model_ids": [
+      "inclusionai/ling-3.0-flash:free",
+      "poolside/laguna-m.1:free",
+      "tencent/hy3:free"
+    ],
     "confirmation_request_count": 3,
-    "successful_source_count": 55
+    "successful_source_count": 55,
+    "policy_path": "scripts/openrouter_pricing_policy.json",
+    "policy_file_sha256": "sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75"
   },
   "exit_status": 0,
   "stdout": "<temporary-artifact-directory>\\openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json",
@@ -24,5 +48,8 @@
       "sha256": "sha256:3adf1f17151f831331acb482693c7745a7654d43a44dd4c968a6f73921a006ce"
     }
   ],
-  "evidence_digest": "sha256:88160c23d1bbce82511baaf3b6527a4f5bae0d2ae78060f7f3b1670248e6f53f"
+  "execution": {
+    "worktree_clean": true
+  },
+  "evidence_digest": "sha256:a14e2a3a19c6695ec8e6a6b9cbebdf98991a4cc46f4397cb4631bfc9ba866003"
 }

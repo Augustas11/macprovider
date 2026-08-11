@@ -3,7 +3,7 @@
   "receipt_type": "openrouter-pricing-compute-success",
   "started_at": "2026-08-10T17:20:07Z",
   "finished_at": "2026-08-10T17:20:07Z",
-  "engine_commit": "c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805",
+  "engine_commit": "6638ac0ab6b935730f0a8ba1e0bedcdaf59dd7b6",
   "execution": {
     "worktree_clean": true
   },
@@ -30,14 +30,14 @@
     "rate_card_file_sha256": "sha256:68eb8794a2388cd73727b23db7e13adee8ae2c8e30bc0eeef5ad887223398cd3"
   },
   "exit_status": 0,
-  "stdout": "<temporary-artifact-directory>\\compute\\openrouter-rate-card-proposal-2026-08-10T17-20-07Z-ceaa10b2bef721f1.json",
+  "stdout": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-258cfbdbb4b81600.json",
   "stderr": "",
   "output_directory_listing": [
     {
-      "filename": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-ceaa10b2bef721f1.json",
-      "bytes": 36779,
-      "sha256": "sha256:1b0d3f27435674a4e4d248ad0f0e9f7fbd75bbb9935098552c6a0870471bb875"
+      "filename": "openrouter-rate-card-proposal-2026-08-10T17-20-07Z-258cfbdbb4b81600.json",
+      "bytes": 37211,
+      "sha256": "sha256:5ae45c69c534cf44398d76e870459168654e830be77800616dc31c6b4dea254c"
     }
   ],
-  "evidence_digest": "sha256:25a985af8dc01c91eb17405837bc88bab444d452cbd57a6aef07f6b68c1d383b"
+  "evidence_digest": "sha256:0174e212223eb21df1d86e332fb511f6271a1a255bd38751c81744f6b13f0d71"
 }
