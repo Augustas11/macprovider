@@ -84,7 +84,9 @@ Fetch and compute failures emit and archive credential-redacted schema-version
 
 Failure receipts never stand in for snapshots or proposals. They prove the
 bounded attempt and preserve its redacted error; a later successful stage still
-requires its real validated artifact.
+requires its real validated artifact. Before recording an empty failure
+inventory, the runner requires the failed stage's output directory to be empty;
+any unexpected partial artifact aborts receipt publication.
 
 The schema-version 1 receipts already committed here are historical evidence
 created before the executable runner existed. The manual contract below

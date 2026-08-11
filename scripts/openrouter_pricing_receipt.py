@@ -205,7 +205,9 @@ def expected_compute_command(inputs: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def validate_inventory(receipt: Mapping[str, Any], archive: Path, success: bool) -> Path | None:
+def validate_inventory(
+    receipt: Mapping[str, Any], archive: Path, success: bool, receipt_type: str | None = None,
+) -> Path | None:
     listing = receipt.get("output_directory_listing")
     if not success:
         if listing != []:
@@ -216,7 +218,20 @@ def validate_inventory(receipt: Mapping[str, Any], archive: Path, success: bool)
     item = listing[0]
     if set(item) != {"filename", "bytes", "sha256"} or not isinstance(item["filename"], str):
         raise ReceiptError("receipt artifact inventory is malformed")
-    artifact = archive / item["filename"]
+    filename = item["filename"]
+    if not filename or Path(filename).name != filename:
+        raise ReceiptError("receipt artifact filename must be a basename")
+    if receipt_type == FETCH_SUCCESS:
+        pattern = r"openrouter-pricing-snapshot-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json"
+    elif receipt_type == COMPUTE_SUCCESS:
+        pattern = r"openrouter-rate-card-proposal-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{16}\.json"
+    else:
+        pattern = None
+    if pattern is not None and not re.fullmatch(pattern, filename):
+        raise ReceiptError("receipt artifact filename does not match its receipt type")
+    artifact = (archive / filename).resolve()
+    if artifact.parent != archive.resolve():
+        raise ReceiptError("receipt artifact escapes its receipt directory")
     if not artifact.is_file():
         raise ReceiptError(f"archived artifact is missing: {artifact.name}")
     if item["bytes"] != artifact.stat().st_size or item["sha256"] != sha256_file(artifact):
@@ -257,7 +272,7 @@ def validate_receipt(receipt_path: Path, repo: Path) -> None:
     reject_secrets(receipt)
     if receipt.get("evidence_digest") != evidence_digest(receipt):
         raise ReceiptError("receipt evidence_digest mismatch")
-    artifact = validate_inventory(receipt, receipt_path.parent, success)
+    artifact = validate_inventory(receipt, receipt_path.parent, success, receipt_type)
 
     policy_path: Path
     if receipt_type in {FETCH_SUCCESS, FETCH_FAILURE}:
@@ -360,6 +375,11 @@ def unique_artifact(directory: Path, pattern: str) -> Path:
     return matches[0]
 
 
+def require_empty_failure_output(directory: Path) -> None:
+    if any(directory.iterdir()):
+        raise ReceiptError("failed stage emitted unexpected output; refusing an empty-inventory receipt")
+
+
 def archive_files(paths: tuple[Path, ...], archive: Path) -> tuple[Path, ...]:
     archive.mkdir(parents=True, exist_ok=True)
     targets = tuple(archive / path.name for path in paths)
@@ -368,7 +388,7 @@ def archive_files(paths: tuple[Path, ...], archive: Path) -> tuple[Path, ...]:
             raise ReceiptError(f"refusing to overwrite archived evidence {target.name}")
     before = [(path.stat().st_size, sha256_file(path)) for path in paths]
     temporary_paths: list[Path] = []
-    published: list[Path] = []
+    published: list[tuple[Path, int, int]] = []
     try:
         for source, target in zip(paths, targets):
             descriptor, temporary_name = tempfile.mkstemp(
@@ -382,21 +402,24 @@ def archive_files(paths: tuple[Path, ...], archive: Path) -> tuple[Path, ...]:
         if before != staged:
             raise ReceiptError("staged archive evidence is not byte-identical to its validated source")
         for temporary_path, target in zip(temporary_paths, targets):
+            staged_stat = temporary_path.stat(follow_symlinks=False)
             try:
                 os.link(temporary_path, target)
             except FileExistsError as error:
                 raise ReceiptError(f"refusing to overwrite concurrently created evidence {target.name}") from error
-            published.append(target)
+            published.append((target, staged_stat.st_dev, staged_stat.st_ino))
         after = [(path.stat().st_size, sha256_file(path)) for path in targets]
         if before != after:
             raise ReceiptError("archived evidence is not byte-identical to its validated source")
         return targets
     except BaseException:
-        for target in published:
+        for target, device, inode in published:
             try:
-                target.unlink()
+                current = target.stat(follow_symlinks=False)
             except FileNotFoundError:
-                pass
+                continue
+            if (current.st_dev, current.st_ino) == (device, inode):
+                target.unlink()
         raise
     finally:
         for temporary_path in temporary_paths:
@@ -458,6 +481,7 @@ def command_run(args: argparse.Namespace) -> int:
         ]
         fetch_started, fetch_finished, fetched = run_child(repo, fetch_args, api_key, temporary)
         if fetched.returncode != 0:
+            require_empty_failure_output(fetch_dir)
             fetch_failure = {
                 "schema_version": RECEIPT_SCHEMA_VERSION,
                 "receipt_type": FETCH_FAILURE,
@@ -530,6 +554,7 @@ def command_run(args: argparse.Namespace) -> int:
         ]
         compute_started, compute_finished, computed = run_child(repo, compute_args, api_key, temporary)
         if computed.returncode != 0:
+            require_empty_failure_output(compute_dir)
             compute_failure = {
                 "schema_version": RECEIPT_SCHEMA_VERSION,
                 "receipt_type": COMPUTE_FAILURE,

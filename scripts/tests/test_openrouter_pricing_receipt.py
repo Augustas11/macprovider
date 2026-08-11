@@ -239,6 +239,60 @@ class ReceiptTests(unittest.TestCase):
             self.assertFalse((archive / first.name).exists())
             self.assertEqual(b"concurrent\n", (archive / second.name).read_bytes())
 
+    def test_validate_inventory_rejects_artifact_outside_receipt_directory(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            archive = root / "archive"
+            archive.mkdir()
+            outside = root / "snapshot.json"
+            outside.write_bytes(b"{}\n")
+            value = {
+                "output_directory_listing": [
+                    {
+                        "filename": f"../{outside.name}",
+                        "bytes": outside.stat().st_size,
+                        "sha256": receipt.sha256_file(outside),
+                    }
+                ]
+            }
+            with self.assertRaisesRegex(receipt.ReceiptError, "basename"):
+                receipt.validate_inventory(value, archive, True)
+
+    def test_failure_receipt_requires_empty_stage_output_directory(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            (directory / "unexpected-artifact.json").write_bytes(b"{}\n")
+            with self.assertRaisesRegex(receipt.ReceiptError, "emitted unexpected output"):
+                receipt.require_empty_failure_output(directory)
+
+    def test_archive_pair_rollback_preserves_concurrent_replacement(self):
+        with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
+            source = Path(source_name)
+            archive = Path(archive_name)
+            first = source / "receipt.json"
+            second = source / "artifact.json"
+            first.write_bytes(b"receipt\n")
+            second.write_bytes(b"artifact\n")
+            first_target = archive / first.name
+            second_target = archive / second.name
+            calls = 0
+
+            def replace_first_then_collide(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return REAL_LINK(src, dst)
+                first_target.unlink()
+                first_target.write_bytes(b"concurrent replacement\n")
+                second_target.write_bytes(b"concurrent blocker\n")
+                return REAL_LINK(src, dst)
+
+            with mock.patch.object(receipt.os, "link", side_effect=replace_first_then_collide):
+                with self.assertRaisesRegex(receipt.ReceiptError, "concurrently created"):
+                    receipt.archive_pair(first, second, archive)
+            self.assertEqual(b"concurrent replacement\n", first_target.read_bytes())
+            self.assertEqual(b"concurrent blocker\n", second_target.read_bytes())
+
     def test_schema_v2_fetch_and_compute_failure_receipts_validate(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
