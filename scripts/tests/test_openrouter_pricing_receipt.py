@@ -28,6 +28,7 @@ RATE_CARD = REPO / "phase3-binary" / "catalog" / "autotune" / "rate-card.json"
 RUN_COMMIT = "c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805"
 REAL_COPYFILE = shutil.copyfile
 REAL_LINK = receipt.os.link
+REAL_RENAME = receipt.os.rename
 
 
 class ReceiptTests(unittest.TestCase):
@@ -258,6 +259,25 @@ class ReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(receipt.ReceiptError, "basename"):
                 receipt.validate_inventory(value, archive, True)
 
+    def test_validate_inventory_rejects_symlink_artifact(self):
+        with tempfile.TemporaryDirectory() as name:
+            archive = Path(name)
+            target = archive / "target.json"
+            target.write_bytes(b"{}\n")
+            artifact = archive / "snapshot.json"
+            artifact.symlink_to(target.name)
+            value = {
+                "output_directory_listing": [
+                    {
+                        "filename": artifact.name,
+                        "bytes": target.stat().st_size,
+                        "sha256": receipt.sha256_file(target),
+                    }
+                ]
+            }
+            with self.assertRaisesRegex(receipt.ReceiptError, "regular file"):
+                receipt.validate_inventory(value, archive, True)
+
     def test_failure_receipt_requires_empty_stage_output_directory(self):
         with tempfile.TemporaryDirectory() as name:
             directory = Path(name)
@@ -277,20 +297,58 @@ class ReceiptTests(unittest.TestCase):
             second_target = archive / second.name
             calls = 0
 
-            def replace_first_then_collide(src, dst):
+            def replace_first_then_collide(src, dst, **kwargs):
                 nonlocal calls
                 calls += 1
                 if calls == 1:
-                    return REAL_LINK(src, dst)
-                first_target.unlink()
-                first_target.write_bytes(b"concurrent replacement\n")
-                second_target.write_bytes(b"concurrent blocker\n")
-                return REAL_LINK(src, dst)
+                    return REAL_LINK(src, dst, **kwargs)
+                if calls == 2:
+                    first_target.unlink()
+                    first_target.write_bytes(b"concurrent replacement\n")
+                    second_target.write_bytes(b"concurrent blocker\n")
+                return REAL_LINK(src, dst, **kwargs)
 
             with mock.patch.object(receipt.os, "link", side_effect=replace_first_then_collide):
                 with self.assertRaisesRegex(receipt.ReceiptError, "concurrently created"):
                     receipt.archive_pair(first, second, archive)
             self.assertEqual(b"concurrent replacement\n", first_target.read_bytes())
+            self.assertEqual(b"concurrent blocker\n", second_target.read_bytes())
+
+    def test_archive_pair_rollback_preserves_replacement_after_identity_check(self):
+        with tempfile.TemporaryDirectory() as source_name, tempfile.TemporaryDirectory() as archive_name:
+            source = Path(source_name)
+            archive = Path(archive_name)
+            first = source / "receipt.json"
+            second = source / "artifact.json"
+            first.write_bytes(b"receipt\n")
+            second.write_bytes(b"artifact\n")
+            first_target = archive / first.name
+            second_target = archive / second.name
+            link_calls = 0
+            replacement_inserted = False
+
+            def collide_on_second_link(src, dst, **kwargs):
+                nonlocal link_calls
+                link_calls += 1
+                if link_calls == 2:
+                    second_target.write_bytes(b"concurrent blocker\n")
+                return REAL_LINK(src, dst, **kwargs)
+
+            def replace_before_rollback_rename(src, dst):
+                nonlocal replacement_inserted
+                if Path(src) == first_target and not replacement_inserted:
+                    replacement_inserted = True
+                    first_target.unlink()
+                    first_target.write_bytes(b"replacement during rollback\n")
+                return REAL_RENAME(src, dst)
+
+            with mock.patch.object(receipt.os, "link", side_effect=collide_on_second_link), mock.patch.object(
+                receipt.os, "rename", side_effect=replace_before_rollback_rename
+            ):
+                with self.assertRaisesRegex(receipt.ReceiptError, "concurrently created"):
+                    receipt.archive_pair(first, second, archive)
+            self.assertTrue(replacement_inserted)
+            self.assertEqual(b"replacement during rollback\n", first_target.read_bytes())
             self.assertEqual(b"concurrent blocker\n", second_target.read_bytes())
 
     def test_schema_v2_fetch_and_compute_failure_receipts_validate(self):

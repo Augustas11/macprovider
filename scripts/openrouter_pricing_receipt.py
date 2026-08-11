@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -229,7 +230,10 @@ def validate_inventory(
         pattern = None
     if pattern is not None and not re.fullmatch(pattern, filename):
         raise ReceiptError("receipt artifact filename does not match its receipt type")
-    artifact = (archive / filename).resolve()
+    artifact_path = archive / filename
+    if artifact_path.is_symlink():
+        raise ReceiptError("receipt artifact must be a regular file, not a symlink")
+    artifact = artifact_path.resolve()
     if artifact.parent != archive.resolve():
         raise ReceiptError("receipt artifact escapes its receipt directory")
     if not artifact.is_file():
@@ -380,6 +384,29 @@ def require_empty_failure_output(directory: Path) -> None:
         raise ReceiptError("failed stage emitted unexpected output; refusing an empty-inventory receipt")
 
 
+def rollback_published(
+    published: list[tuple[Path, int, int]], archive: Path,
+) -> list[Path]:
+    preserved: list[Path] = []
+    for target, device, inode in published:
+        quarantine = archive / f".{target.name}.rollback-{uuid.uuid4().hex}"
+        try:
+            os.rename(target, quarantine)
+        except FileNotFoundError:
+            continue
+        current = quarantine.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) == (device, inode):
+            quarantine.unlink()
+            continue
+        try:
+            os.link(quarantine, target, follow_symlinks=False)
+        except (FileExistsError, IsADirectoryError, PermissionError):
+            preserved.append(quarantine)
+        else:
+            quarantine.unlink()
+    return preserved
+
+
 def archive_files(paths: tuple[Path, ...], archive: Path) -> tuple[Path, ...]:
     archive.mkdir(parents=True, exist_ok=True)
     targets = tuple(archive / path.name for path in paths)
@@ -412,14 +439,13 @@ def archive_files(paths: tuple[Path, ...], archive: Path) -> tuple[Path, ...]:
         if before != after:
             raise ReceiptError("archived evidence is not byte-identical to its validated source")
         return targets
-    except BaseException:
-        for target, device, inode in published:
-            try:
-                current = target.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if (current.st_dev, current.st_ino) == (device, inode):
-                target.unlink()
+    except BaseException as error:
+        preserved = rollback_published(published, archive)
+        if preserved:
+            error.add_note(
+                "concurrent replacement preserved at "
+                + ", ".join(path.name for path in preserved)
+            )
         raise
     finally:
         for temporary_path in temporary_paths:
