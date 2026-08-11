@@ -26,6 +26,23 @@ The commands are noninteractive and have useful exit codes, so an operator can
 schedule `fetch` and then `compute` externally. Do not schedule an apply step:
 there is intentionally no apply mode in this tool.
 
+## Refresh and archive operations
+
+Run the workflow once per day after the UTC ranking window closes. Archive
+successful outputs under `docs/research/openrouter-snapshots/`; its README
+defines the durable artifact contract. Retain timestamped snapshots and
+proposals such as `openrouter-pricing-snapshot-YYYY-MM-DDTHH-MM-SSZ-<digest16>.json`
+and `openrouter-rate-card-proposal-YYYY-MM-DDTHH-MM-SSZ-<digest16>.json`. Preserve
+each artifact's content digest and review notes; never hand-edit an artifact.
+
+Treat artifacts older than 48 hours as stale for a pricing decision. A stale
+artifact may be used for historical research, but must not be promoted or used
+as the current market basis without a successful refresh. An unattended job may
+run `fetch` and, only after a successful validated snapshot, `compute`; persist
+stdout, stderr, and exit status separately. A failed-closed fetch stops the
+chain, emits no snapshot, and must not be followed by compute against raw,
+partial, or manually repaired data. There is no unattended apply step.
+
 ## Sources and normalization
 
 The fetcher uses documented OpenRouter API endpoints:
@@ -60,11 +77,11 @@ provider endpoints, breaking ties deterministically by prompt price and
 provider name. Decimal strings—not binary floats—are used for stored money and
 all calculations.
 
-The snapshot schema is version `4`:
+The snapshot schema is version `5`:
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "snapshot_type": "openrouter-pricing",
   "fetched_at": "2026-08-05T12:00:00Z",
   "content_digest": "sha256:<normalized-content-hash>",
@@ -74,7 +91,7 @@ The snapshot schema is version `4`:
     "observed_schema_version_or_fingerprint": "...",
     "generator_version": "openrouter-pricing-engine-v1",
     "fetch_metadata": {
-      "successful_source_count": 102,
+      "successful_source_count": 52,
       "observed_model_count": 50,
       "requested_top_n": 50,
       "demand_window_days": 30,
@@ -108,7 +125,8 @@ The snapshot schema is version `4`:
         "ranking_model_permaslug": "provider/model",
         "catalog_canonical_slug": "provider/model",
         "catalog_name": "Provider: Model",
-        "identity_resolution": "catalog|catalog_paid_variant|endpoint_alias_fallback"
+        "identity_resolution": "catalog|catalog_paid_variant|endpoint_alias_fallback|endpoint_confirmed_catalog_candidate",
+        "endpoint_set_confirmation": "not_required|confirmed_empty_second_fetch|recovered_nonempty_on_confirmation"
       }
     }
   ]
@@ -125,22 +143,33 @@ If a dated ranking model is no longer present in the catalog, the engine may
 use the endpoint response for that exact dated ID only when OpenRouter returns
 a valid current model ID. The snapshot records this as
 `endpoint_alias_fallback` and leaves catalog-only metadata `null`; it never
-guesses an alias from the model name.
+guesses an alias from the model name. If the dated permaslug instead maps to
+multiple catalog candidates, the engine accepts the endpoint-returned ID only
+when it exactly and uniquely identifies one of those candidates. The snapshot
+records that case as `endpoint_confirmed_catalog_candidate`; an unmatched,
+missing, or malformed identity fails closed.
 
-An endpoint response that succeeds but has no active priced provider is retained
-with `pricing_status: "no_active_priced_endpoint"` and `pricing: null`. This is
-not treated as a partial fetch; Component 2 blocks that model rather than
-inventing a market price.
+A non-empty, schema-valid endpoint list with no active priced provider is
+retained with `pricing_status: "no_active_priced_endpoint"` and a null pricing
+value. A successful response with an exact resolved `data.id` and an explicitly
+present empty `endpoints` array triggers one bounded confirmation request to
+the same URL within the generation deadline. Two empty results are retained as
+`pricing_status: "no_provider_endpoints"`, null pricing, and
+`endpoint_set_confirmation: "confirmed_empty_second_fetch"`. If confirmation
+returns providers, the second document is used and provenance records
+`recovered_nonempty_on_confirmation`. Component 2 blocks the confirmed-empty
+row and never derives a provider floor, undercut target, or proposed rate.
 
 ## Fail-closed behavior
 
 The command emits no final snapshot if any required fetch, validation,
 normalization, or coverage step fails. It rejects bounded-retry exhaustion for
 429/5xx/transport errors, malformed JSON, changed required schemas, missing
-keys, empty ranking/catalog/endpoints results, blank identities, invalid or
-negative pricing, duplicate normalized identities, and missing endpoint data
-for a selected ranked model. A fully prepared file is atomically renamed only
-after validation and digest calculation.
+keys, empty ranking/catalog results, unconfirmed or malformed endpoint sets,
+blank or mismatched identities, invalid or negative pricing, duplicate
+normalized identities, and missing endpoint data for a selected ranked model.
+A fully prepared file is atomically renamed only after validation and digest
+calculation.
 
 The source envelopes and fields used by normalization have explicit allowlists.
 An unexpected field, required-field change, or type change fails closed rather
@@ -164,8 +193,7 @@ Candidates must be in a complete snapshot covering the mandatory documented
 daily top-50 demand cohort (aggregated total tokens over the fetch window), have a
 verified MLX/MLX-Swift/production GGUF-Metal path, and have a commercially
 permitted license. Broad-fleet models require active parameters at or below
-8B, 4-bit residency at or below 18 GB, and projected M-base TPS of at least
-30. Coding-dense rows require a coding-specialist flag, residency at or below
+8B, 4-bit residency at or below 18 GB, and projected M-base TPS of at least 30. Coding-dense rows require a coding-specialist flag, residency at or below
 45 GB, and projected M-Max TPS of at least 20.
 
 The policy's target rules are from `RESEARCH_227_RATE_CARD_V3_PROMPT.md`:
@@ -188,9 +216,10 @@ Component 3 owns that conversion/review boundary.
 ### Nemotron-3
 
 The policy records `nvidia/nemotron-3-nano-30b-a3b` as commercially permitted
-under the [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/).
-NVIDIA states that models under that agreement are commercially usable, subject
-to its terms. This is a policy evidence record, not a replacement for legal
+under the **NVIDIA Nemotron Open Model License** identified by the
+[pinned NVIDIA model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/f303f4dd6fc8f7202071617038e9962b26a21c03/README.md).
+The card describes the model as ready for commercial use subject to those
+governing terms. This is a policy evidence record, not a replacement for legal
 review. If the policy's verification is removed or changed to non-permitted,
 the engine deterministically blocks/drops the model and records the reason.
 
@@ -223,7 +252,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts/tests/test_openrouter_p
 ```
 
 The suite covers valid normalization/digest behavior, 429 retry and exhaustion,
-transport failure, malformed/empty/schema-drifted input, partial endpoints,
-invalid pricing, duplicate canonical mappings, snapshot tampering, proposal
-categories, unresolved Nemotron licensing, atomic write failure, and
-rate-card-reference immutability.
+transport failure, confirmed empty provider sets, transient-empty recovery,
+malformed/schema-drifted input, partial endpoints, invalid pricing, duplicate
+canonical mappings, snapshot tampering, proposal categories, unresolved
+Nemotron licensing, atomic write failure, and rate-card-reference immutability.

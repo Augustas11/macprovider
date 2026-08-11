@@ -184,8 +184,11 @@ requires a complete 50-model observed cohort. `--top-n` below 50 is useful only
 for fetch-only diagnostics.
 It retries transient errors with bounded backoff, honors `Retry-After` for
 429s, and fails closed without writing a snapshot on a timeout, schema change,
-empty result, invalid price, or partial pull. Commands are noninteractive and
-suitable for an external scheduler.
+unconfirmed empty result, invalid price, or partial pull. A successful exact-ID
+endpoint response with an explicit empty provider array is confirmed by a
+second bounded request, retained as demand-only evidence, and blocked from all
+pricing calculations. Commands are noninteractive and suitable for an external
+scheduler.
 
 Snapshots contain `schema_version`, `fetched_at`, a reproducible
 `content_digest`, endpoint/schema provenance, and normalized demand/pricing

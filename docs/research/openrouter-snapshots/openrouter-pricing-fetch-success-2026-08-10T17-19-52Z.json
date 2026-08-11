@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "receipt_type": "openrouter-pricing-fetch-success",
+  "started_at": "2026-08-10T17:19:52Z",
+  "finished_at": "2026-08-10T17:20:07Z",
+  "engine_commit": "c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805",
+  "execution": {
+    "worktree_clean": true
+  },
+  "command": [
+    "python",
+    "scripts/openrouter_pricing_engine.py",
+    "fetch",
+    "--policy",
+    "scripts/openrouter_pricing_policy.json",
+    "--output-dir",
+    "<temporary-artifact-directory>",
+    "--top-n",
+    "50",
+    "--demand-window-days",
+    "30",
+    "--retries",
+    "3",
+    "--timeout-seconds",
+    "20.0",
+    "--generation-timeout-seconds",
+    "900.0"
+  ],
+  "source": {
+    "rankings_url": "https://openrouter.ai/api/v1/datasets/rankings-daily",
+    "ranking_window_start_date": "2026-07-11",
+    "ranking_window_end_date": "2026-08-09",
+    "openrouter_api_key_configured": true,
+    "confirmed_empty_model_ids": [
+      "inclusionai/ling-3.0-flash:free",
+      "poolside/laguna-m.1:free",
+      "tencent/hy3:free"
+    ],
+    "confirmation_request_count": 3,
+    "successful_source_count": 55,
+    "policy_path": "scripts/openrouter_pricing_policy.json",
+    "policy_file_sha256": "sha256:97462653d8c01c6fc024103bcae38543e4a716d8091099a49930ad4b77d44b75"
+  },
+  "exit_status": 0,
+  "stdout": "<temporary-artifact-directory>\\fetch\\openrouter-pricing-snapshot-2026-08-10T17-20-06Z-e1fe9caa0e710957.json",
+  "stderr": "",
+  "output_directory_listing": [
+    {
+      "filename": "openrouter-pricing-snapshot-2026-08-10T17-20-06Z-e1fe9caa0e710957.json",
+      "bytes": 39615,
+      "sha256": "sha256:98379baf240dd7966b9fef4a68413e21b1e464a249306917cc97e36c18b4df3a"
+    }
+  ],
+  "evidence_digest": "sha256:72e394f6356f0ef5294033de75401d682e3cb7bb6507bf12a6bfdadb21b27fad"
+}
