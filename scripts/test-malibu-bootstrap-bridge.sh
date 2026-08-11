@@ -379,6 +379,59 @@ MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
 cmp -s "$frozen_bridge_appcast" "$work/provider-current-webroot/appcast.xml" ||
   fail "current provider appcast is not the frozen bridge appcast"
 
+python3 - "$work/provider-current-webroot/.malibu-current/publication-manifest.json" \
+  "$work/provider-current-webroot/.malibu-tag-manifests/v1.8.88.json" <<'PY'
+import json
+import pathlib
+import sys
+
+for raw_path in sys.argv[1:]:
+    path = pathlib.Path(raw_path)
+    manifest = json.loads(path.read_text())
+    manifest.pop("release_sequence", None)
+    path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+PY
+printf 'newer provider dmg bytes\n' > "$work/provider-current/Malibu-v1.8.89.dmg"
+newer_provider_dmg_sha="$(shasum -a 256 "$work/provider-current/Malibu-v1.8.89.dmg" | awk '{print $1}')"
+printf '%s  Malibu-v1.8.89.dmg\n' "$newer_provider_dmg_sha" > "$work/provider-current/Malibu-v1.8.89.dmg.sha256"
+newer_provider_publication_id="$(python3 - "$work/provider-current/publication-manifest-newer.json" \
+  "$work/provider-current/Malibu-v1.8.89.dmg" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, dmg_path = map(pathlib.Path, sys.argv[1:])
+tag = "v1.8.89"
+dmg_sha = hashlib.sha256(dmg_path.read_bytes()).hexdigest()
+identity = hashlib.sha256(json.dumps({
+    "compatibility_artifact_index_sha256": "0" * 64,
+    "dmg_sha256": dmg_sha,
+    "release_sequence": 189,
+}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+manifest_path.write_text(json.dumps({
+    "schema_version": 1,
+    "repository": "Augustas11/macprovider",
+    "tag": tag,
+    "commit": "e" * 40,
+    "prerelease": False,
+    "release_id": 502,
+    "release_sequence": 189,
+    "publication_id": identity,
+    "assets": {
+        dmg_path.name: {"id": 602, "sha256": dmg_sha},
+    },
+}, sort_keys=True) + "\n")
+print(identity)
+PY
+)"
+MALIBU_PUBLICATION_TESTING=1 bash "$installer" \
+  "$work/provider-current-webroot" v1.8.89 "$newer_provider_publication_id" \
+  "$work/provider-current/publication-manifest-newer.json" "$work/provider-current/Malibu-v1.8.89.dmg" \
+  "$work/provider-current/appcast.xml" "$work/provider-current/Malibu-v1.8.89.dmg.sha256"
+[[ "$(cat "$work/provider-current-webroot/latest.dmg")" == 'newer provider dmg bytes' ]] ||
+  fail "legacy current sequence fallback did not publish the newer provider DMG"
+
 printf 'older provider dmg bytes\n' > "$work/provider-current/Malibu-v1.8.87.dmg"
 older_provider_dmg_sha="$(shasum -a 256 "$work/provider-current/Malibu-v1.8.87.dmg" | awk '{print $1}')"
 printf '%s  Malibu-v1.8.87.dmg\n' "$older_provider_dmg_sha" > "$work/provider-current/Malibu-v1.8.87.dmg.sha256"
