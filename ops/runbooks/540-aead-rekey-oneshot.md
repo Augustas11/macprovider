@@ -136,17 +136,20 @@ python3 test/e2e/aead-rekey-oneshot/aead_rekey_oneshot.py \
 ```
 
 For G-req, the harness sends exactly `threshold - 1` successful warmups, starts
-one bounded sentinel, observes the provider Busy, and then starts the trigger.
+one bounded streaming sentinel, observes its first response bytes as direct
+admission evidence, and then starts the trigger while that sentinel remains
+active.
 For G-age, it derives the deadline from `/poolz.connected_at`, starts the
-sentinel two seconds before the configured age by default, observes Busy, and
-starts the trigger only after the threshold is due. If the provider is already
+streaming sentinel two seconds before the configured age by default, records
+its admission before the deadline, and starts the trigger only after the
+threshold is due. If the provider is already
 too near the age deadline, stop and restart only the isolated setup; do not
 improvise on Pearl. The tracked age overlay uses 30 seconds to leave setup
 margin while remaining a bounded one-shot drill.
 
 The process returns 0 only when the isolated SQLite request log maps the
-harness trigger to the internal rekey `request_id`, records the provider Busy
-with a distinct sentinel before trigger dispatch, proves that successful
+harness trigger to the internal rekey `request_id`, records a distinct
+streaming sentinel as admitted before trigger dispatch, proves that successful
 sentinel remained outstanding when `aead_rekey` started, and proves the trigger
 remained outstanding through commit,
 records one expected rekey and commit, distinct old/new KIDs, unchanged

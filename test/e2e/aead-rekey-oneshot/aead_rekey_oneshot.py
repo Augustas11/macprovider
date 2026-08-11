@@ -19,11 +19,12 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+import uuid
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 
-HARNESS_VERSION = "1.1.0"
+HARNESS_VERSION = "1.2.0"
 BUYER_TOKEN_ENV = "MACPROVIDER_REKEY_BUYER_TOKEN"
 OPERATOR_TOKEN_ENV = "MACPROVIDER_REKEY_OPERATOR_TOKEN"
 MAX_REQUESTS = 100
@@ -64,6 +65,14 @@ def parse_utc(value: Any) -> float | None:
         return datetime.fromisoformat(candidate).timestamp()
     except ValueError:
         return None
+
+
+def is_canonical_uuid_v4(value: str) -> bool:
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return parsed.version == 4 and str(parsed) == value
 
 
 def regular_file(path_text: str, label: str) -> Path:
@@ -249,6 +258,7 @@ def http_once(
     headers: dict[str, str],
     body: bytes | None,
     timeout_seconds: float,
+    on_first_body_bytes: Callable[[int, dict[str, str]], None] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     """Issue exactly one request: no redirect handling and no retry loop."""
     parsed = urlsplit(url)
@@ -269,19 +279,25 @@ def http_once(
         connection.request(method, path, body=body, headers=headers)
         apply_remaining_timeout()
         response = connection.getresponse()
+        response_headers = {key.lower(): value for key, value in response.getheaders()}
         chunks: list[bytes] = []
         bytes_read = 0
+        first_body_bytes_observed = False
         while True:
             apply_remaining_timeout()
             chunk = response.read1(min(65536, MAX_RESPONSE_BYTES + 1 - bytes_read))
             if not chunk:
                 break
+            if not first_body_bytes_observed:
+                first_body_bytes_observed = True
+                if on_first_body_bytes is not None:
+                    on_first_body_bytes(response.status, response_headers)
             chunks.append(chunk)
             bytes_read += len(chunk)
             if bytes_read > MAX_RESPONSE_BYTES:
                 raise HarnessError(f"{method} {path} response exceeded {MAX_RESPONSE_BYTES} bytes")
         payload = b"".join(chunks)
-        return response.status, {key.lower(): value for key, value in response.getheaders()}, payload
+        return response.status, response_headers, payload
     finally:
         connection.close()
 
@@ -714,7 +730,7 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
     trigger_request_id = ""
     sentinel_request_id = ""
     admitted_old_epoch_survived = False
-    sentinel_busy_before_trigger = False
+    sentinel_admitted_before_trigger = False
     bounds = capture.get("bounds") if isinstance(capture.get("bounds"), dict) else {}
     required_post_commit = int(bounds.get("post_commit_successes", 1))
     if start_time is not None and commit_time is not None:
@@ -744,11 +760,16 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(row, dict):
                 continue
             rows_by_external.setdefault(str(row.get("external_request_id", "")), []).append(row)
-        harness_external_ids = [
-            str(request.get("external_request_id", ""))
-            for request in requests
-            if isinstance(request, dict)
-        ]
+        harness_external_ids = []
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            external_id = str(request.get("external_request_id", ""))
+            harness_external_ids.append(external_id)
+            if not is_canonical_uuid_v4(external_id):
+                add_reason(reasons, f"buyer request ID is not canonical UUIDv4: {external_id or '<missing>'}")
+            if str(request.get("accepted_request_id", "")) != external_id:
+                add_reason(reasons, f"gateway did not preserve buyer request ID {external_id or '<missing>'}")
         if not harness_external_ids or any(not item for item in harness_external_ids):
             add_reason(reasons, "buyer request correlation IDs are missing")
         for external_id in harness_external_ids:
@@ -776,6 +797,7 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             trigger_http_start = parse_utc(trigger_requests[0].get("started_at"))
             trigger_http_end = parse_utc(trigger_requests[0].get("ended_at"))
             sentinel_http_start = parse_utc(sentinel_requests[0].get("started_at"))
+            sentinel_admitted_at = parse_utc(sentinel_requests[0].get("admitted_at"))
             if (
                 trigger_http_start is None
                 or trigger_http_end is None
@@ -783,23 +805,14 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
                 or trigger_http_end < commit_time
             ):
                 add_reason(reasons, "trigger buyer request did not remain outstanding across the rekey commit")
-            for sample in samples:
-                if not isinstance(sample, dict):
-                    continue
-                observed = parse_utc(sample.get("observed_at"))
-                provider = target_from_sample(sample, provider_id)
-                if (
-                    observed is not None
-                    and sentinel_http_start is not None
-                    and trigger_http_start is not None
-                    and sentinel_http_start <= observed <= trigger_http_start
-                    and provider is not None
-                    and provider.get("state") == "busy"
-                ):
-                    sentinel_busy_before_trigger = True
-                    break
-            if not sentinel_busy_before_trigger:
-                add_reason(reasons, "provider Busy was not recorded after sentinel admission and before trigger dispatch")
+            sentinel_admitted_before_trigger = bool(
+                sentinel_http_start is not None
+                and sentinel_admitted_at is not None
+                and trigger_http_start is not None
+                and sentinel_http_start <= sentinel_admitted_at <= trigger_http_start
+            )
+            if not sentinel_admitted_before_trigger:
+                add_reason(reasons, "streaming sentinel admission was not recorded before trigger dispatch")
             trigger_rows = rows_by_external.get(trigger_external, [])
             sentinel_rows = rows_by_external.get(sentinel_external, [])
             if len(trigger_rows) == 1:
@@ -862,7 +875,7 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             "rekey_window_overlapping_requests": overlapping_requests,
             "successful_requests_completed_after_commit": successful_after_commit,
             "admitted_old_epoch_survived": admitted_old_epoch_survived,
-            "sentinel_busy_before_trigger": sentinel_busy_before_trigger,
+            "sentinel_admitted_before_trigger": sentinel_admitted_before_trigger,
             "pool_samples": len(samples),
             "pool_states_observed": sorted(set(pool_states)),
         },
@@ -893,6 +906,7 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             "ready_or_busy_throughout": bool(pool_states) and all(state in ALLOWED_PROVIDER_STATES for state in pool_states),
             "trigger_bound_to_rekey": bool(trigger_request_id and len(starts) == 1 and trigger_request_id == starts[0].get("request_id")),
             "admitted_old_epoch_survived": admitted_old_epoch_survived,
+            "sentinel_admitted_before_trigger": sentinel_admitted_before_trigger,
         },
     }
 
@@ -965,7 +979,9 @@ def sanitized_capture(capture: dict[str, Any]) -> dict[str, Any]:
                     "request_index",
                     "role",
                     "external_request_id",
+                    "accepted_request_id",
                     "started_at",
+                    "admitted_at",
                     "ended_at",
                     "http_status",
                     "outcome",
@@ -1120,6 +1136,7 @@ class LiveState:
         self.next_request = 0
         self.commit_observed = False
         self.commit_event = threading.Event()
+        self.sentinel_admitted_event = threading.Event()
 
     def fail(self, message: str) -> None:
         with self.lock:
@@ -1216,7 +1233,7 @@ def issue_buyer_once(
             return
         request_index = state.next_request
         state.next_request += 1
-    external_request_id = f"rekey-oneshot-{os.getpid()}-{request_index}"
+    external_request_id = str(uuid.uuid4())
     record: dict[str, Any] = {
         "request_index": request_index,
         "role": role,
@@ -1237,16 +1254,30 @@ def issue_buyer_once(
         {
             "model": args.model,
             "messages": [{"role": "user", "content": instruction}],
-            "stream": False,
+            "stream": sentinel,
             "max_tokens": max_tokens,
         },
         separators=(",", ":"),
     ).encode("utf-8")
+
+    def mark_sentinel_admitted(status: int, response_headers: dict[str, str]) -> None:
+        if not sentinel or state.sentinel_admitted_event.is_set():
+            return
+        if status != 200:
+            raise HarnessError(f"buyer sentinel returned HTTP {status} before admission")
+        content_type = response_headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type != "text/event-stream":
+            raise HarnessError("buyer sentinel response was not text/event-stream")
+        if response_headers.get("x-request-id", "") != external_request_id:
+            raise HarnessError("gateway did not preserve the sentinel UUIDv4 X-Request-ID")
+        record["admitted_at"] = utc_now()
+        state.sentinel_admitted_event.set()
+
     try:
         remaining_run_seconds = deadline_monotonic - time.monotonic()
         if remaining_run_seconds <= 0:
             raise TimeoutError("one-shot wall-clock cap reached before buyer dispatch")
-        status, _, response_body = http_once(
+        status, response_headers, response_body = http_once(
             args.buyer_url,
             "POST",
             {
@@ -1257,20 +1288,29 @@ def issue_buyer_once(
             },
             body,
             min(args.request_timeout_seconds, remaining_run_seconds),
+            mark_sentinel_admitted if sentinel else None,
         )
         record["http_status"] = status
+        record["accepted_request_id"] = response_headers.get("x-request-id", "")
         excerpt = response_body[:512].decode("utf-8", "replace")
         record["response_excerpt"] = excerpt
         if status != 200:
             record["outcome"] = "http_error"
             state.fail(f"buyer request {request_index} returned HTTP {status}")
         else:
-            try:
-                decoded = json.loads(response_body)
-            except json.JSONDecodeError as exc:
-                raise HarnessError("buyer returned invalid JSON") from exc
-            if not isinstance(decoded, dict) or not isinstance(decoded.get("choices"), list) or not decoded["choices"]:
-                raise HarnessError("buyer response lacked a non-empty choices array")
+            if record["accepted_request_id"] != external_request_id:
+                raise HarnessError("gateway did not preserve the UUIDv4 X-Request-ID")
+            if sentinel:
+                if response_headers.get("content-type", "").split(";", 1)[0].strip().lower() != "text/event-stream":
+                    raise HarnessError("buyer sentinel response was not text/event-stream")
+                validate_streaming_buyer_response(response_body)
+            else:
+                try:
+                    decoded = json.loads(response_body)
+                except json.JSONDecodeError as exc:
+                    raise HarnessError("buyer returned invalid JSON") from exc
+                if not isinstance(decoded, dict) or not isinstance(decoded.get("choices"), list) or not decoded["choices"]:
+                    raise HarnessError("buyer response lacked a non-empty choices array")
             record["outcome"] = "ok"
     except Exception as exc:  # one attempt only
         record["error"] = str(exc)
@@ -1281,23 +1321,50 @@ def issue_buyer_once(
             state.requests.append(record)
 
 
-def wait_for_provider_busy(state: LiveState, deadline_monotonic: float) -> bool:
+def validate_streaming_buyer_response(response_body: bytes) -> None:
+    saw_choices = False
+    saw_done = False
+    try:
+        response_text = response_body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HarnessError("buyer returned invalid UTF-8 streaming data") from exc
+    for raw_line in response_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            saw_done = True
+            continue
+        if not payload:
+            continue
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise HarnessError("buyer returned invalid streaming JSON") from exc
+        if isinstance(decoded, dict) and isinstance(decoded.get("error"), dict):
+            raise HarnessError("buyer returned a streaming error object")
+        choices = decoded.get("choices") if isinstance(decoded, dict) else None
+        if isinstance(choices, list):
+            saw_choices = saw_choices or any(
+                isinstance(choice, dict)
+                and (
+                    isinstance(choice.get("delta"), dict)
+                    or isinstance(choice.get("message"), dict)
+                    or isinstance(choice.get("text"), str)
+                    or choice.get("finish_reason") is not None
+                )
+                for choice in choices
+            )
+    if not saw_choices or not saw_done:
+        raise HarnessError("buyer stream lacked choices data or the terminal [DONE] marker")
+
+
+def wait_for_sentinel_admission(state: LiveState, deadline_monotonic: float) -> bool:
     while time.monotonic() < deadline_monotonic and not state.dispatch_stop.is_set():
-        with state.lock:
-            for sample in reversed(state.pool_samples):
-                provider = target_from_sample(sample, str(sample.get("expected_provider_id", "")))
-                if provider and provider.get("state") == "busy":
-                    return True
-            samples = list(state.pool_samples)
-        for sample in reversed(samples):
-            poolz = sample.get("poolz") if isinstance(sample, dict) else None
-            pool = poolz.get("pool") if isinstance(poolz, dict) else None
-            if isinstance(pool, list) and any(
-                isinstance(item, dict) and item.get("state") == "busy" for item in pool
-            ):
-                return True
-        time.sleep(0.02)
-    state.fail("sentinel request was not observed Busy before the trigger")
+        if state.sentinel_admitted_event.wait(0.02):
+            return True
+    state.fail("sentinel did not begin streaming before the rekey trigger deadline")
     return False
 
 
@@ -1436,10 +1503,13 @@ def run_live(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
         name="rekey-buyer-sentinel",
     )
     sentinel_thread.start()
-    busy_deadline = deadline
+    admission_deadline = deadline
     if age_deadline_utc is not None:
-        busy_deadline = min(busy_deadline, time.monotonic() + max(0.0, age_deadline_utc - time.time()))
-    wait_for_provider_busy(state, busy_deadline)
+        admission_deadline = min(
+            admission_deadline,
+            time.monotonic() + max(0.0, age_deadline_utc - time.time()),
+        )
+    wait_for_sentinel_admission(state, admission_deadline)
     if not sentinel_thread.is_alive():
         state.fail("sentinel completed before the rekey trigger was dispatched")
     if age_deadline_utc is not None:

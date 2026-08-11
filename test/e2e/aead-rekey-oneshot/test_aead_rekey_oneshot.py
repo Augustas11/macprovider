@@ -10,7 +10,12 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from types import SimpleNamespace
+from typing import Any
 import unittest
+import uuid
 
 
 MODULE_PATH = Path(__file__).with_name("aead_rekey_oneshot.py")
@@ -18,6 +23,9 @@ SPEC = importlib.util.spec_from_file_location("aead_rekey_oneshot", MODULE_PATH)
 assert SPEC and SPEC.loader
 HARNESS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HARNESS)
+
+SENTINEL_EXTERNAL_ID = "11111111-1111-4111-8111-111111111111"
+TRIGGER_EXTERNAL_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def ts(second: int) -> str:
@@ -51,8 +59,10 @@ def passing_capture(gate: str = "request_threshold") -> dict:
             {
                 "request_index": 0,
                 "role": "sentinel",
-                "external_request_id": "external-sentinel",
+                "external_request_id": SENTINEL_EXTERNAL_ID,
+                "accepted_request_id": SENTINEL_EXTERNAL_ID,
                 "started_at": ts(1),
+                "admitted_at": ts(1),
                 "ended_at": ts(4),
                 "http_status": 200,
                 "outcome": "ok",
@@ -61,7 +71,8 @@ def passing_capture(gate: str = "request_threshold") -> dict:
             {
                 "request_index": 1,
                 "role": "trigger",
-                "external_request_id": "external-trigger",
+                "external_request_id": TRIGGER_EXTERNAL_ID,
+                "accepted_request_id": TRIGGER_EXTERNAL_ID,
                 "started_at": ts(2),
                 "ended_at": ts(7),
                 "http_status": 200,
@@ -73,7 +84,7 @@ def passing_capture(gate: str = "request_threshold") -> dict:
             {
                 "ts_utc": ts(4),
                 "request_id": "old-epoch-sentinel",
-                "external_request_id": "external-sentinel",
+                "external_request_id": SENTINEL_EXTERNAL_ID,
                 "provider_assigned_id": "assigned-one",
                 "latency_ms": 3000,
                 "queue_wait_ms": 0,
@@ -85,7 +96,7 @@ def passing_capture(gate: str = "request_threshold") -> dict:
             {
                 "ts_utc": ts(7),
                 "request_id": "buyer-0",
-                "external_request_id": "external-trigger",
+                "external_request_id": TRIGGER_EXTERNAL_ID,
                 "provider_assigned_id": "assigned-one",
                 "latency_ms": 5000,
                 "queue_wait_ms": 2000,
@@ -96,12 +107,9 @@ def passing_capture(gate: str = "request_threshold") -> dict:
             },
         ],
         "pool_samples": [
-            {"observed_at": ts(1), "poolz": {"pool": [provider], "summary": {"ready": 1}}},
-            {
-                "observed_at": ts(2),
-                "poolz": {"pool": [dict(provider, state="busy")], "summary": {"busy": 1}},
-            },
-            {"observed_at": ts(7), "poolz": {"pool": [provider], "summary": {"ready": 1}}},
+            {"observed_at": ts(1), "poolz": {"pool": [dict(provider)], "summary": {"ready": 1}}},
+            {"observed_at": ts(2), "poolz": {"pool": [dict(provider)], "summary": {"ready": 1}}},
+            {"observed_at": ts(7), "poolz": {"pool": [dict(provider)], "summary": {"ready": 1}}},
         ],
         "events": [
             {
@@ -138,6 +146,8 @@ class EvaluateCaptureTests(unittest.TestCase):
         self.assertEqual(result["rekey"]["old_kid"], "old-kid")
         self.assertEqual(result["rekey"]["new_kid"], "new-kid")
         self.assertEqual(result["metrics"]["rekey_window_overlapping_requests"], 2)
+        self.assertTrue(result["metrics"]["sentinel_admitted_before_trigger"])
+        self.assertEqual(result["metrics"]["pool_states_observed"], ["ready"])
 
     def test_age_handoff_uses_same_analyzer(self) -> None:
         result = HARNESS.evaluate_capture(passing_capture("age_threshold"))
@@ -205,6 +215,22 @@ class EvaluateCaptureTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("harness trigger" in reason for reason in result["reasons"]))
 
+    def test_request_ids_must_be_canonical_uuid_v4(self) -> None:
+        capture = passing_capture()
+        capture["requests"][0]["external_request_id"] = "not-a-uuid"
+        capture["requests"][0]["accepted_request_id"] = "not-a-uuid"
+        capture["request_log"][0]["external_request_id"] = "not-a-uuid"
+        result = HARNESS.evaluate_capture(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("canonical UUIDv4" in reason for reason in result["reasons"]))
+
+    def test_gateway_must_echo_the_external_request_id(self) -> None:
+        capture = passing_capture()
+        capture["requests"][0]["accepted_request_id"] = TRIGGER_EXTERNAL_ID
+        result = HARNESS.evaluate_capture(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("did not preserve" in reason for reason in result["reasons"]))
+
     def test_old_epoch_sentinel_must_drain_before_commit(self) -> None:
         capture = passing_capture()
         capture["request_log"][0]["ts_utc"] = ts(2)
@@ -212,6 +238,13 @@ class EvaluateCaptureTests(unittest.TestCase):
         result = HARNESS.evaluate_capture(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("old-epoch" in reason for reason in result["reasons"]))
+
+    def test_sentinel_admission_must_precede_trigger(self) -> None:
+        capture = passing_capture()
+        capture["requests"][0]["admitted_at"] = ts(3)
+        result = HARNESS.evaluate_capture(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("admission" in reason for reason in result["reasons"]))
 
     def test_dry_run_cli_writes_json_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_text:
@@ -346,6 +379,125 @@ class RequestLogTests(unittest.TestCase):
             rows = HARNESS.read_request_log(db, ["external"])
             self.assertEqual(rows[0]["request_id"], "internal")
             self.assertNotIn("buyer_ip", rows[0])
+
+
+class LiveDispatchTests(unittest.TestCase):
+    def test_streaming_sentinel_signals_admission_and_uses_uuid_v4(self) -> None:
+        state = HARNESS.LiveState()
+        args = SimpleNamespace(
+            buyer_url="http://127.0.0.1:19443/v1/chat/completions",
+            max_requests=20,
+            max_tokens=16,
+            model="model-a",
+            request_timeout_seconds=30,
+            sentinel_max_tokens=128,
+        )
+        release_response = threading.Event()
+        observed: dict[str, Any] = {}
+
+        def fake_http_once(url, method, headers, body, timeout_seconds, on_first_body_bytes=None):
+            observed["url"] = url
+            observed["method"] = method
+            observed["headers"] = headers
+            observed["body"] = json.loads(body)
+            observed["timeout_seconds"] = timeout_seconds
+            if on_first_body_bytes is not None:
+                on_first_body_bytes(
+                    200,
+                    {
+                        "content-type": "text/event-stream; charset=utf-8",
+                        "x-request-id": headers["X-Request-Id"],
+                    },
+                )
+            release_response.wait(2)
+            return (
+                200,
+                {
+                    "content-type": "text/event-stream; charset=utf-8",
+                    "x-request-id": headers["X-Request-Id"],
+                },
+                b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+            )
+
+        original_http_once = HARNESS.http_once
+        HARNESS.http_once = fake_http_once
+        try:
+            thread = threading.Thread(
+                target=HARNESS.issue_buyer_once,
+                args=("sentinel", args, "buyer-token", time.monotonic() + 5, state),
+            )
+            thread.start()
+            self.assertTrue(state.sentinel_admitted_event.wait(1))
+            self.assertTrue(thread.is_alive())
+            release_response.set()
+            thread.join(2)
+        finally:
+            release_response.set()
+            HARNESS.http_once = original_http_once
+
+        self.assertFalse(thread.is_alive())
+        request_id = observed["headers"]["X-Request-Id"]
+        self.assertEqual(uuid.UUID(request_id).version, 4)
+        self.assertTrue(observed["body"]["stream"])
+        self.assertEqual(len(state.requests), 1)
+        self.assertIn("admitted_at", state.requests[0])
+        self.assertEqual(state.requests[0]["outcome"], "ok")
+
+    def test_streaming_sentinel_rejects_invalid_admission_headers(self) -> None:
+        state = HARNESS.LiveState()
+        args = SimpleNamespace(
+            buyer_url="http://127.0.0.1:19443/v1/chat/completions",
+            max_requests=20,
+            max_tokens=16,
+            model="model-a",
+            request_timeout_seconds=30,
+            sentinel_max_tokens=128,
+        )
+
+        def fake_http_once(url, method, headers, body, timeout_seconds, on_first_body_bytes=None):
+            if on_first_body_bytes is not None:
+                on_first_body_bytes(
+                    200,
+                    {
+                        "content-type": "application/json",
+                        "x-request-id": headers["X-Request-Id"],
+                    },
+                )
+            return 200, {}, b"{}"
+
+        original_http_once = HARNESS.http_once
+        HARNESS.http_once = fake_http_once
+        try:
+            HARNESS.issue_buyer_once(
+                "sentinel", args, "buyer-token", time.monotonic() + 5, state
+            )
+        finally:
+            HARNESS.http_once = original_http_once
+
+        self.assertFalse(state.sentinel_admitted_event.is_set())
+        self.assertTrue(state.dispatch_stop.is_set())
+        self.assertEqual(state.requests[0]["outcome"], "transport_error")
+        self.assertIn("not text/event-stream", state.requests[0]["error"])
+
+    def test_streaming_response_requires_choices_and_done(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "terminal"):
+            HARNESS.validate_streaming_buyer_response(b'data: {"choices":[]}\n\n')
+
+    def test_streaming_response_rejects_empty_choice_object(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "choices"):
+            HARNESS.validate_streaming_buyer_response(
+                b'data: {"choices":[{}]}\n\ndata: [DONE]\n\n'
+            )
+
+    def test_streaming_response_rejects_error_object(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "error object"):
+            HARNESS.validate_streaming_buyer_response(
+                b'data: {"error":{"code":"provider_failed"}}\n\ndata: [DONE]\n\n'
+            )
+
+    def test_streaming_response_rejects_invalid_utf8(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "UTF-8"):
+            HARNESS.validate_streaming_buyer_response(b"data: \xff\n\ndata: [DONE]\n\n")
 
 
 if __name__ == "__main__":
