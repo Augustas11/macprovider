@@ -3,7 +3,7 @@
   "receipt_type": "openrouter-pricing-fetch-success",
   "started_at": "2026-08-10T17:19:52Z",
   "finished_at": "2026-08-10T17:20:07Z",
-  "engine_commit": "c7c3782bf68073b7ce1b7b5e8f5eac0d6c089805",
+  "engine_commit": "6638ac0ab6b935730f0a8ba1e0bedcdaf59dd7b6",
   "execution": {
     "worktree_clean": true
   },
@@ -51,5 +51,5 @@
       "sha256": "sha256:98379baf240dd7966b9fef4a68413e21b1e464a249306917cc97e36c18b4df3a"
     }
   ],
-  "evidence_digest": "sha256:72e394f6356f0ef5294033de75401d682e3cb7bb6507bf12a6bfdadb21b27fad"
+  "evidence_digest": "sha256:77cfed454f060b65e171ac201f7e422700c1173120089e3a071048b90f4078e5"
 }

@@ -69,11 +69,20 @@ Committed evidence:
 | Superseded pre-fix fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T10-05-13Z.json` |
 | Superseded pre-fix snapshot | `openrouter-pricing-snapshot-2026-08-10T10-05-29Z-34126a58ac6728ec.json` |
 | Superseded pre-fix compute receipt | `openrouter-pricing-compute-success-2026-08-10T10-06-14Z.json` |
-| Superseded pre-fix proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-2a4ef8180e266e37.json` |
+| Superseded pre-fix proposal | `openrouter-rate-card-proposal-2026-08-10T10-06-14Z-d60d0d8d828bbd5c.json` |
 | Final post-fix fetch receipt | `openrouter-pricing-fetch-success-2026-08-10T17-19-52Z.json` |
 | Final post-fix snapshot | `openrouter-pricing-snapshot-2026-08-10T17-20-06Z-e1fe9caa0e710957.json` |
 | Final post-fix compute receipt | `openrouter-pricing-compute-success-2026-08-10T17-20-07Z.json` |
-| Final post-fix proposal | `openrouter-rate-card-proposal-2026-08-10T17-20-07Z-ceaa10b2bef721f1.json` |
+| Final post-fix proposal | `openrouter-rate-card-proposal-2026-08-10T17-20-07Z-258cfbdbb4b81600.json` |
+
+> **Evidence regenerated under proposal schema v2 (drop-gate fix #990).** Both
+> committed proposals above were re-derived from their snapshots under the
+> corrected engine, and every committed receipt was migrated to receipt-schema
+> v2 with its `engine_commit` rebound to `6638ac0a` (an on-`main` commit that
+> carries the v2 engine), so the receipt evidence harness validates the full set.
+> The re-derived proposals now show `dropped: []` / `retained: 3` — the earlier
+> committed artifacts' `dropped` rows for served models (`gpt-oss-20b`,
+> `qwen2.5-coder-32b`) were the schema-v1 false-delisting signal #990 fixes.
 
 The final snapshot was fetched at `2026-08-10T17:20:06Z`; its semantic digest
 is `sha256:b3b620810102afd2055acfad169ab1ed08f89e66f33f5aa8febacbc039808d04`
