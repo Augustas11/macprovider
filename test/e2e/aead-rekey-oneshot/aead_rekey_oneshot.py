@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,7 +25,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 
-HARNESS_VERSION = "1.2.0"
+HARNESS_VERSION = "1.3.0"
 BUYER_TOKEN_ENV = "MACPROVIDER_REKEY_BUYER_TOKEN"
 OPERATOR_TOKEN_ENV = "MACPROVIDER_REKEY_OPERATOR_TOKEN"
 MAX_REQUESTS = 100
@@ -67,12 +68,119 @@ def parse_utc(value: Any) -> float | None:
         return None
 
 
+def parse_utc_z(value: Any) -> float | None:
+    if not isinstance(value, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z", value
+    ) is None:
+        return None
+    return parse_utc(value)
+
+
+def parse_precise_utc(value: Any) -> float | None:
+    if not isinstance(value, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}Z", value
+    ) is None:
+        return None
+    return parse_utc(value)
+
+
 def is_canonical_uuid_v4(value: str) -> bool:
     try:
         parsed = uuid.UUID(value)
     except (ValueError, AttributeError):
         return False
     return parsed.version == 4 and str(parsed) == value
+
+
+def evidence_string(value: Any, *, max_length: int = 512) -> str:
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        return ""
+    return value
+
+
+def is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def validate_live_authority(capture: dict[str, Any], reasons: list[str]) -> None:
+    approval_ref = capture.get("operator_approval_ref")
+    if not isinstance(approval_ref, str) or not approval_ref.startswith("https://github.com/"):
+        add_reason(reasons, "live approval reference is missing or invalid")
+    if not is_sha256(capture.get("approval_attempt_key")):
+        add_reason(reasons, "live approval attempt key is missing or invalid")
+
+    approved = capture.get("approved_identity")
+    if not isinstance(approved, dict):
+        add_reason(reasons, "approved live identity is missing or invalid")
+        return
+    if not is_sha256(approved.get("coordinator_sha256")) or not is_sha256(approved.get("gateway_sha256")):
+        add_reason(reasons, "approved executable digests are missing or invalid")
+    if not evidence_string(approved.get("provider_cli_version")) or not evidence_string(
+        approved.get("provider_compatibility_set_id")
+    ):
+        add_reason(reasons, "approved provider identity is missing or invalid")
+
+    coordinator_process = capture.get("coordinator_process")
+    gateway_process = capture.get("gateway_process")
+    if not isinstance(coordinator_process, dict) or not isinstance(gateway_process, dict):
+        add_reason(reasons, "live process evidence is missing or invalid")
+    else:
+        coordinator_bindings = coordinator_process.get("exact_flag_bindings")
+        gateway_bindings = gateway_process.get("exact_flag_bindings")
+        coordinator_bindings_valid = coordinator_process.get("exact_flag_bindings_verified") is True or (
+            isinstance(coordinator_bindings, dict)
+            and set(coordinator_bindings) == {"--config", "--config-overlay"}
+            and all(evidence_string(value) for value in coordinator_bindings.values())
+        )
+        gateway_bindings_valid = gateway_process.get("exact_flag_bindings_verified") is True or (
+            isinstance(gateway_bindings, dict)
+            and set(gateway_bindings) == {"--config"}
+            and all(evidence_string(value) for value in gateway_bindings.values())
+        )
+        coordinator_name = evidence_string(coordinator_process.get("executable_name")) or Path(
+            evidence_string(coordinator_process.get("executable"))
+        ).name
+        gateway_name = evidence_string(gateway_process.get("executable_name")) or Path(
+            evidence_string(gateway_process.get("executable"))
+        ).name
+        process_checks = (
+            coordinator_bindings_valid,
+            gateway_bindings_valid,
+            coordinator_process.get("required_log_bound") is True,
+            coordinator_process.get("executable_sha256") == approved.get("coordinator_sha256"),
+            gateway_process.get("executable_sha256") == approved.get("gateway_sha256"),
+            type(coordinator_process.get("pid")) is int and coordinator_process["pid"] > 0,
+            type(gateway_process.get("pid")) is int and gateway_process["pid"] > 0,
+            coordinator_name == "coordinator",
+            gateway_name == "gateway",
+        )
+        if not all(process_checks):
+            add_reason(reasons, "live process evidence did not match the approved identity")
+
+    config = capture.get("config")
+    gateway_config = capture.get("gateway_config")
+    if not isinstance(config, dict) or not isinstance(gateway_config, dict):
+        add_reason(reasons, "live config evidence is missing or invalid")
+    elif (
+        not is_sha256(config.get("base_sha256"))
+        or not is_sha256(config.get("overlay_sha256"))
+        or config.get("listen_bind_address") != "127.0.0.1"
+        or config.get("require_encrypted_leg") is not True
+        or config.get("require_gateway_context") is not True
+        or type(config.get("routing_max_retries")) is not int
+        or config.get("routing_max_retries") != 0
+        or not is_sha256(gateway_config.get("sha256"))
+        or gateway_config.get("listen_bind_address") != "127.0.0.1"
+        or gateway_config.get("retry_503_enabled") is not False
+        or type(config.get("buyer_port")) is not int
+        or type(config.get("provider_port")) is not int
+        or type(gateway_config.get("listen_port")) is not int
+        or not isinstance(coordinator_process, dict)
+        or coordinator_process.get("listen_ports") != [config.get("buyer_port"), config.get("provider_port")]
+        or not isinstance(gateway_process, dict)
+        or gateway_process.get("listen_ports") != [gateway_config.get("listen_port")]
+    ):
+        add_reason(reasons, "live config evidence violated the approved isolation contract")
 
 
 def regular_file(path_text: str, label: str) -> Path:
@@ -559,12 +667,75 @@ def read_request_log(db_path: Path, external_ids: list[str]) -> list[dict[str, A
     return [dict(row) for row in rows]
 
 
-def event_time(event: dict[str, Any]) -> float | None:
-    for key in ("time", "timestamp", "ts", "_observed_at"):
-        parsed = parse_utc(event.get(key))
+def event_time(event: dict[str, Any], *, require_observed: bool = False) -> float | None:
+    # Zerolog's event time is second-granular; the monitor observation preserves
+    # the ordering needed to compare events with microsecond HTTP timestamps.
+    keys = ("_observed_at",) if require_observed else ("_observed_at", "time", "timestamp", "ts")
+    for key in keys:
+        parsed = parse_precise_utc(event.get(key)) if require_observed else parse_utc(event.get(key))
         if parsed is not None:
             return parsed
     return None
+
+
+def request_ids_correlate(logged_request_id: Any, event_request_id: Any) -> bool:
+    if not isinstance(logged_request_id, str) or not isinstance(event_request_id, str):
+        return False
+    if not is_canonical_uuid_v4(logged_request_id):
+        return False
+    return event_request_id in {logged_request_id, f"req-{logged_request_id}"}
+
+
+def validated_capture_bounds(capture: dict[str, Any], *, require_live: bool = False) -> dict[str, int] | None:
+    defaults = {
+        "max_requests": MAX_REQUESTS,
+        "max_seconds": MAX_SECONDS,
+        "concurrency": 2,
+        "max_tokens_per_request": MAX_TOKENS,
+        "sentinel_max_tokens": MAX_SENTINEL_TOKENS,
+        "request_timeout_seconds": 120,
+        "post_commit_successes": 1,
+        "automatic_retries": 0,
+    }
+    raw = capture.get("bounds")
+    if raw is None and not require_live:
+        raw = {}
+    if not isinstance(raw, dict) or (require_live and not defaults.keys() <= raw.keys()):
+        return None
+    values = {key: raw.get(key, default) for key, default in defaults.items()}
+    if any(type(value) is not int for value in values.values()):
+        return None
+    if (
+        not 1 <= values["max_requests"] <= MAX_REQUESTS
+        or not 1 <= values["max_seconds"] <= MAX_SECONDS
+        or values["concurrency"] != 2
+        or not 1 <= values["max_tokens_per_request"] <= MAX_TOKENS
+        or not 1 <= values["sentinel_max_tokens"] <= MAX_SENTINEL_TOKENS
+        or not 1 <= values["request_timeout_seconds"] <= min(120, values["max_seconds"])
+        or not 1 <= values["post_commit_successes"] < values["max_requests"]
+        or values["automatic_retries"] != 0
+    ):
+        return None
+    return values
+
+
+def request_log_interval(
+    row: dict[str, Any], bounds: dict[str, int] | None
+) -> tuple[float, float] | None:
+    if bounds is None:
+        return None
+    start = parse_utc_z(row.get("ts_utc"))
+    raw_latency = row.get("latency_ms")
+    if type(raw_latency) not in {int, float}:
+        return None
+    latency_seconds = raw_latency / 1000.0
+    if (
+        start is None
+        or not math.isfinite(latency_seconds)
+        or not 0 <= latency_seconds <= bounds["request_timeout_seconds"]
+    ):
+        return None
+    return start, start + latency_seconds
 
 
 def target_from_sample(sample: dict[str, Any], provider_id: str) -> dict[str, Any] | None:
@@ -583,16 +754,32 @@ def add_reason(reasons: list[str], reason: str) -> None:
         reasons.append(reason)
 
 
-def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
+def evaluate_capture(capture: dict[str, Any], *, expected_source: str = "fixture") -> dict[str, Any]:
     reasons: list[str] = []
+    if expected_source not in {"fixture", "live"}:
+        raise ValueError("expected_source must be fixture or live")
+    is_live = expected_source == "live"
+    if capture.get("source") != expected_source:
+        add_reason(reasons, "capture source did not match the trusted evaluation mode")
+    if is_live:
+        validate_live_authority(capture, reasons)
+    timestamp_parser = parse_utc_z if is_live else parse_utc
     gate = capture.get("gate")
-    expected_reason = gate if gate in {"request_threshold", "age_threshold"} else ""
-    provider_id = str(capture.get("expected_provider_id", ""))
-    expected_pool_size = int(capture.get("expected_pool_size", 1))
+    expected_reason = gate if isinstance(gate, str) and gate in {"request_threshold", "age_threshold"} else ""
+    provider_id = evidence_string(capture.get("expected_provider_id"))
+    if not provider_id:
+        add_reason(reasons, "expected provider ID is missing or invalid")
+    raw_pool_size = capture.get("expected_pool_size", 1)
+    expected_pool_size = raw_pool_size if type(raw_pool_size) is int else 0
+    if expected_pool_size != 1:
+        add_reason(reasons, "expected pool size is missing or invalid")
     requests = capture.get("requests") if isinstance(capture.get("requests"), list) else []
     samples = capture.get("pool_samples") if isinstance(capture.get("pool_samples"), list) else []
     events = capture.get("events") if isinstance(capture.get("events"), list) else []
-    runtime_failures = capture.get("runtime_failures") if isinstance(capture.get("runtime_failures"), list) else []
+    raw_runtime_failures = capture.get("runtime_failures", [])
+    runtime_failures = raw_runtime_failures if isinstance(raw_runtime_failures, list) else []
+    if not isinstance(raw_runtime_failures, list):
+        add_reason(reasons, "runtime failure evidence is malformed")
     for failure in runtime_failures:
         add_reason(reasons, f"runtime failure: {failure}")
 
@@ -610,19 +797,25 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             add_reason(reasons, "buyer observed HTTP 503")
         if "no_provider_available" in detail:
             add_reason(reasons, "buyer observed no_provider_available")
-        if status != 200 or outcome != "ok":
+        if type(status) is not int or status != 200 or outcome != "ok":
             add_reason(reasons, f"buyer request {request.get('request_index', '?')} failed")
         else:
             successful_requests += 1
 
     identities: list[tuple[str, str, str, str, str]] = []
     pool_states: list[str] = []
+    pool_observation_times: list[float] = []
     first_provider: dict[str, Any] | None = None
     final_provider: dict[str, Any] | None = None
     for sample in samples:
         if not isinstance(sample, dict) or sample.get("error"):
             add_reason(reasons, "poolz monitoring failed")
             continue
+        observed_at = timestamp_parser(sample.get("observed_at"))
+        if observed_at is None:
+            add_reason(reasons, "poolz observation timestamp is missing or invalid")
+        else:
+            pool_observation_times.append(observed_at)
         poolz = sample.get("poolz")
         pool = poolz.get("pool") if isinstance(poolz, dict) else None
         if not isinstance(pool, list) or len(pool) != expected_pool_size:
@@ -636,15 +829,17 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             first_provider = provider
         final_provider = provider
         safety = provider.get("safety_telemetry")
-        compatibility_set = str(safety.get("compatibility_set_id", "")) if isinstance(safety, dict) else ""
+        compatibility_set = evidence_string(safety.get("compatibility_set_id")) if isinstance(safety, dict) else ""
         identity = (
-            str(provider.get("provider_id", "")),
-            str(provider.get("assigned_id", "")),
-            str(provider.get("connected_at", "")),
-            str(provider.get("binary_version", "")),
+            evidence_string(provider.get("provider_id")),
+            evidence_string(provider.get("assigned_id")),
+            evidence_string(provider.get("connected_at")),
+            evidence_string(provider.get("binary_version")),
             compatibility_set,
         )
         identities.append(identity)
+        if timestamp_parser(identity[2]) is None:
+            add_reason(reasons, "provider connected_at timestamp is missing or invalid")
         state = str(provider.get("state", ""))
         pool_states.append(state)
         if state not in ALLOWED_PROVIDER_STATES:
@@ -661,9 +856,9 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
         add_reason(reasons, "poolz identity evidence is incomplete")
     approved_identity = capture.get("approved_identity") if isinstance(capture.get("approved_identity"), dict) else {}
     if approved_identity and identities:
-        if identities[0][3] != str(approved_identity.get("provider_cli_version", "")):
+        if identities[0][3] != evidence_string(approved_identity.get("provider_cli_version")):
             add_reason(reasons, "provider CLI version did not match approved identity throughout")
-        if identities[0][4] != str(approved_identity.get("provider_compatibility_set_id", "")):
+        if identities[0][4] != evidence_string(approved_identity.get("provider_compatibility_set_id")):
             add_reason(reasons, "provider compatibility-set ID did not match approved identity throughout")
     if final_provider is None or final_provider.get("state") != "ready" or final_provider.get("routing_eligible") is not True:
         add_reason(reasons, "provider was not Ready and routing-eligible at postflight")
@@ -674,6 +869,7 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
         if isinstance(event, dict)
         and (
             event.get("provider_id") == provider_id
+            or event.get("event") in {"aead_rekey_failed", "encrypted_leg_session_closed"}
             or (not event.get("provider_id") and str(event.get("message", "")) in FORBIDDEN_MESSAGES)
         )
     ]
@@ -700,12 +896,13 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
     rekey_id = ""
     start_time = None
     commit_time = None
+    trigger_bound_to_rekey = False
     if len(starts) == 1 and len(commits) == 1:
         start = starts[0]
         commit = commits[0]
-        old_kid = str(commit.get("old_kid", ""))
-        new_kid = str(commit.get("new_kid", ""))
-        rekey_id = str(commit.get("rekey_id", ""))
+        old_kid = evidence_string(commit.get("old_kid"))
+        new_kid = evidence_string(commit.get("new_kid"))
+        rekey_id = evidence_string(commit.get("rekey_id"))
         if start.get("decision") != "rotate_in_band":
             add_reason(reasons, "aead_rekey decision was not rotate_in_band")
         if commit.get("decision") != "continue_same_session":
@@ -720,8 +917,8 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             add_reason(reasons, "old_kid and new_kid were not cryptographically distinct")
         if start.get("kid") != old_kid:
             add_reason(reasons, "aead_rekey old KID did not match committed old_kid")
-        start_time = event_time(start)
-        commit_time = event_time(commit)
+        start_time = event_time(start, require_observed=is_live)
+        commit_time = event_time(commit, require_observed=is_live)
         if start_time is None or commit_time is None or commit_time < start_time:
             add_reason(reasons, "rekey event timestamps are missing or out of order")
 
@@ -731,31 +928,91 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
     sentinel_request_id = ""
     admitted_old_epoch_survived = False
     sentinel_admitted_before_trigger = False
-    bounds = capture.get("bounds") if isinstance(capture.get("bounds"), dict) else {}
-    required_post_commit = int(bounds.get("post_commit_successes", 1))
+    bounds = validated_capture_bounds(capture, require_live=is_live)
+    if bounds is None:
+        add_reason(reasons, "capture bounds are missing or invalid")
+    required_post_commit = bounds["post_commit_successes"] if bounds is not None else 1
+    if is_live and bounds is not None:
+        config = capture.get("config")
+        if not isinstance(config, dict):
+            add_reason(reasons, "live threshold evidence is missing or invalid")
+        else:
+            request_threshold = config.get("encrypted_leg_rekey_after_requests")
+            age_threshold = config.get("encrypted_leg_rekey_after_seconds")
+            thresholds_valid = type(request_threshold) is int and type(age_threshold) is int
+            if expected_reason == "request_threshold":
+                thresholds_valid = thresholds_valid and 1 <= request_threshold <= bounds["max_requests"]
+                thresholds_valid = thresholds_valid and age_threshold > bounds["max_seconds"]
+            elif expected_reason == "age_threshold":
+                thresholds_valid = thresholds_valid and 1 <= age_threshold <= bounds["max_seconds"]
+                thresholds_valid = thresholds_valid and request_threshold > bounds["max_requests"]
+            else:
+                thresholds_valid = False
+            if not thresholds_valid:
+                add_reason(reasons, "live threshold evidence did not match the selected bounded gate")
+    capture_start = timestamp_parser(capture.get("started_at")) if is_live else None
+    capture_end = timestamp_parser(capture.get("ended_at")) if is_live else None
+    if is_live and (
+        capture_start is None
+        or capture_end is None
+        or capture_end < capture_start
+        or bounds is None
+        or capture_end - capture_start > bounds["max_seconds"]
+    ):
+        add_reason(reasons, "live capture timestamps are missing, invalid, or exceed the run bound")
+    if is_live and capture_start is not None and capture_end is not None and any(
+        observed < capture_start or observed > capture_end for observed in pool_observation_times
+    ):
+        add_reason(reasons, "poolz observations fell outside the live capture window")
+    if (
+        is_live
+        and capture_start is not None
+        and capture_end is not None
+        and start_time is not None
+        and commit_time is not None
+        and not capture_start <= start_time <= commit_time <= capture_end
+    ):
+        add_reason(reasons, "rekey events fell outside the live capture window")
+    if bounds is not None and len(requests) > bounds["max_requests"]:
+        add_reason(reasons, "captured buyer requests exceeded the declared request bound")
     if start_time is not None and commit_time is not None:
+        request_intervals_by_external: dict[str, tuple[float, float]] = {}
         for request in requests:
             if not isinstance(request, dict):
                 continue
-            request_start = parse_utc(request.get("started_at"))
-            request_end = parse_utc(request.get("ended_at"))
+            request_start = timestamp_parser(request.get("started_at"))
+            request_end = timestamp_parser(request.get("ended_at"))
             if request_start is None or request_end is None:
+                if is_live:
+                    add_reason(reasons, "live buyer request timestamps are missing or invalid")
                 continue
+            if request_end < request_start:
+                add_reason(reasons, "buyer request timestamps are out of order")
+                continue
+            if (
+                is_live
+                and (
+                    capture_start is None
+                    or capture_end is None
+                    or bounds is None
+                    or request_start < capture_start
+                    or request_end > capture_end
+                    or request_end - request_start > bounds["request_timeout_seconds"]
+                )
+            ):
+                add_reason(reasons, "live buyer request interval fell outside its capture or timeout bound")
+                continue
+            external_id = request.get("external_request_id")
+            if isinstance(external_id, str):
+                request_intervals_by_external[external_id] = (request_start, request_end)
             if request_start <= commit_time and request_end >= start_time:
                 overlapping_requests += 1
-            if request_end >= commit_time and request.get("http_status") == 200 and request.get("outcome") == "ok":
-                successful_after_commit += 1
         if overlapping_requests == 0:
             add_reason(reasons, "no buyer request overlapped the rekey window")
-        if successful_after_commit < required_post_commit:
-            add_reason(
-                reasons,
-                f"only {successful_after_commit} successful buyer request(s) completed after commit; "
-                f"required {required_post_commit}",
-            )
 
         request_rows = capture.get("request_log") if isinstance(capture.get("request_log"), list) else []
         rows_by_external: dict[str, list[dict[str, Any]]] = {}
+        internal_request_ids: list[str] = []
         for row in request_rows:
             if not isinstance(row, dict):
                 continue
@@ -778,14 +1035,62 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
                 add_reason(reasons, f"buyer request {external_id or '<missing>'} did not map to exactly one request_log row")
                 continue
             row = matched[0]
-            try:
-                single_attempt = int(row.get("retried", -1)) == 0 and int(row.get("attempt_n", -1)) == 0
-            except (TypeError, ValueError):
-                single_attempt = False
-            if row.get("status") != 200 or not single_attempt:
+            row_interval = request_log_interval(row, bounds)
+            if row_interval is None:
+                add_reason(reasons, f"request_log row for {external_id} has invalid or out-of-bounds timing")
+            elif (
+                is_live
+                and (
+                    capture_start is None
+                    or capture_end is None
+                    or row_interval[0] < capture_start
+                    or row_interval[1] > capture_end
+                )
+            ):
+                add_reason(reasons, f"request_log row for {external_id} fell outside the live capture window")
+            internal_request_id = row.get("request_id")
+            if not isinstance(internal_request_id, str) or not is_canonical_uuid_v4(internal_request_id):
+                add_reason(reasons, f"request_log row for {external_id} has a noncanonical internal request_id")
+            else:
+                internal_request_ids.append(internal_request_id)
+            single_attempt = type(row.get("retried")) is int and row.get("retried") == 0
+            single_attempt = single_attempt and type(row.get("attempt_n")) is int and row.get("attempt_n") == 0
+            if type(row.get("status")) is not int or row.get("status") != 200 or not single_attempt:
                 add_reason(reasons, f"request_log row for {external_id} was not a single successful attempt")
-            if str(row.get("provider_assigned_id", "")) != assigned_id:
+            if evidence_string(row.get("provider_assigned_id")) != assigned_id:
                 add_reason(reasons, f"request_log row for {external_id} used another assigned_id")
+        if len(internal_request_ids) != len(set(internal_request_ids)):
+            add_reason(reasons, "request_log internal request IDs were not unique")
+
+        successful_post_commit_ids: set[str] = set()
+        for request in requests:
+            if not isinstance(request, dict) or request.get("role") != "post_commit":
+                continue
+            external_id = request.get("external_request_id")
+            client_interval = request_intervals_by_external.get(external_id) if isinstance(external_id, str) else None
+            matched = rows_by_external.get(external_id, []) if isinstance(external_id, str) else []
+            row_interval = request_log_interval(matched[0], bounds) if len(matched) == 1 else None
+            if (
+                isinstance(external_id, str)
+                and client_interval is not None
+                and row_interval is not None
+                and client_interval[0] >= commit_time
+                and row_interval[0] >= commit_time
+                and client_interval[0] <= row_interval[0] <= row_interval[1] <= client_interval[1]
+                and type(request.get("http_status")) is int
+                and request.get("http_status") == 200
+                and request.get("outcome") == "ok"
+                and type(matched[0].get("status")) is int
+                and matched[0].get("status") == 200
+            ):
+                successful_post_commit_ids.add(external_id)
+        successful_after_commit = len(successful_post_commit_ids)
+        if successful_after_commit < required_post_commit:
+            add_reason(
+                reasons,
+                f"only {successful_after_commit} successful buyer request(s) completed after commit; "
+                f"required {required_post_commit}",
+            )
 
         trigger_requests = [request for request in requests if isinstance(request, dict) and request.get("role") == "trigger"]
         sentinel_requests = [request for request in requests if isinstance(request, dict) and request.get("role") == "sentinel"]
@@ -794,10 +1099,11 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
         else:
             trigger_external = str(trigger_requests[0].get("external_request_id", ""))
             sentinel_external = str(sentinel_requests[0].get("external_request_id", ""))
-            trigger_http_start = parse_utc(trigger_requests[0].get("started_at"))
-            trigger_http_end = parse_utc(trigger_requests[0].get("ended_at"))
-            sentinel_http_start = parse_utc(sentinel_requests[0].get("started_at"))
-            sentinel_admitted_at = parse_utc(sentinel_requests[0].get("admitted_at"))
+            trigger_http_start = timestamp_parser(trigger_requests[0].get("started_at"))
+            trigger_http_end = timestamp_parser(trigger_requests[0].get("ended_at"))
+            sentinel_http_start = timestamp_parser(sentinel_requests[0].get("started_at"))
+            sentinel_http_end = timestamp_parser(sentinel_requests[0].get("ended_at"))
+            sentinel_admitted_at = timestamp_parser(sentinel_requests[0].get("admitted_at"))
             if (
                 trigger_http_start is None
                 or trigger_http_end is None
@@ -816,21 +1122,40 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             trigger_rows = rows_by_external.get(trigger_external, [])
             sentinel_rows = rows_by_external.get(sentinel_external, [])
             if len(trigger_rows) == 1:
-                trigger_request_id = str(trigger_rows[0].get("request_id", ""))
-                if len(starts) == 1 and trigger_request_id != str(starts[0].get("request_id", "")):
-                    add_reason(reasons, "rekey event request_id did not map to the harness trigger request")
+                trigger_interval = request_log_interval(trigger_rows[0], bounds)
+                raw_trigger_request_id = trigger_rows[0].get("request_id")
+                if isinstance(raw_trigger_request_id, str):
+                    trigger_request_id = raw_trigger_request_id
+                if len(starts) == 1:
+                    matching_event_rows = [
+                        row
+                        for row in request_rows
+                        if isinstance(row, dict)
+                        and request_ids_correlate(row.get("request_id"), starts[0].get("request_id"))
+                    ]
+                    trigger_bound_to_rekey = (
+                        len(matching_event_rows) == 1 and matching_event_rows[0] is trigger_rows[0]
+                    )
+                    if not trigger_bound_to_rekey:
+                        add_reason(reasons, "rekey event request_id did not map uniquely to the harness trigger request")
+                if (
+                    trigger_interval is None
+                    or trigger_interval[0] > start_time
+                    or trigger_interval[1] < commit_time
+                ):
+                    add_reason(reasons, "trigger request_log interval did not remain outstanding across the rekey commit")
             if len(sentinel_rows) == 1:
                 sentinel = sentinel_rows[0]
-                sentinel_request_id = str(sentinel.get("request_id", ""))
-                sentinel_end = parse_utc(sentinel.get("ts_utc"))
-                try:
-                    sentinel_start = sentinel_end - float(sentinel.get("latency_ms", 0)) / 1000.0 if sentinel_end else None
-                except (TypeError, ValueError):
-                    sentinel_start = None
+                raw_sentinel_request_id = sentinel.get("request_id")
+                if isinstance(raw_sentinel_request_id, str):
+                    sentinel_request_id = raw_sentinel_request_id
+                sentinel_interval = request_log_interval(sentinel, bounds)
                 if (
-                    sentinel_start is not None
-                    and sentinel_end is not None
-                    and sentinel_start <= start_time <= sentinel_end
+                    sentinel_interval is not None
+                    and sentinel_interval[0] <= start_time <= sentinel_interval[1]
+                    and sentinel_http_start is not None
+                    and sentinel_http_end is not None
+                    and sentinel_http_start <= start_time <= sentinel_http_end
                     and sentinel.get("status") == 200
                     and sentinel_request_id != trigger_request_id
                 ):
@@ -842,13 +1167,15 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
     health_final = capture.get("health_final")
     coordinator_version = ""
     if isinstance(health_initial, dict):
-        coordinator_version = str(health_initial.get("version", ""))
+        coordinator_version = evidence_string(health_initial.get("version"))
     if not coordinator_version:
         add_reason(reasons, "coordinator version evidence is missing")
     if not isinstance(health_final, dict) or health_final.get("status") != "ok":
         add_reason(reasons, "coordinator postflight health is not ok")
-    elif int(health_final.get("pool_degraded", 0)) or int(health_final.get("pool_draining", 0)) or int(health_final.get("pool_unavailable", 0)):
-        add_reason(reasons, "coordinator postflight reports a non-serving provider state")
+    else:
+        health_counters = [health_final.get(key, 0) for key in ("pool_degraded", "pool_draining", "pool_unavailable")]
+        if any(type(value) is not int or value != 0 for value in health_counters):
+            add_reason(reasons, "coordinator postflight reports invalid or non-serving provider counters")
     cli_version = str(first_provider.get("binary_version", "")) if first_provider else ""
     safety_telemetry = first_provider.get("safety_telemetry") if first_provider else None
     compatibility_set_id = (
@@ -904,7 +1231,7 @@ def evaluate_capture(capture: dict[str, Any]) -> dict[str, Any]:
             "same_connection": bool(identities) and all(identity[2] == identities[0][2] for identity in identities),
             "fresh_kid": bool(old_kid and new_kid and old_kid != new_kid),
             "ready_or_busy_throughout": bool(pool_states) and all(state in ALLOWED_PROVIDER_STATES for state in pool_states),
-            "trigger_bound_to_rekey": bool(trigger_request_id and len(starts) == 1 and trigger_request_id == starts[0].get("request_id")),
+            "trigger_bound_to_rekey": trigger_bound_to_rekey,
             "admitted_old_epoch_survived": admitted_old_epoch_survived,
             "sentinel_admitted_before_trigger": sentinel_admitted_before_trigger,
         },
@@ -1602,7 +1929,7 @@ def run_live(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
             "events": list(state.events),
             "runtime_failures": list(state.fatal_errors),
         }
-    result = evaluate_capture(capture)
+    result = evaluate_capture(capture, expected_source="live")
     return capture, result
 
 
@@ -1722,7 +2049,8 @@ def main() -> int:
                 raise HarnessError("dry-run fixture must contain a JSON object")
             if capture.get("gate") != args.gate:
                 raise HarnessError("dry-run fixture gate does not match --gate")
-            result = evaluate_capture(capture)
+            capture["source"] = "fixture"
+            result = evaluate_capture(capture, expected_source="fixture")
             if result["verdict"] == "PASS":
                 result["verdict"] = "DRY-RUN-PASS"
             output_dir = reserve_output_dir(args.output_dir)

@@ -26,6 +26,10 @@ SPEC.loader.exec_module(HARNESS)
 
 SENTINEL_EXTERNAL_ID = "11111111-1111-4111-8111-111111111111"
 TRIGGER_EXTERNAL_ID = "22222222-2222-4222-8222-222222222222"
+SENTINEL_INTERNAL_ID = "33333333-3333-4333-8333-333333333333"
+TRIGGER_INTERNAL_ID = "44444444-4444-4444-8444-444444444444"
+POST_COMMIT_EXTERNAL_ID = "55555555-5555-4555-8555-555555555555"
+POST_COMMIT_INTERNAL_ID = "66666666-6666-4666-8666-666666666666"
 
 
 def ts(second: int) -> str:
@@ -44,6 +48,7 @@ def passing_capture(gate: str = "request_threshold") -> dict:
         "encrypted_leg": True,
     }
     return {
+        "source": "fixture",
         "gate": gate,
         "expected_provider_id": "mp-dedicated",
         "expected_pool_size": 1,
@@ -79,11 +84,22 @@ def passing_capture(gate: str = "request_threshold") -> dict:
                 "outcome": "ok",
                 "response_excerpt": '{"choices":[{}]}',
             },
+            {
+                "request_index": 2,
+                "role": "post_commit",
+                "external_request_id": POST_COMMIT_EXTERNAL_ID,
+                "accepted_request_id": POST_COMMIT_EXTERNAL_ID,
+                "started_at": ts(6),
+                "ended_at": ts(7),
+                "http_status": 200,
+                "outcome": "ok",
+                "response_excerpt": '{"choices":[{}]}',
+            },
         ],
         "request_log": [
             {
-                "ts_utc": ts(4),
-                "request_id": "old-epoch-sentinel",
+                "ts_utc": ts(1),
+                "request_id": SENTINEL_INTERNAL_ID,
                 "external_request_id": SENTINEL_EXTERNAL_ID,
                 "provider_assigned_id": "assigned-one",
                 "latency_ms": 3000,
@@ -94,12 +110,24 @@ def passing_capture(gate: str = "request_threshold") -> dict:
                 "attempt_n": 0,
             },
             {
-                "ts_utc": ts(7),
-                "request_id": "buyer-0",
+                "ts_utc": ts(2),
+                "request_id": TRIGGER_INTERNAL_ID,
                 "external_request_id": TRIGGER_EXTERNAL_ID,
                 "provider_assigned_id": "assigned-one",
                 "latency_ms": 5000,
                 "queue_wait_ms": 2000,
+                "status": 200,
+                "error_code": None,
+                "retried": 0,
+                "attempt_n": 0,
+            },
+            {
+                "ts_utc": ts(6),
+                "request_id": POST_COMMIT_INTERNAL_ID,
+                "external_request_id": POST_COMMIT_EXTERNAL_ID,
+                "provider_assigned_id": "assigned-one",
+                "latency_ms": 1000,
+                "queue_wait_ms": 0,
                 "status": 200,
                 "error_code": None,
                 "retried": 0,
@@ -117,7 +145,7 @@ def passing_capture(gate: str = "request_threshold") -> dict:
                 "event": "aead_rekey",
                 "provider_id": "mp-dedicated",
                 "assigned_id": "assigned-one",
-                "request_id": "buyer-0",
+                "request_id": f"req-{TRIGGER_INTERNAL_ID}",
                 "kid": "old-kid",
                 "reason": gate,
                 "decision": "rotate_in_band",
@@ -127,7 +155,7 @@ def passing_capture(gate: str = "request_threshold") -> dict:
                 "event": "aead_rekey_committed",
                 "provider_id": "mp-dedicated",
                 "assigned_id": "assigned-one",
-                "request_id": "buyer-0",
+                "request_id": f"req-{TRIGGER_INTERNAL_ID}",
                 "rekey_id": "rekey-one",
                 "old_kid": "old-kid",
                 "new_kid": "new-kid",
@@ -138,19 +166,85 @@ def passing_capture(gate: str = "request_threshold") -> dict:
     }
 
 
+def make_live(capture: dict) -> dict:
+    capture["source"] = "live"
+    capture["started_at"] = ts(0)
+    capture["ended_at"] = ts(7)
+    capture["bounds"] = {
+        "max_requests": 20,
+        "max_seconds": 60,
+        "concurrency": 2,
+        "max_tokens_per_request": 16,
+        "sentinel_max_tokens": 128,
+        "request_timeout_seconds": 30,
+        "post_commit_successes": 1,
+        "automatic_retries": 0,
+    }
+    capture["events"][0]["_observed_at"] = "2026-07-22T12:00:03.000001Z"
+    capture["events"][1]["_observed_at"] = "2026-07-22T12:00:05.000001Z"
+    capture["operator_approval_ref"] = "https://github.com/Augustas11/macprovider/issues/540#issuecomment-test"
+    capture["approval_attempt_key"] = "a" * 64
+    capture["approved_identity"] = {
+        "coordinator_sha256": "b" * 64,
+        "gateway_sha256": "c" * 64,
+        "provider_cli_version": "v1.8.58",
+        "provider_compatibility_set_id": "set-reviewed",
+    }
+    capture["coordinator_process"] = {
+        "exact_flag_bindings": {"--config": "/runtime/base.yaml", "--config-overlay": "/runtime/overlay.yaml"},
+        "required_log_bound": True,
+        "executable": "/runtime/bin/coordinator",
+        "executable_sha256": "b" * 64,
+        "listen_ports": [18443, 18444],
+        "pid": 101,
+    }
+    capture["gateway_process"] = {
+        "exact_flag_bindings": {"--config": "/runtime/gateway.yaml"},
+        "executable": "/runtime/bin/gateway",
+        "executable_sha256": "c" * 64,
+        "listen_ports": [19443],
+        "pid": 102,
+    }
+    capture["config"] = {
+        "base_sha256": "d" * 64,
+        "overlay_sha256": "e" * 64,
+        "listen_bind_address": "127.0.0.1",
+        "require_encrypted_leg": True,
+        "require_gateway_context": True,
+        "routing_max_retries": 0,
+        "buyer_port": 18443,
+        "provider_port": 18444,
+        "encrypted_leg_rekey_after_requests": 6 if capture["gate"] == "request_threshold" else 1000,
+        "encrypted_leg_rekey_after_seconds": 3600 if capture["gate"] == "request_threshold" else 6,
+    }
+    capture["gateway_config"] = {
+        "sha256": "f" * 64,
+        "listen_bind_address": "127.0.0.1",
+        "retry_503_enabled": False,
+        "listen_port": 19443,
+    }
+    capture["runtime_failures"] = []
+    return capture
+
+
+def evaluate(capture: dict) -> dict:
+    return HARNESS.evaluate_capture(capture, expected_source=capture.get("source", "fixture"))
+
+
 class EvaluateCaptureTests(unittest.TestCase):
     def test_success_handoff_records_required_evidence(self) -> None:
-        result = HARNESS.evaluate_capture(passing_capture())
+        result = evaluate(passing_capture())
         self.assertEqual(result["verdict"], "PASS", result["reasons"])
         self.assertEqual(result["identity"]["assigned_id"], "assigned-one")
         self.assertEqual(result["rekey"]["old_kid"], "old-kid")
         self.assertEqual(result["rekey"]["new_kid"], "new-kid")
         self.assertEqual(result["metrics"]["rekey_window_overlapping_requests"], 2)
+        self.assertEqual(result["metrics"]["successful_requests_completed_after_commit"], 1)
         self.assertTrue(result["metrics"]["sentinel_admitted_before_trigger"])
         self.assertEqual(result["metrics"]["pool_states_observed"], ["ready"])
 
     def test_age_handoff_uses_same_analyzer(self) -> None:
-        result = HARNESS.evaluate_capture(passing_capture("age_threshold"))
+        result = evaluate(passing_capture("age_threshold"))
         self.assertEqual(result["verdict"], "PASS", result["reasons"])
 
     def test_reconnect_or_legacy_close_is_fail(self) -> None:
@@ -166,7 +260,7 @@ class EvaluateCaptureTests(unittest.TestCase):
                 "message": "provider websocket disconnected",
             }
         )
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("provider identity changed" in reason for reason in result["reasons"]))
         self.assertTrue(any("close/reconnect" in reason for reason in result["reasons"]))
@@ -176,7 +270,7 @@ class EvaluateCaptureTests(unittest.TestCase):
         capture["events"].append(
             {"time": ts(4), "message": "provider websocket closing"}
         )
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("close/reconnect" in reason for reason in result["reasons"]))
 
@@ -185,7 +279,7 @@ class EvaluateCaptureTests(unittest.TestCase):
         final_provider = capture["pool_samples"][-1]["poolz"]["pool"][0]
         final_provider["binary_version"] = "v1.8.59"
         final_provider["safety_telemetry"] = {"compatibility_set_id": "set-other"}
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("provider identity changed" in reason for reason in result["reasons"]))
 
@@ -196,7 +290,7 @@ class EvaluateCaptureTests(unittest.TestCase):
             outcome="http_error",
             response_excerpt='{"error":{"code":"no_provider_available"}}',
         )
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertIn("buyer observed HTTP 503", result["reasons"])
         self.assertIn("buyer observed no_provider_available", result["reasons"])
@@ -204,45 +298,336 @@ class EvaluateCaptureTests(unittest.TestCase):
     def test_missing_kid_evidence_is_fail(self) -> None:
         capture = passing_capture()
         capture["events"][1]["new_kid"] = ""
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("missing old_kid" in reason for reason in result["reasons"]))
 
     def test_trigger_must_map_to_rekey_request_id(self) -> None:
         capture = passing_capture()
         capture["request_log"][1]["request_id"] = "different-internal-request"
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("harness trigger" in reason for reason in result["reasons"]))
+
+    def test_attempt_005_subsecond_timestamps_and_wire_request_id_pass(self) -> None:
+        capture = passing_capture()
+        capture["requests"][0].update(
+            started_at="2026-08-11T14:38:17.294059Z",
+            admitted_at="2026-08-11T14:38:17.349916Z",
+            ended_at="2026-08-11T14:38:21.788063Z",
+        )
+        capture["requests"][1].update(
+            started_at="2026-08-11T14:38:17.351656Z",
+            ended_at="2026-08-11T14:38:22.395662Z",
+        )
+        capture["requests"][2].update(
+            started_at="2026-08-11T14:38:21.800000Z",
+            ended_at="2026-08-11T14:38:22.500000Z",
+        )
+        capture["request_log"][0].update(
+            ts_utc="2026-08-11T14:38:17.311515252Z",
+            latency_ms=4417,
+        )
+        capture["request_log"][1].update(
+            ts_utc="2026-08-11T14:38:17.368350123Z",
+            latency_ms=4983,
+        )
+        capture["request_log"][2].update(
+            ts_utc="2026-08-11T14:38:21.810000000Z",
+            latency_ms=600,
+        )
+        capture["events"][0].update(
+            time="2026-08-11T14:38:17Z",
+            _observed_at="2026-08-11T14:38:17.382273Z",
+        )
+        capture["events"][1].update(
+            time="2026-08-11T14:38:21Z",
+            _observed_at="2026-08-11T14:38:21.773150Z",
+        )
+
+        result = evaluate(capture)
+
+        self.assertEqual(result["verdict"], "PASS", result["reasons"])
+        self.assertTrue(result["assertions"]["trigger_bound_to_rekey"])
+        self.assertTrue(result["assertions"]["admitted_old_epoch_survived"])
+
+    def test_settlement_request_id_correlates_without_relay_prefix(self) -> None:
+        capture = passing_capture()
+        capture["events"][0]["request_id"] = TRIGGER_INTERNAL_ID
+        capture["events"][1]["request_id"] = TRIGGER_INTERNAL_ID
+
+        result = evaluate(capture)
+
+        self.assertEqual(result["verdict"], "PASS", result["reasons"])
+        self.assertTrue(result["assertions"]["trigger_bound_to_rekey"])
+
+    def test_trigger_event_mapping_must_be_unique(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][0]["request_id"] = TRIGGER_INTERNAL_ID
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("not unique" in reason for reason in result["reasons"]))
+        self.assertTrue(any("map uniquely" in reason for reason in result["reasons"]))
+
+    def test_double_relay_prefix_does_not_correlate(self) -> None:
+        capture = passing_capture()
+        capture["events"][0]["request_id"] = f"req-req-{TRIGGER_INTERNAL_ID}"
+        capture["events"][1]["request_id"] = f"req-req-{TRIGGER_INTERNAL_ID}"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("map uniquely" in reason for reason in result["reasons"]))
+
+    def test_non_string_internal_request_id_does_not_correlate(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][1]["request_id"] = [TRIGGER_INTERNAL_ID]
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("noncanonical internal" in reason for reason in result["reasons"]))
+
+    def test_live_capture_requires_precise_event_observation_times(self) -> None:
+        capture = make_live(passing_capture())
+        capture["events"][0]["_observed_at"] = "malformed"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("timestamps" in reason for reason in result["reasons"]))
+
+    def test_live_observation_times_require_subsecond_utc(self) -> None:
+        for observed_at in ("2026-08-11T12:00:03Z", "2026-08-11T12:00:03.000000"):
+            with self.subTest(observed_at=observed_at):
+                capture = make_live(passing_capture())
+                capture["events"][0]["_observed_at"] = observed_at
+                result = evaluate(capture)
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertTrue(any("timestamps" in reason for reason in result["reasons"]))
+
+    def test_non_finite_sentinel_latency_does_not_prove_overlap(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][0]["latency_ms"] = "Infinity"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("old-epoch" in reason for reason in result["reasons"]))
+
+    def test_trigger_request_log_must_remain_outstanding_through_commit(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][1]["latency_ms"] = 1000
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("trigger request_log interval" in reason for reason in result["reasons"]))
+
+    def test_trigger_request_log_rejects_non_finite_latency(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][1]["latency_ms"] = "NaN"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("trigger request_log interval" in reason for reason in result["reasons"]))
+
+    def test_request_timeout_bound_cannot_exceed_live_cap(self) -> None:
+        capture = passing_capture()
+        capture["bounds"] = {"max_seconds": 300, "request_timeout_seconds": 121}
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("request_log interval" in reason for reason in result["reasons"]))
+
+    def test_live_capture_requires_complete_valid_bounds(self) -> None:
+        mutations = (
+            lambda capture: capture.pop("bounds"),
+            lambda capture: capture["bounds"].pop("request_timeout_seconds"),
+            lambda capture: capture["bounds"].update(post_commit_successes=0),
+            lambda capture: capture["bounds"].update(post_commit_successes="invalid"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                capture = make_live(passing_capture())
+                mutate(capture)
+                result = evaluate(capture)
+                self.assertEqual(result["verdict"], "FAIL")
+                self.assertIn("capture bounds are missing or invalid", result["reasons"])
+
+    def test_request_log_intervals_require_explicit_utc(self) -> None:
+        for row_index in (0, 1):
+            with self.subTest(row_index=row_index):
+                capture = passing_capture()
+                capture["request_log"][row_index]["ts_utc"] = "2026-07-22T12:00:01.000000"
+                result = evaluate(capture)
+                self.assertEqual(result["verdict"], "FAIL")
+                expected = "old-epoch" if row_index == 0 else "trigger request_log interval"
+                self.assertTrue(any(expected in reason for reason in result["reasons"]))
+
+    def test_live_client_timestamps_require_explicit_utc(self) -> None:
+        capture = make_live(passing_capture())
+        capture["requests"][2]["ended_at"] = "2026-07-22T12:00:06.000000"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertIn("live buyer request timestamps are missing or invalid", result["reasons"])
+
+    def test_every_mapped_request_log_row_requires_explicit_utc(self) -> None:
+        capture = make_live(passing_capture())
+        capture["request_log"][2]["ts_utc"] = "2026-07-22T12:00:05.000000"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("out-of-bounds timing" in reason for reason in result["reasons"]))
 
     def test_request_ids_must_be_canonical_uuid_v4(self) -> None:
         capture = passing_capture()
         capture["requests"][0]["external_request_id"] = "not-a-uuid"
         capture["requests"][0]["accepted_request_id"] = "not-a-uuid"
         capture["request_log"][0]["external_request_id"] = "not-a-uuid"
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("canonical UUIDv4" in reason for reason in result["reasons"]))
 
     def test_gateway_must_echo_the_external_request_id(self) -> None:
         capture = passing_capture()
         capture["requests"][0]["accepted_request_id"] = TRIGGER_EXTERNAL_ID
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("did not preserve" in reason for reason in result["reasons"]))
 
-    def test_old_epoch_sentinel_must_drain_before_commit(self) -> None:
+    def test_old_epoch_sentinel_must_remain_outstanding_at_rekey_start(self) -> None:
         capture = passing_capture()
         capture["request_log"][0]["ts_utc"] = ts(2)
         capture["request_log"][0]["latency_ms"] = 500
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("old-epoch" in reason for reason in result["reasons"]))
+
+    def test_sentinel_client_interval_must_contain_rekey_start(self) -> None:
+        capture = passing_capture()
+        capture["requests"][0]["ended_at"] = ts(2)
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("old-epoch" in reason for reason in result["reasons"]))
+
+    def test_only_dedicated_post_commit_requests_satisfy_bound(self) -> None:
+        capture = passing_capture()
+        capture["bounds"] = {"max_requests": 10, "post_commit_successes": 3}
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("successful buyer request" in reason for reason in result["reasons"]))
+
+    def test_capture_enforces_declared_request_and_time_bounds(self) -> None:
+        request_bound = make_live(passing_capture())
+        request_bound["bounds"]["max_requests"] = 2
+        request_bound["bounds"]["post_commit_successes"] = 1
+        result = evaluate(request_bound)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("request bound" in reason for reason in result["reasons"]))
+
+        time_bound = make_live(passing_capture())
+        time_bound["bounds"]["max_seconds"] = 5
+        time_bound["bounds"]["request_timeout_seconds"] = 5
+        result = evaluate(time_bound)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("run bound" in reason for reason in result["reasons"]))
+
+    def test_every_mapped_row_requires_finite_bounded_latency(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][2]["latency_ms"] = "NaN"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("out-of-bounds timing" in reason for reason in result["reasons"]))
+
+    def test_every_buyer_interval_must_be_ordered(self) -> None:
+        capture = passing_capture()
+        capture["requests"][2]["started_at"] = ts(8)
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("out of order" in reason for reason in result["reasons"]))
+
+    def test_identity_and_cryptographic_fields_must_be_strings(self) -> None:
+        mutations = (
+            lambda capture: capture["pool_samples"][0]["poolz"]["pool"][0].update(assigned_id=None),
+            lambda capture: capture["events"][1].update(old_kid=123),
+            lambda capture: capture["events"][1].update(new_kid=[]),
+            lambda capture: capture["events"][1].update(rekey_id={}),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                capture = passing_capture()
+                mutate(capture)
+                result = evaluate(capture)
+                self.assertEqual(result["verdict"], "FAIL")
+
+    def test_live_capture_connection_and_pool_timestamps_are_validated(self) -> None:
+        mutations = (
+            lambda capture: capture.update(started_at="malformed"),
+            lambda capture: capture["pool_samples"][0].update(observed_at="malformed"),
+            lambda capture: capture["pool_samples"][0]["poolz"]["pool"][0].update(connected_at=None),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                capture = make_live(passing_capture())
+                mutate(capture)
+                result = evaluate(capture)
+                self.assertEqual(result["verdict"], "FAIL")
+
+    def test_live_evaluation_requires_source_and_authority_evidence(self) -> None:
+        result = HARNESS.evaluate_capture(make_live(passing_capture()), expected_source="live")
+        self.assertEqual(result["verdict"], "PASS", result["reasons"])
+
+        capture = make_live(passing_capture())
+        capture["source"] = "fixture"
+        result = HARNESS.evaluate_capture(capture, expected_source="live")
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("trusted evaluation mode" in reason for reason in result["reasons"]))
+
+        for field in ("approved_identity", "coordinator_process", "gateway_process", "config", "gateway_config"):
+            with self.subTest(field=field):
+                capture = make_live(passing_capture())
+                capture.pop(field)
+                result = HARNESS.evaluate_capture(capture, expected_source="live")
+                self.assertEqual(result["verdict"], "FAIL")
+
+    def test_providerless_rekey_failure_is_rejected(self) -> None:
+        capture = passing_capture()
+        capture["events"].append({"time": ts(4), "event": "aead_rekey_failed"})
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("aead_rekey_failed" in reason for reason in result["reasons"]))
+
+    def test_post_commit_coordinator_row_must_start_after_commit(self) -> None:
+        capture = passing_capture()
+        capture["request_log"][2]["ts_utc"] = ts(4)
+        capture["request_log"][2]["latency_ms"] = 3000
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("successful buyer request" in reason for reason in result["reasons"]))
+
+    def test_live_buyer_and_request_log_intervals_stay_in_capture_window(self) -> None:
+        capture = make_live(passing_capture())
+        capture["requests"][2]["started_at"] = "2026-07-22T12:01:10.000000Z"
+        capture["requests"][2]["ended_at"] = "2026-07-22T12:01:11.000000Z"
+        capture["request_log"][2]["ts_utc"] = "2026-07-22T12:01:10.000000Z"
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertTrue(any("capture" in reason for reason in result["reasons"]))
+
+    def test_pass_critical_scalars_require_exact_types(self) -> None:
+        mutations = (
+            lambda capture: capture["request_log"][2].update(latency_ms="1000"),
+            lambda capture: capture["request_log"][2].update(retried="0"),
+            lambda capture: capture["requests"][2].update(http_status=200.0),
+            lambda capture: capture["health_final"].update(pool_degraded="0"),
+            lambda capture: capture["health_initial"].update(version=123),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                capture = passing_capture()
+                mutate(capture)
+                result = evaluate(capture)
+                self.assertEqual(result["verdict"], "FAIL")
+
+    def test_malformed_gate_and_health_counters_return_structured_fail(self) -> None:
+        capture = passing_capture()
+        capture["gate"] = []
+        capture["health_final"]["pool_degraded"] = None
+        result = evaluate(capture)
+        self.assertEqual(result["verdict"], "FAIL")
 
     def test_sentinel_admission_must_precede_trigger(self) -> None:
         capture = passing_capture()
         capture["requests"][0]["admitted_at"] = ts(3)
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("admission" in reason for reason in result["reasons"]))
 
@@ -277,14 +662,14 @@ class EvaluateCaptureTests(unittest.TestCase):
     def test_runtime_failure_cannot_be_hidden_in_dry_run(self) -> None:
         capture = passing_capture()
         capture["runtime_failures"] = ["poolz monitor failed"]
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("runtime failure" in reason for reason in result["reasons"]))
 
     def test_required_post_commit_success_count_is_enforced(self) -> None:
         capture = passing_capture()
         capture["bounds"] = {"post_commit_successes": 3}
-        result = HARNESS.evaluate_capture(capture)
+        result = evaluate(capture)
         self.assertEqual(result["verdict"], "FAIL")
         self.assertTrue(any("required 3" in reason for reason in result["reasons"]))
 
