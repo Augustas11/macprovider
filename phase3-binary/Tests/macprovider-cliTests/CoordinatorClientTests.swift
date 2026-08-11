@@ -3299,6 +3299,7 @@ final class CoordinatorClientTests: XCTestCase {
             "status": "accepted",
             "assigned_id": "assigned-v2",
             "heartbeat_interval_s": 30,
+            "compatibility_policy": "unconfigured",
             "tier2_session": [
                 "encrypted_leg": [
                     "enabled": true,

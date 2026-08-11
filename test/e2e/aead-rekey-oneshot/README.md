@@ -13,9 +13,10 @@ The live runner is intentionally narrow:
 - it validates the exact coordinator base and startup overlay named on the
   running coordinator process, plus the exact gateway config, both executable
   digests, and the PIDs that own all three loopback listener ports;
-- it requires an isolated SQLite `request_log`, generates its own external
-  request IDs, and proves the logged internal trigger ID is the one on
-  `aead_rekey` while a distinct admitted sentinel drains before commit;
+- it requires an isolated SQLite `request_log`, generates gateway-valid UUIDv4
+  external request IDs, and proves the logged internal trigger ID is the one on
+  `aead_rekey` while a distinct streaming sentinel admitted before the trigger
+  drains before commit;
 - it requires gateway `retry_503.enabled: false` and consumes each gate-specific
   approval once in a mode-0600 local ledger before buyer traffic begins;
 - it requires the operator-approved coordinator/gateway executable SHA-256
