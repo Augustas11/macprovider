@@ -56,15 +56,32 @@ final class MalibuAgent: ObservableObject {
     private var admissionIdentityRecoveryTask: Task<Void, Never>?
     private var referralStatusExpiryTask: Task<Void, Never>?
     private let referralActionWatchdog = ReferralActionWatchdog()
+    private let cliUpdateRunner: @Sendable (
+        _ installedVersion: String?,
+        _ compatibilitySetID: String?,
+        _ onLogLine: @escaping @Sendable @MainActor (String) -> Void
+    ) async throws -> Void
     private var lastReferralRefreshRequestedAt: Date?
     private let latestReleaseTTL: TimeInterval = 3600
 
     init(
         initialSnapshot: AgentSnapshot = .empty,
-        projectionEligibleForMetrics: Bool = false
+        projectionEligibleForMetrics: Bool = false,
+        cliUpdateRunner: @escaping @Sendable (
+            _ installedVersion: String?,
+            _ compatibilitySetID: String?,
+            _ onLogLine: @escaping @Sendable @MainActor (String) -> Void
+        ) async throws -> Void = { installedVersion, compatibilitySetID, onLogLine in
+            try await CLIUpdateRunner.run(
+                installedVersion: installedVersion,
+                compatibilitySetID: compatibilitySetID,
+                onLogLine: onLogLine
+            )
+        }
     ) {
         snapshot = initialSnapshot
         providerProjectionEligible = projectionEligibleForMetrics
+        self.cliUpdateRunner = cliUpdateRunner
         thermalMonitor.$state
             .sink { [weak self] state in
                 self?.snapshot.thermalState = state
@@ -320,10 +337,7 @@ final class MalibuAgent: ObservableObject {
         cliUpdateTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await CLIUpdateRunner.run(
-                    installedVersion: installedVersion,
-                    compatibilitySetID: compatibilitySetID
-                ) { line in
+                try await self.cliUpdateRunner(installedVersion, compatibilitySetID) { line in
                     self.logLines.append(LogTailBuffer.redacted(line))
                     if self.logLines.count > 400 {
                         self.logLines.removeFirst(self.logLines.count - 400)
