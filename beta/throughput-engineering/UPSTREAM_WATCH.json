@@ -78,7 +78,7 @@
       "url": "https://github.com/ml-explore/mlx-swift-lm/pull/453"
     },
     "mlx_swift_lm_518_remote_package_unsafe_flags": {
-      "closed_at": null,
+      "closed_at": "2026-08-11T15:55:11Z",
       "kind": "issue",
       "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/700",
       "number": 518,
@@ -87,10 +87,10 @@
         "T1-01",
         "TG1"
       ],
-      "state": "OPEN",
-      "status": "blocked",
+      "state": "CLOSED",
+      "status": "awaiting_release_tag",
       "title": "[BUG] Can't add mlx-swift-lm as a dependency because of Unsafe Flags",
-      "updated_at": "2026-08-08T03:18:53Z",
+      "updated_at": "2026-08-11T15:55:11Z",
       "url": "https://github.com/ml-explore/mlx-swift-lm/issues/518"
     }
   },
@@ -98,8 +98,8 @@
     "kvcache_offset_graph_traceable": false,
     "note": "KVCache.swift heuristic on upstream main"
   },
-  "last_changed_at": "2026-08-09T09:43:58Z",
-  "last_checked_at": "2026-08-09T09:43:58Z",
+  "last_changed_at": "2026-08-12T06:03:43Z",
+  "last_checked_at": "2026-08-12T06:03:43Z",
   "macprovider_pins": {
     "mlx_swift": "0.31.4",
     "mlx_swift_lm": "3.31.4",
