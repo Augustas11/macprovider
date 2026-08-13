@@ -1240,6 +1240,7 @@
       ],
       "tests": [
         "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault",
+        "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierHonorsConfiguredQuota",
         "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesLiveTrustedProvider",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession",

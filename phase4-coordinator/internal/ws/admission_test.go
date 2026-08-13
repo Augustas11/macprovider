@@ -94,6 +94,26 @@ func TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault(t *testing
 	}
 }
 
+func TestAdmissionManagerTrustedTierHonorsConfiguredQuota(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalQuotaPerHour: 1,
+		TrustedQuotaPerHour:     1,
+	}, func() time.Time { return now })
+	trusted := pool.Provider{ProviderID: "trusted-1", Tier: pool.TierTrusted}
+
+	if !adm.TryReserveRequest(trusted) {
+		t.Fatal("first trusted request blocked")
+	}
+	if adm.TryReserveRequest(trusted) {
+		t.Fatal("trusted provider bypassed configured trusted quota")
+	}
+	adm.RefundRequest(trusted)
+	if !adm.TryReserveRequest(trusted) {
+		t.Fatal("trusted request after refund blocked")
+	}
+}
+
 func TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust(t *testing.T) {
 	cfg := config.Default()
 	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{

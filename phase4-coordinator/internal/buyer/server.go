@@ -5459,7 +5459,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					return provider, routeErr
 				}
 				if !s.checkQuota(provider) {
-					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned provisional provider is over request quota"}
+					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned metered provider is over request quota"}
 				}
 				return s.preflightCandidate(provider, requestID, estimatedTokens)
 			}
@@ -5474,7 +5474,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 					return provider, routeErr
 				}
 				if !s.checkQuota(provider) {
-					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned provisional provider is over request quota"}
+					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned metered provider is over request quota"}
 				}
 				return s.preflightCandidate(provider, requestID, estimatedTokens)
 			}
@@ -5520,7 +5520,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		// first loop did produce survivors but all of them got quota-
 		// blocked, the envelope MUST be 429 not 503.
 		if result.PreQuotaCount > 0 && result.Counts[routing.ReasonQuotaBlocked] == result.PreQuotaCount {
-			return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible provisional providers are over request quota"}
+			return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible metered providers are over request quota"}
 		}
 		if result.Counts[routing.ReasonContextTooSmall] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
