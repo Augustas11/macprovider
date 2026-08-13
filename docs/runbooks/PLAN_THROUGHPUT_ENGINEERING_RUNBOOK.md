@@ -545,7 +545,7 @@ Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM
 | [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR (**merged**, awaiting release tag) | T1-02 / TG1 | Weekday blocker watch |
 | [mlx-swift-lm#312](https://github.com/ml-explore/mlx-swift-lm/issues/312) + [#453](https://github.com/ml-explore/mlx-swift-lm/pull/453) | Issue + PR (**PR merged**, awaiting release tag) | #965 / reusable quantized KV | Weekday blocker watch |
 | [mlx-swift-lm#424](https://github.com/ml-explore/mlx-swift-lm/issues/424) | Issue | #377 / speculative rollback | Weekday blocker watch |
-| [mlx-swift-lm#518](https://github.com/ml-explore/mlx-swift-lm/issues/518) | Issue | #700 / package consumption | Weekday blocker watch |
+| [mlx-swift-lm#518](https://github.com/ml-explore/mlx-swift-lm/issues/518) | Issue (**closed**, awaiting release tag) | #700 / package consumption | Weekday blocker watch |
 | ml-explore release tags | Release | T1-01 pin bump | Weekly discovery watch |
 | `swift-transformers` release tags | Release | #966 token-exact migration | Weekly discovery watch |
 
