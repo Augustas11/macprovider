@@ -21,13 +21,20 @@ var (
 )
 
 func (s *Server) routingAdmissionTier(ctx context.Context, auth providerAuth, providerID string, pinned bool) pool.Tier {
+	return s.routingAdmissionTierWithCustody(ctx, auth, providerID, pinned, false)
+}
+
+func (s *Server) routingAdmissionTierWithCustody(ctx context.Context, auth providerAuth, providerID string, pinned bool, durableIdentityVerified bool) pool.Tier {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if pinned {
 		return pool.TierPinned
 	}
 	if s.rewardsTrust == nil || !auth.validated || auth.providerID != providerID {
 		return pool.TierProvisional
 	}
-	if !s.trustedRoutingCustodyEligible(ctx, providerID) {
+	if !s.trustedRoutingCustodyEligibleWithProof(ctx, providerID, durableIdentityVerified) {
 		return pool.TierProvisional
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
@@ -50,7 +57,7 @@ func (s *Server) ApplyRewardsTrustTier(providerID, tier string) {
 	var routingTier pool.Tier
 	switch strings.ToLower(strings.TrimSpace(tier)) {
 	case rewardsTrustTierTrusted:
-		if !s.trustedRoutingCustodyEligible(context.Background(), providerID) {
+		if !s.trustedRoutingCustodyEligibleWithProof(context.Background(), providerID, s.liveDurableAdmissionIdentityVerified(providerID)) {
 			routingTier = pool.TierProvisional
 			break
 		}
@@ -94,7 +101,7 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 			}
 			continue
 		}
-		if !s.trustedRoutingCustodyEligible(sweepCtx, provider.ProviderID) {
+		if !s.trustedRoutingCustodyEligibleWithProof(sweepCtx, provider.ProviderID, provider.DurableAdmissionIdentityVerified) {
 			s.rewardsTrustSweepFailures.Delete(key)
 			if provider.Tier == pool.TierTrusted {
 				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
@@ -168,6 +175,10 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 }
 
 func (s *Server) trustedRoutingCustodyEligible(ctx context.Context, providerID string) bool {
+	return s.trustedRoutingCustodyEligibleWithProof(ctx, providerID, false)
+}
+
+func (s *Server) trustedRoutingCustodyEligibleWithProof(ctx context.Context, providerID string, durableIdentityVerified bool) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -189,23 +200,23 @@ func (s *Server) trustedRoutingCustodyEligible(ctx context.Context, providerID s
 	if !revoked {
 		return true
 	}
-	identities, ok := s.bootstrapTokens.(admissionIdentityStore)
-	if !ok {
-		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without durable admission identity store; keeping rewards-trusted routing provisional")
-		return false
-	}
-	identityCtx, identityCancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
-	_, active, err := identities.LookupAdmissionIdentityPubkey(identityCtx, providerID)
-	identityCancel()
-	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("durable admission identity lookup failed; keeping rewards-trusted routing provisional")
-		return false
-	}
-	if !active {
-		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without active durable admission identity; keeping rewards-trusted routing provisional")
+	if !durableIdentityVerified {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without live durable admission identity proof; keeping rewards-trusted routing provisional")
 		return false
 	}
 	return true
+}
+
+func (s *Server) liveDurableAdmissionIdentityVerified(providerID string) bool {
+	if s == nil || s.pool == nil {
+		return false
+	}
+	for _, provider := range s.pool.Snapshot() {
+		if provider.ProviderID == providerID && provider.DurableAdmissionIdentityVerified {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) clearRewardsTrustLookupFailure(providerID, assignedID string) {

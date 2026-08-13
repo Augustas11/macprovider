@@ -14,12 +14,14 @@
   from rewards-runner callbacks or the sweep-wide bounded active-session trust
   reconciliation sweep. Tokenless or mismatched-auth sessions remain
   `provisional` even if they claim a trusted provider ID. A provider ID with
-  revoked credential history and no active durable admission identity MUST stay
-  `provisional` for rewards-trusted routing, even if a newly self-minted bearer
-  validates for that provider ID. Trusted providers that trip canary degradation
-  MUST keep that recovery hold across reconnects, including fail-closed
-  provisional reconnects and later trusted promotion, until a canary recovery
-  pass clears it.
+  revoked credential history MUST stay `provisional` for rewards-trusted
+  routing unless the live session proves custody of the pre-existing durable
+  admission identity key; a stored durable-identity row, first-time enrollment,
+  generic migration exemption, or newly self-minted bearer is not sufficient by
+  itself to inherit old rewards trust. Trusted providers that trip canary
+  degradation MUST keep that recovery hold across reconnects, including
+  fail-closed provisional reconnects and later trusted promotion, until a
+  canary recovery pass clears it.
 - When `malibu_emission.writer_dsn` is configured, the coordinator MAY use
   that rewards DB as a read-only trusted-routing lookup source even if
   `malibu_emission.enabled` is false. Lookup errors fail closed to
@@ -1390,9 +1392,11 @@ The coordinator recognizes four admission tiers:
   errors fail closed to the provisional tier after the bounded failure
   window or immediately for sessions left unresolved by the sweep deadline.
   A provider ID with revoked token history MUST fail closed to provisional for
-  trusted quota unless an active durable admission identity proves custody
-  continuity. Reissuing a bearer through referral/self-service after revocation
-  is not sufficient by itself to inherit old rewards trust.
+  trusted quota unless the live session proves custody of the pre-existing
+  durable admission identity key. Reissuing a bearer through
+  referral/self-service after revocation, first-time durable identity
+  enrollment, or generic migration exemption is not sufficient by itself to
+  inherit old rewards trust.
   Pinned providers remain unlimited and are not demoted by rewards trust
   changes.
 - `malibu_emission.writer_dsn`, when present and successfully opened, is the
@@ -4289,8 +4293,9 @@ token, and credential-custody continuity, provider admission returns
 `tier: "trusted"`, `/poolz` shows `tier: "trusted"`, and buyer routing
 does not apply the `admission.provisional_quota_per_hour` cap. With the
 same provider ID but no matching bearer-authenticated identity, or with
-revoked token history and no active durable admission identity, admission
-remains `tier: "provisional"`. When rewards demotes the provider to
+revoked token history and no live proof of the pre-existing durable
+admission identity key, admission remains `tier: "provisional"`. When
+rewards demotes the provider to
 `trust_tier='provisional'`, the live non-pinned pool entry changes back
 to `tier: "provisional"` through the live callback or bounded trust
 reconciliation sweep, and the provisional request quota applies.

@@ -2115,6 +2115,14 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.AdmittedChipNormalized = admissionObservation.AdmittedTuple.ChipNormalized
 		entry.AdmittedUnifiedMemoryGB = admissionObservation.AdmittedTuple.UnifiedMemoryGB
 	}
+	entry.DurableAdmissionIdentityVerified = identityProof.DurableAdmissionIdentityVerified
+	entry.Tier = s.routingAdmissionTierWithCustody(
+		context.Background(),
+		connectionAuth,
+		initial.ProviderID,
+		entry.Tier == pool.TierPinned,
+		entry.DurableAdmissionIdentityVerified,
+	)
 	registered := false
 	reservedAdmission := false
 	defer func() {

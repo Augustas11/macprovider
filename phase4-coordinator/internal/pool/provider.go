@@ -128,12 +128,16 @@ type Provider struct {
 	// Registry uses this to refuse evicting a routable session in
 	// favor of a bearer-less duplicate; buyer routing + billing use
 	// it to exclude bearer-less duplicates from money paths.
-	AuthState          AuthState     `json:"auth_state,omitempty"`
-	InferencePath      InferencePath `json:"inference_path"`
-	AdmittedAt         time.Time     `json:"admitted_at"`
-	HTTPForwardingOnly bool          `json:"http_forwarding_only,omitempty"`
-	State              State         `json:"state"`
-	LastHeartbeatAt    time.Time     `json:"last_heartbeat_at"`
+	AuthState AuthState `json:"auth_state,omitempty"`
+	// DurableAdmissionIdentityVerified is true only when this session proved
+	// custody of the pre-existing durable admission identity key. Generic
+	// migration exemptions and first-time key enrollment do not set it.
+	DurableAdmissionIdentityVerified bool          `json:"-"`
+	InferencePath                    InferencePath `json:"inference_path"`
+	AdmittedAt                       time.Time     `json:"admitted_at"`
+	HTTPForwardingOnly               bool          `json:"http_forwarding_only,omitempty"`
+	State                            State         `json:"state"`
+	LastHeartbeatAt                  time.Time     `json:"last_heartbeat_at"`
 	// LastActivityAt is the timestamp of the most recent inbound frame of any
 	// kind (heartbeat OR in-flight inference response). The liveness monitor
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a

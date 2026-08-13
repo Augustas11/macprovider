@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
@@ -169,7 +172,7 @@ func TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation(t *te
 	}
 }
 
-func TestRoutingAdmissionTierAllowsTrustedQuotaAfterRevocationWithDurableIdentity(t *testing.T) {
+func TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation(t *testing.T) {
 	ctx := context.Background()
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
@@ -203,9 +206,80 @@ func TestRoutingAdmissionTierAllowsTrustedQuotaAfterRevocationWithDurableIdentit
 		}),
 	)
 
-	tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false)
+	tier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
+	if tier != pool.TierProvisional {
+		t.Fatalf("durable-row-only trusted tier = %s, want provisional", tier)
+	}
+
+	tier = s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, true)
 	if tier != pool.TierTrusted {
-		t.Fatalf("durable-identity trusted tier = %s, want trusted", tier)
+		t.Fatalf("verified durable-identity trusted tier = %s, want trusted", tier)
+	}
+}
+
+func TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody(t *testing.T) {
+	const providerID = "provider-a"
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, bearer, err := store.IssueToken(ctx, providerID, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPubkey, currentPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, providerID, bearer, currentPubkey, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithBootstrapTokenStore(store),
+	)
+	initial := AuthRequest{
+		ProviderID:                 providerID,
+		BinaryVersion:              "1.2.3",
+		ProviderECDHPublicKey:      "ecdh-key",
+		ProviderAdmissionPubkey:    append([]byte(nil), currentPubkey...),
+		ProviderAdmissionPublicKey: base64.StdEncoding.EncodeToString(currentPubkey),
+	}
+	retained := retainedAuthAttemptForIdentityProof(t, initial)
+	proof := signedIdentityProof(t, initial, retained, currentPrivateKey)
+
+	result := s.verifyIdentitySignature(ctx, initial, proof, retained, providerAuth{
+		validated:  true,
+		providerID: providerID,
+		token:      bearer,
+	})
+	if !result.Accepted || !result.DurableAdmissionIdentityVerified {
+		t.Fatalf("existing durable proof accepted=%v durable_verified=%v", result.Accepted, result.DurableAdmissionIdentityVerified)
+	}
+
+	_, enrollmentBearer, err := store.IssueToken(ctx, "provider-b", "host-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollmentPubkey, enrollmentPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollmentInitial := initial
+	enrollmentInitial.ProviderID = "provider-b"
+	enrollmentInitial.ProviderAdmissionPubkey = append([]byte(nil), enrollmentPubkey...)
+	enrollmentInitial.ProviderAdmissionPublicKey = base64.StdEncoding.EncodeToString(enrollmentPubkey)
+	enrollmentRetained := retainedAuthAttemptForIdentityProof(t, enrollmentInitial)
+	enrollmentProof := signedIdentityProof(t, enrollmentInitial, enrollmentRetained, enrollmentPrivateKey)
+	result = s.verifyIdentitySignature(ctx, enrollmentInitial, enrollmentProof, enrollmentRetained, providerAuth{
+		validated:  true,
+		providerID: "provider-b",
+		token:      enrollmentBearer,
+	})
+	if !result.Accepted || result.DurableAdmissionIdentityVerified {
+		t.Fatalf("first enrollment accepted=%v durable_verified=%v", result.Accepted, result.DurableAdmissionIdentityVerified)
 	}
 }
 
@@ -276,6 +350,52 @@ func TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenH
 	}
 	if got.Tier != pool.TierProvisional {
 		t.Fatalf("tier after revoked legacy token history = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID:                       "provider-a",
+		AssignedID:                       "session-a",
+		Tier:                             pool.TierTrusted,
+		State:                            pool.StateReady,
+		AuthState:                        pool.AuthBearerValidated,
+		DurableAdmissionIdentityVerified: true,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierTrusted {
+		t.Fatalf("verified durable identity tier after revoked history = %s, want trusted", got.Tier)
 	}
 }
 
@@ -622,4 +742,45 @@ func (f failingAdmissionStateStore) LoadAdmissionState(context.Context) (Admissi
 
 func (f failingAdmissionStateStore) SaveAdmissionState(context.Context, AdmissionState) error {
 	return f.err
+}
+
+func retainedAuthAttemptForIdentityProof(t *testing.T, initial AuthRequest) AuthAttemptState {
+	t.Helper()
+	raw, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := initialAuthTranscriptHash(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return AuthAttemptState{
+		AuthAttemptID:           "attempt-" + initial.ProviderID,
+		ProviderID:              initial.ProviderID,
+		BinaryVersion:           initial.BinaryVersion,
+		ProviderECDHPublicKey:   initial.ProviderECDHPublicKey,
+		InitialTranscriptSHA256: hash,
+	}
+}
+
+func signedIdentityProof(t *testing.T, initial AuthRequest, retained AuthAttemptState, privateKey ed25519.PrivateKey) AuthRequest {
+	t.Helper()
+	transcript := base64.StdEncoding.EncodeToString(retained.InitialTranscriptSHA256[:])
+	tuple := map[string]any{
+		"auth_attempt_id":          retained.AuthAttemptID,
+		"provider_id":              initial.ProviderID,
+		"binary_version":           retained.BinaryVersion,
+		"provider_ecdh_public_key": retained.ProviderECDHPublicKey,
+		"transcript_sha256":        transcript,
+	}
+	canonical, err := billing.CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(privateKey, canonical)
+	proof := initial
+	proof.AuthAttemptID = retained.AuthAttemptID
+	proof.IdentityTranscriptSHA256 = transcript
+	proof.IdentitySignature = base64.StdEncoding.EncodeToString(signature)
+	return proof
 }
