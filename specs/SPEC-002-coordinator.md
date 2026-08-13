@@ -1,7 +1,38 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.6 (2026-07-29, B1 request-log TTFT/decode persistence)
+**Version:** 1.5.8 (2026-08-13, rewards-trusted routing quota custody proof)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.8 (2026-08-13, rewards-trusted routing quota custody proof):**
+- Tightens rewards-trusted routing custody continuity: matching bearer auth and
+  durable rewards trust are not sufficient by themselves. The live session MUST
+  also prove custody of a pre-existing durable admission identity key before the
+  coordinator assigns routing tier `trusted`. Absence of revoked token history,
+  first-time durable identity enrollment, generic migration exemption, or a
+  newly self-minted bearer remains `provisional` until a later session proves
+  the already-enrolled durable key.
+
+**Change log v1.5.7 (2026-08-13, rewards-trusted routing quota):**
+- Adds the routing/admission tier `trusted`, sourced from durable rewards
+  trust state (`provider_emission_state.trust_tier='trusted'`) only for
+  bearer-authenticated provider IDs that also pass credential-custody
+  continuity checks. `trusted` providers bypass the low provisional Sybil quota
+  by default (`admission.trusted_quota_per_hour: 0` means unlimited) while
+  remaining distinct from operator-pinned providers. Rewards demotion back to
+  `provisional` MUST revoke the trusted routing quota for live sessions, either
+  from rewards-runner callbacks or the sweep-wide bounded active-session trust
+  reconciliation sweep. Tokenless or mismatched-auth sessions remain
+  `provisional` even if they claim a trusted provider ID. A stored
+  durable-identity row, first-time enrollment, generic migration exemption, or
+  newly self-minted bearer is not sufficient by itself to inherit old rewards
+  trust. Trusted providers that trip canary
+  degradation MUST keep that recovery hold across reconnects, including
+  fail-closed provisional reconnects and later trusted promotion, until a
+  canary recovery pass clears it.
+- When `malibu_emission.writer_dsn` is configured, the coordinator MAY use
+  that rewards DB as a read-only trusted-routing lookup source even if
+  `malibu_emission.enabled` is false. Lookup errors fail closed to
+  `provisional`.
 
 **Change log v1.5.6 (2026-07-29, B1 — per-request provider TTFT/decode persistence):**
 - `request_log` gains nullable `ttft_ms` and `decode_ms` columns. New
@@ -757,15 +788,22 @@ if provider_id in config.providers[]:
         # Only operator-configured endpoints may enable HTTP-forwarding.
         inference_path = WS_TUNNELED
 else:
-    tier = provisional  (subject to admission rate limits, FR-P16)
+    if hello bearer auth is validated
+       and hello provider_id matches the authenticated provider_id
+       and provider_id has live proof of a pre-existing durable admission identity key
+       and durable rewards trust_tier(provider_id) == "trusted":
+        tier = trusted  (subject to trusted request quota, FR-P16)
+    else:
+        tier = provisional  (subject to admission rate limits, FR-P16)
     if hello.endpoint_url is present and non-empty:
-        # Q1 OPERATOR DECISION (v1.1.1): Provisional providers operate
-        # EXCLUSIVELY in WS-tunneled mode. Self-reported endpoint_url
-        # from unknown provider_ids is IGNORED to prevent abuse (a Sybil
-        # attacker could register N provisional providers each pointing
-        # endpoint_url at a target server to amplify traffic via the
-        # coordinator). The coordinator logs at warn level:
-        # "provisional provider <id> sent endpoint_url <url>; ignored,
+        # Q1 OPERATOR DECISION (v1.1.1): Non-pinned providers operate
+        # EXCLUSIVELY in WS-tunneled mode, including rewards-trusted
+        # providers. Self-reported endpoint_url from non-pinned provider_ids
+        # is IGNORED to prevent abuse (a Sybil attacker could register N
+        # provisional providers each pointing endpoint_url at a target server
+        # to amplify traffic via the coordinator). The coordinator logs at
+        # warn level:
+        # "non-pinned provider <id> sent endpoint_url <url>; ignored,
         # forcing WS-tunneled mode."
         inference_path = WS_TUNNELED
     else:
@@ -1187,7 +1225,7 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   runs the FR-P11 recovery cycle. The counter is per provider (a provider
   serves a single model). Simultaneous faults across a multi-slot provider
   from one wedge event each count, intentionally tripping immediately. The
-  breaker applies to all tiers (pinned and provisional). Transition to
+  breaker applies to all tiers (pinned, trusted, and provisional). Transition to
   `draining`/`unavailable` (any cause) clears the counter; a successful
   recovery to `ready` resets it to zero.
 - **No flapping on a single blip:** the threshold + window are REQUIRED so a
@@ -1323,11 +1361,12 @@ list. All other error statuses result in an immediate error response
 to the buyer per FR-B7 (no silent retry in v1).
 
 **FR-P15. Admission tier assignment.**
-The coordinator recognizes three admission tiers:
+The coordinator recognizes four admission tiers:
 
 | Tier | Source | Admission | Routing weight |
 |---|---|---|---|
 | Pinned | `config.providers[]` | Operator pre-approved | 1.0 |
+| Trusted | durable rewards trust state (`provider_emission_state.trust_tier='trusted'`) plus matching bearer-authenticated provider identity plus live proof of a pre-existing durable admission identity key | Automatic after earned rewards trust; revoked on rewards demotion, bounded reconciliation sweep, or custody-transfer failure | 1.0 |
 | Provisional | Unknown `provider_id` | Auto on hello, rate-limited | 0.3 (configurable) |
 | Rejected | `rejected_providers` table | Never. WS close 4009. | N/A |
 
@@ -1335,15 +1374,45 @@ The coordinator recognizes three admission tiers:
 - Per-hour admission rate: max 10 new provisional providers per hour
   (sliding window). 11th → WS close 4008. Rationale: 10/hr allows
   ~240/day; at 40 KB per-connection state, 240 = ~9.6 MB on the
-  3.8 GB Pearl VPS. Config: `admission.provisional_rate_per_hour`.
+  3.8 GB Pearl VPS. Config:
+  `admission.provisional_admission_rate_per_hour`.
 - Total provisional pool size: max 100 simultaneous. 101st → WS close
   4007. Rationale: 100 × 40 KB = 4 MB. Config:
-  `admission.max_provisional_providers`.
+  `admission.provisional_pool_max`.
 - Per-provisional-provider request quota: max 100 buyer requests per
   hour. Over quota → skip provider in routing (invisible to buyer).
   Rationale: 100 req/hr at ~2.5 s each = ~4 min active inference,
   ~7% utilization. Config:
-  `admission.provisional_request_quota_per_hour`.
+  `admission.provisional_quota_per_hour`.
+- Per-trusted-provider request quota: default unlimited
+  (`admission.trusted_quota_per_hour: 0`) for providers that earned
+  rewards trust via real receipts plus an independent criterion. A
+  positive operator value MAY cap trusted providers with the same
+  sliding-hour semantics. Rewards trust demotion MUST move live
+  non-pinned sessions back to the provisional routing tier so this
+  elevated quota is revoked. The coordinator MUST run bounded
+  active-session reconciliation against the durable rewards trust store
+  whenever DB-backed trusted admission lookup is enabled, under a
+  sweep-wide deadline so a stalled trust store cannot make revocation
+  latency scale with live provider count. DB-backed demotions still revoke
+  live trusted quota if the rewards runner callback is unavailable; lookup
+  errors fail closed to the provisional tier after the bounded failure
+  window or immediately for sessions left unresolved by the sweep deadline.
+  Trusted quota MUST fail closed to provisional unless the live session proves
+  custody of the pre-existing durable admission identity key. Absence of revoked
+  token history is not proof of custody. Reissuing a bearer through
+  referral/self-service after revocation, first-time durable identity
+  enrollment, generic migration exemption, or newly self-minted bearer is not
+  sufficient by itself to inherit old rewards trust.
+  Pinned providers remain unlimited and are not demoted by rewards trust
+  changes.
+- `malibu_emission.writer_dsn`, when present and successfully opened, is the
+  durable rewards trust lookup source for trusted routing. This read-only
+  trusted-routing bridge is intentionally independent of
+  `malibu_emission.enabled`: operators may pause emissions while preserving
+  already-earned routing trust. If the DB is absent, unreachable, or returns
+  an error for a lookup, the affected non-pinned provider is treated as
+  `provisional` until a successful trusted lookup occurs again.
 
 **FR-P17. Provisional admission persistence.**
 Provisional admissions are persisted to SQLite:
@@ -1423,7 +1492,7 @@ degradation and **supersedes** the former "3 consecutive timeouts → degraded"
 rule.
 
 **FR-P21. Tier visibility in /poolz.**
-The `/poolz` response (FR-O2) gains `tier` (`"pinned"` or
+The `/poolz` response (FR-O2) gains `tier` (`"pinned"`, `"trusted"`, or
 `"provisional"`) and `inference_path` (`"http_forwarding"` or
 `"ws_tunneled"`) fields per provider entry.
 
@@ -2064,9 +2133,9 @@ function route(request, pool, headers) -> provider | error:
             return error(503, "Pinned provider not available")
         if not model_id_equal(provider.model_id, model):
             return error(404, "Pinned provider serves different model")
-        # v1.1.1: check provisional quota even for pinned-by-header requests
-        if not check_provisional_quota(provider):
-            return error(429, "Pinned provisional provider is over request quota")
+        # v1.5.7: check any metered routing quota even for pinned-by-header requests
+        if not check_metered_request_quota(provider):
+            return error(429, "Pinned metered provider is over request quota")
         return provider
 
     # Step 2: Filter candidates
@@ -2091,7 +2160,11 @@ function route(request, pool, headers) -> provider | error:
             return true  # pinned providers have no request quota
         quota = COUNT(requests where provider_id == provider.id
                       AND ts > now() - 1 hour)
-        return quota < admission.provisional_request_quota_per_hour  # default 100
+        if provider.tier == "trusted":
+            if admission.trusted_quota_per_hour == 0:
+                return true
+            return quota < admission.trusted_quota_per_hour
+        return quota < admission.provisional_quota_per_hour  # default 100
 
     pre_quota_candidates = candidates
     quota_blocked_candidates = [c for c in pre_quota_candidates
@@ -2120,7 +2193,8 @@ function route(request, pool, headers) -> provider | error:
     # Step 2.5: Apply admission-tier weight (v1.1)
     for candidate in candidates:
         candidate.effective_throughput = candidate.throughput_tps_estimate * tier_weight(candidate.tier)
-    # where tier_weight(pinned) = 1.0, tier_weight(provisional) = 0.3 (configurable)
+    # where tier_weight(pinned/trusted) = 1.0,
+    # tier_weight(provisional) = 0.3 (configurable)
 
     # Step 3: Apply buyer preference
     pref = headers.get("X-MacProvider-Pref", "")
@@ -3025,8 +3099,9 @@ not a buyer API surface.
 }
 ```
 
-`tier` MUST be `"pinned"` or `"provisional"`. `state` MUST be one of
-`"ready"`, `"draining"`, `"unavailable"`, or `"unknown"`.
+`tier` MUST be `"pinned"`, `"trusted"`, or `"provisional"`. `state`
+MUST be one of `"ready"`, `"draining"`, `"unavailable"`, or
+`"unknown"`.
 
 Unknown providers return the same 200 shape with `"state": "unknown"`.
 
@@ -3893,7 +3968,7 @@ text elsewhere.
 blocks supply-side growth beyond operator-vetted partners.
 
 **SPEC-002 v1.1 encoding:**
-- FR-P15 (three admission tiers): pinned / provisional / rejected.
+- FR-P15 (admission tiers): pinned / trusted / provisional / rejected.
 - FR-P16 (rate limits): Prevents abuse of relaxed admission.
 - § 7.1 (F-2 amendment): Formal relaxation.
 - § 7.5 (operator endpoints): promote, reject.
@@ -4205,7 +4280,7 @@ weight).
 Run by: `phase4-coordinator/scripts/test-provisional.sh`
 
 **AC-12. Provisional rate limit.**
-Configure `admission.provisional_rate_per_hour: 10`. Connect 11
+Configure `admission.provisional_admission_rate_per_hour: 10`. Connect 11
 provisional providers within 60 seconds. First 10 get `hello_ack`.
 11th gets WS close code 4008.
 
@@ -4217,6 +4292,30 @@ Provider's tier changes to pinned in `/poolz`. Routing weight upgrades
 to 1.0 immediately.
 
 Run by: `phase4-coordinator/scripts/test-promote.sh`
+
+**AC-13a. Rewards-trusted quota elevation.**
+Given a provider with durable rewards trust
+`provider_emission_state.trust_tier='trusted'`, a matching bearer
+token, and live proof of a pre-existing durable admission identity key,
+provider admission returns
+`tier: "trusted"`, `/poolz` shows `tier: "trusted"`, and buyer routing
+does not apply the `admission.provisional_quota_per_hour` cap. With the
+same provider ID but no matching bearer-authenticated identity, or with
+no live proof of the pre-existing durable admission identity key, admission
+remains `tier: "provisional"` even if no revoked-token history exists. When
+rewards demotes the provider to
+`trust_tier='provisional'`, the live non-pinned pool entry changes back
+to `tier: "provisional"` through the live callback or bounded trust
+reconciliation sweep, and the provisional request quota applies.
+When `malibu_emission.writer_dsn` is configured but
+`malibu_emission.enabled` is false, admission and reconciliation still use
+the rewards DB for read-only trusted-routing lookup and fail closed to
+`provisional` on lookup errors. A trusted provider that trips canary
+degradation remains degraded and unroutable across reconnects, including a
+temporary fail-closed provisional reconnect and later trusted promotion, until
+canary recovery clears the sanction.
+
+Run by: `cd phase4-coordinator && go test ./internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRoutingAdmissionTierRejectsTrustedQuotaWithoutDurableIdentityProofEvenWithoutRevocation|TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation|TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation|TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody|TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDemotesTrustedProviderWithoutDurableIdentityProof|TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory|TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHistory|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess|TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders|TestHandleDisconnectClearsRewardsTrustLookupFailure' && go test ./internal/pool -run 'TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect'`
 
 **AC-14. admin/reject.**
 Connect a provisional provider. `POST /admin/reject/{provider_id}`.

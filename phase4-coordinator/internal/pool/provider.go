@@ -37,6 +37,7 @@ const (
 	StateUnavailable State = "unavailable"
 
 	TierPinned      Tier = "pinned"
+	TierTrusted     Tier = "trusted"
 	TierProvisional Tier = "provisional"
 	TierRejected    Tier = "rejected"
 
@@ -127,12 +128,16 @@ type Provider struct {
 	// Registry uses this to refuse evicting a routable session in
 	// favor of a bearer-less duplicate; buyer routing + billing use
 	// it to exclude bearer-less duplicates from money paths.
-	AuthState          AuthState     `json:"auth_state,omitempty"`
-	InferencePath      InferencePath `json:"inference_path"`
-	AdmittedAt         time.Time     `json:"admitted_at"`
-	HTTPForwardingOnly bool          `json:"http_forwarding_only,omitempty"`
-	State              State         `json:"state"`
-	LastHeartbeatAt    time.Time     `json:"last_heartbeat_at"`
+	AuthState AuthState `json:"auth_state,omitempty"`
+	// DurableAdmissionIdentityVerified is true only when this session proved
+	// custody of the pre-existing durable admission identity key. Generic
+	// migration exemptions and first-time key enrollment do not set it.
+	DurableAdmissionIdentityVerified bool          `json:"-"`
+	InferencePath                    InferencePath `json:"inference_path"`
+	AdmittedAt                       time.Time     `json:"admitted_at"`
+	HTTPForwardingOnly               bool          `json:"http_forwarding_only,omitempty"`
+	State                            State         `json:"state"`
+	LastHeartbeatAt                  time.Time     `json:"last_heartbeat_at"`
 	// LastActivityAt is the timestamp of the most recent inbound frame of any
 	// kind (heartbeat OR in-flight inference response). The liveness monitor
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
@@ -1174,6 +1179,34 @@ func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
 		return Provider{}, false
 	}
 	p.Tier = tier
+	r.applyCanarySanctionLocked(p)
+	cp := *p
+	cp.conn = nil
+	return cp, true
+}
+
+func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return Provider{}, false
+	}
+	if p.Tier == TierPinned {
+		cp := *p
+		cp.conn = nil
+		return cp, true
+	}
+	switch tier {
+	case TierTrusted, TierProvisional:
+	default:
+		return Provider{}, false
+	}
+	if tier == TierTrusted && p.AuthState != AuthBearerValidated {
+		return Provider{}, false
+	}
+	p.Tier = tier
+	r.applyCanarySanctionLocked(p)
 	cp := *p
 	cp.conn = nil
 	return cp, true
@@ -1799,7 +1832,7 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
 	sanction, ok := r.canarySanctions[p.ProviderID]
-	if !ok || p.Tier != TierPinned {
+	if !ok {
 		return
 	}
 	p.CanaryFailCount = sanction.failCount

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -28,16 +29,16 @@ const (
 
 // Config is the operator-tunable malibu_emission block.
 type Config struct {
-	Enabled                 bool
-	WriterDSN               string
-	TickInterval            time.Duration
-	ProviderDailyCapMALIBU  float64
-	WalletDailyCapMALIBU    float64
-	SQLitePayoutDBPath      string
-	WalletMirrorInterval    time.Duration
-	UnlockEvalInterval      time.Duration
-	MaxSerializableRetries  int
-	BaseUSDCBalanceRPCURLs  []string
+	Enabled                bool
+	WriterDSN              string
+	TickInterval           time.Duration
+	ProviderDailyCapMALIBU float64
+	WalletDailyCapMALIBU   float64
+	SQLitePayoutDBPath     string
+	WalletMirrorInterval   time.Duration
+	UnlockEvalInterval     time.Duration
+	MaxSerializableRetries int
+	BaseUSDCBalanceRPCURLs []string
 }
 
 // DefaultsApplied fills zero values with spec defaults.
@@ -79,17 +80,20 @@ func (c Config) Validate() error {
 
 // Runner orchestrates emission tick, wallet mirror, and unlock evaluation.
 type Runner struct {
-	db               *sql.DB
-	cfg              Config
-	logger           zerolog.Logger
-	connectivity     ProviderConnectivity
-	balanceChecker   WalletBalanceChecker
+	db             *sql.DB
+	cfg            Config
+	logger         zerolog.Logger
+	connectivity   ProviderConnectivity
+	balanceChecker WalletBalanceChecker
+	observerMu     sync.RWMutex
+	observer       TrustTierObserver
 }
 
 // RunnerDeps optional integrations for Phase C2 unlock evaluation.
 type RunnerDeps struct {
 	Connectivity   ProviderConnectivity
 	BalanceChecker WalletBalanceChecker
+	TrustObserver  TrustTierObserver
 }
 
 // New constructs a Runner. db MUST be authenticated as rewards_writer.
@@ -107,6 +111,7 @@ func New(db *sql.DB, cfg Config, logger zerolog.Logger, deps RunnerDeps) (*Runne
 		logger:         logger,
 		connectivity:   deps.Connectivity,
 		balanceChecker: deps.BalanceChecker,
+		observer:       deps.TrustObserver,
 	}, nil
 }
 
@@ -115,6 +120,15 @@ func (r *Runner) SetConnectivity(c ProviderConnectivity) {
 	if r != nil {
 		r.connectivity = c
 	}
+}
+
+func (r *Runner) SetTrustTierObserver(observer TrustTierObserver) {
+	if r == nil {
+		return
+	}
+	r.observerMu.Lock()
+	defer r.observerMu.Unlock()
+	r.observer = observer
 }
 
 // Start launches background goroutines until ctx is cancelled.
@@ -155,13 +169,13 @@ func EnsureProviderState(ctx context.Context, db *sql.DB, providerID string) err
 
 // AccrualBalance returns total and withdrawable MALIBU for a provider.
 type AccrualBalance struct {
-	AccruedMALIBU       string
-	WithdrawableMALIBU  string
-	HeldMALIBU          string
-	TrustTier           string
-	HoldReasons         []string
-	ProviderDailyCap    float64
-	WalletDailyCap      float64
+	AccruedMALIBU      string
+	WithdrawableMALIBU string
+	HeldMALIBU         string
+	TrustTier          string
+	HoldReasons        []string
+	ProviderDailyCap   float64
+	WalletDailyCap     float64
 }
 
 // QueryAccrualBalance reads ledger aggregates for the provider read API.

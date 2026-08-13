@@ -696,6 +696,91 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 	}
 }
 
+func TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID:     "trusted-a",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierTrusted,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	registerFloorPeer(registry, "trusted-peer", "model-a")
+	at := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+
+	first := registry.RecordCanaryResult("trusted-a", "session-a", false, at, 2)
+	if first.Count != 1 || first.Tripped != CanaryTripNone {
+		t.Fatalf("first canary result = %+v", first)
+	}
+	second := registry.RecordCanaryResult("trusted-a", "session-a", false, at.Add(time.Minute), 2)
+	if second.Count != 2 || second.Tripped != CanaryTripDegraded || second.Tier != TierTrusted {
+		t.Fatalf("second canary result = %+v", second)
+	}
+
+	registry.Register(&Provider{
+		ProviderID:     "trusted-a",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierTrusted,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	reconnected, ok := registry.Resolve("trusted-a", "session-b")
+	if !ok {
+		t.Fatal("reconnected provider not found")
+	}
+	if reconnected.State != StateDegraded || reconnected.RoutingEligible() {
+		t.Fatalf("reconnected trusted canary-sanctioned provider = %+v, want degraded and unroutable", reconnected)
+	}
+	if reconnected.CanaryFailCount != 2 {
+		t.Fatalf("reconnected canary fail count = %d, want 2", reconnected.CanaryFailCount)
+	}
+	if !registry.CanaryRecoveryEligible("trusted-a", "session-b") {
+		t.Fatal("reconnected trusted provider should require canary recovery")
+	}
+
+	registry.Register(&Provider{
+		ProviderID:     "trusted-a",
+		AssignedID:     "session-c",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+		AuthState:      AuthBearerValidated,
+	}, nil)
+	provisionalReconnect, ok := registry.Resolve("trusted-a", "session-c")
+	if !ok {
+		t.Fatal("provisional reconnect not found")
+	}
+	if provisionalReconnect.State != StateDegraded || provisionalReconnect.RoutingEligible() {
+		t.Fatalf("provisional reconnect with trusted canary sanction = %+v, want degraded and unroutable", provisionalReconnect)
+	}
+	if provisionalReconnect.Tier != TierProvisional {
+		t.Fatalf("provisional reconnect tier = %s, want provisional", provisionalReconnect.Tier)
+	}
+	if !registry.CanaryRecoveryEligible("trusted-a", "session-c") {
+		t.Fatal("provisional reconnect should preserve canary recovery hold")
+	}
+
+	promoted, ok := registry.SetEarnedTrustTier("trusted-a", TierTrusted)
+	if !ok {
+		t.Fatal("trusted promotion failed")
+	}
+	if promoted.Tier != TierTrusted || promoted.State != StateDegraded || promoted.RoutingEligible() {
+		t.Fatalf("trusted promotion after provisional reconnect = %+v, want trusted but still degraded and unroutable", promoted)
+	}
+	if !registry.CanaryRecoveryEligible("trusted-a", "session-c") {
+		t.Fatal("trusted promotion should not clear canary recovery hold")
+	}
+}
+
 // registerFloorPeer registers a second routing-eligible provider serving
 // modelID so the FR-CAN22 last-provider floor does not spare the provider under
 // test — letting sanction/recovery tests still exercise the trip path.
@@ -711,6 +796,52 @@ func registerFloorPeer(registry *Registry, id, modelID string) {
 		MaxConcurrency:   1,
 		MaxContextTokens: 4096,
 	}, nil)
+}
+
+func TestRegistrySetEarnedTrustTierDoesNotUnpinOperatorProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "pinned-1",
+		AssignedID: "session-1",
+		Tier:       TierPinned,
+		State:      StateReady,
+	}, nil)
+
+	updated, ok := registry.SetEarnedTrustTier("pinned-1", TierProvisional)
+	if !ok {
+		t.Fatal("SetEarnedTrustTier returned !ok")
+	}
+	if updated.Tier != TierPinned {
+		t.Fatalf("operator pinned tier changed to %s", updated.Tier)
+	}
+}
+
+func TestRegistrySetEarnedTrustTierRequiresBearerValidatedForTrusted(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "self-minted-1",
+		AssignedID: "session-1",
+		Tier:       TierProvisional,
+		State:      StateReady,
+		AuthState:  AuthSelfMinted,
+	}, nil)
+	registry.Register(&Provider{
+		ProviderID: "bearer-1",
+		AssignedID: "session-2",
+		Tier:       TierProvisional,
+		State:      StateReady,
+		AuthState:  AuthBearerValidated,
+	}, nil)
+
+	if _, ok := registry.SetEarnedTrustTier("self-minted-1", TierTrusted); ok {
+		t.Fatal("self-minted session was promoted to trusted")
+	}
+	if got, ok := registry.Resolve("self-minted-1", "session-1"); !ok || got.Tier != TierProvisional {
+		t.Fatalf("self-minted tier = %s ok=%v, want provisional", got.Tier, ok)
+	}
+	if updated, ok := registry.SetEarnedTrustTier("bearer-1", TierTrusted); !ok || updated.Tier != TierTrusted {
+		t.Fatalf("bearer trusted promotion = %s ok=%v, want trusted", updated.Tier, ok)
+	}
 }
 
 // TestRecordCanaryResultFloorSparesSoleProvider verifies the FR-CAN22

@@ -1203,6 +1203,26 @@ func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string
 	return count > 0, nil
 }
 
+// HasRevokedTokenForProvider reports whether providerID has any revoked token
+// history. Trusted routing uses this as a custody-transfer guard: a later
+// self-minted bearer for the same provider ID is not enough to inherit durable
+// rewards trust unless durable admission identity proof also exists.
+func (s *Store) HasRevokedTokenForProvider(ctx context.Context, providerID string) (bool, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return false, fmt.Errorf("provider id is required")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM provider_tokens WHERE provider_id = ? AND revoked_at IS NOT NULL`,
+		providerID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s *Store) ListActiveProviderIDsCreatedBefore(ctx context.Context, cutoff time.Time) ([]string, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("auth store is nil")

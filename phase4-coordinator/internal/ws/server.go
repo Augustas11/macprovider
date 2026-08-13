@@ -157,6 +157,7 @@ type Server struct {
 	authPolicyAdmin                ProviderAuthPolicyAdminStore
 	hardwareTrustAdmin             HardwareTrustAdminStore
 	providerTrust                  ProviderTrustChecker
+	rewardsTrust                   ProviderRewardsTrustTierStore
 	admissionIdentityRecoveryAdmin AdmissionIdentityRecoveryAdminStore
 	idlePrewarm                    IdlePrewarmRecorder
 	idlePrewarmMetrics             IdlePrewarmMetrics
@@ -201,6 +202,12 @@ type Server struct {
 	// concurrently by /healthz, hence atomic.
 	trustSweepFailures     int
 	trustAuthorityDegraded atomic.Bool
+	// rewardsTrustSweepFailures bounds per-session fail-open trusted routing
+	// quota when an individual rewards trust lookup becomes unreadable after a
+	// trusted session is live.
+	rewardsTrustSweepFailures sync.Map
+	// rewardsTrustStoreFailures preserves the all-lookups-failed outage guard.
+	rewardsTrustStoreFailures int
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -221,6 +228,10 @@ type TokenValidator interface {
 	ValidateToken(context.Context, string) (string, bool, error)
 	MarkTokenUsed(context.Context, string) error
 	ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error)
+}
+
+type providerTokenCustodyHistoryStore interface {
+	HasRevokedTokenForProvider(context.Context, string) (bool, error)
 }
 
 // TokenIssuer handles SPEC-003 v0.8 FR-C9.1 self-serve provisional token
@@ -522,6 +533,12 @@ func WithProviderTrustChecker(checker ProviderTrustChecker) Option {
 	}
 }
 
+func WithProviderRewardsTrustTierStore(store ProviderRewardsTrustTierStore) Option {
+	return func(s *Server) {
+		s.rewardsTrust = store
+	}
+}
+
 func WithIdlePrewarmRecorder(recorder IdlePrewarmRecorder) Option {
 	return func(s *Server) {
 		s.idlePrewarm = recorder
@@ -722,7 +739,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	// strict autotune evidence TTL checks run only when the hello gate is enabled
 	// and its catalog+evidence dependencies are wired. Both use the same 30s
 	// sweep cadence.
-	if (s.providerTrust != nil || (s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
+	if (s.providerTrust != nil || s.rewardsTrust != nil || (s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
 		go s.runTrustRevalidationLoop()
 	}
 	return s
@@ -1615,7 +1632,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
 	if entry.AdmissionSandboxed {
-		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -1627,9 +1644,9 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 		entry.AdmissionSandboxCredentialBypassed = authState != pool.AuthBearerValidated
-		entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	} else {
-		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -1647,7 +1664,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		pairOT = ot
 		claimURL = url
 		authState = resolvedAuthState
-		entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	}
 	entry.AuthState = authState
 	session, _ := s.registerProviderSession(conn, entry)
@@ -1757,7 +1774,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if initial.CredentialBootstrap {
 		entry, ok = s.prepareCredentialBootstrap(conn, connectionAuth, initial)
 	} else {
-		entry, ok = s.prepareProviderAdmission(conn, connectionAuth, initial.Hello())
+		entry, ok = s.prepareProviderAdmissionDeferredQuota(conn, connectionAuth, initial.Hello())
 	}
 	if !ok {
 		return "", ""
@@ -2098,6 +2115,14 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		entry.AdmittedChipNormalized = admissionObservation.AdmittedTuple.ChipNormalized
 		entry.AdmittedUnifiedMemoryGB = admissionObservation.AdmittedTuple.UnifiedMemoryGB
 	}
+	entry.DurableAdmissionIdentityVerified = identityProof.DurableAdmissionIdentityVerified
+	entry.Tier = s.routingAdmissionTierWithCustody(
+		context.Background(),
+		connectionAuth,
+		initial.ProviderID,
+		entry.Tier == pool.TierPinned,
+		entry.DurableAdmissionIdentityVerified,
+	)
 	registered := false
 	reservedAdmission := false
 	defer func() {
@@ -2108,7 +2133,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	var assignedProviderToken, pairOT, claimURL string
 	var authState pool.AuthState
 	if entry.AdmissionSandboxed {
-		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -2120,11 +2145,11 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 		entry.AdmissionSandboxCredentialBypassed = authState != pool.AuthBearerValidated
-		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier)
 	} else {
 		// Reserve after the post-challenge evidence recheck, but defer the durable
 		// admission record until credential minting succeeds.
-		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -2213,7 +2238,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 				Int("identity_generation", state.Generation).
 				Msg("durable admission identity recovered under operator authorization")
 		}
-		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier)
 	}
 	entry.AuthState = authState
 	// Issue #582 FIX A: no post-mint hardware-trust re-check. Trust was authorized
@@ -2407,6 +2432,14 @@ func (s *Server) observeCredentialBootstrap(outcome string) {
 }
 
 func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
+	return s.prepareProviderAdmissionWithQuotaCheck(conn, auth, hello, true)
+}
+
+func (s *Server) prepareProviderAdmissionDeferredQuota(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
+	return s.prepareProviderAdmissionWithQuotaCheck(conn, auth, hello, false)
+}
+
+func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth providerAuth, hello Hello, checkQuota bool) (*pool.Provider, bool) {
 	// Exact pre-fix sets listed in first_hop_bridge_ids may open an
 	// update-only session so public 1.8.48 can persist coordinator
 	// compatibility admission and run ordinary `macprovider-cli update`
@@ -2464,10 +2497,24 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		// validateProviderToken at upgrade. A fresh bootstrap credential is
 		// consumed only after this admission path and all evidence checks pass.
 	}
-	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, false)
-	if closeCode != 0 {
-		s.close(conn, closeCode, closeReason)
-		return nil, false
+	requestedTier := s.routingAdmissionTier(context.Background(), auth, hello.ProviderID, pinned)
+	tier := requestedTier
+	if checkQuota {
+		var closeCode gobwas.StatusCode
+		var closeReason string
+		tier, closeCode, closeReason = s.checkOrRecordAdmission(hello, requestedTier, false)
+		if closeCode != 0 {
+			s.close(conn, closeCode, closeReason)
+			return nil, false
+		}
+	} else {
+		var closeCode gobwas.StatusCode
+		var closeReason string
+		tier, closeCode, closeReason = s.checkAdmissionWithoutCapacity(hello, requestedTier)
+		if closeCode != 0 {
+			s.close(conn, closeCode, closeReason)
+			return nil, false
+		}
 	}
 	endpointURL := ""
 	inferencePath := pool.InferencePathWSTunneled
@@ -2917,8 +2964,8 @@ func (s *Server) gatedRecommendedBinaryVersion(compatibilitySetID string) string
 	return s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion
 }
 
-func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {
-	tier, closeCode, closeReason := s.admission.ReserveAdmission(hello, pinned, s.connectedProvisional())
+func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, tier pool.Tier) (pool.Tier, bool) {
+	tier, closeCode, closeReason := s.admission.ReserveAdmissionAs(hello, tier, s.connectedProvisional())
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return "", false
@@ -2926,15 +2973,19 @@ func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, pinned boo
 	return tier, true
 }
 
-func (s *Server) commitProviderAdmission(hello Hello, pinned bool) pool.Tier {
-	return s.admission.CommitReservedAdmission(hello, pinned)
+func (s *Server) commitProviderAdmission(hello Hello, tier pool.Tier) pool.Tier {
+	return s.admission.CommitReservedAdmissionAs(hello, tier)
 }
 
-func (s *Server) checkOrRecordAdmission(hello Hello, pinned bool, record bool) (pool.Tier, gobwas.StatusCode, string) {
+func (s *Server) checkOrRecordAdmission(hello Hello, tier pool.Tier, record bool) (pool.Tier, gobwas.StatusCode, string) {
 	if record {
-		return s.admission.Admit(hello, pinned, s.connectedProvisional())
+		return s.admission.AdmitAs(hello, tier, s.connectedProvisional())
 	}
-	return s.admission.CheckAdmit(hello, pinned, s.connectedProvisional())
+	return s.admission.CheckAdmitAs(hello, tier, s.connectedProvisional())
+}
+
+func (s *Server) checkAdmissionWithoutCapacity(hello Hello, tier pool.Tier) (pool.Tier, gobwas.StatusCode, string) {
+	return s.admission.CheckAdmitAsWithoutCapacity(hello, tier)
 }
 
 // compareSemver is a thin alias for the coordinator's single version
@@ -5191,6 +5242,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
+	s.clearRewardsTrustLookupFailure(providerID, assignedID)
 	s.pruneIdlePrewarmLimits(s.now())
 	binaryVersion := ""
 	var conn net.Conn

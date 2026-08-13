@@ -1,0 +1,240 @@
+package ws
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+)
+
+type ProviderRewardsTrustTierStore interface {
+	ProviderTrustTier(ctx context.Context, providerID string) (string, error)
+}
+
+const rewardsTrustTierTrusted = "trusted"
+const rewardsTrustSweepDegradedThreshold = 3
+
+var (
+	rewardsTrustLookupTimeout = 500 * time.Millisecond
+	rewardsTrustSweepDeadline = trustRevalidationSweepDeadlineCap
+)
+
+func (s *Server) routingAdmissionTier(ctx context.Context, auth providerAuth, providerID string, pinned bool) pool.Tier {
+	return s.routingAdmissionTierWithCustody(ctx, auth, providerID, pinned, false)
+}
+
+func (s *Server) routingAdmissionTierWithCustody(ctx context.Context, auth providerAuth, providerID string, pinned bool, durableIdentityVerified bool) pool.Tier {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if pinned {
+		return pool.TierPinned
+	}
+	if s.rewardsTrust == nil || !auth.validated || auth.providerID != providerID {
+		return pool.TierProvisional
+	}
+	if !s.trustedRoutingCustodyEligibleWithProof(ctx, providerID, durableIdentityVerified) {
+		return pool.TierProvisional
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
+	defer cancel()
+	tier, err := s.rewardsTrust.ProviderTrustTier(lookupCtx, providerID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("rewards trust tier lookup failed; keeping provisional routing tier")
+		return pool.TierProvisional
+	}
+	if strings.EqualFold(strings.TrimSpace(tier), rewardsTrustTierTrusted) {
+		return pool.TierTrusted
+	}
+	return pool.TierProvisional
+}
+
+func (s *Server) ApplyRewardsTrustTier(providerID, tier string) {
+	if s == nil || s.pool == nil {
+		return
+	}
+	var routingTier pool.Tier
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case rewardsTrustTierTrusted:
+		if !s.trustedRoutingCustodyEligibleWithProof(context.Background(), providerID, s.liveDurableAdmissionIdentityVerified(providerID)) {
+			routingTier = pool.TierProvisional
+			break
+		}
+		routingTier = pool.TierTrusted
+	case string(pool.TierProvisional):
+		routingTier = pool.TierProvisional
+	default:
+		s.log.Warn().Str("provider_id", providerID).Str("trust_tier", tier).Msg("unknown rewards trust tier; live routing tier unchanged")
+		return
+	}
+	updated, ok := s.pool.SetEarnedTrustTier(providerID, routingTier)
+	if !ok {
+		return
+	}
+	s.log.Info().
+		Str("provider_id", providerID).
+		Str("routing_tier", string(updated.Tier)).
+		Str("rewards_trust_tier", tier).
+		Msg("live provider routing tier reconciled from rewards trust")
+}
+
+func (s *Server) runRewardsTrustTierReconciliationSweep() {
+	if s == nil || s.pool == nil || s.rewardsTrust == nil {
+		return
+	}
+	sweepCtx, cancel := context.WithTimeout(context.Background(), rewardsTrustSweepDeadline)
+	defer cancel()
+	var eligible, succeeded, failed int
+	for _, provider := range s.pool.Snapshot() {
+		if provider.Tier == pool.TierPinned {
+			continue
+		}
+		if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
+			continue
+		}
+		key := sessionKey(provider.ProviderID, provider.AssignedID)
+		if provider.AuthState != pool.AuthBearerValidated {
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		if !s.trustedRoutingCustodyEligibleWithProof(sweepCtx, provider.ProviderID, provider.DurableAdmissionIdentityVerified) {
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		eligible++
+		if sweepCtx.Err() != nil {
+			failed++
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		lookupCtx, cancel := context.WithTimeout(sweepCtx, rewardsTrustLookupTimeout)
+		tier, err := s.rewardsTrust.ProviderTrustTier(lookupCtx, provider.ProviderID)
+		cancel()
+		if sweepCtx.Err() != nil {
+			failed++
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		if err != nil {
+			failed++
+			failures := s.recordRewardsTrustLookupFailure(key)
+			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("rewards trust tier reconciliation failed")
+			if failures >= rewardsTrustSweepDegradedThreshold && provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		s.rewardsTrustSweepFailures.Delete(key)
+		succeeded++
+		routingTier := pool.TierProvisional
+		if strings.EqualFold(strings.TrimSpace(tier), rewardsTrustTierTrusted) {
+			routingTier = pool.TierTrusted
+		}
+		if provider.Tier != routingTier {
+			s.ApplyRewardsTrustTier(provider.ProviderID, string(routingTier))
+		}
+	}
+	if eligible == 0 {
+		s.rewardsTrustStoreFailures = 0
+		return
+	}
+	if failed > 0 && succeeded == 0 {
+		s.rewardsTrustStoreFailures++
+		s.log.Warn().
+			Int("eligible_sessions", eligible).
+			Int("consecutive_failures", s.rewardsTrustStoreFailures).
+			Msg("rewards trust tier reconciliation skipped; trust store unavailable")
+		if s.rewardsTrustStoreFailures >= rewardsTrustSweepDegradedThreshold {
+			for _, provider := range s.pool.Snapshot() {
+				if provider.Tier == pool.TierTrusted {
+					s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+				}
+			}
+		}
+		return
+	}
+	if s.rewardsTrustStoreFailures > 0 {
+		s.log.Info().
+			Int("prior_consecutive_failures", s.rewardsTrustStoreFailures).
+			Msg("rewards trust tier reconciliation recovered")
+	}
+	s.rewardsTrustStoreFailures = 0
+}
+
+func (s *Server) trustedRoutingCustodyEligible(ctx context.Context, providerID string) bool {
+	return s.trustedRoutingCustodyEligibleWithProof(ctx, providerID, false)
+}
+
+func (s *Server) trustedRoutingCustodyEligibleWithProof(ctx context.Context, providerID string, durableIdentityVerified bool) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if durableIdentityVerified {
+		return true
+	}
+	if s.tokens == nil {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider token custody history unavailable and live durable admission identity proof missing; keeping rewards-trusted routing provisional")
+		return false
+	}
+	history, ok := s.tokens.(providerTokenCustodyHistoryStore)
+	if !ok {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider token custody history unavailable; keeping rewards-trusted routing provisional")
+		return false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
+	revoked, err := history.HasRevokedTokenForProvider(lookupCtx, providerID)
+	cancel()
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider token custody history lookup failed; keeping rewards-trusted routing provisional")
+		return false
+	}
+	if revoked {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without live durable admission identity proof; keeping rewards-trusted routing provisional")
+	} else {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider lacks live durable admission identity proof; keeping rewards-trusted routing provisional")
+	}
+	return false
+}
+
+func (s *Server) liveDurableAdmissionIdentityVerified(providerID string) bool {
+	if s == nil || s.pool == nil {
+		return false
+	}
+	for _, provider := range s.pool.Snapshot() {
+		if provider.ProviderID == providerID && provider.DurableAdmissionIdentityVerified {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) clearRewardsTrustLookupFailure(providerID, assignedID string) {
+	if s == nil {
+		return
+	}
+	s.rewardsTrustSweepFailures.Delete(sessionKey(providerID, assignedID))
+}
+
+func (s *Server) recordRewardsTrustLookupFailure(key string) int {
+	if s == nil {
+		return 0
+	}
+	prior, _ := s.rewardsTrustSweepFailures.Load(key)
+	failures, _ := prior.(int)
+	failures++
+	s.rewardsTrustSweepFailures.Store(key, failures)
+	return failures
+}

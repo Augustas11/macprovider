@@ -2,14 +2,22 @@ package ws
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/rs/zerolog"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,6 +70,598 @@ func TestAdmissionManagerTiersRateLimitAndQuota(t *testing.T) {
 	adm.Reject("new-1", "test")
 	if !adm.Rejected("new-1") {
 		t.Fatal("provider not rejected")
+	}
+}
+
+func TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              1,
+		ProvisionalQuotaPerHour:         1,
+		TrustedQuotaPerHour:             0,
+	}, func() time.Time { return now })
+
+	if tier, code, reason := adm.AdmitAs(Hello{ProviderID: "trusted-1"}, pool.TierTrusted, 0); tier != pool.TierTrusted || code != 0 || reason != "" {
+		t.Fatalf("trusted admit = tier:%s code:%d reason:%q", tier, code, reason)
+	}
+	trusted := pool.Provider{ProviderID: "trusted-1", Tier: pool.TierTrusted}
+	for i := 0; i < 3; i++ {
+		if !adm.TryReserveRequest(trusted) {
+			t.Fatalf("trusted request %d blocked by provisional quota", i+1)
+		}
+	}
+
+	provisional := pool.Provider{ProviderID: "trusted-1", Tier: pool.TierProvisional}
+	if !adm.TryReserveRequest(provisional) {
+		t.Fatal("first provisional request after demotion blocked")
+	}
+	if adm.TryReserveRequest(provisional) {
+		t.Fatal("demoted provider bypassed provisional quota")
+	}
+}
+
+func TestAdmissionManagerTrustedTierHonorsConfiguredQuota(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalQuotaPerHour: 1,
+		TrustedQuotaPerHour:     1,
+	}, func() time.Time { return now })
+	trusted := pool.Provider{ProviderID: "trusted-1", Tier: pool.TierTrusted}
+
+	if !adm.TryReserveRequest(trusted) {
+		t.Fatal("first trusted request blocked")
+	}
+	if adm.TryReserveRequest(trusted) {
+		t.Fatal("trusted provider bypassed configured trusted quota")
+	}
+	adm.RefundRequest(trusted)
+	if !adm.TryReserveRequest(trusted) {
+		t.Fatal("trusted request after refund blocked")
+	}
+}
+
+func TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	}))
+
+	if tier := s.routingAdmissionTier(context.Background(), providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false); tier != pool.TierProvisional {
+		t.Fatalf("authenticated trusted tier without durable proof = %s, want provisional", tier)
+	}
+	if tier := s.routingAdmissionTierWithCustody(context.Background(), providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, true); tier != pool.TierTrusted {
+		t.Fatalf("authenticated trusted tier with durable proof = %s, want %s", tier, pool.TierTrusted)
+	}
+	if tier := s.routingAdmissionTier(context.Background(), providerAuth{}, "provider-a", false); tier != pool.TierProvisional {
+		t.Fatalf("tokenless trusted-id tier = %s, want provisional", tier)
+	}
+	if tier := s.routingAdmissionTier(context.Background(), providerAuth{validated: true, providerID: "other"}, "provider-a", false); tier != pool.TierProvisional {
+		t.Fatalf("mismatched token tier = %s, want provisional", tier)
+	}
+}
+
+func TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+
+	tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false)
+	if tier != pool.TierProvisional {
+		t.Fatalf("legacy revoked-history trusted tier = %s, want provisional", tier)
+	}
+	if tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", true); tier != pool.TierPinned {
+		t.Fatalf("operator-pinned tier = %s, want pinned", tier)
+	}
+}
+
+func TestRoutingAdmissionTierRejectsTrustedQuotaWithoutDurableIdentityProofEvenWithoutRevocation(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+
+	tier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
+	if tier != pool.TierProvisional {
+		t.Fatalf("new-bearer trusted tier without durable proof = %s, want provisional", tier)
+	}
+
+	tier = s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, true)
+	if tier != pool.TierTrusted {
+		t.Fatalf("verified durable-identity trusted tier without revocation history = %s, want trusted", tier)
+	}
+}
+
+func TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	_, secondToken, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, "provider-a", secondToken, pub, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithBootstrapTokenStore(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+
+	tier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
+	if tier != pool.TierProvisional {
+		t.Fatalf("durable-row-only trusted tier = %s, want provisional", tier)
+	}
+
+	tier = s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, true)
+	if tier != pool.TierTrusted {
+		t.Fatalf("verified durable-identity trusted tier = %s, want trusted", tier)
+	}
+}
+
+func TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody(t *testing.T) {
+	const providerID = "provider-a"
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, bearer, err := store.IssueToken(ctx, providerID, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentPubkey, currentPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, providerID, bearer, currentPubkey, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithBootstrapTokenStore(store),
+	)
+	initial := AuthRequest{
+		ProviderID:                 providerID,
+		BinaryVersion:              "1.2.3",
+		ProviderECDHPublicKey:      "ecdh-key",
+		ProviderAdmissionPubkey:    append([]byte(nil), currentPubkey...),
+		ProviderAdmissionPublicKey: base64.StdEncoding.EncodeToString(currentPubkey),
+	}
+	retained := retainedAuthAttemptForIdentityProof(t, initial)
+	proof := signedIdentityProof(t, initial, retained, currentPrivateKey)
+
+	result := s.verifyIdentitySignature(ctx, initial, proof, retained, providerAuth{
+		validated:  true,
+		providerID: providerID,
+		token:      bearer,
+	})
+	if !result.Accepted || !result.DurableAdmissionIdentityVerified {
+		t.Fatalf("existing durable proof accepted=%v durable_verified=%v", result.Accepted, result.DurableAdmissionIdentityVerified)
+	}
+
+	_, enrollmentBearer, err := store.IssueToken(ctx, "provider-b", "host-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollmentPubkey, enrollmentPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollmentInitial := initial
+	enrollmentInitial.ProviderID = "provider-b"
+	enrollmentInitial.ProviderAdmissionPubkey = append([]byte(nil), enrollmentPubkey...)
+	enrollmentInitial.ProviderAdmissionPublicKey = base64.StdEncoding.EncodeToString(enrollmentPubkey)
+	enrollmentRetained := retainedAuthAttemptForIdentityProof(t, enrollmentInitial)
+	enrollmentProof := signedIdentityProof(t, enrollmentInitial, enrollmentRetained, enrollmentPrivateKey)
+	result = s.verifyIdentitySignature(ctx, enrollmentInitial, enrollmentProof, enrollmentRetained, providerAuth{
+		validated:  true,
+		providerID: "provider-b",
+		token:      enrollmentBearer,
+	})
+	if !result.Accepted || result.DurableAdmissionIdentityVerified {
+		t.Fatalf("first enrollment accepted=%v durable_verified=%v", result.Accepted, result.DurableAdmissionIdentityVerified)
+	}
+}
+
+func TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, "provider-a", bearer, pub, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Admission.ProvisionalPoolMax = 0
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithBootstrapTokenStore(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	hello := capacityTestHello(2)
+
+	entry, ok := s.prepareProviderAdmissionDeferredQuota(nil, providerAuth{validated: true, providerID: "provider-a"}, hello)
+	if !ok {
+		t.Fatal("deferred v2 admission rejected before durable identity proof")
+	}
+	if entry.Tier != pool.TierProvisional {
+		t.Fatalf("pre-proof tier = %s, want provisional", entry.Tier)
+	}
+
+	finalTier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, true)
+	if finalTier != pool.TierTrusted {
+		t.Fatalf("post-proof tier = %s, want trusted", finalTier)
+	}
+	if tier, code, reason := s.admission.ReserveAdmissionAs(hello, finalTier, s.connectedProvisional()); tier != pool.TierTrusted || code != 0 || reason != "" {
+		t.Fatalf("trusted reserve after proof = tier:%s code:%d reason:%q, want trusted success", tier, code, reason)
+	}
+
+	unverifiedTier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
+	if unverifiedTier != pool.TierProvisional {
+		t.Fatalf("unverified tier = %s, want provisional", unverifiedTier)
+	}
+	if _, code, _ := s.admission.ReserveAdmissionAs(hello, unverifiedTier, s.connectedProvisional()); code != CloseProvisionalPoolFull {
+		t.Fatalf("unverified reserve code = %d, want provisional pool full", code)
+	}
+}
+
+func TestRewardsTrustReconciliationDemotesLiveTrustedProvider(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierProvisional)},
+	}))
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("reconciled tier = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("tier after revoked legacy token history = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationDemotesTrustedProviderWithoutDurableIdentityProof(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("tier without durable identity proof = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID:                       "provider-a",
+		AssignedID:                       "session-a",
+		Tier:                             pool.TierTrusted,
+		State:                            pool.StateReady,
+		AuthState:                        pool.AuthBearerValidated,
+		DurableAdmissionIdentityVerified: true,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierTrusted {
+		t.Fatalf("verified durable identity tier after revoked history = %s, want trusted", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierProvisional,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthSelfMinted,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	}))
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("non-bearer reconciled tier = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	for _, id := range []string{"provider-a", "provider-b"} {
+		registry.Register(&pool.Provider{
+			ProviderID:                       id,
+			AssignedID:                       "session-" + id,
+			Tier:                             pool.TierTrusted,
+			State:                            pool.StateReady,
+			AuthState:                        pool.AuthBearerValidated,
+			DurableAdmissionIdentityVerified: true,
+		}, nil)
+	}
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers:  map[string]string{"provider-b": string(pool.TierTrusted)},
+		errors: map[string]error{"provider-a": errors.New("lookup failed")},
+	}))
+	for _, id := range []string{"provider-a", "provider-b"} {
+		s.sessions.Store(sessionKey(id, "session-"+id), &providerSession{})
+	}
+
+	for i := 0; i < rewardsTrustSweepDegradedThreshold; i++ {
+		s.runRewardsTrustTierReconciliationSweep()
+	}
+
+	failing, ok := registry.Resolve("provider-a", "session-provider-a")
+	if !ok {
+		t.Fatal("failing provider disappeared")
+	}
+	if failing.Tier != pool.TierProvisional {
+		t.Fatalf("failing provider tier = %s, want provisional", failing.Tier)
+	}
+	succeeding, ok := registry.Resolve("provider-b", "session-provider-b")
+	if !ok {
+		t.Fatal("succeeding provider disappeared")
+	}
+	if succeeding.Tier != pool.TierTrusted {
+		t.Fatalf("succeeding provider tier = %s, want trusted", succeeding.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders(t *testing.T) {
+	oldLookupTimeout := rewardsTrustLookupTimeout
+	oldSweepDeadline := rewardsTrustSweepDeadline
+	rewardsTrustLookupTimeout = 25 * time.Millisecond
+	rewardsTrustSweepDeadline = 60 * time.Millisecond
+	t.Cleanup(func() {
+		rewardsTrustLookupTimeout = oldLookupTimeout
+		rewardsTrustSweepDeadline = oldSweepDeadline
+	})
+
+	registry := pool.NewRegistry(nil)
+	for i := 0; i < 8; i++ {
+		id := "provider-" + string(rune('a'+i))
+		registry.Register(&pool.Provider{
+			ProviderID:                       id,
+			AssignedID:                       "session-" + id,
+			Tier:                             pool.TierTrusted,
+			State:                            pool.StateReady,
+			AuthState:                        pool.AuthBearerValidated,
+			DurableAdmissionIdentityVerified: true,
+		}, nil)
+	}
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(blockingRewardsTrustStore{}))
+	for i := 0; i < 8; i++ {
+		id := "provider-" + string(rune('a'+i))
+		s.sessions.Store(sessionKey(id, "session-"+id), &providerSession{})
+	}
+
+	start := time.Now()
+	s.runRewardsTrustTierReconciliationSweep()
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("sweep elapsed = %s, want bounded by sweep deadline", elapsed)
+	}
+	demoted := 0
+	for _, provider := range registry.Snapshot() {
+		if provider.Tier == pool.TierProvisional {
+			demoted++
+		}
+	}
+	if demoted == 0 {
+		t.Fatal("stalled sweep deadline did not demote any unresolved trusted providers")
+	}
+}
+
+func TestHandleDisconnectClearsRewardsTrustLookupFailure(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	s.sessions.Store(sessionKey("provider-a", "session-a"), newProviderSession("provider-a", "session-a", serverConn, 1))
+	key := sessionKey("provider-a", "session-a")
+	s.rewardsTrustSweepFailures.Store(key, 2)
+
+	s.handleDisconnect("provider-a", "session-a")
+
+	if _, ok := s.rewardsTrustSweepFailures.Load(key); ok {
+		t.Fatal("rewards trust lookup failure counter survived disconnect")
 	}
 }
 
@@ -247,10 +847,74 @@ type failingAdmissionStateStore struct {
 	err error
 }
 
+type fakeRewardsTrustStore struct {
+	tiers  map[string]string
+	errors map[string]error
+	err    error
+}
+
+type blockingRewardsTrustStore struct{}
+
+func (blockingRewardsTrustStore) ProviderTrustTier(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (f fakeRewardsTrustStore) ProviderTrustTier(_ context.Context, providerID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if err := f.errors[providerID]; err != nil {
+		return "", err
+	}
+	return f.tiers[providerID], nil
+}
+
 func (f failingAdmissionStateStore) LoadAdmissionState(context.Context) (AdmissionState, error) {
 	return AdmissionState{}, nil
 }
 
 func (f failingAdmissionStateStore) SaveAdmissionState(context.Context, AdmissionState) error {
 	return f.err
+}
+
+func retainedAuthAttemptForIdentityProof(t *testing.T, initial AuthRequest) AuthAttemptState {
+	t.Helper()
+	raw, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := initialAuthTranscriptHash(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return AuthAttemptState{
+		AuthAttemptID:           "attempt-" + initial.ProviderID,
+		ProviderID:              initial.ProviderID,
+		BinaryVersion:           initial.BinaryVersion,
+		ProviderECDHPublicKey:   initial.ProviderECDHPublicKey,
+		InitialTranscriptSHA256: hash,
+	}
+}
+
+func signedIdentityProof(t *testing.T, initial AuthRequest, retained AuthAttemptState, privateKey ed25519.PrivateKey) AuthRequest {
+	t.Helper()
+	transcript := base64.StdEncoding.EncodeToString(retained.InitialTranscriptSHA256[:])
+	tuple := map[string]any{
+		"auth_attempt_id":          retained.AuthAttemptID,
+		"provider_id":              initial.ProviderID,
+		"binary_version":           retained.BinaryVersion,
+		"provider_ecdh_public_key": retained.ProviderECDHPublicKey,
+		"transcript_sha256":        transcript,
+	}
+	canonical, err := billing.CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := ed25519.Sign(privateKey, canonical)
+	proof := initial
+	proof.AuthAttemptID = retained.AuthAttemptID
+	proof.IdentityTranscriptSHA256 = transcript
+	proof.IdentitySignature = base64.StdEncoding.EncodeToString(signature)
+	return proof
 }

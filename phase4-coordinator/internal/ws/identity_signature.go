@@ -35,17 +35,18 @@ const (
 )
 
 type identityProofResult struct {
-	Accepted           bool
-	AdmissionMode      string
-	VerifiedKeyRole    string
-	Generation         int
-	EnrollmentPubkey   []byte
-	VerifiedPubkey     []byte
-	ActivePubkey       []byte
-	RotationPubkey     []byte
-	RecoveryPubkey     []byte
-	RecoveryGrantedBy  string
-	PreviousValidUntil *time.Time
+	Accepted                         bool
+	AdmissionMode                    string
+	VerifiedKeyRole                  string
+	DurableAdmissionIdentityVerified bool
+	Generation                       int
+	EnrollmentPubkey                 []byte
+	VerifiedPubkey                   []byte
+	ActivePubkey                     []byte
+	RotationPubkey                   []byte
+	RecoveryPubkey                   []byte
+	RecoveryGrantedBy                string
+	PreviousValidUntil               *time.Time
 }
 
 type durableIdentitySelection struct {
@@ -89,13 +90,14 @@ func (s *Server) verifyIdentitySignature(ctx context.Context, initial AuthReques
 		bytes.Equal(initial.ProviderAdmissionPubkey, selection.ActivePubkey) &&
 		ed25519.Verify(ed25519.PublicKey(selection.ActivePubkey), canonical, signature) {
 		return identityProofResult{
-			Accepted:           true,
-			AdmissionMode:      identityAdmissionSignature,
-			VerifiedKeyRole:    identityKeyRoleCurrent,
-			Generation:         selection.Generation,
-			VerifiedPubkey:     append([]byte(nil), selection.ActivePubkey...),
-			ActivePubkey:       append([]byte(nil), selection.ActivePubkey...),
-			PreviousValidUntil: selection.PreviousValidUntil,
+			Accepted:                         true,
+			AdmissionMode:                    identityAdmissionSignature,
+			VerifiedKeyRole:                  identityKeyRoleCurrent,
+			DurableAdmissionIdentityVerified: true,
+			Generation:                       selection.Generation,
+			VerifiedPubkey:                   append([]byte(nil), selection.ActivePubkey...),
+			ActivePubkey:                     append([]byte(nil), selection.ActivePubkey...),
+			PreviousValidUntil:               selection.PreviousValidUntil,
 		}
 	}
 	if proofMaterialValid && !initial.ProviderAdmissionRecovery && selection.Found &&
@@ -105,13 +107,14 @@ func (s *Server) verifyIdentitySignature(ctx context.Context, initial AuthReques
 			verifiedKeyRole = identityKeyRolePrevious
 		}
 		result := identityProofResult{
-			Accepted:           true,
-			AdmissionMode:      identityAdmissionSignature,
-			VerifiedKeyRole:    verifiedKeyRole,
-			Generation:         selection.Generation,
-			VerifiedPubkey:     append([]byte(nil), selection.VerificationPubkey...),
-			ActivePubkey:       append([]byte(nil), selection.ActivePubkey...),
-			PreviousValidUntil: selection.PreviousValidUntil,
+			Accepted:                         true,
+			AdmissionMode:                    identityAdmissionSignature,
+			VerifiedKeyRole:                  verifiedKeyRole,
+			DurableAdmissionIdentityVerified: true,
+			Generation:                       selection.Generation,
+			VerifiedPubkey:                   append([]byte(nil), selection.VerificationPubkey...),
+			ActivePubkey:                     append([]byte(nil), selection.ActivePubkey...),
+			PreviousValidUntil:               selection.PreviousValidUntil,
 		}
 		// The next key is part of the canonical initial transcript signed by
 		// the current key. Only a proof by the authoritative current key may
