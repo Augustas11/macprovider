@@ -1232,10 +1232,10 @@
       "spec_id": "SPEC-002",
       "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/pool/provider.go:TierTrusted",
-        "phase4-coordinator/internal/ws/admission.go:AdmissionManager.requestQuotaLimit",
+        "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetEarnedTrustTier",
+        "phase4-coordinator/internal/ws/admission.go:func (a *AdmissionManager) requestQuotaLimit",
         "phase4-coordinator/internal/ws/rewards_trust.go:routingAdmissionTier",
-        "phase4-coordinator/internal/rewards/unlock.go:Runner.notifyTrustTierChanged"
+        "phase4-coordinator/internal/rewards/unlock.go:func (r *Runner) notifyTrustTierChanged"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault",
