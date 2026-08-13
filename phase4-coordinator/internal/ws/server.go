@@ -202,9 +202,12 @@ type Server struct {
 	// concurrently by /healthz, hence atomic.
 	trustSweepFailures     int
 	trustAuthorityDegraded atomic.Bool
-	// rewardsTrustSweepFailures bounds fail-open trusted routing quota when the
-	// rewards trust store becomes unreadable after trusted sessions are live.
-	rewardsTrustSweepFailures int
+	// rewardsTrustSweepFailures bounds per-session fail-open trusted routing
+	// quota when an individual rewards trust lookup becomes unreadable after a
+	// trusted session is live.
+	rewardsTrustSweepFailures sync.Map
+	// rewardsTrustStoreFailures preserves the all-lookups-failed outage guard.
+	rewardsTrustStoreFailures int
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.

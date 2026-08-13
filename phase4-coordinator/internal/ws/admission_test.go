@@ -161,6 +161,45 @@ func TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession(t *testing.T) 
 	}
 }
 
+func TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	for _, id := range []string{"provider-a", "provider-b"} {
+		registry.Register(&pool.Provider{
+			ProviderID: id,
+			AssignedID: "session-" + id,
+			Tier:       pool.TierTrusted,
+			State:      pool.StateReady,
+			AuthState:  pool.AuthBearerValidated,
+		}, nil)
+	}
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers:  map[string]string{"provider-b": string(pool.TierTrusted)},
+		errors: map[string]error{"provider-a": errors.New("lookup failed")},
+	}))
+	for _, id := range []string{"provider-a", "provider-b"} {
+		s.sessions.Store(sessionKey(id, "session-"+id), &providerSession{})
+	}
+
+	for i := 0; i < rewardsTrustSweepDegradedThreshold; i++ {
+		s.runRewardsTrustTierReconciliationSweep()
+	}
+
+	failing, ok := registry.Resolve("provider-a", "session-provider-a")
+	if !ok {
+		t.Fatal("failing provider disappeared")
+	}
+	if failing.Tier != pool.TierProvisional {
+		t.Fatalf("failing provider tier = %s, want provisional", failing.Tier)
+	}
+	succeeding, ok := registry.Resolve("provider-b", "session-provider-b")
+	if !ok {
+		t.Fatal("succeeding provider disappeared")
+	}
+	if succeeding.Tier != pool.TierTrusted {
+		t.Fatalf("succeeding provider tier = %s, want trusted", succeeding.Tier)
+	}
+}
+
 func TestAdmissionManagerPendingReservationsEnforcePoolCap(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	adm := NewAdmissionManager(config.AdmissionConfig{
@@ -344,13 +383,17 @@ type failingAdmissionStateStore struct {
 }
 
 type fakeRewardsTrustStore struct {
-	tiers map[string]string
-	err   error
+	tiers  map[string]string
+	errors map[string]error
+	err    error
 }
 
 func (f fakeRewardsTrustStore) ProviderTrustTier(_ context.Context, providerID string) (string, error) {
 	if f.err != nil {
 		return "", f.err
+	}
+	if err := f.errors[providerID]; err != nil {
+		return "", err
 	}
 	return f.tiers[providerID], nil
 }

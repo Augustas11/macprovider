@@ -73,7 +73,9 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 		if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
 			continue
 		}
+		key := sessionKey(provider.ProviderID, provider.AssignedID)
 		if provider.AuthState != pool.AuthBearerValidated {
+			s.rewardsTrustSweepFailures.Delete(key)
 			if provider.Tier == pool.TierTrusted {
 				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
 			}
@@ -85,9 +87,14 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 		cancel()
 		if err != nil {
 			failed++
+			failures := s.recordRewardsTrustLookupFailure(key)
 			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("rewards trust tier reconciliation failed")
+			if failures >= rewardsTrustSweepDegradedThreshold && provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
 			continue
 		}
+		s.rewardsTrustSweepFailures.Delete(key)
 		succeeded++
 		routingTier := pool.TierProvisional
 		if strings.EqualFold(strings.TrimSpace(tier), rewardsTrustTierTrusted) {
@@ -98,16 +105,16 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 		}
 	}
 	if eligible == 0 {
-		s.rewardsTrustSweepFailures = 0
+		s.rewardsTrustStoreFailures = 0
 		return
 	}
 	if failed > 0 && succeeded == 0 {
-		s.rewardsTrustSweepFailures++
+		s.rewardsTrustStoreFailures++
 		s.log.Warn().
 			Int("eligible_sessions", eligible).
-			Int("consecutive_failures", s.rewardsTrustSweepFailures).
+			Int("consecutive_failures", s.rewardsTrustStoreFailures).
 			Msg("rewards trust tier reconciliation skipped; trust store unavailable")
-		if s.rewardsTrustSweepFailures >= rewardsTrustSweepDegradedThreshold {
+		if s.rewardsTrustStoreFailures >= rewardsTrustSweepDegradedThreshold {
 			for _, provider := range s.pool.Snapshot() {
 				if provider.Tier == pool.TierTrusted {
 					s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
@@ -116,10 +123,21 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 		}
 		return
 	}
-	if s.rewardsTrustSweepFailures > 0 {
+	if s.rewardsTrustStoreFailures > 0 {
 		s.log.Info().
-			Int("prior_consecutive_failures", s.rewardsTrustSweepFailures).
+			Int("prior_consecutive_failures", s.rewardsTrustStoreFailures).
 			Msg("rewards trust tier reconciliation recovered")
 	}
-	s.rewardsTrustSweepFailures = 0
+	s.rewardsTrustStoreFailures = 0
+}
+
+func (s *Server) recordRewardsTrustLookupFailure(key string) int {
+	if s == nil {
+		return 0
+	}
+	prior, _ := s.rewardsTrustSweepFailures.Load(key)
+	failures, _ := prior.(int)
+	failures++
+	s.rewardsTrustSweepFailures.Store(key, failures)
+	return failures
 }

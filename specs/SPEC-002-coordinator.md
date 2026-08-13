@@ -4262,7 +4262,7 @@ but no matching bearer-authenticated identity, admission remains
 to `tier: "provisional"` through the live callback or bounded trust
 reconciliation sweep, and the provisional request quota applies.
 
-Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession'`
+Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess'`
 
 **AC-14. admin/reject.**
 Connect a provisional provider. `POST /admin/reject/{provider_id}`.
