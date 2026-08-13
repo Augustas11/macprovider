@@ -31,15 +31,17 @@ Every online eligible provider should see a buyer request at least every few min
 
 ```bash
 # 1. Confirm signed go/no-go + physical baselines on record
-# 2. Coordinator overlay
-ssh pearl 'sudo sed -i "s/canary_enabled: false/canary_enabled: true/" /etc/macprovider/coordinator.pearl-overlays.yaml'
-# 3. Remove emergency sentinel, install enable gate
+# 2. Do NOT flip coordinator pool.canary_enabled — that is the sanctions loop,
+#    not the buyer liveness probe. Leave it false.
+# 3. Install the reviewed canary-buyer scripts, refresh expected-fleet from live
+#    /poolz, then remove the emergency sentinel and install the enable gate.
 ssh pearl 'sudo rm -f /var/lib/macprovider-canary-buyer/DISABLED
   && sudo install -d -o root -g root -m 0755 /etc/macprovider-canary-buyer
-  && sudo touch /etc/macprovider-canary-buyer/enabled
+  && sudo install -o root -g root -m 0644 /dev/null /etc/macprovider-canary-buyer/enabled
   && sudo systemctl daemon-reload
   && sudo systemctl enable --now canary-buyer.timer'
-# 4. Watch pool health for 1h; emergency rollback:
+# 4. Set PEARL_UPDATER_BUYER_CANARY_MODE=required so the updater does not
+#    re-disable the timer. Watch pool health for 1h; emergency rollback:
 #    ops/runbooks/584-emergency-disable-drill.md
 ```
 

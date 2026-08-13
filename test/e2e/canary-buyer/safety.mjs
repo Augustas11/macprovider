@@ -1,4 +1,6 @@
 const READY_STATES = new Set(['ready']);
+const SLEEP_OR_GONE_STATES = new Set(['unavailable', 'offline', 'disconnected', 'sleep']);
+const LIVENESS_MAX_SERVING_IN_FLIGHT = 1;
 const THERMAL_PRESSURE_STATES = new Set(['serious', 'critical', 'thermal_pressure', 'thermal_throttled']);
 const MEMORY_PRESSURE_STATES = new Set(['warning', 'critical', 'memory_pressure']);
 
@@ -109,6 +111,19 @@ export function gatewaySnapshot(status) {
   };
 }
 
+export function isLivenessSleepOrGone(row, { maxHeartbeatAgeMs = 90_000 } = {}) {
+  if (!row) return true;
+  if (SLEEP_OR_GONE_STATES.has(row.state)) return true;
+  if (!Number.isFinite(row.heartbeat_age_ms) || row.heartbeat_age_ms > maxHeartbeatAgeMs) return true;
+  return false;
+}
+
+export function isLivenessServingPoolRow(row, { maxHeartbeatAgeMs = 90_000 } = {}) {
+  if (!row || isLivenessSleepOrGone(row, { maxHeartbeatAgeMs })) return false;
+  if (row.state === 'ready' && row.routing_eligible === true) return true;
+  return row.state === 'busy';
+}
+
 export function gatewayInvariantReasons(initial, current, {
   minReadyProviders = 1,
   maxDrainingProviders = 0,
@@ -117,6 +132,7 @@ export function gatewayInvariantReasons(initial, current, {
   enforceStableProviderCounts = true,
   enforceStableModelSet = true,
   allowedStableModelIDs = null,
+  allowServingDegraded = false,
 } = {}) {
   const before = initial?.pool ? initial : gatewaySnapshot(initial);
   const after = current?.pool ? current : gatewaySnapshot(current);
@@ -132,9 +148,10 @@ export function gatewayInvariantReasons(initial, current, {
   const activeModelDropped = Boolean(activeModelBefore && !afterModels.has(activeModelID));
   const activeProviderLossAllowed = Boolean(activeModelBefore);
   const activeModelLossAllowed = activeModelDropped && activeModelBefore.provider_count === 1;
-  if (!['up', ...(activeModelLossAllowed ? ['degraded'] : [])].includes(after.status)
+  const degradedOK = activeModelLossAllowed || allowServingDegraded;
+  if (!['up', ...(degradedOK ? ['degraded'] : [])].includes(after.status)
       || after.coordinator_status !== 'up') reasons.push('gateway_or_coordinator_not_up');
-  if (after.degraded !== (after.status === 'degraded') || (after.degraded && !activeModelLossAllowed)) {
+  if (after.degraded !== (after.status === 'degraded') || (after.degraded && !degradedOK)) {
     reasons.push('gateway_degraded');
   }
   if (!Number.isInteger(after.pool.total_providers) || !Number.isInteger(after.pool.ready)) {
@@ -222,6 +239,7 @@ export function poolzInvariantReasons(initial, current, {
   activeProviderID = '',
   heartbeatAdvanceProviderIDs = null,
   enforceStableProviderSet = true,
+  livenessContinuity = false,
 } = {}) {
   const before = Array.isArray(initial) ? initial : poolzSnapshot(initial);
   const after = Array.isArray(current) ? current : poolzSnapshot(current);
@@ -242,9 +260,14 @@ export function poolzInvariantReasons(initial, current, {
       if (enforceStableProviderSet) reasons.push(`${id}:provider_disappeared`);
       continue;
     }
+    if (livenessContinuity && isLivenessSleepOrGone(observed, { maxHeartbeatAgeMs })) {
+      continue;
+    }
+    const busyAllowed = livenessContinuity || id === activeProviderID;
     const stateAllowed = READY_STATES.has(observed.state)
-      || (id === activeProviderID && observed.state === 'busy');
-    const routingAllowed = observed.routing_eligible || (id === activeProviderID && observed.state === 'busy');
+      || (busyAllowed && observed.state === 'busy');
+    const routingAllowed = observed.routing_eligible
+      || (busyAllowed && observed.state === 'busy');
     if (!stateAllowed || !routingAllowed) {
       reasons.push(`${id}:state_${observed.state || 'missing'}_not_ready`);
     }
@@ -565,25 +588,38 @@ export function expectedFleetReasons(poolRows, expectedFleet, {
   maxHeartbeatAgeMs = 90_000,
   activeProviderID = '',
   allowUnexpectedProviders = false,
+  livenessContinuity = false,
 } = {}) {
   const reasons = [];
   const allowed = new Set(allowedExtraProviderIDs);
   const current = new Map(poolRows.map((row) => [row.provider_id, row]));
   const expected = new Map(expectedFleet.map((row) => [row.provider_id, row]));
+  let serving = 0;
   for (const [id, row] of expected) {
     const observed = current.get(id);
-    if (!observed) {
-      reasons.push(`${id}:expected_provider_missing`);
+    if (!observed || (livenessContinuity && isLivenessSleepOrGone(observed, { maxHeartbeatAgeMs }))) {
+      if (livenessContinuity) continue;
+      reasons.push(`${id}:${observed ? 'expected_provider_not_ready' : 'expected_provider_missing'}`);
       continue;
     }
     if (observed.model_id !== row.model_id) reasons.push(`${id}:model_${observed.model_id || 'missing'}_ne_${row.model_id}`);
-    const stateAllowed = observed.state === 'ready' || (id === activeProviderID && observed.state === 'busy');
-    const routingAllowed = observed.routing_eligible || (id === activeProviderID && observed.state === 'busy');
+    const busyAllowed = livenessContinuity || id === activeProviderID;
+    const stateAllowed = observed.state === 'ready' || (busyAllowed && observed.state === 'busy');
+    const routingAllowed = observed.routing_eligible || (busyAllowed && observed.state === 'busy');
     if (!stateAllowed || !routingAllowed) reasons.push(`${id}:expected_provider_not_ready`);
+    else serving += 1;
     if (!Number.isFinite(observed.heartbeat_age_ms)) reasons.push(`${id}:heartbeat_signal_missing`);
     else if (observed.heartbeat_age_ms > maxHeartbeatAgeMs) {
       reasons.push(`${id}:heartbeat_stale_${observed.heartbeat_age_ms}ms_gt_${maxHeartbeatAgeMs}ms`);
     }
+  }
+  if (livenessContinuity) {
+    for (const row of poolRows) {
+      if (isLivenessServingPoolRow(row, { maxHeartbeatAgeMs }) && !expected.has(row.provider_id) && allowUnexpectedProviders) {
+        serving += 1;
+      }
+    }
+    if (serving < 1) reasons.push('liveness_serving_providers_lt_1');
   }
   for (const id of current.keys()) {
     if (!allowUnexpectedProviders && !expected.has(id) && !allowed.has(id)) {
@@ -654,6 +690,7 @@ export function recoverySoakReasons({
       reasons.push(...poolzInvariantReasons(previous, sample, {
         maxHeartbeatAgeMs: options.maxHeartbeatAgeMs,
         enforceStableProviderSet: options.enforceStableProviderCounts !== false,
+        livenessContinuity: options.livenessContinuity === true,
       }).map((reason) => `sample_${index}:${reason}`));
     });
     if (poolzSamples.length) {
@@ -662,6 +699,7 @@ export function recoverySoakReasons({
         requireHeartbeatAdvance: true,
         heartbeatAdvanceProviderIDs: options.heartbeatAdvanceProviderIDs || null,
         enforceStableProviderSet: options.enforceStableProviderCounts !== false,
+        livenessContinuity: options.livenessContinuity === true,
       }).map((reason) => `final:${reason}`));
     }
   }
@@ -671,8 +709,10 @@ export function recoverySoakReasons({
       const byID = new Map(sampleSet.map((sample) => [sample.provider_id, sample]));
       for (const initial of providerInitial) {
         const current = byID.get(initial.provider_id);
-        if (!current) reasons.push(`sample_${index}:${initial.provider_id}:provider_signal_missing`);
-        else {
+        if (!current) {
+          if (options.livenessContinuity === true) continue;
+          reasons.push(`sample_${index}:${initial.provider_id}:provider_signal_missing`);
+        } else {
           const previousSet = index === 0 ? providerInitial : providerSamples[index - 1];
           const previous = previousSet.find((sample) => sample.provider_id === initial.provider_id) || initial;
           reasons.push(...providerSignalReasons(previous, current, {

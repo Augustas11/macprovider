@@ -450,7 +450,7 @@ test('liveness fails malformed live ready pool rows instead of dropping their te
   assert.ok(reasons.length > 0);
 });
 
-test('liveness protects the initial live provider and model set during a canary run', () => {
+test('liveness keeps serving through one lid-close or busy Mac and does not freeze the initial model set', () => {
   const now = Date.now();
   const stamp = (offset) => new Date(now + offset).toISOString();
   const staleExpectedFleet = [
@@ -486,10 +486,7 @@ test('liveness protects the initial live provider and model set during a canary 
   observed.operator_pool = observed.operator_pool.filter((row) => row.provider_id !== 'provider-a');
   observed.providers = observed.providers.filter((provider) => provider.provider_id !== 'provider-a');
 
-  const reasons = safetyObservationReasons(initial, observed, staleExpectedFleet);
-  assert.ok(reasons.includes('model-a:model_disappeared'));
-  assert.ok(reasons.includes('provider-a:expected_provider_missing'));
-  assert.ok(reasons.includes('provider-a:provider_signal_missing'));
+  assert.deepEqual(safetyObservationReasons(initial, observed, staleExpectedFleet), []);
 });
 
 test('liveness response attribution follows the live fleet instead of stale expected mappings', () => {
@@ -621,10 +618,10 @@ test('malformed and oversized sample configuration fails before probing', () => 
 });
 
 test('qualification refuses to start without technical isolation and safety observers', () => {
-  const env = {
-    ...process.env,
-    MACPROVIDER_BUYER_TOKEN: 'mp_test_token_not_secret',
-  };
+  const env = { ...process.env, MACPROVIDER_BUYER_TOKEN: 'mp_test_token_not_secret' };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('CANARY_')) delete env[key];
+  }
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL('./probe.mjs', import.meta.url)),
     '--mode', 'qualification',
@@ -717,7 +714,7 @@ test('active-request safety correlates exact busy pool row, dropped gateway mode
   observed.gateway.pool.ready = 1;
   observed.gateway.models = observed.gateway.models.filter((model) => model.id !== 'model-a');
 
-  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     activeModelID: 'model-a',
   }), []);
@@ -765,7 +762,7 @@ test('active-request safety accepts unchanged gateway counts while provider is b
   observed.providers[0].status = 'busy';
   observed.providers[0].requests_in_flight = 1;
 
-  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     activeModelID: 'model-a',
   }), []);
@@ -807,7 +804,7 @@ test('active-request safety accepts a non-first duplicate-model provider without
   observed.gateway.models[1].ready_provider_count = 1;
   observed.gateway.models[1].slots_free = 1;
 
-  assert.ok(safetyObservationReasons(initial, observed, expectedFleet).length > 0);
+  assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet), []);
   assert.deepEqual(safetyObservationReasons(initial, observed, expectedFleet, {
     activeModelID: 'model-b',
   }), []);
@@ -1335,14 +1332,14 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     { ...scopedAdvance, heartbeatAdvanceProviderIDs: new Set(['provider-a', 'provider-b', 'provider-c']) },
     now,
   ).some((reason) => reason.includes('provider-c')));
-  assert.ok(recoverySoakObservationReasons(
+  assert.deepEqual(recoverySoakObservationReasons(
     observation,
     [recoveryOne, recoveryTwo],
     expectedFleet,
     null,
     scopedAdvance,
     now,
-  ).length > 0);
+  ), []);
 
   const missingDuplicate = structuredClone(recoveryTwo);
   missingDuplicate.gateway.pool.total_providers = 2;
@@ -1363,14 +1360,14 @@ test('legacy rollback recovery tolerates only unexercised duplicate provider rea
     requireHeartbeatAdvance: true,
     heartbeatAdvanceProviderIDs: exercisedProviderIDs,
   }), []);
-  assert.ok(recoverySoakObservationReasons(
+  assert.deepEqual(recoverySoakObservationReasons(
     observation,
     [recoveryOne, missingDuplicate],
     expectedFleet,
     null,
     scopedAdvance,
     now,
-  ).length > 0);
+  ), []);
 
   const duplicatePoolIdentity = structuredClone(missingDuplicate);
   const duplicateProviderB = structuredClone(
@@ -1683,4 +1680,116 @@ test('a content-bearing stream without terminal DONE is a partial-stream failure
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('liveness treats serving busy and lid-close as continuity, not a fleet abort', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const gateway = gatewaySnapshot({
+    status: 'up', degraded: false, coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+    models: expectedFleet.map(({ model_id }) => ({
+      id: model_id, provider_count: 1, ready_provider_count: 1, slots_free: 1,
+      available: true, availability: 'available', degraded: false,
+    })),
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id, assigned_id: `session-${index}`, model_id, state: 'ready', routing_eligible: true,
+    connected_at: stamp(-60_000), last_heartbeat_at: stamp(-1_000), last_activity_at: stamp(-500),
+  })) }, now);
+  const providers = [
+    safetyProvider('provider-a', 'model-a', 'session-0'),
+    safetyProvider('provider-b', 'model-b', 'session-1'),
+  ];
+  const initial = { gateway, operator_pool: operatorPool, providers };
+
+  const serving = structuredClone(initial);
+  serving.operator_pool[0].state = 'busy';
+  serving.operator_pool[0].routing_eligible = false;
+  serving.providers[0].status = 'busy';
+  serving.providers[0].requests_in_flight = 1;
+  serving.gateway.status = 'degraded';
+  serving.gateway.degraded = true;
+  serving.gateway.pool.ready = 1;
+  serving.gateway.models = serving.gateway.models.filter((model) => model.id !== 'model-a');
+  assert.deepEqual(safetyObservationReasons(initial, serving, expectedFleet), []);
+
+  const lidClose = structuredClone(serving);
+  lidClose.operator_pool[1].state = 'unavailable';
+  lidClose.operator_pool[1].routing_eligible = false;
+  lidClose.gateway.pool.ready = 0;
+  lidClose.gateway.pool.unavailable = 1;
+  lidClose.gateway.models = [];
+  assert.deepEqual(safetyObservationReasons(initial, lidClose, expectedFleet), []);
+
+  const queued = structuredClone(serving);
+  queued.providers[0].requests_queued = 1;
+  assert.ok(safetyObservationReasons(initial, queued, expectedFleet).some((reason) => reason.includes('requests_queued')));
+
+  const allGone = structuredClone(initial);
+  allGone.operator_pool[0].state = 'unavailable';
+  allGone.operator_pool[0].routing_eligible = false;
+  allGone.operator_pool[1].state = 'unavailable';
+  allGone.operator_pool[1].routing_eligible = false;
+  allGone.gateway.pool.ready = 0;
+  allGone.gateway.pool.unavailable = 2;
+  allGone.gateway.models = [];
+  assert.ok(safetyObservationReasons(initial, allGone, expectedFleet).includes('liveness_serving_providers_lt_1'));
+});
+
+test('liveness soak stays healthy while the probed Mac is still serving', () => {
+  const now = Date.now();
+  const stamp = (offset) => new Date(now + offset).toISOString();
+  const expectedFleet = [
+    { provider_id: 'provider-a', model_id: 'model-a' },
+    { provider_id: 'provider-b', model_id: 'model-b' },
+  ];
+  const gateway = gatewaySnapshot({
+    status: 'up', degraded: false, coordinator: { status: 'up', checked_at: stamp(0) },
+    pool: { total_providers: 2, ready: 2, degraded: 0, draining: 0, unavailable: 0 },
+    models: expectedFleet.map(({ model_id }) => ({
+      id: model_id, provider_count: 1, ready_provider_count: 1, slots_free: 1,
+      available: true, availability: 'available', degraded: false,
+    })),
+  });
+  const operatorPool = poolzSnapshot({ pool: expectedFleet.map(({ provider_id, model_id }, index) => ({
+    provider_id, assigned_id: `session-${index}`, model_id, state: 'ready', routing_eligible: true,
+    connected_at: stamp(-60_000), last_heartbeat_at: stamp(-1_000), last_activity_at: stamp(-500),
+  })) }, now);
+  const providers = [
+    safetyProvider('provider-a', 'model-a', 'session-0'),
+    safetyProvider('provider-b', 'model-b', 'session-1'),
+  ];
+  const initial = { gateway, operator_pool: operatorPool, providers };
+  const sample = structuredClone(initial);
+  sample.operator_pool[0].state = 'busy';
+  sample.operator_pool[0].routing_eligible = false;
+  sample.operator_pool[0].last_heartbeat_at_ms = now;
+  sample.providers[0].status = 'busy';
+  sample.providers[0].requests_in_flight = 1;
+  sample.providers[0].observation_id = 'provider-a-sample';
+  sample.providers[0].observed_at_ms = now;
+  sample.providers[1].observation_id = 'provider-b-sample';
+  sample.providers[1].observed_at_ms = now;
+  sample.gateway.status = 'degraded';
+  sample.gateway.degraded = true;
+  sample.gateway.pool.ready = 1;
+  sample.gateway.models = sample.gateway.models.filter((model) => model.id !== 'model-a');
+  const later = structuredClone(sample);
+  later.operator_pool[0].last_heartbeat_at_ms = now + 8_000;
+  later.providers[0].observation_id = 'provider-a-soak';
+  later.providers[0].observed_at_ms = now + 8_000;
+  later.operator_pool[1].last_heartbeat_at_ms = now + 8_000;
+  later.providers[1].observation_id = 'provider-b-soak';
+  later.providers[1].observed_at_ms = now + 8_000;
+  assert.deepEqual(recoverySoakObservationReasons(initial, [sample, later], expectedFleet, null, {
+    minReadyProviders: 1,
+    maxHeartbeatAgeMs: 90_000,
+    maxMemoryGrowthMB: 512,
+    maxMemoryFraction: 0.9,
+  }), []);
 });

@@ -60,6 +60,8 @@ import {
   qualificationIsolationReasons,
   validateBaselineDocument,
   validateExpectedFleetDocument,
+  isLivenessSleepOrGone,
+  isLivenessServingPoolRow,
 } from './safety.mjs';
 
 // `crypto` is a global on Node 20+ / browsers, but NOT on Node 18 (where it's
@@ -1106,10 +1108,28 @@ function mergeFleetByProviderID(...fleets) {
   return [...byID.values()].sort((a, b) => a.provider_id.localeCompare(b.provider_id));
 }
 
+function liveServingFleet(observed, { maxHeartbeatAgeMs = CONFIG.maxHeartbeatAgeMs } = {}) {
+  const seen = new Set();
+  const rows = [];
+  for (const row of observed?.operator_pool || []) {
+    if (!isLivenessServingPoolRow(row, { maxHeartbeatAgeMs })) continue;
+    if (typeof row.provider_id !== 'string' || !row.provider_id) continue;
+    if (typeof row.model_id !== 'string' || !row.model_id) continue;
+    if (seen.has(row.provider_id)) continue;
+    seen.add(row.provider_id);
+    rows.push({ provider_id: row.provider_id, model_id: row.model_id });
+  }
+  return rows.sort((a, b) => a.provider_id.localeCompare(b.provider_id));
+}
+
+function liveReadyRoutableModels(observed) {
+  return liveFleetModels(liveReadyFleet(observed));
+}
+
 function minimumReadyProviders(staticFleet, fleetSize) {
   return staticFleet
     ? Math.max(CONFIG.minReadyProviders, fleetSize)
-    : Math.max(1, fleetSize);
+    : 1;
 }
 
 export function ensureLivenessBudgetCapacity(budget, modelCount) {
@@ -1495,8 +1515,12 @@ export function recoverySoakObservationReasons(
       ...soakOptions,
       enforceHealthyProviderAggregates: false,
       enforceStableProviderCounts: false,
-      enforceStableModelSet: true,
-      allowedStableModelIDs: new Set(safetyFleet.map((row) => row.model_id)),
+      enforceStableModelSet: false,
+      allowServingDegraded: true,
+      livenessContinuity: true,
+      maxRequestsInFlight: 1,
+      allowedRuntimeStates: ['ready', 'busy'],
+      minReadyProviders: 0,
     });
   }
   const reasons = recoverySoakReasons({
@@ -1648,14 +1672,16 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   const gatewayAllowanceModelID = activeAggregateLossAllowed
     ? activeModelID
     : (recoveredDirectSignals ? cachedGatewayModelID : '');
+  const livenessContinuity = !staticFleet;
   const reasons = gatewayInvariantReasons(initial.gateway, observed.gateway, {
-    minReadyProviders: minimumReadyProviders(staticFleet, safetyFleet.length),
+    minReadyProviders: staticFleet ? minimumReadyProviders(true, safetyFleet.length) : 0,
     maxDrainingProviders: qualification ? 1 : 0,
     activeModelID: qualification ? '' : gatewayAllowanceModelID,
     enforceHealthyProviderAggregates: staticFleet,
     enforceStableProviderCounts: staticFleet,
-    enforceStableModelSet: staticFleet || !qualification,
+    enforceStableModelSet: staticFleet,
     allowedStableModelIDs: staticFleet ? null : safetyModelIDs,
+    allowServingDegraded: livenessContinuity,
   });
   if (legacyRollbackAuthorizationUnknown) {
     reasons.push('legacy_rollback_authorization_provider_unknown');
@@ -1663,7 +1689,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
   if (!staticFleet) {
     reasons.push(...liveFleetGatewayModelReasons(
       observed.gateway,
-      liveFleetModels(telemetryFleet),
+      liveReadyRoutableModels(observed),
       { activeModelID: gatewayAllowanceModelID },
     ));
   }
@@ -1677,6 +1703,7 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
     maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
     activeProviderID: qualification ? '' : activeProviderID,
     allowUnexpectedProviders: !staticFleet,
+    livenessContinuity,
   }));
   if (staticFleet) {
     const initialExpected = expectedPoolRows(initial.operator_pool || [], safetyFleet);
@@ -1737,6 +1764,11 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
         const poolSlotSignal = poolIndex >= 0 ? observed.providers[poolIndex] : null;
         const directSignalPresent = poolIndex >= 0 && hasDirectProviderSignal(poolSlotSignal);
         const directSignalMissing = poolIndex >= 0 && !directSignalPresent;
+        if (livenessContinuity && isLivenessSleepOrGone(poolRow, {
+          maxHeartbeatAgeMs: CONFIG.maxHeartbeatAgeMs,
+        })) {
+          continue;
+        }
         if (allowLegacyBridgeProviderSignals && isLegacyBridgeProviderSignalSubstitute(poolRow, expected)) {
           continue;
         }
@@ -1759,11 +1791,13 @@ export function safetyObservationReasons(initial, observed, expectedFleet, {
       const before = initialByID.get(expected.provider_id) || current;
       const requireProviderHeartbeatAdvance = requireHeartbeatAdvance
         && (!heartbeatAdvanceProviderIDs || heartbeatAdvanceProviderIDs.has(expected.provider_id));
+      const servingThisProvider = livenessContinuity
+        || activeProviderID === current.provider_id;
       reasons.push(...providerSignalReasons(before, current, {
         maxMemoryGrowthMB: CONFIG.maxMemoryGrowthMB,
         maxMemoryFraction: CONFIG.maxMemoryFraction,
-        maxRequestsInFlight: activeProviderID === current.provider_id ? 1 : 0,
-        allowedRuntimeStates: activeProviderID === current.provider_id ? ['ready', 'busy'] : ['ready'],
+        maxRequestsInFlight: servingThisProvider ? 1 : 0,
+        allowedRuntimeStates: servingThisProvider ? ['ready', 'busy'] : ['ready'],
         requireObservationAdvance: requireProviderHeartbeatAdvance,
       }));
       if (current.model_id !== expected.model_id) {
