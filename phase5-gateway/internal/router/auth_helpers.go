@@ -89,13 +89,36 @@ func (s *Server) effectiveAccountDailyQuota(ctx context.Context) int64 {
 }
 
 type authResult struct {
-	Bearer      *storage.KeyValidation
-	Demo        bool
-	DemoPayload auth.DemoPayload
-	DemoToken   string
+	Bearer        *storage.KeyValidation
+	WalletSession *walletSessionAuth
+	Demo          bool
+	DemoPayload   auth.DemoPayload
+	DemoToken     string
 }
 
 func (s *Server) authenticateAny(w http.ResponseWriter, r *http.Request) (authResult, bool) {
+	credentialCount := 0
+	if strings.TrimSpace(r.Header.Get("X-Demo-Token")) != "" {
+		credentialCount++
+	}
+	rawAuthHeader := r.Header.Get("Authorization")
+	authHeader := strings.TrimSpace(rawAuthHeader)
+	authBearer := ""
+	if strings.HasPrefix(rawAuthHeader, "Bearer ") {
+		authBearer = strings.TrimSpace(strings.TrimPrefix(rawAuthHeader, "Bearer "))
+	}
+	if authHeader != "" && (authBearer != "" || !strings.HasPrefix(rawAuthHeader, "Bearer ")) {
+		credentialCount++
+	}
+	xAPIKey := strings.TrimSpace(r.Header.Get("X-Api-Key"))
+	anthropicAliasNormalized := anthropicMessagesAdapterFromContext(r.Context()) != nil && xAPIKey != "" && authHeader == "Bearer "+xAPIKey
+	if xAPIKey != "" && !anthropicAliasNormalized {
+		credentialCount++
+	}
+	if credentialCount > 1 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "ambiguous_credentials", "Multiple credential types are not allowed")
+		return authResult{}, false
+	}
 	if token := r.Header.Get("X-Demo-Token"); token != "" {
 		if s.demoPaused() {
 			writeError(w, http.StatusServiceUnavailable, "service_unavailable", "demo_paused", "Demo access is paused while capacity catches up. API keys continue to work.")
@@ -107,6 +130,13 @@ func (s *Server) authenticateAny(w http.ResponseWriter, r *http.Request) (authRe
 			return authResult{}, false
 		}
 		return authResult{Demo: true, DemoPayload: payload, DemoToken: token}, true
+	}
+	if bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); strings.HasPrefix(bearer, walletSessionBearerPrefix) {
+		session, ok := s.requireWalletSessionBearer(w, r)
+		if !ok {
+			return authResult{}, false
+		}
+		return authResult{WalletSession: session}, true
 	}
 	validation, ok := s.requireBearer(w, r)
 	if !ok {

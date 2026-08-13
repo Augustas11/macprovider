@@ -24,5 +24,18 @@ var (
 	// (account_id, request_id) the usage_events PK, which allows
 	// legitimate cross-account collisions; explorer callers must
 	// disambiguate.
-	ErrExplorerAmbiguousRequestID = errors.New("explorer session request_id matches multiple accounts; supply account_id")
+	ErrExplorerAmbiguousRequestID   = errors.New("explorer session request_id matches multiple accounts; supply account_id")
+	ErrWalletChallengeConsumed      = errors.New("wallet session challenge consumed")
+	ErrWalletChallengeExpired       = errors.New("wallet session challenge expired")
+	ErrWalletChallengeMismatch      = errors.New("wallet session challenge proof mismatch")
+	ErrWalletIdentityConflict       = errors.New("wallet identity is bound to another account")
+	ErrWalletSessionCapExceeded     = errors.New("wallet session cap exceeded")
+	ErrWalletSessionActiveCap       = errors.New("wallet session active cap exceeded")
+	ErrWalletSessionInactive        = errors.New("wallet session inactive")
+	ErrWalletSessionModelDenied     = errors.New("wallet session model not allowed")
+	ErrWalletSessionPerRequestCap   = errors.New("wallet session per-request cap exceeded")
+	ErrWalletSessionReplayDuplicate = errors.New("wallet session replay duplicate")
+	ErrWalletSessionReplayMismatch  = errors.New("wallet session replay material mismatch")
+	ErrWalletSessionReplayCapacity  = errors.New("wallet session replay capacity exhausted")
+	ErrWalletSessionDispatchFence   = errors.New("wallet session dispatch fence rejected")
 )

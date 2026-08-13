@@ -67,6 +67,123 @@ CREATE INDEX IF NOT EXISTS idx_quota_expires_at ON quota_reservations(expires_at
 CREATE INDEX IF NOT EXISTS idx_quota_request ON quota_reservations(request_id);
 `
 
+const walletSessionDDL = `
+CREATE TABLE IF NOT EXISTS wallet_session_challenges (
+	nonce_hash BLOB PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES accounts(account_id),
+	wallet_namespace TEXT NOT NULL,
+	wallet_fingerprint TEXT NOT NULL,
+	purpose TEXT NOT NULL,
+	audience TEXT NOT NULL,
+	requested_expires_at TEXT NOT NULL,
+	per_request_token_cap INTEGER NOT NULL CHECK (per_request_token_cap > 0),
+	total_token_cap INTEGER NOT NULL CHECK (total_token_cap > 0),
+	model_allowlist_json TEXT NOT NULL,
+	session_public_key BLOB NOT NULL,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	consumed_at TEXT NOT NULL DEFAULT '',
+	consumed_session_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_challenges_account ON wallet_session_challenges(account_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_wallet_challenges_wallet ON wallet_session_challenges(wallet_namespace, wallet_fingerprint, expires_at);
+
+CREATE TABLE IF NOT EXISTS wallet_identities (
+	wallet_namespace TEXT NOT NULL,
+	wallet_fingerprint TEXT NOT NULL,
+	account_id TEXT NOT NULL REFERENCES accounts(account_id),
+	status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+	verification_public_key BLOB NOT NULL,
+	created_at TEXT NOT NULL,
+	revoked_at TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (wallet_namespace, wallet_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_identities_account ON wallet_identities(account_id, status);
+
+CREATE TABLE IF NOT EXISTS wallet_sessions (
+	session_id TEXT PRIMARY KEY,
+	account_id TEXT NOT NULL REFERENCES accounts(account_id),
+	wallet_namespace TEXT NOT NULL,
+	wallet_fingerprint TEXT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('active', 'revoked', 'expired', 'exhausted')),
+	expires_at TEXT NOT NULL,
+	total_token_cap INTEGER NOT NULL CHECK (total_token_cap > 0),
+	per_request_token_cap INTEGER NOT NULL CHECK (per_request_token_cap > 0),
+	model_allowlist_json TEXT NOT NULL,
+	bearer_hash BLOB NOT NULL UNIQUE,
+	bearer_key_id TEXT NOT NULL,
+	verification_public_key BLOB NOT NULL,
+	session_public_key BLOB NOT NULL,
+	created_at TEXT NOT NULL,
+	revoked_at TEXT NOT NULL DEFAULT '',
+	revoked_by TEXT NOT NULL DEFAULT '',
+	revoked_reason TEXT NOT NULL DEFAULT '',
+	FOREIGN KEY (wallet_namespace, wallet_fingerprint) REFERENCES wallet_identities(wallet_namespace, wallet_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_sessions_account_status ON wallet_sessions(account_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_wallet_sessions_wallet_status ON wallet_sessions(wallet_namespace, wallet_fingerprint, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_wallet_sessions_bearer_hash ON wallet_sessions(bearer_hash);
+
+CREATE TABLE IF NOT EXISTS wallet_session_replays (
+	session_id TEXT NOT NULL REFERENCES wallet_sessions(session_id),
+	request_id TEXT NOT NULL,
+	method TEXT NOT NULL,
+	canonical_route TEXT NOT NULL,
+	semantic_headers_hash BLOB NOT NULL,
+	raw_body_hash BLOB NOT NULL,
+	body_bytes INTEGER NOT NULL DEFAULT 0 CHECK (body_bytes >= 0),
+	metadata_client_ip TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL CHECK (state IN ('claimed', 'dispatch_armed', 'dispatched', 'metadata_only', 'finalized', 'refunded', 'held', 'quarantined', 'stale_held')),
+	account_reservation_id TEXT NOT NULL DEFAULT '',
+	session_reservation_id TEXT NOT NULL DEFAULT '',
+	dispatch_armed_at TEXT NOT NULL DEFAULT '',
+	dispatched_at TEXT NOT NULL DEFAULT '',
+	recovery_policy TEXT NOT NULL DEFAULT '',
+	intended_effect TEXT NOT NULL DEFAULT '',
+	reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK (reserved_tokens >= 0),
+	terminal_state TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (session_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_replays_session_created ON wallet_session_replays(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_wallet_replays_state ON wallet_session_replays(state, updated_at);
+
+CREATE TABLE IF NOT EXISTS wallet_session_reservations (
+	session_id TEXT NOT NULL REFERENCES wallet_sessions(session_id),
+	request_id TEXT NOT NULL,
+	account_id TEXT NOT NULL REFERENCES accounts(account_id),
+	reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+	settled_tokens INTEGER NOT NULL DEFAULT 0 CHECK (settled_tokens >= 0),
+	status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'refunded', 'held', 'quarantined', 'stale_held')),
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	settled_at TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (session_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_reservations_session_status ON wallet_session_reservations(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_wallet_reservations_account_request ON wallet_session_reservations(account_id, request_id);
+
+CREATE TABLE IF NOT EXISTS wallet_session_request_map (
+	account_id TEXT NOT NULL,
+	request_id TEXT NOT NULL,
+	session_id TEXT NOT NULL REFERENCES wallet_sessions(session_id),
+	session_reservation_id TEXT NOT NULL,
+	canonical_route TEXT NOT NULL,
+	model_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (account_id, request_id),
+	FOREIGN KEY (account_id, request_id) REFERENCES quota_reservations(account_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_request_map_session ON wallet_session_request_map(session_id, request_id);
+`
+
 // demoUsageEventsAuxiliaryDDL covers the secondary index + append-only
 // triggers for demo_usage_events. Mirrors usageEventsAuxiliaryDDL.
 const demoUsageEventsAuxiliaryDDL = `

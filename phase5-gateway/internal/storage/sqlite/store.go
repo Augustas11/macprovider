@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,13 +21,14 @@ type Store struct {
 }
 
 var (
-	_ storage.AuthStore     = (*Store)(nil)
-	_ storage.AccountStore  = (*Store)(nil)
-	_ storage.KeyStore      = (*Store)(nil)
-	_ storage.UsageStore    = (*Store)(nil)
-	_ storage.FeedbackStore = (*Store)(nil)
-	_ storage.AuditStore    = (*Store)(nil)
-	_ storage.CapacityStore = (*Store)(nil)
+	_ storage.AuthStore          = (*Store)(nil)
+	_ storage.AccountStore       = (*Store)(nil)
+	_ storage.KeyStore           = (*Store)(nil)
+	_ storage.UsageStore         = (*Store)(nil)
+	_ storage.WalletSessionStore = (*Store)(nil)
+	_ storage.FeedbackStore      = (*Store)(nil)
+	_ storage.AuditStore         = (*Store)(nil)
+	_ storage.CapacityStore      = (*Store)(nil)
 )
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -104,6 +106,7 @@ func (s *Store) Ping(ctx context.Context) error {
 //	v8 — public issuance reservation events for atomic per-IP signup/demo/
 //	     feedback ceilings.
 //	v9 — oauth return_to + oauth_handoffs support.
+//	v10 — SPEC-040 wallet-native buyer session tables.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -114,7 +117,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 9
+const maxKnownSchemaVersion = 10
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -144,6 +147,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, walletSessionDDL); err != nil {
+		return err
+	}
+	if err := s.ensureWalletSessionRequestMapModelIDColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureWalletSessionReplayDispatchColumns(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureOAuthStateExpiresAtColumn(ctx); err != nil {
@@ -209,6 +221,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(9, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(10, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -661,6 +676,80 @@ func (s *Store) ensureQuotaSettlementHoldColumn(ctx context.Context) error {
 		return fmt.Errorf("stamp schema_migrations v6 with settlement_hold column: %w", err)
 	}
 	return tx.Commit()
+}
+
+func (s *Store) ensureWalletSessionRequestMapModelIDColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(wallet_session_request_map)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasModelID := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "model_id" {
+			hasModelID = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasModelID {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE wallet_session_request_map ADD COLUMN model_id TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add wallet_session_request_map.model_id: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureWalletSessionReplayDispatchColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(wallet_session_replays)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name string
+		ddl  string
+	}{
+		{"dispatch_armed_at", `ALTER TABLE wallet_session_replays ADD COLUMN dispatch_armed_at TEXT NOT NULL DEFAULT ''`},
+		{"dispatched_at", `ALTER TABLE wallet_session_replays ADD COLUMN dispatched_at TEXT NOT NULL DEFAULT ''`},
+		{"recovery_policy", `ALTER TABLE wallet_session_replays ADD COLUMN recovery_policy TEXT NOT NULL DEFAULT ''`},
+		{"intended_effect", `ALTER TABLE wallet_session_replays ADD COLUMN intended_effect TEXT NOT NULL DEFAULT ''`},
+		{"reserved_tokens", `ALTER TABLE wallet_session_replays ADD COLUMN reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK (reserved_tokens >= 0)`},
+	} {
+		if _, ok := existing[column.name]; ok {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, column.ddl); err != nil {
+			return fmt.Errorf("add wallet_session_replays.%s: %w", column.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureQuotaReservationStaleHeldStatus(ctx context.Context) error {
@@ -1501,10 +1590,13 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 		limit = 500
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT account_id, request_id, window_date, reserved_tokens, expires_at, created_at
-		FROM quota_reservations
-		WHERE status = 'active' AND settlement_hold = 1
-		ORDER BY expires_at ASC, created_at ASC
+		SELECT qr.account_id, qr.request_id, COALESCE(wrm.session_id, ''), qr.window_date,
+			qr.reserved_tokens, qr.expires_at, qr.created_at
+		FROM quota_reservations qr
+		LEFT JOIN wallet_session_request_map wrm
+			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
+		WHERE qr.status = 'active' AND qr.settlement_hold = 1
+		ORDER BY qr.expires_at ASC, qr.created_at ASC
 		LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -1514,7 +1606,10 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	for rows.Next() {
 		var reservation storage.ActiveReservation
 		var expiresAt, createdAt string
-		if err := rows.Scan(&reservation.AccountID, &reservation.RequestID, &reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt); err != nil {
+		if err := rows.Scan(
+			&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
+			&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
+		); err != nil {
 			return nil, err
 		}
 		reservation.ExpiresAt = decodeTime(expiresAt)
@@ -1580,6 +1675,774 @@ func (s *Store) ReleaseConcurrency(ctx context.Context, accountID, requestID str
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
 		encodeTime(releasedAt), accountID, requestID)
 	return err
+}
+
+func (s *Store) StoreWalletSessionChallenge(ctx context.Context, challenge storage.WalletSessionChallenge) error {
+	if challenge.CreatedAt.IsZero() {
+		challenge.CreatedAt = time.Now().UTC()
+	}
+	if challenge.Purpose == "" {
+		challenge.Purpose = "wallet-session-registration-v1"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO wallet_session_challenges(
+			nonce_hash, account_id, wallet_namespace, wallet_fingerprint, purpose, audience,
+			requested_expires_at, per_request_token_cap, total_token_cap, model_allowlist_json,
+			session_public_key, created_at, expires_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		challenge.NonceHash, challenge.AccountID, challenge.WalletNamespace, challenge.WalletFingerprint,
+		challenge.Purpose, challenge.Audience, encodeTime(challenge.RequestedExpiresAt),
+		challenge.PerRequestTokenCap, challenge.TotalTokenCap, challenge.ModelAllowlistJSON,
+		challenge.SessionPublicKey, encodeTime(challenge.CreatedAt), encodeTime(challenge.ExpiresAt))
+	return err
+}
+
+func (s *Store) RegisterWalletSession(ctx context.Context, req storage.WalletSessionRegistrationRequest) (storage.WalletSession, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return storage.WalletSession{}, err
+	}
+	defer tx.Rollback()
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now().UTC()
+	}
+	now := req.CreatedAt.UTC()
+	var accountStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM accounts WHERE account_id = ?`, req.AccountID).Scan(&accountStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.WalletSession{}, storage.ErrNotFound
+		}
+		return storage.WalletSession{}, err
+	}
+	if accountStatus != "active" {
+		return storage.WalletSession{}, storage.ErrWalletSessionInactive
+	}
+	challenge, err := walletChallengeByNonceTx(ctx, tx, req.ChallengeNonceHash)
+	if err != nil {
+		return storage.WalletSession{}, err
+	}
+	if challenge.AccountID != req.AccountID || challenge.WalletNamespace != req.WalletNamespace || challenge.WalletFingerprint != req.WalletFingerprint {
+		return storage.WalletSession{}, storage.ErrNotFound
+	}
+	if challenge.Audience != req.Audience ||
+		!challenge.RequestedExpiresAt.Equal(req.RequestedExpiresAt) ||
+		challenge.PerRequestTokenCap != req.PerRequestTokenCap ||
+		challenge.TotalTokenCap != req.TotalTokenCap ||
+		challenge.ModelAllowlistJSON != req.ModelAllowlistJSON ||
+		!bytesEqual(challenge.SessionPublicKey, req.SessionPublicKey) {
+		return storage.WalletSession{}, storage.ErrWalletChallengeMismatch
+	}
+	if !challenge.ConsumedAt.IsZero() {
+		return storage.WalletSession{}, storage.ErrWalletChallengeConsumed
+	}
+	if !now.Before(challenge.ExpiresAt) {
+		return storage.WalletSession{}, storage.ErrWalletChallengeExpired
+	}
+	if !now.Before(challenge.RequestedExpiresAt) {
+		return storage.WalletSession{}, storage.ErrWalletChallengeExpired
+	}
+	var identityAccountID, identityStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT account_id, status FROM wallet_identities
+		WHERE wallet_namespace = ? AND wallet_fingerprint = ?`,
+		req.WalletNamespace, req.WalletFingerprint).Scan(&identityAccountID, &identityStatus)
+	if err == nil {
+		if identityAccountID != req.AccountID {
+			return storage.WalletSession{}, storage.ErrWalletIdentityConflict
+		}
+		if identityStatus != "active" {
+			return storage.WalletSession{}, storage.ErrWalletSessionInactive
+		}
+	} else if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO wallet_identities(wallet_namespace, wallet_fingerprint, account_id, status, verification_public_key, created_at)
+			VALUES(?, ?, ?, 'active', ?, ?)`,
+			req.WalletNamespace, req.WalletFingerprint, req.AccountID, req.VerificationPublicKey, encodeTime(now)); err != nil {
+			return storage.WalletSession{}, err
+		}
+	} else {
+		return storage.WalletSession{}, err
+	}
+	if req.MaxActivePerAccount > 0 {
+		count, err := activeWalletSessionCountTx(ctx, tx, `account_id = ?`, now, req.AccountID)
+		if err != nil {
+			return storage.WalletSession{}, err
+		}
+		if count >= req.MaxActivePerAccount {
+			return storage.WalletSession{}, storage.ErrWalletSessionActiveCap
+		}
+	}
+	if req.MaxActivePerWallet > 0 {
+		count, err := activeWalletSessionCountTx(ctx, tx, `wallet_namespace = ? AND wallet_fingerprint = ?`, now, req.WalletNamespace, req.WalletFingerprint)
+		if err != nil {
+			return storage.WalletSession{}, err
+		}
+		if count >= req.MaxActivePerWallet {
+			return storage.WalletSession{}, storage.ErrWalletSessionActiveCap
+		}
+	}
+	session := storage.WalletSession{
+		SessionID: req.SessionID, AccountID: req.AccountID, WalletNamespace: req.WalletNamespace,
+		WalletFingerprint: req.WalletFingerprint, Status: "active", ExpiresAt: challenge.RequestedExpiresAt,
+		TotalTokenCap: challenge.TotalTokenCap, PerRequestTokenCap: challenge.PerRequestTokenCap,
+		ModelAllowlistJSON: challenge.ModelAllowlistJSON, BearerHash: req.BearerHash, BearerKeyID: req.BearerKeyID,
+		VerificationPublicKey: req.VerificationPublicKey, SessionPublicKey: challenge.SessionPublicKey, CreatedAt: now,
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO wallet_sessions(
+			session_id, account_id, wallet_namespace, wallet_fingerprint, status, expires_at,
+			total_token_cap, per_request_token_cap, model_allowlist_json, bearer_hash, bearer_key_id,
+			verification_public_key, session_public_key, created_at)
+		VALUES(?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.SessionID, session.AccountID, session.WalletNamespace, session.WalletFingerprint,
+		encodeTime(session.ExpiresAt), session.TotalTokenCap, session.PerRequestTokenCap, session.ModelAllowlistJSON,
+		session.BearerHash, session.BearerKeyID, session.VerificationPublicKey, session.SessionPublicKey, encodeTime(now)); err != nil {
+		return storage.WalletSession{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_challenges
+		SET consumed_at = ?, consumed_session_id = ?
+		WHERE nonce_hash = ? AND consumed_at = ''`,
+		encodeTime(now), session.SessionID, req.ChallengeNonceHash); err != nil {
+		return storage.WalletSession{}, err
+	}
+	return session, tx.Commit()
+}
+
+func (s *Store) LookupWalletSessionByBearerHash(ctx context.Context, bearerHash []byte) (storage.WalletSession, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT session_id, account_id, wallet_namespace, wallet_fingerprint, status, expires_at,
+			total_token_cap, per_request_token_cap, model_allowlist_json, bearer_hash, bearer_key_id,
+			verification_public_key, session_public_key, created_at, revoked_at, revoked_by, revoked_reason
+		FROM wallet_sessions
+		WHERE bearer_hash = ?`, bearerHash)
+	return scanWalletSession(row)
+}
+
+func (s *Store) ListWalletSessions(ctx context.Context, accountID string) ([]storage.WalletSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT session_id, account_id, wallet_namespace, wallet_fingerprint, status, expires_at,
+			total_token_cap, per_request_token_cap, model_allowlist_json, bearer_hash, bearer_key_id,
+			verification_public_key, session_public_key, created_at, revoked_at, revoked_by, revoked_reason
+		FROM wallet_sessions
+		WHERE account_id = ?
+		ORDER BY created_at DESC, session_id DESC`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []storage.WalletSession
+	for rows.Next() {
+		session, err := scanWalletSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *Store) GetWalletSession(ctx context.Context, accountID, sessionID string) (storage.WalletSession, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT session_id, account_id, wallet_namespace, wallet_fingerprint, status, expires_at,
+			total_token_cap, per_request_token_cap, model_allowlist_json, bearer_hash, bearer_key_id,
+			verification_public_key, session_public_key, created_at, revoked_at, revoked_by, revoked_reason
+		FROM wallet_sessions
+		WHERE account_id = ? AND session_id = ?`, accountID, sessionID)
+	return scanWalletSession(row)
+}
+
+func (s *Store) WalletSessionUsage(ctx context.Context, accountID, sessionID string) (storage.WalletSessionUsage, error) {
+	session, err := s.GetWalletSession(ctx, accountID, sessionID)
+	if err != nil {
+		return storage.WalletSessionUsage{}, err
+	}
+	var settled, reserved, held int64
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN status = 'settled' THEN settled_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'active' THEN reserved_tokens ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status IN ('held', 'quarantined', 'stale_held') THEN reserved_tokens ELSE 0 END), 0),
+			COUNT(*)
+		FROM wallet_session_reservations
+		WHERE account_id = ? AND session_id = ?`,
+		accountID, sessionID).Scan(&settled, &reserved, &held, &count); err != nil {
+		return storage.WalletSessionUsage{}, err
+	}
+	usedExposure := settled + reserved + held
+	return storage.WalletSessionUsage{
+		SessionID: sessionID, AccountID: accountID, TotalCap: session.TotalTokenCap,
+		PerRequestCap: session.PerRequestTokenCap, SettledTokens: settled, ReservedTokens: reserved,
+		HeldTokens: held, RemainingTokens: max64(0, session.TotalTokenCap-usedExposure), RequestCount: count,
+	}, nil
+}
+
+func (s *Store) ListWalletSessionUsageDetails(ctx context.Context, accountID, sessionID string, limit int, cursor string, since, until time.Time) ([]storage.WalletSessionUsageDetail, string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if since.IsZero() {
+		since = time.Unix(0, 0).UTC()
+	}
+	if until.IsZero() {
+		until = time.Now().UTC()
+	}
+	cursorCreatedAt, cursorRequestID, err := decodeWalletUsageCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	whereCursor := ""
+	args := []any{accountID, sessionID, encodeTime(since.UTC()), encodeTime(until.UTC())}
+	if cursorCreatedAt != "" {
+		whereCursor = ` AND (sr.created_at < ? OR (sr.created_at = ? AND sr.request_id < ?))`
+		args = append(args, cursorCreatedAt, cursorCreatedAt, cursorRequestID)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			sr.request_id,
+			COALESCE(wrm.model_id, ''),
+			sr.reserved_tokens,
+			sr.settled_tokens,
+			sr.status,
+			sr.created_at,
+			sr.settled_at,
+			CASE WHEN ue.request_id IS NULL THEN 0 ELSE 1 END,
+			COALESCE(ue.prompt_tokens, 0),
+			COALESCE(ue.completion_tokens, 0),
+			COALESCE(ue.total_tokens, 0),
+			COALESCE(ue.token_source, ''),
+			COALESCE(ue.outcome, ''),
+			COALESCE(ue.created_at, '')
+		FROM wallet_session_reservations sr
+		LEFT JOIN wallet_session_request_map wrm
+			ON wrm.account_id = sr.account_id AND wrm.request_id = sr.request_id AND wrm.session_id = sr.session_id
+		LEFT JOIN usage_events ue
+			ON ue.account_id = sr.account_id AND ue.request_id = sr.request_id
+		WHERE sr.account_id = ? AND sr.session_id = ?
+			AND sr.created_at >= ? AND sr.created_at <= ?`+whereCursor+`
+		ORDER BY sr.created_at DESC, sr.request_id DESC
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	details := make([]storage.WalletSessionUsageDetail, 0, limit)
+	var nextCursor string
+	for rows.Next() {
+		var detail storage.WalletSessionUsageDetail
+		var reservationCreatedAt, reservationSettledAt, usageCreatedAt string
+		var hasUsage int
+		if err := rows.Scan(
+			&detail.RequestID, &detail.ModelID, &detail.ReservedTokens, &detail.SettledTokens,
+			&detail.TerminalStatus, &reservationCreatedAt, &reservationSettledAt, &hasUsage,
+			&detail.PromptTokens, &detail.CompletionTokens, &detail.TotalTokens,
+			&detail.TokenSource, &detail.Outcome, &usageCreatedAt,
+		); err != nil {
+			return nil, "", err
+		}
+		if len(details) == limit {
+			nextCursor = encodeWalletUsageCursor(details[len(details)-1].ReservationCreatedAt, details[len(details)-1].RequestID)
+			break
+		}
+		detail.ReservationCreatedAt = decodeTime(reservationCreatedAt)
+		detail.ReservationSettledAt = decodeTime(reservationSettledAt)
+		detail.UsageEventCreatedAt = decodeTime(usageCreatedAt)
+		detail.QuotaReservationID = "qres_" + detail.RequestID
+		detail.SessionReservationID = "wsres_" + detail.RequestID
+		if hasUsage == 1 {
+			detail.UsageEventID = "uev_" + detail.RequestID
+		}
+		detail.ReconciliationStatus = walletUsageReconciliationStatus(detail.TerminalStatus, hasUsage == 1)
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return details, nextCursor, nil
+}
+
+func (s *Store) RevokeWalletSession(ctx context.Context, accountID, sessionID, actor, reason string, revokedAt time.Time) error {
+	if revokedAt.IsZero() {
+		revokedAt = time.Now().UTC()
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		UPDATE wallet_sessions
+		SET status = 'revoked', revoked_at = ?, revoked_by = ?, revoked_reason = ?
+		WHERE account_id = ? AND session_id = ? AND status = 'active'`,
+		encodeTime(revokedAt.UTC()), actor, reason, accountID, sessionID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrNotFound
+	}
+	if err := refundClaimedWalletAdmissionsTx(ctx, tx, accountID, sessionID, revokedAt.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AdmitWalletSessionInference(ctx context.Context, req storage.WalletSessionAdmissionRequest) (storage.WalletSessionAdmissionDecision, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	defer tx.Rollback()
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now().UTC()
+	}
+	now := req.CreatedAt.UTC()
+	if req.ExpiresAt.IsZero() {
+		req.ExpiresAt = now.Add(24 * time.Hour)
+	}
+	if req.Replay.SessionID == "" {
+		req.Replay.SessionID = req.SessionID
+	}
+	if req.Replay.RequestID == "" {
+		req.Replay.RequestID = req.RequestID
+	}
+	if req.Replay.Method == "" {
+		req.Replay.Method = req.Method
+	}
+	if req.Replay.CanonicalRoute == "" {
+		req.Replay.CanonicalRoute = req.CanonicalRoute
+	}
+	if _, err := reapExpiredReservationsTx(ctx, tx, now); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	session, accountStatus, err := activeWalletSessionTx(ctx, tx, req.AccountID, req.SessionID, now)
+	if err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	if accountStatus != "active" {
+		return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionInactive
+	}
+	if req.ModelID != "" && !walletSessionAllowsModel(session.ModelAllowlistJSON, req.ModelID) {
+		return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionModelDenied
+	}
+	if req.RequestedTokens > session.PerRequestTokenCap {
+		return storage.WalletSessionAdmissionDecision{}, storage.ErrWalletSessionPerRequestCap
+	}
+	if err := insertWalletReplayTx(ctx, tx, req.Replay, "claimed", now); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	sessionUsed, sessionReserved, err := walletSessionExposureTx(ctx, tx, req.SessionID)
+	if err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	remainingSession := session.TotalTokenCap - sessionUsed - sessionReserved
+	decision := storage.WalletSessionAdmissionDecision{
+		Admitted: false, AccountID: req.AccountID, SessionID: req.SessionID, RequestID: req.RequestID,
+		SessionUsed: sessionUsed, SessionReserved: sessionReserved, SessionRemaining: max64(0, remainingSession),
+	}
+	if req.RequestedTokens > remainingSession {
+		return decision, storage.ErrWalletSessionCapExceeded
+	}
+	used, reserved, err := dailyUsageTx(ctx, tx, req.AccountID, req.WindowDate)
+	if err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	accountRemaining := req.DailyQuota - used - reserved
+	decision.AccountQuota = storage.QuotaDecision{
+		Admitted: false, LimitTokens: req.DailyQuota, UsedTokens: used, ReservedTokens: reserved,
+		RemainingTokens: max64(0, accountRemaining), ResetUnix: resetUnix(req.WindowDate),
+	}
+	if req.RequestedTokens > accountRemaining {
+		return decision, storage.ErrQuotaExceeded
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at)
+		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
+		req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt.UTC()), encodeTime(now)); err != nil {
+		if isUniqueConstraintError(err) {
+			return storage.WalletSessionAdmissionDecision{}, storage.ErrReservationExists
+		}
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO wallet_session_reservations(session_id, request_id, account_id, reserved_tokens, status, expires_at, created_at)
+		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
+		req.SessionID, req.RequestID, req.AccountID, req.RequestedTokens, encodeTime(req.ExpiresAt.UTC()), encodeTime(now)); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO wallet_session_request_map(account_id, request_id, session_id, session_reservation_id, canonical_route, model_id, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		req.AccountID, req.RequestID, req.SessionID, req.RequestID, req.CanonicalRoute, req.ModelID, encodeTime(now)); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET account_reservation_id = ?, session_reservation_id = ?, updated_at = ?
+		WHERE session_id = ? AND request_id = ?`,
+		req.RequestID, req.RequestID, encodeTime(now), req.SessionID, req.RequestID); err != nil {
+		return storage.WalletSessionAdmissionDecision{}, err
+	}
+	decision.Admitted = true
+	decision.AccountQuota.Admitted = true
+	decision.AccountQuota.ReservedTokens += req.RequestedTokens
+	decision.AccountQuota.RemainingTokens = max64(0, accountRemaining-req.RequestedTokens)
+	decision.SessionReserved += req.RequestedTokens
+	decision.SessionRemaining = max64(0, remainingSession-req.RequestedTokens)
+	return decision, tx.Commit()
+}
+
+func (s *Store) AdmitWalletSessionMetadata(ctx context.Context, req storage.WalletSessionMetadataAdmissionRequest) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now().UTC()
+	}
+	now := req.CreatedAt.UTC()
+	if req.Replay.SessionID == "" {
+		req.Replay.SessionID = req.SessionID
+	}
+	if req.Replay.RequestID == "" {
+		return storage.ErrWalletSessionReplayMismatch
+	}
+	if _, _, err := activeWalletSessionTx(ctx, tx, req.AccountID, req.SessionID, now); err != nil {
+		return err
+	}
+	if existing, matched, err := walletReplayMaterialMatchTx(ctx, tx, req.Replay); err != nil {
+		return err
+	} else if existing {
+		if matched {
+			return storage.ErrWalletSessionReplayDuplicate
+		}
+		return storage.ErrWalletSessionReplayMismatch
+	}
+	if req.MaxReplayRows > 0 || req.MaxReplayBytes > 0 {
+		rows, bytes, err := walletReplayCapacityTx(ctx, tx, req.SessionID)
+		if err != nil {
+			return err
+		}
+		if (req.MaxReplayRows > 0 && rows >= req.MaxReplayRows) || (req.MaxReplayBytes > 0 && bytes+req.Replay.BodyBytes > req.MaxReplayBytes) {
+			return storage.ErrWalletSessionReplayCapacity
+		}
+	}
+	if req.RateLimit > 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM wallet_session_replays
+			WHERE session_id = ? AND metadata_client_ip = ? AND created_at >= ?`,
+			req.SessionID, req.Replay.MetadataClientIP, encodeTime(req.WindowStart.UTC())).Scan(&count); err != nil {
+			return err
+		}
+		if count >= req.RateLimit {
+			return storage.ErrRateLimit
+		}
+	}
+	if err := insertWalletReplayTx(ctx, tx, req.Replay, "metadata_only", now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ArmWalletSessionDispatch(ctx context.Context, arm storage.WalletSessionDispatchArm) error {
+	if arm.ArmedAt.IsZero() {
+		arm.ArmedAt = time.Now().UTC()
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, _, err := activeWalletSessionTx(ctx, tx, arm.AccountID, arm.SessionID, arm.ArmedAt.UTC()); err != nil {
+		return err
+	}
+	var replayState, replayRoute, reservationStatus, quotaStatus string
+	var reservedTokens int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT r.state, r.canonical_route, sr.status, qr.status, sr.reserved_tokens
+		FROM wallet_session_replays r
+		JOIN wallet_session_reservations sr ON sr.session_id = r.session_id AND sr.request_id = r.request_id
+		JOIN quota_reservations qr ON qr.account_id = sr.account_id AND qr.request_id = sr.request_id
+		WHERE r.session_id = ? AND r.request_id = ? AND sr.account_id = ?`,
+		arm.SessionID, arm.RequestID, arm.AccountID).Scan(&replayState, &replayRoute, &reservationStatus, &quotaStatus, &reservedTokens); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrWalletSessionDispatchFence
+		}
+		return err
+	}
+	if replayState != "claimed" || reservationStatus != "active" || quotaStatus != "active" ||
+		(arm.CanonicalRoute != "" && replayRoute != arm.CanonicalRoute) {
+		return storage.ErrWalletSessionDispatchFence
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = 'dispatch_armed',
+			dispatch_armed_at = ?,
+			recovery_policy = 'hold_until_settlement_finality',
+			intended_effect = 'wallet_session_inference',
+			reserved_tokens = ?,
+			updated_at = ?
+		WHERE session_id = ? AND request_id = ? AND state = 'claimed'`,
+		encodeTime(arm.ArmedAt.UTC()), reservedTokens, encodeTime(arm.ArmedAt.UTC()), arm.SessionID, arm.RequestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrWalletSessionDispatchFence
+	}
+	return tx.Commit()
+}
+
+func (s *Store) MarkWalletSessionDispatched(ctx context.Context, sessionID, requestID string, dispatchedAt time.Time) error {
+	if dispatchedAt.IsZero() {
+		dispatchedAt = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = 'dispatched', dispatched_at = ?, updated_at = ?
+		WHERE session_id = ? AND request_id = ? AND state = 'dispatch_armed'`,
+		encodeTime(dispatchedAt.UTC()), encodeTime(dispatchedAt.UTC()), sessionID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrWalletSessionDispatchFence
+	}
+	return nil
+}
+
+func (s *Store) HoldStaleWalletSessionDispatchArms(ctx context.Context, before, heldAt time.Time) (int64, error) {
+	if heldAt.IsZero() {
+		heldAt = time.Now().UTC()
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT sr.account_id, sr.session_id, sr.request_id
+		FROM wallet_session_reservations sr
+		JOIN wallet_session_replays r ON r.session_id = sr.session_id AND r.request_id = sr.request_id
+		WHERE sr.status = 'active'
+			AND r.state IN ('dispatch_armed', 'dispatched')
+			AND r.updated_at < ?
+		ORDER BY r.updated_at ASC`, encodeTime(before.UTC()))
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	type staleArm struct {
+		accountID string
+		sessionID string
+		requestID string
+	}
+	var stale []staleArm
+	for rows.Next() {
+		var row staleArm
+		if err := rows.Scan(&row.accountID, &row.sessionID, &row.requestID); err != nil {
+			return 0, err
+		}
+		stale = append(stale, row)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var held int64
+	for _, row := range stale {
+		if err := transitionWalletSessionReservationTx(ctx, tx, row.accountID, row.sessionID, row.requestID, "held", "held", heldAt.UTC()); err != nil {
+			if errors.Is(err, storage.ErrReservationNotFound) {
+				continue
+			}
+			return 0, err
+		}
+		held++
+	}
+	return held, tx.Commit()
+}
+
+func (s *Store) RefundStaleWalletSessionClaims(ctx context.Context, before, refundedAt time.Time) (int64, error) {
+	if refundedAt.IsZero() {
+		refundedAt = time.Now().UTC()
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	refunded, err := refundStaleWalletSessionClaimsTx(ctx, tx, before.UTC(), refundedAt.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return refunded, tx.Commit()
+}
+
+func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement storage.WalletSessionReservationSettlement) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if settlement.SettledAt.IsZero() {
+		settlement.SettledAt = time.Now().UTC()
+	}
+	accountSettlement := storage.ReservationSettlement{
+		AccountID: settlement.AccountID, RequestID: settlement.RequestID, PromptTokens: settlement.PromptTokens,
+		CompletionTokens: settlement.CompletionTokens, TotalTokens: settlement.TotalTokens, MaxTotalTokens: settlement.MaxTotalTokens,
+		TokenSource: settlement.TokenSource, Outcome: settlement.Outcome, SettledAt: settlement.SettledAt,
+	}
+	if err := normalizeSettlementTokens(&accountSettlement); err != nil {
+		return err
+	}
+	var windowDate, quotaStatus, sessionStatus string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT qr.window_date, qr.status, sr.status
+		FROM quota_reservations qr
+		JOIN wallet_session_reservations sr ON sr.account_id = qr.account_id AND sr.request_id = qr.request_id
+		WHERE qr.account_id = ? AND qr.request_id = ? AND sr.session_id = ?`,
+		settlement.AccountID, settlement.RequestID, settlement.SessionID).Scan(&windowDate, &quotaStatus, &sessionStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	if quotaStatus != "active" || (sessionStatus != "active" && sessionStatus != "held") {
+		return fmt.Errorf("%w: wallet reservation %s is %s/%s", storage.ErrReservationTerminal, settlement.RequestID, quotaStatus, sessionStatus)
+	}
+	when := encodeTime(settlement.SettledAt.UTC())
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'settled', settled_tokens = ?, settled_at = ?
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		accountSettlement.TotalTokens, when, settlement.AccountID, settlement.RequestID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_reservations
+		SET status = 'settled', settled_tokens = ?, settled_at = ?
+		WHERE session_id = ? AND request_id = ? AND status IN ('active', 'held')`,
+		accountSettlement.TotalTokens, when, settlement.SessionID, settlement.RequestID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO usage_events(request_id, account_id, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		settlement.RequestID, settlement.AccountID, windowDate, accountSettlement.PromptTokens, accountSettlement.CompletionTokens,
+		accountSettlement.TotalTokens, accountSettlement.TokenSource, accountSettlement.Outcome, when); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = 'finalized', terminal_state = ?, updated_at = ?
+		WHERE session_id = ? AND request_id = ?`,
+		settlement.Outcome, when, settlement.SessionID, settlement.RequestID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RefundWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, refundedAt time.Time) error {
+	if refundedAt.IsZero() {
+		refundedAt = time.Now().UTC()
+	}
+	return s.transitionWalletSessionReservation(ctx, accountID, sessionID, requestID, "refunded", "refunded", refundedAt.UTC())
+}
+
+func (s *Store) SealWalletSessionUsageEvent(ctx context.Context, accountID, sessionID, requestID string, settledTokens int64, sealedAt time.Time) error {
+	if sealedAt.IsZero() {
+		sealedAt = time.Now().UTC()
+	}
+	if settledTokens < 0 {
+		return fmt.Errorf("settled tokens must be non-negative")
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	whenText := encodeTime(sealedAt.UTC())
+	res, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_reservations
+		SET status = 'settled', settled_tokens = ?, settled_at = ?
+		WHERE account_id = ? AND session_id = ? AND request_id = ? AND status IN ('active', 'held')`,
+		settledTokens, whenText, accountID, sessionID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrReservationNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, settlement_hold = 0
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		settledTokens, whenText, accountID, requestID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = 'finalized', terminal_state = 'usage_event', updated_at = ?
+		WHERE session_id = ? AND request_id = ?`,
+		whenText, sessionID, requestID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) HoldWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, heldAt time.Time) error {
+	if heldAt.IsZero() {
+		heldAt = time.Now().UTC()
+	}
+	return s.transitionWalletSessionReservation(ctx, accountID, sessionID, requestID, "held", "held", heldAt.UTC())
+}
+
+func (s *Store) QuarantineWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, quarantinedAt time.Time) error {
+	if quarantinedAt.IsZero() {
+		quarantinedAt = time.Now().UTC()
+	}
+	return s.transitionWalletSessionReservation(ctx, accountID, sessionID, requestID, "quarantined", "quarantined", quarantinedAt.UTC())
+}
+
+func (s *Store) MarkWalletSessionReservationStaleHeld(ctx context.Context, accountID, sessionID, requestID string, staleAt time.Time) error {
+	if staleAt.IsZero() {
+		staleAt = time.Now().UTC()
+	}
+	return s.transitionWalletSessionReservation(ctx, accountID, sessionID, requestID, "stale_held", "stale_held", staleAt.UTC())
+}
+
+func (s *Store) transitionWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID, status, replayState string, when time.Time) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := transitionWalletSessionReservationTx(ctx, tx, accountID, sessionID, requestID, status, replayState, when); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) error {
@@ -2061,10 +2924,22 @@ func reapExpiredReservationsTx(ctx context.Context, q execer, now time.Time) (in
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	if _, err := refundExpiredWalletSessionClaimsTx(ctx, q, now.UTC()); err != nil {
+		return 0, err
+	}
 	res, err := q.ExecContext(ctx, `
-			UPDATE quota_reservations
-			SET status = 'expired', settled_tokens = 0, settled_at = ?
-			WHERE status = 'active' AND settlement_hold = 0 AND expires_at <= ?`,
+		UPDATE quota_reservations
+		SET status = 'expired', settled_tokens = 0, settled_at = ?
+		WHERE status = 'active' AND settlement_hold = 0 AND expires_at <= ?
+			AND NOT EXISTS (
+				SELECT 1
+				FROM wallet_session_reservations sr
+				JOIN wallet_session_replays r ON r.session_id = sr.session_id AND r.request_id = sr.request_id
+				WHERE sr.account_id = quota_reservations.account_id
+					AND sr.request_id = quota_reservations.request_id
+					AND sr.status = 'active'
+					AND r.state IN ('dispatch_armed', 'dispatched')
+			)`,
 		encodeTime(now), encodeTime(now))
 	if err != nil {
 		return 0, err
@@ -2090,6 +2965,467 @@ func dailyUsageTx(ctx context.Context, q queryer, accountID, windowDate string) 
 	return used.Int64, reserved.Int64, nil
 }
 
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanWalletSession(row rowScanner) (storage.WalletSession, error) {
+	var session storage.WalletSession
+	var expiresAt, createdAt, revokedAt string
+	if err := row.Scan(
+		&session.SessionID, &session.AccountID, &session.WalletNamespace, &session.WalletFingerprint,
+		&session.Status, &expiresAt, &session.TotalTokenCap, &session.PerRequestTokenCap,
+		&session.ModelAllowlistJSON, &session.BearerHash, &session.BearerKeyID,
+		&session.VerificationPublicKey, &session.SessionPublicKey, &createdAt, &revokedAt,
+		&session.RevokedBy, &session.RevokedReason,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.WalletSession{}, storage.ErrNotFound
+		}
+		return storage.WalletSession{}, err
+	}
+	session.ExpiresAt = decodeTime(expiresAt)
+	session.CreatedAt = decodeTime(createdAt)
+	session.RevokedAt = decodeTime(revokedAt)
+	return session, nil
+}
+
+func walletChallengeByNonceTx(ctx context.Context, tx *immediateTx, nonceHash []byte) (storage.WalletSessionChallenge, error) {
+	var challenge storage.WalletSessionChallenge
+	var requestedExpiresAt, createdAt, expiresAt, consumedAt string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT nonce_hash, account_id, wallet_namespace, wallet_fingerprint, purpose, audience,
+			requested_expires_at, per_request_token_cap, total_token_cap, model_allowlist_json,
+			session_public_key, created_at, expires_at, consumed_at, consumed_session_id
+		FROM wallet_session_challenges
+		WHERE nonce_hash = ?`, nonceHash).Scan(
+		&challenge.NonceHash, &challenge.AccountID, &challenge.WalletNamespace, &challenge.WalletFingerprint,
+		&challenge.Purpose, &challenge.Audience, &requestedExpiresAt, &challenge.PerRequestTokenCap,
+		&challenge.TotalTokenCap, &challenge.ModelAllowlistJSON, &challenge.SessionPublicKey,
+		&createdAt, &expiresAt, &consumedAt, &challenge.ConsumedSessionID,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.WalletSessionChallenge{}, storage.ErrNotFound
+		}
+		return storage.WalletSessionChallenge{}, err
+	}
+	challenge.RequestedExpiresAt = decodeTime(requestedExpiresAt)
+	challenge.CreatedAt = decodeTime(createdAt)
+	challenge.ExpiresAt = decodeTime(expiresAt)
+	challenge.ConsumedAt = decodeTime(consumedAt)
+	return challenge, nil
+}
+
+func activeWalletSessionCountTx(ctx context.Context, tx *immediateTx, predicate string, now time.Time, args ...any) (int, error) {
+	query := `SELECT COUNT(*) FROM wallet_sessions WHERE status = 'active' AND expires_at > ? AND ` + predicate
+	allArgs := append([]any{encodeTime(now.UTC())}, args...)
+	var count int
+	if err := tx.QueryRowContext(ctx, query, allArgs...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func activeWalletSessionTx(ctx context.Context, tx *immediateTx, accountID, sessionID string, now time.Time) (storage.WalletSession, string, error) {
+	var accountStatus string
+	row := tx.QueryRowContext(ctx, `
+		SELECT ws.session_id, ws.account_id, ws.wallet_namespace, ws.wallet_fingerprint, ws.status, ws.expires_at,
+			ws.total_token_cap, ws.per_request_token_cap, ws.model_allowlist_json, ws.bearer_hash, ws.bearer_key_id,
+			ws.verification_public_key, ws.session_public_key, ws.created_at, ws.revoked_at, ws.revoked_by, ws.revoked_reason,
+			a.status
+		FROM wallet_sessions ws
+		JOIN accounts a ON a.account_id = ws.account_id
+		WHERE ws.account_id = ? AND ws.session_id = ?`,
+		accountID, sessionID)
+	var session storage.WalletSession
+	var expiresAt, createdAt, revokedAt string
+	if err := row.Scan(
+		&session.SessionID, &session.AccountID, &session.WalletNamespace, &session.WalletFingerprint,
+		&session.Status, &expiresAt, &session.TotalTokenCap, &session.PerRequestTokenCap,
+		&session.ModelAllowlistJSON, &session.BearerHash, &session.BearerKeyID,
+		&session.VerificationPublicKey, &session.SessionPublicKey, &createdAt, &revokedAt,
+		&session.RevokedBy, &session.RevokedReason, &accountStatus,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.WalletSession{}, "", storage.ErrNotFound
+		}
+		return storage.WalletSession{}, "", err
+	}
+	session.ExpiresAt = decodeTime(expiresAt)
+	session.CreatedAt = decodeTime(createdAt)
+	session.RevokedAt = decodeTime(revokedAt)
+	if session.Status != "active" || accountStatus != "active" || !now.Before(session.ExpiresAt) {
+		return storage.WalletSession{}, accountStatus, storage.ErrWalletSessionInactive
+	}
+	return session, accountStatus, nil
+}
+
+func walletSessionAllowsModel(allowlistJSON, modelID string) bool {
+	var models []string
+	if err := json.Unmarshal([]byte(allowlistJSON), &models); err != nil {
+		return false
+	}
+	for _, model := range models {
+		if model == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+func insertWalletReplayTx(ctx context.Context, tx *immediateTx, replay storage.WalletSessionReplayMaterial, state string, now time.Time) error {
+	if existing, matched, err := walletReplayMaterialMatchTx(ctx, tx, replay); err != nil {
+		return err
+	} else if existing {
+		if matched {
+			return storage.ErrWalletSessionReplayDuplicate
+		}
+		return storage.ErrWalletSessionReplayMismatch
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO wallet_session_replays(
+			session_id, request_id, method, canonical_route, semantic_headers_hash, raw_body_hash,
+			body_bytes, metadata_client_ip, state, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		replay.SessionID, replay.RequestID, replay.Method, replay.CanonicalRoute, replay.SemanticHeadersHash,
+		replay.RawBodyHash, replay.BodyBytes, replay.MetadataClientIP, state, encodeTime(now.UTC()), encodeTime(now.UTC()))
+	if isUniqueConstraintError(err) {
+		return storage.ErrWalletSessionReplayDuplicate
+	}
+	return err
+}
+
+func walletReplayMaterialMatchTx(ctx context.Context, tx *immediateTx, replay storage.WalletSessionReplayMaterial) (bool, bool, error) {
+	var method, route, metadataClientIP string
+	var semanticHash, rawBodyHash []byte
+	var bodyBytes int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT method, canonical_route, semantic_headers_hash, raw_body_hash, body_bytes, metadata_client_ip
+		FROM wallet_session_replays
+		WHERE session_id = ? AND request_id = ?`,
+		replay.SessionID, replay.RequestID).Scan(&method, &route, &semanticHash, &rawBodyHash, &bodyBytes, &metadataClientIP)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	matched := method == replay.Method && route == replay.CanonicalRoute &&
+		bytesEqual(semanticHash, replay.SemanticHeadersHash) &&
+		bytesEqual(rawBodyHash, replay.RawBodyHash) &&
+		bodyBytes == replay.BodyBytes && metadataClientIP == replay.MetadataClientIP
+	return true, matched, nil
+}
+
+func walletSessionExposureTx(ctx context.Context, tx *immediateTx, sessionID string) (used int64, reserved int64, err error) {
+	var usedNull, reservedNull sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(settled_tokens), 0)
+		FROM wallet_session_reservations
+		WHERE session_id = ? AND status = 'settled'`, sessionID).Scan(&usedNull); err != nil {
+		return 0, 0, err
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(reserved_tokens), 0)
+		FROM wallet_session_reservations
+		WHERE session_id = ? AND status IN ('active', 'held', 'quarantined', 'stale_held')`, sessionID).Scan(&reservedNull); err != nil {
+		return 0, 0, err
+	}
+	return usedNull.Int64, reservedNull.Int64, nil
+}
+
+func walletReplayCapacityTx(ctx context.Context, tx *immediateTx, sessionID string) (rows int, bytes int64, err error) {
+	var bytesNull sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(body_bytes), 0)
+		FROM wallet_session_replays
+		WHERE session_id = ?`, sessionID).Scan(&rows, &bytesNull); err != nil {
+		return 0, 0, err
+	}
+	return rows, bytesNull.Int64, nil
+}
+
+func refundClaimedWalletAdmissionsTx(ctx context.Context, tx *immediateTx, accountID, sessionID string, when time.Time) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT request_id FROM wallet_session_replays
+		WHERE session_id = ? AND state = 'claimed'`, sessionID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var requestIDs []string
+	for rows.Next() {
+		var requestID string
+		if err := rows.Scan(&requestID); err != nil {
+			return err
+		}
+		requestIDs = append(requestIDs, requestID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, requestID := range requestIDs {
+		if err := transitionWalletSessionReservationTx(ctx, tx, accountID, sessionID, requestID, "refunded", "refunded", when); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+func refundStaleWalletSessionClaimsTx(ctx context.Context, q execer, before, refundedAt time.Time) (int64, error) {
+	whenText := encodeTime(refundedAt.UTC())
+	res, err := q.ExecContext(ctx, `
+		UPDATE wallet_session_reservations
+		SET status = 'refunded', settled_tokens = 0, settled_at = ?
+		WHERE status = 'active'
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_session_replays r
+				WHERE r.session_id = wallet_session_reservations.session_id
+					AND r.request_id = wallet_session_reservations.request_id
+					AND r.state = 'claimed'
+					AND r.updated_at < ?
+			)`,
+		whenText, encodeTime(before.UTC()))
+	if err != nil {
+		return 0, err
+	}
+	refunded, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if refunded == 0 {
+		return 0, nil
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'refunded', settled_tokens = 0, settled_at = ?, settlement_hold = 0
+		WHERE status = 'active'
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_session_reservations sr
+				JOIN wallet_session_replays r ON r.session_id = sr.session_id AND r.request_id = sr.request_id
+				WHERE sr.account_id = quota_reservations.account_id
+					AND sr.request_id = quota_reservations.request_id
+					AND sr.status = 'refunded'
+					AND sr.settled_at = ?
+					AND r.state = 'claimed'
+					AND r.updated_at < ?
+			)`,
+		whenText, whenText, encodeTime(before.UTC())); err != nil {
+		return 0, err
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = 'refunded', terminal_state = 'refunded', updated_at = ?
+		WHERE state = 'claimed'
+			AND updated_at < ?
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_session_reservations sr
+				WHERE sr.session_id = wallet_session_replays.session_id
+					AND sr.request_id = wallet_session_replays.request_id
+					AND sr.status = 'refunded'
+					AND sr.settled_at = ?
+			)`,
+		whenText, encodeTime(before.UTC()), whenText); err != nil {
+		return 0, err
+	}
+	return refunded, nil
+}
+
+func refundExpiredWalletSessionClaimsTx(ctx context.Context, q execer, now time.Time) (int64, error) {
+	whenText := encodeTime(now.UTC())
+	res, err := q.ExecContext(ctx, `
+		UPDATE wallet_session_reservations
+		SET status = 'refunded', settled_tokens = 0, settled_at = ?
+		WHERE status = 'active'
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_session_replays r
+				JOIN quota_reservations qr ON qr.account_id = wallet_session_reservations.account_id
+					AND qr.request_id = wallet_session_reservations.request_id
+				WHERE r.session_id = wallet_session_reservations.session_id
+					AND r.request_id = wallet_session_reservations.request_id
+					AND r.state = 'claimed'
+					AND qr.status = 'active'
+					AND qr.expires_at <= ?
+			)`,
+		whenText, whenText)
+	if err != nil {
+		return 0, err
+	}
+	refunded, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if refunded == 0 {
+		return 0, nil
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'refunded', settled_tokens = 0, settled_at = ?, settlement_hold = 0
+		WHERE status = 'active'
+			AND expires_at <= ?
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_session_reservations sr
+				JOIN wallet_session_replays r ON r.session_id = sr.session_id AND r.request_id = sr.request_id
+				WHERE sr.account_id = quota_reservations.account_id
+					AND sr.request_id = quota_reservations.request_id
+					AND sr.status = 'refunded'
+					AND sr.settled_at = ?
+					AND r.state = 'claimed'
+			)`,
+		whenText, whenText, whenText); err != nil {
+		return 0, err
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = 'refunded', terminal_state = 'refunded', updated_at = ?
+		WHERE state = 'claimed'
+			AND EXISTS (
+				SELECT 1
+				FROM wallet_session_reservations sr
+				WHERE sr.session_id = wallet_session_replays.session_id
+					AND sr.request_id = wallet_session_replays.request_id
+					AND sr.status = 'refunded'
+					AND sr.settled_at = ?
+			)`,
+		whenText, whenText); err != nil {
+		return 0, err
+	}
+	return refunded, nil
+}
+
+func transitionWalletSessionReservationTx(ctx context.Context, tx *immediateTx, accountID, sessionID, requestID, status, replayState string, when time.Time) error {
+	whenText := encodeTime(when.UTC())
+	quotaStatus := "refunded"
+	settlementHold := 0
+	if status == "held" || status == "quarantined" {
+		quotaStatus = "active"
+		settlementHold = 1
+	} else if status == "stale_held" {
+		quotaStatus = "stale_held"
+		settlementHold = 1
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT 1
+		FROM wallet_session_reservations sr
+		JOIN quota_reservations qr ON qr.account_id = sr.account_id AND qr.request_id = sr.request_id
+		WHERE sr.account_id = ?
+			AND sr.session_id = ?
+			AND sr.request_id = ?
+			AND sr.status IN ('active', 'held', 'quarantined')
+			AND qr.status = 'active'`,
+		accountID, sessionID, requestID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE wallet_session_reservations
+		SET status = ?, settled_tokens = 0, settled_at = ?
+		WHERE account_id = ? AND session_id = ? AND request_id = ? AND status IN ('active', 'held', 'quarantined')`,
+		status, whenText, accountID, sessionID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("wallet session reservation transition affected %d wallet rows", rows)
+	}
+	var resQuota sql.Result
+	if quotaStatus == "active" {
+		resQuota, err = tx.ExecContext(ctx, `
+			UPDATE quota_reservations
+			SET settlement_hold = ?
+			WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+			settlementHold, accountID, requestID)
+	} else {
+		resQuota, err = tx.ExecContext(ctx, `
+			UPDATE quota_reservations
+			SET status = ?, settled_tokens = 0, settled_at = ?, settlement_hold = ?
+			WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+			quotaStatus, whenText, settlementHold, accountID, requestID)
+	}
+	if err != nil {
+		return err
+	}
+	quotaRows, err := resQuota.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if quotaRows != 1 {
+		return fmt.Errorf("wallet session reservation transition affected %d quota rows", quotaRows)
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE wallet_session_replays
+		SET state = ?, terminal_state = ?, updated_at = ?
+		WHERE session_id = ? AND request_id = ?`,
+		replayState, replayState, whenText, sessionID, requestID)
+	return err
+}
+
+type walletUsageCursor struct {
+	CreatedAt string `json:"created_at"`
+	RequestID string `json:"request_id"`
+}
+
+func encodeWalletUsageCursor(createdAt time.Time, requestID string) string {
+	raw, _ := json.Marshal(walletUsageCursor{CreatedAt: encodeTime(createdAt.UTC()), RequestID: requestID})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeWalletUsageCursor(cursor string) (string, string, error) {
+	if strings.TrimSpace(cursor) == "" {
+		return "", "", nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", storage.ErrBadCursor
+	}
+	var decoded walletUsageCursor
+	if err := json.Unmarshal(raw, &decoded); err != nil || decoded.CreatedAt == "" || decoded.RequestID == "" {
+		return "", "", storage.ErrBadCursor
+	}
+	return decoded.CreatedAt, decoded.RequestID, nil
+}
+
+func walletUsageReconciliationStatus(status string, hasUsage bool) string {
+	switch {
+	case status == "settled" && hasUsage:
+		return "matched"
+	case status == "settled":
+		return "settled_missing_usage_event"
+	case hasUsage:
+		return "usage_event_present"
+	case status == "active":
+		return "pending"
+	case status == "held" || status == "quarantined" || status == "stale_held":
+		return status
+	default:
+		return "reservation_" + status
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 type immediateTx struct {
 	ctx  context.Context
 	conn *sql.Conn
@@ -2102,6 +3438,10 @@ func (tx *immediateTx) ExecContext(ctx context.Context, query string, args ...an
 
 func (tx *immediateTx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	return tx.conn.QueryRowContext(ctx, query, args...)
+}
+
+func (tx *immediateTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return tx.conn.QueryContext(ctx, query, args...)
 }
 
 // immediateTxTerminalTimeout bounds each terminal COMMIT/ROLLBACK statement.

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,13 +69,41 @@ type StorageConfig struct {
 }
 
 type AuthConfig struct {
-	KeyPrefix             string      `yaml:"key_prefix"`
-	KeyHash               string      `yaml:"key_hash"`
-	KeyHashSecret         string      `yaml:"key_hash_secret"`
-	GitHubOAuthEnabled    bool        `yaml:"github_oauth_enabled"`
-	EmailMagicLinkEnabled bool        `yaml:"email_magic_link_enabled"`
-	OAuth                 OAuthConfig `yaml:"oauth"`
-	Demo                  DemoConfig  `yaml:"demo"`
+	KeyPrefix             string               `yaml:"key_prefix"`
+	KeyHash               string               `yaml:"key_hash"`
+	KeyHashSecret         string               `yaml:"key_hash_secret"`
+	GitHubOAuthEnabled    bool                 `yaml:"github_oauth_enabled"`
+	EmailMagicLinkEnabled bool                 `yaml:"email_magic_link_enabled"`
+	OAuth                 OAuthConfig          `yaml:"oauth"`
+	Demo                  DemoConfig           `yaml:"demo"`
+	WalletSessions        WalletSessionsConfig `yaml:"wallet_sessions"`
+}
+
+type WalletSessionsConfig struct {
+	Enabled                          bool              `yaml:"enabled"`
+	BearerPrefix                     string            `yaml:"bearer_prefix"`
+	MaxSessionTTLSeconds             int               `yaml:"max_session_ttl_seconds"`
+	MaxChallengeTTLSeconds           int               `yaml:"max_challenge_ttl_seconds"`
+	MaxTotalTokenCap                 int64             `yaml:"max_total_token_cap"`
+	MaxPerRequestTokenCap            int64             `yaml:"max_per_request_token_cap"`
+	MaxActiveSessionsPerAccount      int               `yaml:"max_active_sessions_per_account"`
+	MaxActiveSessionsPerWallet       int               `yaml:"max_active_sessions_per_wallet"`
+	ChallengeIssuancePerIPPerHour    int               `yaml:"challenge_issuance_per_ip_per_hour"`
+	SessionIssuancePerAccountPerHour int               `yaml:"session_issuance_per_account_per_hour"`
+	ChallengeBodyBytes               int64             `yaml:"challenge_body_bytes"`
+	RegistrationBodyBytes            int64             `yaml:"registration_body_bytes"`
+	BearerHashKeys                   map[string]string `yaml:"bearer_hash_keys"`
+	CurrentBearerHashKeyID           string            `yaml:"current_bearer_hash_key_id"`
+	PreviousBearerHashKeyIDs         []string          `yaml:"previous_bearer_hash_key_ids"`
+	RetiringBearerHashKeyIDs         []string          `yaml:"retiring_bearer_hash_key_ids"`
+	AllowUnsafeKeyRetirement         bool              `yaml:"allow_unsafe_key_retirement"`
+	WalletFingerprintSecret          string            `yaml:"wallet_fingerprint_secret"`
+	WalletFingerprintSecretVersion   string            `yaml:"wallet_fingerprint_secret_version"`
+	SignatureMaxAgeSeconds           int               `yaml:"signature_max_age_seconds"`
+	SignatureMaxFutureSkewSeconds    int               `yaml:"signature_max_future_skew_seconds"`
+	MetadataRequestsPerMinute        int               `yaml:"metadata_requests_per_minute"`
+	ReplayMaxRowsPerSession          int               `yaml:"replay_max_rows_per_session"`
+	ReplayMaxBytesPerSession         int64             `yaml:"replay_max_bytes_per_session"`
 }
 
 type OAuthConfig struct {
@@ -265,6 +294,25 @@ func Default() Config {
 				TokenURL:     "https://github.com/login/oauth/access_token",
 				UserURL:      "https://api.github.com/user",
 			}},
+			WalletSessions: WalletSessionsConfig{
+				Enabled:                          false,
+				BearerPrefix:                     "mps_",
+				MaxSessionTTLSeconds:             3600,
+				MaxChallengeTTLSeconds:           300,
+				MaxTotalTokenCap:                 100000,
+				MaxPerRequestTokenCap:            4096,
+				MaxActiveSessionsPerAccount:      100,
+				MaxActiveSessionsPerWallet:       20,
+				ChallengeIssuancePerIPPerHour:    60,
+				SessionIssuancePerAccountPerHour: 60,
+				ChallengeBodyBytes:               16 * 1024,
+				RegistrationBodyBytes:            16 * 1024,
+				SignatureMaxAgeSeconds:           300,
+				SignatureMaxFutureSkewSeconds:    30,
+				MetadataRequestsPerMinute:        120,
+				ReplayMaxRowsPerSession:          10000,
+				ReplayMaxBytesPerSession:         4 * 1024 * 1024,
+			},
 		},
 		Quotas: QuotasConfig{
 			AccountDailyTokens:       100000,
@@ -396,12 +444,20 @@ func (c *Config) resolveEnv() error {
 		{"auth.oauth.github.client_id", &c.Auth.OAuth.GitHub.ClientID},
 		{"auth.oauth.github.client_secret", &c.Auth.OAuth.GitHub.ClientSecret},
 		{"auth.demo.signing_secret", &c.Auth.Demo.SigningSecret},
+		{"auth.wallet_sessions.wallet_fingerprint_secret", &c.Auth.WalletSessions.WalletFingerprintSecret},
 	} {
 		v, err := resolveEnvValue(f.field, *f.dst)
 		if err != nil {
 			return err
 		}
 		*f.dst = v
+	}
+	for keyID, value := range c.Auth.WalletSessions.BearerHashKeys {
+		resolved, err := resolveEnvValue("auth.wallet_sessions.bearer_hash_keys."+keyID, value)
+		if err != nil {
+			return err
+		}
+		c.Auth.WalletSessions.BearerHashKeys[keyID] = resolved
 	}
 	return nil
 }
@@ -492,6 +548,9 @@ func (c Config) Validate() error {
 	}
 	if c.Auth.Demo.SigningSecret == "" {
 		return fmt.Errorf("auth.demo.signing_secret must be set")
+	}
+	if err := validateWalletSessionsConfig(c); err != nil {
+		return err
 	}
 	if len(c.Auth.OAuth.CallbackAllowlist) == 0 {
 		return fmt.Errorf("auth.oauth.callback_allowlist must not be empty")
@@ -701,6 +760,134 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateWalletSessionsConfig(c Config) error {
+	ws := c.Auth.WalletSessions
+	if ws.BearerPrefix == "" {
+		ws.BearerPrefix = "mps_"
+	}
+	if ws.BearerPrefix != "mps_" {
+		return fmt.Errorf("auth.wallet_sessions.bearer_prefix must be mps_")
+	}
+	if ws.BearerPrefix == c.Auth.KeyPrefix {
+		return fmt.Errorf("auth.wallet_sessions.bearer_prefix must differ from auth.key_prefix")
+	}
+	if !ws.Enabled {
+		return nil
+	}
+	if ws.MaxSessionTTLSeconds <= 0 || ws.MaxChallengeTTLSeconds <= 0 || ws.MaxChallengeTTLSeconds > ws.MaxSessionTTLSeconds {
+		return fmt.Errorf("auth.wallet_sessions TTL settings must be positive and challenge TTL must not exceed session TTL")
+	}
+	if ws.MaxTotalTokenCap <= 0 || ws.MaxPerRequestTokenCap <= 0 || ws.MaxPerRequestTokenCap > ws.MaxTotalTokenCap {
+		return fmt.Errorf("auth.wallet_sessions token caps must be positive and per-request cap must not exceed total cap")
+	}
+	if ws.MaxPerRequestTokenCap > c.Limits.MaxTokensPerRequest {
+		return fmt.Errorf("auth.wallet_sessions.max_per_request_token_cap must be <= limits.max_tokens_per_request")
+	}
+	if ws.MaxActiveSessionsPerAccount <= 0 || ws.MaxActiveSessionsPerWallet <= 0 {
+		return fmt.Errorf("auth.wallet_sessions active session limits must be positive")
+	}
+	if ws.ChallengeIssuancePerIPPerHour <= 0 || ws.SessionIssuancePerAccountPerHour <= 0 {
+		return fmt.Errorf("auth.wallet_sessions issuance limits must be positive")
+	}
+	if ws.ChallengeBodyBytes <= 0 || ws.RegistrationBodyBytes <= 0 {
+		return fmt.Errorf("auth.wallet_sessions body byte limits must be positive")
+	}
+	if ws.SignatureMaxAgeSeconds <= 0 || ws.SignatureMaxFutureSkewSeconds < 0 || ws.SignatureMaxFutureSkewSeconds >= ws.SignatureMaxAgeSeconds {
+		return fmt.Errorf("auth.wallet_sessions signature freshness settings are invalid")
+	}
+	if ws.MetadataRequestsPerMinute <= 0 || ws.ReplayMaxRowsPerSession <= 0 || ws.ReplayMaxBytesPerSession <= 0 {
+		return fmt.Errorf("auth.wallet_sessions metadata and replay limits must be positive")
+	}
+	if len(ws.BearerHashKeys) == 0 {
+		return fmt.Errorf("auth.wallet_sessions.bearer_hash_keys must be set when wallet sessions are enabled")
+	}
+	if strings.TrimSpace(ws.CurrentBearerHashKeyID) == "" {
+		return fmt.Errorf("auth.wallet_sessions.current_bearer_hash_key_id must be set when wallet sessions are enabled")
+	}
+	if _, ok := ws.BearerHashKeys[ws.CurrentBearerHashKeyID]; !ok {
+		return fmt.Errorf("auth.wallet_sessions.current_bearer_hash_key_id must reference bearer_hash_keys")
+	}
+	for keyID, secret := range ws.BearerHashKeys {
+		if strings.TrimSpace(keyID) == "" {
+			return fmt.Errorf("auth.wallet_sessions.bearer_hash_keys contains an empty key id")
+		}
+		if err := requireSecretBytes("auth.wallet_sessions.bearer_hash_keys."+keyID, secret, 32); err != nil {
+			return err
+		}
+	}
+	for _, keyID := range append(append([]string{}, ws.PreviousBearerHashKeyIDs...), ws.RetiringBearerHashKeyIDs...) {
+		if _, ok := ws.BearerHashKeys[keyID]; !ok {
+			return fmt.Errorf("auth.wallet_sessions previous/retiring bearer key id %q must reference bearer_hash_keys", keyID)
+		}
+	}
+	if len(ws.RetiringBearerHashKeyIDs) > 0 && !ws.AllowUnsafeKeyRetirement {
+		return fmt.Errorf("auth.wallet_sessions retiring bearer hash keys require allow_unsafe_key_retirement in v0.1")
+	}
+	if err := requireSecretBytes("auth.wallet_sessions.wallet_fingerprint_secret", ws.WalletFingerprintSecret, 32); err != nil {
+		return err
+	}
+	if strings.TrimSpace(ws.WalletFingerprintSecretVersion) == "" {
+		return fmt.Errorf("auth.wallet_sessions.wallet_fingerprint_secret_version must be set when wallet sessions are enabled")
+	}
+	if ws.WalletFingerprintSecretVersion != "v1" {
+		return fmt.Errorf("auth.wallet_sessions wallet_fingerprint_secret rotation is not supported in v0.1")
+	}
+	return rejectWalletSessionSecretReuse(c)
+}
+
+func requireSecretBytes(field, secret string, minBytes int) error {
+	if len([]byte(secret)) < minBytes {
+		return fmt.Errorf("%s must contain at least %d bytes of secret material", field, minBytes)
+	}
+	return nil
+}
+
+func rejectWalletSessionSecretReuse(c Config) error {
+	ws := c.Auth.WalletSessions
+	existing := []namedSecret{
+		{name: "coordinator.operator_key", value: strings.TrimSpace(c.Coordinator.OperatorKey)},
+		{name: "coordinator.service_token", value: strings.TrimSpace(c.Coordinator.ServiceToken)},
+		{name: "auth.key_hash_secret", value: strings.TrimSpace(c.Auth.KeyHashSecret)},
+		{name: "auth.demo.signing_secret", value: strings.TrimSpace(c.Auth.Demo.SigningSecret)},
+		{name: "auth.oauth.github.client_secret", value: strings.TrimSpace(c.Auth.OAuth.GitHub.ClientSecret)},
+	}
+	walletSecrets := []namedSecret{
+		{name: "auth.wallet_sessions.wallet_fingerprint_secret", value: strings.TrimSpace(ws.WalletFingerprintSecret)},
+	}
+	for keyID, secret := range ws.BearerHashKeys {
+		walletSecrets = append(walletSecrets, namedSecret{
+			name:  "auth.wallet_sessions.bearer_hash_keys." + keyID,
+			value: strings.TrimSpace(secret),
+		})
+	}
+	sort.Slice(walletSecrets[1:], func(i, j int) bool {
+		return walletSecrets[i+1].name < walletSecrets[j+1].name
+	})
+	for _, walletSecret := range walletSecrets {
+		for _, existingSecret := range existing {
+			if walletSecret.value != "" && existingSecret.value != "" && walletSecret.value == existingSecret.value {
+				return fmt.Errorf("%s must differ from %s", walletSecret.name, existingSecret.name)
+			}
+		}
+	}
+	seenWalletSecrets := map[string]string{}
+	for _, walletSecret := range walletSecrets {
+		if walletSecret.value == "" {
+			continue
+		}
+		if previousField, ok := seenWalletSecrets[walletSecret.value]; ok {
+			return fmt.Errorf("%s must differ from %s", walletSecret.name, previousField)
+		}
+		seenWalletSecrets[walletSecret.value] = walletSecret.name
+	}
+	return nil
+}
+
+type namedSecret struct {
+	name  string
+	value string
 }
 
 func (c Config) TrustedProxyNets() ([]*net.IPNet, error) {

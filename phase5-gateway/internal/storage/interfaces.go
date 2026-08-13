@@ -119,6 +119,29 @@ type UsageStore interface {
 	ReleaseConcurrency(ctx context.Context, accountID, requestID string, releasedAt time.Time) error
 }
 
+type WalletSessionStore interface {
+	StoreWalletSessionChallenge(ctx context.Context, challenge WalletSessionChallenge) error
+	RegisterWalletSession(ctx context.Context, req WalletSessionRegistrationRequest) (WalletSession, error)
+	LookupWalletSessionByBearerHash(ctx context.Context, bearerHash []byte) (WalletSession, error)
+	ListWalletSessions(ctx context.Context, accountID string) ([]WalletSession, error)
+	GetWalletSession(ctx context.Context, accountID, sessionID string) (WalletSession, error)
+	WalletSessionUsage(ctx context.Context, accountID, sessionID string) (WalletSessionUsage, error)
+	ListWalletSessionUsageDetails(ctx context.Context, accountID, sessionID string, limit int, cursor string, since, until time.Time) ([]WalletSessionUsageDetail, string, error)
+	RevokeWalletSession(ctx context.Context, accountID, sessionID, actor, reason string, revokedAt time.Time) error
+	AdmitWalletSessionInference(ctx context.Context, req WalletSessionAdmissionRequest) (WalletSessionAdmissionDecision, error)
+	AdmitWalletSessionMetadata(ctx context.Context, req WalletSessionMetadataAdmissionRequest) error
+	ArmWalletSessionDispatch(ctx context.Context, arm WalletSessionDispatchArm) error
+	MarkWalletSessionDispatched(ctx context.Context, sessionID, requestID string, dispatchedAt time.Time) error
+	HoldStaleWalletSessionDispatchArms(ctx context.Context, before, heldAt time.Time) (int64, error)
+	RefundStaleWalletSessionClaims(ctx context.Context, before, refundedAt time.Time) (int64, error)
+	FinalizeWalletSessionReservation(ctx context.Context, settlement WalletSessionReservationSettlement) error
+	SealWalletSessionUsageEvent(ctx context.Context, accountID, sessionID, requestID string, settledTokens int64, sealedAt time.Time) error
+	RefundWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, refundedAt time.Time) error
+	HoldWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, heldAt time.Time) error
+	QuarantineWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, quarantinedAt time.Time) error
+	MarkWalletSessionReservationStaleHeld(ctx context.Context, accountID, sessionID, requestID string, staleAt time.Time) error
+}
+
 type HealthStore interface {
 	Ping(ctx context.Context) error
 }

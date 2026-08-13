@@ -100,6 +100,13 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 				"request_id", reservation.RequestID,
 				"error", err,
 			)
+			if reservation.WalletSessionID != "" {
+				s.recordWalletSessionAudit(ctx, reservation.AccountID, reservation.WalletSessionID, "wallet_session_settlement_reconcile_failed", "gateway", map[string]any{
+					"request_id": reservation.RequestID,
+					"phase":      "settlement_reconcile",
+					"error":      safeAuditError(err),
+				})
+			}
 			continue
 		}
 		switch result {
@@ -142,7 +149,13 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		if !found {
 			now := s.now()
 			if !reservation.ExpiresAt.IsZero() && !now.Before(reservation.ExpiresAt) {
-				if err := s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, now); err != nil {
+				var err error
+				if reservation.WalletSessionID != "" {
+					err = s.store.MarkWalletSessionReservationStaleHeld(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, now)
+				} else {
+					err = s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, now)
+				}
+				if err != nil {
 					if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
 						return "already_terminal", nil
 					}
@@ -163,7 +176,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		if err != nil {
 			return "", err
 		}
-		if err := s.store.SettleReservation(ctx, storage.ReservationSettlement{
+		settlement := storage.ReservationSettlement{
 			AccountID:        reservation.AccountID,
 			RequestID:        reservation.RequestID,
 			PromptTokens:     prompt,
@@ -173,15 +186,39 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 			TokenSource:      finality.TokenSource,
 			Outcome:          "spec022_verified",
 			SettledAt:        s.now(),
-		}); err != nil {
-			if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+		}
+		var settleErr error
+		if reservation.WalletSessionID != "" {
+			settleErr = s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
+				AccountID:        settlement.AccountID,
+				SessionID:        reservation.WalletSessionID,
+				RequestID:        settlement.RequestID,
+				PromptTokens:     settlement.PromptTokens,
+				CompletionTokens: settlement.CompletionTokens,
+				TotalTokens:      settlement.TotalTokens,
+				MaxTotalTokens:   settlement.MaxTotalTokens,
+				TokenSource:      settlement.TokenSource,
+				Outcome:          settlement.Outcome,
+				SettledAt:        settlement.SettledAt,
+			})
+		} else {
+			settleErr = s.store.SettleReservation(ctx, settlement)
+		}
+		if settleErr != nil {
+			if errors.Is(settleErr, storage.ErrReservationNotFound) || errors.Is(settleErr, storage.ErrReservationTerminal) {
 				return "already_terminal", nil
 			}
-			return "", err
+			return "", settleErr
 		}
 		return "verified", nil
 	case settlementFinalityRefund:
-		if err := s.store.RefundReservation(ctx, reservation.AccountID, reservation.RequestID, s.now().Unix()); err != nil {
+		var err error
+		if reservation.WalletSessionID != "" {
+			err = s.store.RefundWalletSessionReservation(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, s.now())
+		} else {
+			err = s.store.RefundReservation(ctx, reservation.AccountID, reservation.RequestID, s.now().Unix())
+		}
+		if err != nil {
 			if errors.Is(err, storage.ErrReservationNotFound) {
 				return "already_terminal", nil
 			}
@@ -193,7 +230,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		req = req.WithContext(ctx)
 		ctx = context.WithValue(ctx, requestIDKey{}, reservation.RequestID)
 		req = req.WithContext(ctx)
-		if !s.boundStreamingSettlementHold(ctx, req, usageSubject{AccountID: reservation.AccountID}, action) {
+		if !s.boundStreamingSettlementHold(ctx, req, usageSubject{AccountID: reservation.AccountID, WalletSessionID: reservation.WalletSessionID}, action) {
 			return "", fmt.Errorf("failed to bound settlement hold")
 		}
 		return "held", nil

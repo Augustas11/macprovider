@@ -71,7 +71,8 @@
         "SPEC-022",
         "SPEC-024",
         "SPEC-038",
-        "SPEC-039"
+        "SPEC-039",
+        "SPEC-040"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -86,7 +87,8 @@
         "SPEC-015",
         "SPEC-018",
         "SPEC-019",
-        "SPEC-024"
+        "SPEC-024",
+        "SPEC-040"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -225,7 +227,8 @@
         "SPEC-024",
         "SPEC-030",
         "SPEC-038",
-        "SPEC-039"
+        "SPEC-039",
+        "SPEC-040"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -311,7 +314,8 @@
       "consumers": [
         "SPEC-005",
         "SPEC-015",
-        "SPEC-016"
+        "SPEC-016",
+        "SPEC-040"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -530,6 +534,15 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/614"
+    },
+    {
+      "id": "wallet-buyer-session",
+      "owner_spec": "SPEC-040",
+      "consumers": [],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/930"
     }
   ]
 }

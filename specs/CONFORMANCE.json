@@ -1140,6 +1140,43 @@
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC lands first from verified paged-attention spikes; implementation and exact-parity fixtures land in a separate PR behind a disabled-by-default provider-local gate."
       }
+    },
+    {
+      "spec_id": "SPEC-040",
+      "title": "Wallet-Native Buyer Sessions",
+      "version": "0.1.8",
+      "path": "specs/SPEC-040-wallet-native-buyer-sessions.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "wallet-buyer-session"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-005",
+        "SPEC-006",
+        "SPEC-015",
+        "SPEC-022"
+      ],
+      "implementation_status": "partial",
+      "production_status": "not-deployed",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": "2026-08-13",
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local implementation validation is captured for the default-off Ed25519 existing-account wallet-session rail. Structured conformant promotion is intentionally held until a valid signed journey-result artifact is produced for this sensitive authority domain."
+      }
     }
   ],
   "requirements": [
@@ -3014,6 +3051,370 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-PKV14 (operator configuration surface mirroring SPEC-037 FR-KVP11: triple-source precedence, default-off, block size, pool capacity, fallback policy): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R001",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession",
+        "phase5-gateway/internal/storage/sqlite/store.go:StoreWalletSessionChallenge"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionRegistrationSelfServiceReplayAndModelFilter",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletChallengeConsumptionRaceCreatesOneSession",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletRegistrationRejectsChallengeProofDrift",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletRegistrationRejectsAlreadyExpiredSessionProof"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-ACCOUNT-AUTHORIZED-REGISTRATION"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover account-authorized challenge creation, Ed25519 proof registration, active-session caps, and one-time challenge consumption; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R002",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionRegistrationSelfServiceReplayAndModelFilter",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionsDisabledSharedRouteRejectsMPSBearer",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionManagementRejectsAmbiguousCredentials"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-ACCOUNT-AUTHORIZED-REGISTRATION",
+        "JOURNEY-WALLET-SESSION-DISABLED-COEXISTENCE"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover account binding, owner authorization, prefix separation, ambiguous credential rejection, and disabled API-key coexistence; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R003",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession",
+        "phase5-gateway/internal/config/config.go:validateWalletSessionsConfig"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionRegistrationSelfServiceReplayAndModelFilter",
+        "phase5-gateway/internal/config/config_test.go:TestWalletSessionsDefaultOffDoesNotRequireSecrets",
+        "phase5-gateway/internal/config/config_test.go:TestWalletSessionsEnabledRequiresSecrets",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletSessionMigrationIdempotent"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-ACCOUNT-AUTHORIZED-REGISTRATION"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover opaque bearer storage paths, key id config, keyed wallet fingerprints, no-store session responses, and secret-redaction boundaries; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R004",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession"
+      ],
+      "tests": [
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletActiveSessionCapConcurrentRegistrations",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionExhaustionReturnsPaymentRequired",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletReplayDuplicateAndMismatchDoNotReserveAgain"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-SIGNED-INFERENCE",
+        "JOURNEY-WALLET-SESSION-CONCURRENT-CAP-ENFORCEMENT"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover atomic account/session admission, total/per-request caps, replay state, model allowlist, quota integration, and dispatch fencing; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R005",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession"
+      ],
+      "tests": [
+        "phase5-gateway/internal/auth/wallet_test.go:TestWalletProofVectorAndVerification",
+        "phase5-gateway/internal/auth/wallet_test.go:TestWalletRequestVectorHeadersAndVerification",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionRegistrationSelfServiceReplayAndModelFilter",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionAnthropicMessagesAcceptsXAPIKeyBearer"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-SIGNED-INFERENCE"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover session request signatures, UUIDv4 request ids, route/body/header binding, timestamp checks, replay mismatch/duplicate semantics, and metadata ceilings; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R006",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession",
+        "phase5-gateway/internal/router/settlement_journal_recovery.go:RecoverSettlementJournal",
+        "phase5-gateway/internal/router/settlement_reconcile.go:ReconcileSettlementHolds",
+        "phase5-gateway/internal/storage/sqlite/store.go:SealWalletSessionUsageEvent"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionSettlementReconcileClosesWalletHeldReservations",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestSealWalletSessionUsageEventConsumesSessionAndReleasesAccountHold",
+        "phase5-gateway/internal/router/settlement_journal_recovery_test.go:TestSettlementJournal_CrashBetweenUsageEventAndRefundRecovers"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-SETTLEMENT-RECOVERY"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover wallet-session settlement through quota reservations, usage_events, settlement journal fallback, held/quarantined/stale-held recovery, and coordinator finality reconciliation; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R007",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession",
+        "phase5-gateway/internal/storage/sqlite/store.go:RefundStaleWalletSessionClaims"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionExpiredBearerWritesAudit",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletStaleClaimsRefundPreDispatchReservations",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletReaperRefundsExpiredPreDispatchClaims",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletStaleDispatchArmsMoveToHeld"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-REVOCATION-RACE"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover revocation, expiry, stale claimed pre-dispatch refunds, stale dispatch holds, and session exposure recovery; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R008",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionRegistrationSelfServiceReplayAndModelFilter",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionListPaginates",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionManagementRejectsAmbiguousCredentials"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-SIGNED-INFERENCE",
+        "JOURNEY-WALLET-SESSION-STATUS-USAGE-IDOR"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover buyer-safe list/status/usage/revoke routes, account-key detail access, self-usage summary-only access, pagination, and nested model disclosure pruning; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R009",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession",
+        "phase5-gateway/internal/router/server.go:gatewayRetryableByCode",
+        "phase5-gateway/internal/router/cors.go:setCORSHeaders"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionExpiredBearerWritesAudit",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionSettlementReconcileClosesWalletHeldReservations",
+        "phase5-gateway/internal/router/server_test.go:TestGatewayErrorCodeCompleteness",
+        "phase5-gateway/internal/router/cors_test.go:TestCORSPreflight"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-SIGNED-INFERENCE",
+        "JOURNEY-WALLET-SESSION-SETTLEMENT-RECOVERY",
+        "JOURNEY-WALLET-SESSION-ACCOUNT-AUTHORIZED-REGISTRATION",
+        "JOURNEY-WALLET-SESSION-STATUS-USAGE-IDOR",
+        "JOURNEY-WALLET-SESSION-DISABLED-COEXISTENCE"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover wallet-session error taxonomy, retry classification, audit events, privacy limits, no-store/Vary behavior, and CORS signature headers; signed journey-result promotion remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-040-R010",
+      "spec_id": "SPEC-040",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/auth/wallet.go:VerifyWalletProof",
+        "phase5-gateway/internal/router/wallet_sessions.go:handleWalletSessionRegister",
+        "phase5-gateway/internal/router/chat_proxy.go:handleChatCompletions",
+        "phase5-gateway/internal/storage/sqlite/store.go:AdmitWalletSessionInference",
+        "phase5-gateway/internal/storage/sqlite/store.go:RegisterWalletSession",
+        "phase5-gateway/internal/config/config.go:validateWalletSessionsConfig",
+        "phase5-gateway/internal/storage/sqlite/migrate.go:walletSessionDDL"
+      ],
+      "tests": [
+        "phase5-gateway/internal/config/config_test.go:TestWalletSessionsDefaultOffDoesNotRequireSecrets",
+        "phase5-gateway/internal/config/config_test.go:TestWalletSessionsEnabledRequiresSecrets",
+        "phase5-gateway/internal/config/config_test.go:TestWalletSessionsRejectsPrefixAndSecretReuse",
+        "phase5-gateway/internal/storage/sqlite/wallet_session_test.go:TestWalletSessionMigrationIdempotent",
+        "phase5-gateway/internal/router/wallet_sessions_test.go:TestWalletSessionsDisabledSharedRouteRejectsMPSBearer"
+      ],
+      "journeys": [
+        "JOURNEY-WALLET-SESSION-DISABLED-COEXISTENCE"
+      ],
+      "evidence": [
+        {
+          "artifact": "sha256:2e9d9efa0638fcaa9f750645cf95eedbd655855ed5fb0210322e6ed66a6e3740",
+          "source": "journeys/evidence/JOURNEY-WALLET-SESSION-LOCAL-VALIDATION-2026-08-13.md",
+          "captured_at": "2026-08-13",
+          "expires_at": "2026-11-13"
+        }
+      ],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/930",
+        "rationale": "Local tests cover default-off config, validation, additive migrations, disabled-mode shared-route behavior, and local journey evidence; signed journey-result promotion remains pending."
       }
     },
     {
