@@ -8808,8 +8808,9 @@ write_watchdog_script() {
 # auto-update rollback observer.
 #
 # Health verdict: the exact launchd service PID must own the configured local
-# listener and its /v1/health endpoint must answer. Other macprovider-cli
-# diagnostics are structurally irrelevant. Coordinator TCP
+# listener and its /v1/health endpoint must answer. /v1/health returns non-2xx
+# for degraded/draining/unavailable states, so a provider stuck reporting
+# unavailable after the watchdog is armed is restartable. Coordinator TCP
 # reachability is advisory logging only; a missing ESTABLISHED coordinator
 # connection no longer causes a kick by itself.
 
@@ -8830,11 +8831,10 @@ LOG_PATH="$LOG_DIR/watchdog.log"
 # process every 60s before it ever opens its socket.
 #
 # Arming rule: the watchdog stays disarmed (no kicks) until it
-# observes at least ONE successful ESTABLISHED connection IN THE
-# CURRENT BOOT. The armed marker stores the boot id (kern.boottime
-# sec) so a reboot — which restarts the provider into a fresh
-# cold-cache model load — re-disarms the watchdog and prevents the
-# stale-arming restart loop the R1 fix did not cover (R2 ARCH HIGH).
+# observes at least ONE successful local health response IN THE
+# CURRENT BOOT. The armed marker stores the boot id so a reboot —
+# which restarts the provider into a fresh cold-cache model load —
+# re-disarms the watchdog and prevents stale-arming restart loops.
 #
 # Grace rule: after we observe a restart-worthy failure, we wait at least KICK_GRACE_SECONDS
 # before logging another restart request. This covers the post-restart model-reload
@@ -8844,6 +8844,12 @@ STATE_DIR="${MACPROVIDER_WATCHDOG_STATE_DIR:-$HOME/.local/share/macprovider-watc
 ARMED_FILE="$STATE_DIR/armed"
 LAST_KICK_FILE="$STATE_DIR/last_kick"
 KICK_GRACE_SECONDS="${MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS:-300}"
+case "$KICK_GRACE_SECONDS" in
+  ''|*[!0-9]*) KICK_GRACE_SECONDS=300 ;;
+esac
+if [ "$KICK_GRACE_SECONDS" -lt 60 ] || [ "$KICK_GRACE_SECONDS" -gt 3600 ]; then
+  KICK_GRACE_SECONDS=300
+fi
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
@@ -8976,6 +8982,42 @@ local_provider_health_ok() {
   "$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/health" >/dev/null 2>&1
 }
 
+local_status_restart_recommended() {
+  provider_pid="$1"
+  port="$(read_config_port || true)"
+  case "$port" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ! local_health_listener_owned_by_provider "$provider_pid" "$port"; then
+    return 0
+  fi
+  curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
+  status_body="$("$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/status" 2>/dev/null)" || return 1
+  STATUS_BODY="$status_body" python3 <<'PY'
+import json
+import os
+import sys
+
+try:
+    body = json.loads(os.environ.get("STATUS_BODY", ""))
+except Exception:
+    sys.exit(1)
+
+lifecycle = body.get("lifecycle")
+if not isinstance(lifecycle, dict):
+    sys.exit(1)
+
+operator_paused = lifecycle.get("operator_paused")
+if not isinstance(operator_paused, bool):
+    sys.exit(1)
+
+if operator_paused or lifecycle.get("state") == "paused_by_operator":
+    sys.exit(1)
+
+sys.exit(0 if body.get("status") == "unavailable" else 1)
+PY
+}
+
 valid_lifecycle_lease() {
   provider_pid="$1"
   [ -x "$BINARY_PATH" ] || return 1
@@ -8985,8 +9027,41 @@ valid_lifecycle_lease() {
   "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
 }
 
-note_provider_restart_request() {
-  log "provider restart requested for $LABEL but skipped: launchd KeepAlive is the sole runtime manager"
+valid_unbound_lifecycle_lease() {
+  [ -x "$BINARY_PATH" ] || return 1
+  if "$BINARY_PATH" lifecycle-lease status --expected-kind startup >/dev/null 2>&1; then
+    return 0
+  fi
+  "$BINARY_PATH" lifecycle-lease status --expected-kind maintenance >/dev/null 2>&1
+}
+
+provider_restart_cooldown_active() {
+  if [ ! -f "$LAST_KICK_FILE" ]; then
+    return 1
+  fi
+  last_kick="$(cat "$LAST_KICK_FILE" 2>/dev/null || printf 0)"
+  case "$last_kick" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  elapsed=$(( $(now_epoch) - last_kick ))
+  [ "$elapsed" -lt "$KICK_GRACE_SECONDS" ]
+}
+
+kickstart_provider() {
+  reason="$1"
+  launchctl_bin="${MACPROVIDER_LAUNCHCTL:-launchctl}"
+  service_target="gui/$(id -u)/$LABEL"
+  if "$launchctl_bin" kickstart -k "$service_target" >/dev/null 2>&1; then
+    if ! now_epoch > "$LAST_KICK_FILE"; then
+      log "provider restart cooldown write failed for $LABEL reason=${reason}"
+    fi
+    log "provider restart requested for $LABEL via launchctl kickstart -k reason=${reason}"
+    return 0
+  else
+    status="$?"
+    log "provider restart request failed for $LABEL via launchctl kickstart -k reason=${reason} exit_status=${status}"
+    return 1
+  fi
 }
 
 now_epoch() { date -u +%s; }
@@ -10234,8 +10309,13 @@ main() {
   provider_pid="$(provider_process_pid || true)"
   if [ -z "$provider_pid" ]; then
     log "provider process unhealthy: launchd service $LABEL has no validated PID at $BINARY_PATH"
-    now_epoch > "$LAST_KICK_FILE"
-    note_provider_restart_request
+    if valid_unbound_lifecycle_lease; then
+      log "launchd service $LABEL has no validated PID but is inside a validated startup/maintenance lease; watchdog grants bounded grace"
+      exit 0
+    fi
+    if ! provider_restart_cooldown_active; then
+      kickstart_provider "missing_validated_pid" || true
+    fi
     exit 0
   fi
   boot_id="$(current_boot_id)"
@@ -10252,16 +10332,15 @@ main() {
       log "provider process $provider_pid not locally healthy yet; watchdog remains disarmed for boot=${boot_id}"
       exit 0
     fi
-    if [ -f "$LAST_KICK_FILE" ]; then
-      last_kick="$(cat "$LAST_KICK_FILE" 2>/dev/null || printf 0)"
-      elapsed=$(( $(now_epoch) - last_kick ))
-      if [ "$elapsed" -lt "$KICK_GRACE_SECONDS" ]; then
-        exit 0
-      fi
+    if provider_restart_cooldown_active; then
+      exit 0
     fi
-    log "provider process $provider_pid failed local /v1/health after arming; leaving restart ownership to launchd KeepAlive for $LABEL"
-    now_epoch > "$LAST_KICK_FILE"
-    note_provider_restart_request
+    if ! local_status_restart_recommended "$provider_pid"; then
+      log "provider process $provider_pid failed local /v1/health after arming, but /v1/status does not recommend watchdog restart; leaving process untouched"
+      exit 0
+    fi
+    log "provider process $provider_pid failed local /v1/health after arming; requesting launchd restart for $LABEL"
+    kickstart_provider "local_health_failed_after_arming" || true
     exit 0
   fi
   armed_boot=""
