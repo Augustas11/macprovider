@@ -116,7 +116,7 @@ MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
 MAX_BUYER_PROOF_STREAM_BYTES = 1024 * 1024
 MAX_BUYER_PROOF_STREAM_LINE_BYTES = 64 * 1024
 CANARY_AUTHORITY_VERSION = "issue-825-canary-fleet-r6"
-CANARY_AUTHORITY_COMMIT = "fb3f4f1680b9cf2404c0f40317bef3696d659f58"
+CANARY_AUTHORITY_COMMIT = "9eba07d1d16d593e2a6449c8549f18d8fc8694f8"
 CANARY_UNIT_BUDGET_S = 180
 JOURNAL_SCHEMA_VERSION = 1
 CURRENT_RELEASE_SCHEMA_VERSION = 1
@@ -134,8 +134,8 @@ ROLLBACK_STEPS = (
     "canary_timer",
 )
 CANARY_AUTHORITY_FILES = {
-    Path("/opt/macprovider-canary-buyer/probe.mjs"): "a4e7351671f703edf149dc04a3f9db3480b0921252eac29da5e6ad7b3488fa4f",
-    Path("/opt/macprovider-canary-buyer/safety.mjs"): "d1556e42e845a2895d0d777c6f7724d886bd46864143ed836c2179bbca2d3c35",
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "9c33f4522845bffcef0365185c54753e4e18f7ee8b21b62b0493a5cc016caf79",
+    Path("/opt/macprovider-canary-buyer/safety.mjs"): "75f814d5d9582528ce5218b4e7c0aead78d5b1cc04ef798427d9bf4e172bb800",
     Path("/opt/macprovider-canary-buyer/run-canary.sh"): "6c5b31fce3b477aed8a85c7a0750e924360ed4828da49ca42ea693482e635585",
     Path("/opt/macprovider-canary-buyer/emergency-disable.sh"): "1380122e76b3b66ad812849e3684b38eaaed0790f0e6011e3f194bd215ab1c7e",
     Path("/etc/systemd/system/canary-buyer.service"): "df5ef235382a90eebff046e43aeb45b88623f4f4a82637584f9000de40bf9c2b",

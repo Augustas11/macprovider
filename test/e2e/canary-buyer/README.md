@@ -138,22 +138,25 @@ identity allowlist for rollback compatibility. It does not require the
 document's provider cardinality or model set to match the current live fleet.
 Instead it derives the protected liveness fleet from the initial Ready/routable
 `/poolz` rows, probes each unique model in that live fleet, validates any
-provider that becomes live during the run, and ignores non-live provider rows
-for ordinary liveness/recovery. `CANARY_MODELS` remains the qualification
+provider that becomes live during the run, and treats lid-close / unavailable
+plus `busy` with at most one in-flight request as continuity: those Macs drop
+out of the protected set or count as still serving. Queue backup, thermal,
+memory pressure, restart, and a zero-serving pool still fail closed. `CANARY_MODELS` remains the qualification
 workload source, but scheduled liveness derives its workload from live `/poolz`
 and does not require a configured static model list or expected-fleet model-set
-match. Its ready-provider floor is the live protected fleet size observed at
-the safety snapshot, with a minimum of one ready/routable provider. Its
+match. Its serving floor is one ready or busy provider with a fresh heartbeat.
+Its
 request/token budget starts from the configured conservative floor and grows
 only to one 8-token request per live model discovered from that snapshot.
+A 429 or other request failure on any live model aborts the run immediately,
+so a quota-exhausted Llama box will prevent this Mac's Qwen probe from running.
 Each provider heartbeat carries versioned `safety_telemetry`; the coordinator
 validates it, stamps receipt freshness, and publishes it through authenticated
 `/poolz`. Version 2 binds the observation to the coordinator session, binary,
 compatibility set, model hash, and power source and carries live CPU/GPU,
-queue, current RSS, thermal, and memory-pressure signals. Liveness fails closed
-if any expected provider lacks a complete measurement,
-so Pearl does not need a provider-local route to enforce queue, restart,
-memory-pressure, RSS, thermal, and runtime-state invariants.
+queue, current RSS, thermal, and memory-pressure signals. Liveness fails closed if the remaining serving set has queue backup, restart,
+memory-pressure, RSS, thermal, or a complete loss of serving Macs. A lid-close
+or the canary's own in-flight request is not a fleet abort.
 GPU utilization is explicitly marked `host` scope: Apple exposes AGX device
 utilization rather than per-process accounting. The expected fleet keeps one
 provider service per physical Mac, and evidence reviewers treat this as a
