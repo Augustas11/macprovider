@@ -25,19 +25,31 @@ type ProviderConnectivity interface {
 	HeartbeatOK(providerID string, now time.Time) bool
 }
 
+type TrustTierObserver interface {
+	ProviderTrustTierChanged(providerID, tier string)
+}
+
+type TrustTierObserverFunc func(providerID, tier string)
+
+func (f TrustTierObserverFunc) ProviderTrustTierChanged(providerID, tier string) {
+	if f != nil {
+		f(providerID, tier)
+	}
+}
+
 // TrustCriteriaStatus is the provider-facing unlock snapshot.
 type TrustCriteriaStatus struct {
-	TrustTier              string
-	DemotionCooldownUntil  *time.Time
-	EconomicSatisfied      []string
-	AdditionalSatisfied    []string
-	CriteriaMet            int
-	CriteriaRequired       int
-	UnlockPairOKSince      *time.Time
-	VerifiedReceiptCount   int
-	WalletBound            bool
-	AppAttested            bool
-	OperatorPromoted       bool
-	UptimeOK               bool
-	WalletBalanceOK        bool
+	TrustTier             string
+	DemotionCooldownUntil *time.Time
+	EconomicSatisfied     []string
+	AdditionalSatisfied   []string
+	CriteriaMet           int
+	CriteriaRequired      int
+	UnlockPairOKSince     *time.Time
+	VerifiedReceiptCount  int
+	WalletBound           bool
+	AppAttested           bool
+	OperatorPromoted      bool
+	UptimeOK              bool
+	WalletBalanceOK       bool
 }

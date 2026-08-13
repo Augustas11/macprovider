@@ -318,6 +318,8 @@ admission:
   provisional_admission_rate_per_hour: 10
   provisional_pool_max: 100
   provisional_quota_per_hour: 100
+  # 0 = unlimited for authenticated providers with rewards trust_tier=trusted.
+  trusted_quota_per_hour: 0
   provisional_tier_weight: 0.3
 
 tier2:

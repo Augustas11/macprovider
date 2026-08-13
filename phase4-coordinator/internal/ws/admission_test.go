@@ -10,6 +10,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/rs/zerolog"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,6 +63,51 @@ func TestAdmissionManagerTiersRateLimitAndQuota(t *testing.T) {
 	adm.Reject("new-1", "test")
 	if !adm.Rejected("new-1") {
 		t.Fatal("provider not rejected")
+	}
+}
+
+func TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1,
+		ProvisionalPoolMax:              1,
+		ProvisionalQuotaPerHour:         1,
+		TrustedQuotaPerHour:             0,
+	}, func() time.Time { return now })
+
+	if tier, code, reason := adm.AdmitAs(Hello{ProviderID: "trusted-1"}, pool.TierTrusted, 0); tier != pool.TierTrusted || code != 0 || reason != "" {
+		t.Fatalf("trusted admit = tier:%s code:%d reason:%q", tier, code, reason)
+	}
+	trusted := pool.Provider{ProviderID: "trusted-1", Tier: pool.TierTrusted}
+	for i := 0; i < 3; i++ {
+		if !adm.TryReserveRequest(trusted) {
+			t.Fatalf("trusted request %d blocked by provisional quota", i+1)
+		}
+	}
+
+	provisional := pool.Provider{ProviderID: "trusted-1", Tier: pool.TierProvisional}
+	if !adm.TryReserveRequest(provisional) {
+		t.Fatal("first provisional request after demotion blocked")
+	}
+	if adm.TryReserveRequest(provisional) {
+		t.Fatal("demoted provider bypassed provisional quota")
+	}
+}
+
+func TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust(t *testing.T) {
+	cfg := config.Default()
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	}))
+
+	if tier := s.routingAdmissionTier(context.Background(), providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false); tier != pool.TierTrusted {
+		t.Fatalf("authenticated trusted tier = %s, want %s", tier, pool.TierTrusted)
+	}
+	if tier := s.routingAdmissionTier(context.Background(), providerAuth{}, "provider-a", false); tier != pool.TierProvisional {
+		t.Fatalf("tokenless trusted-id tier = %s, want provisional", tier)
+	}
+	if tier := s.routingAdmissionTier(context.Background(), providerAuth{validated: true, providerID: "other"}, "provider-a", false); tier != pool.TierProvisional {
+		t.Fatalf("mismatched token tier = %s, want provisional", tier)
 	}
 }
 
@@ -245,6 +291,18 @@ func TestAdmissionManagerPruneShrinksStateBeyondCutoff(t *testing.T) {
 
 type failingAdmissionStateStore struct {
 	err error
+}
+
+type fakeRewardsTrustStore struct {
+	tiers map[string]string
+	err   error
+}
+
+func (f fakeRewardsTrustStore) ProviderTrustTier(context.Context, string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.tiers["provider-a"], nil
 }
 
 func (f failingAdmissionStateStore) LoadAdmissionState(context.Context) (AdmissionState, error) {

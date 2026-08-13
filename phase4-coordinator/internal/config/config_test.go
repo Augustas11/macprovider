@@ -68,6 +68,17 @@ func setSignedAutotuneFeedPathsForTest(cfg *Config) {
 	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
 }
 
+func TestAdmissionTrustedQuotaDefaultUnlimitedAndRejectsNegative(t *testing.T) {
+	cfg := validTestConfig()
+	if cfg.Admission.TrustedQuotaPerHour != 0 {
+		t.Fatalf("trusted quota default = %d, want 0 unlimited", cfg.Admission.TrustedQuotaPerHour)
+	}
+	cfg.Admission.TrustedQuotaPerHour = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "trusted_quota_per_hour") {
+		t.Fatalf("Validate error=%v, want trusted quota rejection", err)
+	}
+}
+
 func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
 	cfg := validTestConfig()
 	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnablePublicValidation || cfg.Referrals.EnableJoinLinks || cfg.Referrals.EnableSocialInviteBonus {

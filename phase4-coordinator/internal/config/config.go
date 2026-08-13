@@ -789,6 +789,7 @@ type AdmissionConfig struct {
 	ProvisionalAdmissionRatePerHour int     `yaml:"provisional_admission_rate_per_hour"`
 	ProvisionalPoolMax              int     `yaml:"provisional_pool_max"`
 	ProvisionalQuotaPerHour         int     `yaml:"provisional_quota_per_hour"`
+	TrustedQuotaPerHour             int     `yaml:"trusted_quota_per_hour"`
 	ProvisionalTierWeight           float64 `yaml:"provisional_tier_weight"`
 	ProvisionalRetentionDays        int     `yaml:"provisional_retention_days"`
 }
@@ -1234,6 +1235,7 @@ func Default() Config {
 			ProvisionalAdmissionRatePerHour: 10,
 			ProvisionalPoolMax:              100,
 			ProvisionalQuotaPerHour:         100,
+			TrustedQuotaPerHour:             0,
 			ProvisionalTierWeight:           0.3,
 			ProvisionalRetentionDays:        30,
 		},
@@ -2165,6 +2167,9 @@ func (c Config) Validate() error {
 	}
 	if c.Admission.ProvisionalQuotaPerHour <= 0 {
 		return fmt.Errorf("admission.provisional_quota_per_hour must be > 0")
+	}
+	if c.Admission.TrustedQuotaPerHour < 0 {
+		return fmt.Errorf("admission.trusted_quota_per_hour must be >= 0")
 	}
 	if c.Admission.ProvisionalTierWeight <= 0 {
 		return fmt.Errorf("admission.provisional_tier_weight must be > 0")

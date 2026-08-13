@@ -79,9 +79,9 @@ func DefaultWeights() Weights {
 
 // EffectiveThroughput computes throughput_tps_estimate * tier_weight
 // per SPEC-002 v1.1 §5 Step 2.5 and SPEC-004 FR-SR-8 "fast"
-// objective. Any tier value other than pool.TierProvisional uses
-// the Pinned weight (this matches server.go's current behavior where
-// the implicit default tier — empty string set to TierPinned at
+// objective. Any tier value other than pool.TierProvisional, including
+// pool.TierTrusted, uses the Pinned weight (this matches server.go's current
+// behavior where the implicit default tier — empty string set to TierPinned at
 // provider construction — receives weight 1.0).
 func EffectiveThroughput(p pool.Provider, w Weights) float64 {
 	weight := w.Pinned

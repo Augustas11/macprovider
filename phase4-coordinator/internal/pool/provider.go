@@ -37,6 +37,7 @@ const (
 	StateUnavailable State = "unavailable"
 
 	TierPinned      Tier = "pinned"
+	TierTrusted     Tier = "trusted"
 	TierProvisional Tier = "provisional"
 	TierRejected    Tier = "rejected"
 
@@ -1171,6 +1172,29 @@ func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil {
+		return Provider{}, false
+	}
+	p.Tier = tier
+	cp := *p
+	cp.conn = nil
+	return cp, true
+}
+
+func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return Provider{}, false
+	}
+	if p.Tier == TierPinned {
+		cp := *p
+		cp.conn = nil
+		return cp, true
+	}
+	switch tier {
+	case TierTrusted, TierProvisional:
+	default:
 		return Provider{}, false
 	}
 	p.Tier = tier

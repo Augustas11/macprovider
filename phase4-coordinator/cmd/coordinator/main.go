@@ -459,8 +459,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "malibu_emission: %v\n", err)
 			os.Exit(1)
 		}
-		rewardsRunner.Start(shutdownCtx)
-		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
 	} else {
 		logger.Info().Msg("malibu_emission DISABLED via config (default)")
 	}
@@ -668,6 +666,9 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))
 		logger.Info().Str("path", cfg.Explorer.BindPath).Msg("operator explorer enabled")
 	}
+	if rewardsDB != nil {
+		wsOpts = append(wsOpts, providerws.WithProviderRewardsTrustTierStore(rewards.NewTrustTierStore(rewardsDB)))
+	}
 	// M2-2 / ARCH-2: hand the pool emitter a non-blocking channel send
 	// instead of the synchronous SQLite write. The pool already releases
 	// Registry.mu before invoking the emitter (see ApplyHeartbeat), and
@@ -813,6 +814,11 @@ func main() {
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	if rewardsRunner != nil {
 		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
+		rewardsRunner.SetTrustTierObserver(rewards.TrustTierObserverFunc(func(providerID, tier string) {
+			wsServer.ApplyRewardsTrustTier(providerID, tier)
+		}))
+		rewardsRunner.Start(shutdownCtx)
+		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
 	}
 	buyerServer := buyer.NewServer(
 		registry,

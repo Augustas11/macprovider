@@ -19,6 +19,18 @@ func TestEffectiveThroughput_PinnedDefaultsToOne(t *testing.T) {
 	}
 }
 
+func TestEffectiveThroughput_TrustedUsesPinnedWeight(t *testing.T) {
+	t.Parallel()
+	w := routing.DefaultWeights()
+	p := pool.Provider{
+		Tier:                  pool.TierTrusted,
+		ThroughputTPSEstimate: 100,
+	}
+	if got := routing.EffectiveThroughput(p, w); got != 100 {
+		t.Fatalf("trusted tier with default weights: want 100, got %v", got)
+	}
+}
+
 func TestEffectiveThroughput_ProvisionalUsesWeight(t *testing.T) {
 	t.Parallel()
 	w := routing.DefaultWeights()

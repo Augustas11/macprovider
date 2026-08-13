@@ -77,42 +77,61 @@ func NewAdmissionManager(cfg config.AdmissionConfig, now func() time.Time) *Admi
 }
 
 func (a *AdmissionManager) Admit(hello Hello, pinned bool, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
-	if pinned {
-		return pool.TierPinned, 0, ""
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.evaluateAdmissionLocked(hello, connectedProvisional, true)
+	return a.AdmitAs(hello, requestedAdmissionTier(pinned), connectedProvisional)
 }
 
 func (a *AdmissionManager) CheckAdmit(hello Hello, pinned bool, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
-	if pinned {
-		return pool.TierPinned, 0, ""
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.evaluateAdmissionLocked(hello, connectedProvisional, false)
+	return a.CheckAdmitAs(hello, requestedAdmissionTier(pinned), connectedProvisional)
 }
 
 // ReserveAdmission holds in-memory pool capacity without creating durable
 // admission history. A failed referral/token transaction therefore leaves no
 // hourly admission record behind.
 func (a *AdmissionManager) ReserveAdmission(hello Hello, pinned bool, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
-	if pinned {
+	return a.ReserveAdmissionAs(hello, requestedAdmissionTier(pinned), connectedProvisional)
+}
+
+func (a *AdmissionManager) AdmitAs(hello Hello, tier pool.Tier, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
+	if tier == pool.TierPinned {
 		return pool.TierPinned, 0, ""
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	tier, code, reason := a.evaluateAdmissionLocked(hello, connectedProvisional, false)
-	if code == 0 {
+	return a.evaluateAdmissionLocked(hello, tier, connectedProvisional, true)
+}
+
+func (a *AdmissionManager) CheckAdmitAs(hello Hello, tier pool.Tier, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
+	if tier == pool.TierPinned {
+		return pool.TierPinned, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.evaluateAdmissionLocked(hello, tier, connectedProvisional, false)
+}
+
+func (a *AdmissionManager) ReserveAdmissionAs(hello Hello, tier pool.Tier, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
+	if tier == pool.TierPinned {
+		return pool.TierPinned, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tier, code, reason := a.evaluateAdmissionLocked(hello, tier, connectedProvisional, false)
+	if code == 0 && tier == pool.TierProvisional {
 		a.pending++
 	}
 	return tier, code, reason
 }
 
 func (a *AdmissionManager) CommitReservedAdmission(hello Hello, pinned bool) pool.Tier {
-	if pinned {
+	return a.CommitReservedAdmissionAs(hello, requestedAdmissionTier(pinned))
+}
+
+func (a *AdmissionManager) CommitReservedAdmissionAs(hello Hello, tier pool.Tier) pool.Tier {
+	if tier == pool.TierPinned {
 		return pool.TierPinned
+	}
+	if tier != pool.TierProvisional {
+		return tier
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -120,12 +139,32 @@ func (a *AdmissionManager) CommitReservedAdmission(hello Hello, pinned bool) poo
 	return pool.TierProvisional
 }
 
-func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisional int, record bool) (pool.Tier, gobwas.StatusCode, string) {
+func requestedAdmissionTier(pinned bool) pool.Tier {
+	if pinned {
+		return pool.TierPinned
+	}
+	return pool.TierProvisional
+}
+
+func normalizeAdmissionTier(tier pool.Tier) pool.Tier {
+	switch tier {
+	case pool.TierPinned, pool.TierTrusted, pool.TierProvisional:
+		return tier
+	default:
+		return pool.TierProvisional
+	}
+}
+
+func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, tier pool.Tier, connectedProvisional int, record bool) (pool.Tier, gobwas.StatusCode, string) {
+	tier = normalizeAdmissionTier(tier)
 	if _, ok := a.rejected[hello.ProviderID]; ok {
 		return pool.TierRejected, CloseBanned, "banned: provider " + hello.ProviderID + " has been rejected by operator"
 	}
 	if a.cfg.PinnedOnly {
 		return pool.TierRejected, CloseBanned, "banned: provider " + hello.ProviderID + " has been rejected by operator"
+	}
+	if tier != pool.TierProvisional {
+		return tier, 0, ""
 	}
 	now := a.now()
 	cutoff := now.Add(-time.Hour)
@@ -171,7 +210,8 @@ func (a *AdmissionManager) ReleasePendingProvisional() {
 }
 
 func (a *AdmissionManager) CheckQuota(provider pool.Provider) bool {
-	if provider.Tier != pool.TierProvisional {
+	limit, capped := a.requestQuotaLimit(provider)
+	if !capped {
 		return true
 	}
 	a.mu.Lock()
@@ -179,7 +219,7 @@ func (a *AdmissionManager) CheckQuota(provider pool.Provider) bool {
 	cutoff := a.now().Add(-time.Hour)
 	window := keepAfter(a.requestWindows[provider.ProviderID], cutoff)
 	a.requestWindows[provider.ProviderID] = window
-	return len(window) < a.cfg.ProvisionalQuotaPerHour
+	return len(window) < limit
 }
 
 func (a *AdmissionManager) RecordRequest(provider pool.Provider) {
@@ -187,14 +227,15 @@ func (a *AdmissionManager) RecordRequest(provider pool.Provider) {
 }
 
 func (a *AdmissionManager) TryReserveRequest(provider pool.Provider) bool {
-	if provider.Tier != pool.TierProvisional {
+	limit, capped := a.requestQuotaLimit(provider)
+	if !capped {
 		return true
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
 	window := keepAfter(a.requestWindows[provider.ProviderID], now.Add(-time.Hour))
-	if len(window) >= a.cfg.ProvisionalQuotaPerHour {
+	if len(window) >= limit {
 		a.requestWindows[provider.ProviderID] = window
 		return false
 	}
@@ -208,7 +249,7 @@ func (a *AdmissionManager) TryReserveRequest(provider pool.Provider) bool {
 }
 
 func (a *AdmissionManager) RefundRequest(provider pool.Provider) {
-	if provider.Tier != pool.TierProvisional {
+	if _, capped := a.requestQuotaLimit(provider); !capped {
 		return
 	}
 	a.mu.Lock()
@@ -221,6 +262,23 @@ func (a *AdmissionManager) RefundRequest(provider pool.Provider) {
 		rec.TotalRequestsServed--
 	}
 	a.persistLocked()
+}
+
+func (a *AdmissionManager) RequestQuotaMetered(provider pool.Provider) bool {
+	_, capped := a.requestQuotaLimit(provider)
+	return capped
+}
+
+func (a *AdmissionManager) requestQuotaLimit(provider pool.Provider) (int, bool) {
+	switch provider.Tier {
+	case pool.TierProvisional:
+		return a.cfg.ProvisionalQuotaPerHour, true
+	case pool.TierTrusted:
+		if a.cfg.TrustedQuotaPerHour > 0 {
+			return a.cfg.TrustedQuotaPerHour, true
+		}
+	}
+	return 0, false
 }
 
 func (a *AdmissionManager) Promote(providerID string) (string, bool) {

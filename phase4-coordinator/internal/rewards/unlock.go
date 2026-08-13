@@ -317,6 +317,7 @@ func (r *Runner) promoteProvider(ctx context.Context, providerID string, now tim
 	if err := SetTrustTier(ctx, r.db, providerID, TierTrusted); err != nil {
 		return err
 	}
+	r.notifyTrustTierChanged(providerID, TierTrusted)
 	r.logger.Info().Str("provider_id", providerID).Time("at", now).Msg("trust tier promoted to trusted")
 	return nil
 }
@@ -333,8 +334,21 @@ func (r *Runner) demoteProvider(ctx context.Context, providerID string, now time
 	if err != nil {
 		return err
 	}
+	r.notifyTrustTierChanged(providerID, TierProvisional)
 	r.logger.Info().Str("provider_id", providerID).Time("at", now).Msg("trust tier demoted to provisional")
 	return nil
+}
+
+func (r *Runner) notifyTrustTierChanged(providerID, tier string) {
+	if r == nil {
+		return
+	}
+	r.observerMu.RLock()
+	observer := r.observer
+	r.observerMu.RUnlock()
+	if observer != nil {
+		observer.ProviderTrustTierChanged(providerID, tier)
+	}
 }
 
 func advanceWindow(current sql.NullTime, ok bool, now time.Time) sql.NullTime {

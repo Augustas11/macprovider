@@ -157,6 +157,7 @@ type Server struct {
 	authPolicyAdmin                ProviderAuthPolicyAdminStore
 	hardwareTrustAdmin             HardwareTrustAdminStore
 	providerTrust                  ProviderTrustChecker
+	rewardsTrust                   ProviderRewardsTrustTierStore
 	admissionIdentityRecoveryAdmin AdmissionIdentityRecoveryAdminStore
 	idlePrewarm                    IdlePrewarmRecorder
 	idlePrewarmMetrics             IdlePrewarmMetrics
@@ -519,6 +520,12 @@ func WithHardwareTrustAdminStore(store HardwareTrustAdminStore) Option {
 func WithProviderTrustChecker(checker ProviderTrustChecker) Option {
 	return func(s *Server) {
 		s.providerTrust = checker
+	}
+}
+
+func WithProviderRewardsTrustTierStore(store ProviderRewardsTrustTierStore) Option {
+	return func(s *Server) {
+		s.rewardsTrust = store
 	}
 }
 
@@ -1615,7 +1622,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
 	if entry.AdmissionSandboxed {
-		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -1627,9 +1634,9 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 		entry.AdmissionSandboxCredentialBypassed = authState != pool.AuthBearerValidated
-		entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	} else {
-		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, hello, entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -1647,7 +1654,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		pairOT = ot
 		claimURL = url
 		authState = resolvedAuthState
-		entry.Tier = s.commitProviderAdmission(hello, entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(hello, entry.Tier)
 	}
 	entry.AuthState = authState
 	session, _ := s.registerProviderSession(conn, entry)
@@ -2108,7 +2115,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	var assignedProviderToken, pairOT, claimURL string
 	var authState pool.AuthState
 	if entry.AdmissionSandboxed {
-		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -2120,11 +2127,11 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			return "", ""
 		}
 		entry.AdmissionSandboxCredentialBypassed = authState != pool.AuthBearerValidated
-		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier)
 	} else {
 		// Reserve after the post-challenge evidence recheck, but defer the durable
 		// admission record until credential minting succeeds.
-		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		if tier, ok := s.reserveProviderAdmission(conn, initial.Hello(), entry.Tier); !ok {
 			return "", ""
 		} else {
 			entry.Tier = tier
@@ -2213,7 +2220,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 				Int("identity_generation", state.Generation).
 				Msg("durable admission identity recovered under operator authorization")
 		}
-		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier == pool.TierPinned)
+		entry.Tier = s.commitProviderAdmission(initial.Hello(), entry.Tier)
 	}
 	entry.AuthState = authState
 	// Issue #582 FIX A: no post-mint hardware-trust re-check. Trust was authorized
@@ -2464,7 +2471,8 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		// validateProviderToken at upgrade. A fresh bootstrap credential is
 		// consumed only after this admission path and all evidence checks pass.
 	}
-	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, false)
+	requestedTier := s.routingAdmissionTier(context.Background(), auth, hello.ProviderID, pinned)
+	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, requestedTier, false)
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return nil, false
@@ -2917,8 +2925,8 @@ func (s *Server) gatedRecommendedBinaryVersion(compatibilitySetID string) string
 	return s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion
 }
 
-func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {
-	tier, closeCode, closeReason := s.admission.ReserveAdmission(hello, pinned, s.connectedProvisional())
+func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, tier pool.Tier) (pool.Tier, bool) {
+	tier, closeCode, closeReason := s.admission.ReserveAdmissionAs(hello, tier, s.connectedProvisional())
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return "", false
@@ -2926,15 +2934,15 @@ func (s *Server) reserveProviderAdmission(conn net.Conn, hello Hello, pinned boo
 	return tier, true
 }
 
-func (s *Server) commitProviderAdmission(hello Hello, pinned bool) pool.Tier {
-	return s.admission.CommitReservedAdmission(hello, pinned)
+func (s *Server) commitProviderAdmission(hello Hello, tier pool.Tier) pool.Tier {
+	return s.admission.CommitReservedAdmissionAs(hello, tier)
 }
 
-func (s *Server) checkOrRecordAdmission(hello Hello, pinned bool, record bool) (pool.Tier, gobwas.StatusCode, string) {
+func (s *Server) checkOrRecordAdmission(hello Hello, tier pool.Tier, record bool) (pool.Tier, gobwas.StatusCode, string) {
 	if record {
-		return s.admission.Admit(hello, pinned, s.connectedProvisional())
+		return s.admission.AdmitAs(hello, tier, s.connectedProvisional())
 	}
-	return s.admission.CheckAdmit(hello, pinned, s.connectedProvisional())
+	return s.admission.CheckAdmitAs(hello, tier, s.connectedProvisional())
 }
 
 // compareSemver is a thin alias for the coordinator's single version

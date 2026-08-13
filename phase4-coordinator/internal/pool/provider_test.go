@@ -713,6 +713,24 @@ func registerFloorPeer(registry *Registry, id, modelID string) {
 	}, nil)
 }
 
+func TestRegistrySetEarnedTrustTierDoesNotUnpinOperatorProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "pinned-1",
+		AssignedID: "session-1",
+		Tier:       TierPinned,
+		State:      StateReady,
+	}, nil)
+
+	updated, ok := registry.SetEarnedTrustTier("pinned-1", TierProvisional)
+	if !ok {
+		t.Fatal("SetEarnedTrustTier returned !ok")
+	}
+	if updated.Tier != TierPinned {
+		t.Fatalf("operator pinned tier changed to %s", updated.Tier)
+	}
+}
+
 // TestRecordCanaryResultFloorSparesSoleProvider verifies the FR-CAN22
 // last-provider floor: a sole routing-eligible provider that fails canaries past
 // the threshold is NOT removed — it stays ready/routable, keeps accruing the

@@ -2851,11 +2851,11 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	if s.admission != nil {
 		if !s.admission.TryReserveRequest(provider) {
 			if !stream {
-				writeError(w, http.StatusTooManyRequests, "provisional_quota_exceeded", "Selected provisional provider is over request quota")
+				writeError(w, http.StatusTooManyRequests, "provisional_quota_exceeded", "Selected provider is over request quota")
 			}
-			return wsForwardFailed, requestLogAttempt{Status: http.StatusTooManyRequests, Error: "Selected provisional provider is over request quota"}
+			return wsForwardFailed, requestLogAttempt{Status: http.StatusTooManyRequests, Error: "Selected provider is over request quota"}
 		}
-		reserved = provider.Tier == pool.TierProvisional
+		reserved = s.admission.RequestQuotaMetered(provider)
 	}
 	if timeout <= 0 {
 		timeout = s.requestTimeout

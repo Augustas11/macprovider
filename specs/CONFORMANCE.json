@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.5.6",
+      "version": "1.5.7",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1225,6 +1225,31 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "B1 persists nullable per-request provider TTFT/decode timings in local schema and retry fixtures, but live Pearl coordinator database migration evidence remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-002-R002",
+      "spec_id": "SPEC-002",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:TierTrusted",
+        "phase4-coordinator/internal/ws/admission.go:AdmissionManager.requestQuotaLimit",
+        "phase4-coordinator/internal/ws/rewards_trust.go:routingAdmissionTier",
+        "phase4-coordinator/internal/rewards/unlock.go:Runner.notifyTrustTierChanged"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault",
+        "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust",
+        "phase4-coordinator/internal/pool/provider_test.go::TestRegistrySetEarnedTrustTierDoesNotUnpinOperatorProvider",
+        "phase4-coordinator/internal/config/config_test.go::TestAdmissionTrustedQuotaDefaultUnlimitedAndRejectsNegative"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/614",
+        "rationale": "Local tests pin trusted routing quota semantics and authenticated trust lookup; live Pearl sustained-routing evidence remains pending rollout."
       }
     },
     {
