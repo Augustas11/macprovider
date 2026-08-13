@@ -1232,6 +1232,7 @@
       "spec_id": "SPEC-002",
       "state": "pending",
       "implementation": [
+        "phase4-coordinator/internal/auth/tokens.go:func (s *Store) HasRevokedTokenForProvider",
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetEarnedTrustTier",
         "phase4-coordinator/internal/ws/admission.go:func (a *AdmissionManager) requestQuotaLimit",
         "phase4-coordinator/internal/ws/rewards_trust.go:routingAdmissionTier",
@@ -1242,7 +1243,10 @@
         "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault",
         "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierHonorsConfiguredQuota",
         "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust",
+        "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation",
+        "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierAllowsTrustedQuotaAfterRevocationWithDurableIdentity",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesLiveTrustedProvider",
+        "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders",
@@ -1258,7 +1262,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "Local tests pin trusted routing quota semantics and authenticated trust lookup; live Pearl sustained-routing evidence remains pending rollout."
+        "rationale": "Local tests pin trusted routing quota semantics, authenticated trust lookup, credential-custody continuity, and revoked-history demotion; live Pearl sustained-routing evidence remains pending rollout."
       }
     },
     {

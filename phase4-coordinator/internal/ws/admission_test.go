@@ -2,6 +2,8 @@ package ws
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"net"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/rs/zerolog"
@@ -132,6 +135,80 @@ func TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust(t *testing.T) {
 	}
 }
 
+func TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+
+	tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false)
+	if tier != pool.TierProvisional {
+		t.Fatalf("legacy revoked-history trusted tier = %s, want provisional", tier)
+	}
+	if tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", true); tier != pool.TierPinned {
+		t.Fatalf("operator-pinned tier = %s, want pinned", tier)
+	}
+}
+
+func TestRoutingAdmissionTierAllowsTrustedQuotaAfterRevocationWithDurableIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	_, secondToken, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, "provider-a", secondToken, pub, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithBootstrapTokenStore(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+
+	tier := s.routingAdmissionTier(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false)
+	if tier != pool.TierTrusted {
+		t.Fatalf("durable-identity trusted tier = %s, want trusted", tier)
+	}
+}
+
 func TestRewardsTrustReconciliationDemotesLiveTrustedProvider(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registry.Register(&pool.Provider{
@@ -154,6 +231,51 @@ func TestRewardsTrustReconciliationDemotesLiveTrustedProvider(t *testing.T) {
 	}
 	if got.Tier != pool.TierProvisional {
 		t.Fatalf("reconciled tier = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, "provider-a", "host-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(),
+		WithTokenValidator(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("tier after revoked legacy token history = %s, want provisional", got.Tier)
 	}
 }
 

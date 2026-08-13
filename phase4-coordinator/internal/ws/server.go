@@ -230,6 +230,10 @@ type TokenValidator interface {
 	ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error)
 }
 
+type providerTokenCustodyHistoryStore interface {
+	HasRevokedTokenForProvider(context.Context, string) (bool, error)
+}
+
 // TokenIssuer handles SPEC-003 v0.8 FR-C9.1 self-serve provisional token
 // minting plus FR-C9.4 TOFU enforcement. Split from TokenValidator per
 // the codex architect review on PR #44 (interface segregation): a future

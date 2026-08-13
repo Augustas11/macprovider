@@ -27,6 +27,9 @@ func (s *Server) routingAdmissionTier(ctx context.Context, auth providerAuth, pr
 	if s.rewardsTrust == nil || !auth.validated || auth.providerID != providerID {
 		return pool.TierProvisional
 	}
+	if !s.trustedRoutingCustodyEligible(ctx, providerID) {
+		return pool.TierProvisional
+	}
 	lookupCtx, cancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
 	defer cancel()
 	tier, err := s.rewardsTrust.ProviderTrustTier(lookupCtx, providerID)
@@ -47,6 +50,10 @@ func (s *Server) ApplyRewardsTrustTier(providerID, tier string) {
 	var routingTier pool.Tier
 	switch strings.ToLower(strings.TrimSpace(tier)) {
 	case rewardsTrustTierTrusted:
+		if !s.trustedRoutingCustodyEligible(context.Background(), providerID) {
+			routingTier = pool.TierProvisional
+			break
+		}
 		routingTier = pool.TierTrusted
 	case string(pool.TierProvisional):
 		routingTier = pool.TierProvisional
@@ -81,6 +88,13 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 		}
 		key := sessionKey(provider.ProviderID, provider.AssignedID)
 		if provider.AuthState != pool.AuthBearerValidated {
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		if !s.trustedRoutingCustodyEligible(sweepCtx, provider.ProviderID) {
 			s.rewardsTrustSweepFailures.Delete(key)
 			if provider.Tier == pool.TierTrusted {
 				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
@@ -151,6 +165,47 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 			Msg("rewards trust tier reconciliation recovered")
 	}
 	s.rewardsTrustStoreFailures = 0
+}
+
+func (s *Server) trustedRoutingCustodyEligible(ctx context.Context, providerID string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.tokens == nil {
+		return true
+	}
+	history, ok := s.tokens.(providerTokenCustodyHistoryStore)
+	if !ok {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider token custody history unavailable; keeping rewards-trusted routing provisional")
+		return false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
+	revoked, err := history.HasRevokedTokenForProvider(lookupCtx, providerID)
+	cancel()
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider token custody history lookup failed; keeping rewards-trusted routing provisional")
+		return false
+	}
+	if !revoked {
+		return true
+	}
+	identities, ok := s.bootstrapTokens.(admissionIdentityStore)
+	if !ok {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without durable admission identity store; keeping rewards-trusted routing provisional")
+		return false
+	}
+	identityCtx, identityCancel := context.WithTimeout(ctx, rewardsTrustLookupTimeout)
+	_, active, err := identities.LookupAdmissionIdentityPubkey(identityCtx, providerID)
+	identityCancel()
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("durable admission identity lookup failed; keeping rewards-trusted routing provisional")
+		return false
+	}
+	if !active {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without active durable admission identity; keeping rewards-trusted routing provisional")
+		return false
+	}
+	return true
 }
 
 func (s *Server) clearRewardsTrustLookupFailure(providerID, assignedID string) {
