@@ -731,6 +731,34 @@ func TestRegistrySetEarnedTrustTierDoesNotUnpinOperatorProvider(t *testing.T) {
 	}
 }
 
+func TestRegistrySetEarnedTrustTierRequiresBearerValidatedForTrusted(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID: "self-minted-1",
+		AssignedID: "session-1",
+		Tier:       TierProvisional,
+		State:      StateReady,
+		AuthState:  AuthSelfMinted,
+	}, nil)
+	registry.Register(&Provider{
+		ProviderID: "bearer-1",
+		AssignedID: "session-2",
+		Tier:       TierProvisional,
+		State:      StateReady,
+		AuthState:  AuthBearerValidated,
+	}, nil)
+
+	if _, ok := registry.SetEarnedTrustTier("self-minted-1", TierTrusted); ok {
+		t.Fatal("self-minted session was promoted to trusted")
+	}
+	if got, ok := registry.Resolve("self-minted-1", "session-1"); !ok || got.Tier != TierProvisional {
+		t.Fatalf("self-minted tier = %s ok=%v, want provisional", got.Tier, ok)
+	}
+	if updated, ok := registry.SetEarnedTrustTier("bearer-1", TierTrusted); !ok || updated.Tier != TierTrusted {
+		t.Fatalf("bearer trusted promotion = %s ok=%v, want trusted", updated.Tier, ok)
+	}
+}
+
 // TestRecordCanaryResultFloorSparesSoleProvider verifies the FR-CAN22
 // last-provider floor: a sole routing-eligible provider that fails canaries past
 // the threshold is NOT removed — it stays ready/routable, keeps accruing the

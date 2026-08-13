@@ -202,6 +202,9 @@ type Server struct {
 	// concurrently by /healthz, hence atomic.
 	trustSweepFailures     int
 	trustAuthorityDegraded atomic.Bool
+	// rewardsTrustSweepFailures bounds fail-open trusted routing quota when the
+	// rewards trust store becomes unreadable after trusted sessions are live.
+	rewardsTrustSweepFailures int
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -729,7 +732,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	// strict autotune evidence TTL checks run only when the hello gate is enabled
 	// and its catalog+evidence dependencies are wired. Both use the same 30s
 	// sweep cadence.
-	if (s.providerTrust != nil || (s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
+	if (s.providerTrust != nil || s.rewardsTrust != nil || (s.autotuneCatalog != nil && s.autotuneEvidence != nil)) && registry != nil {
 		go s.runTrustRevalidationLoop()
 	}
 	return s

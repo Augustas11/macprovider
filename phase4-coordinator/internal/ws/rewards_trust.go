@@ -14,6 +14,7 @@ type ProviderRewardsTrustTierStore interface {
 
 const rewardsTrustTierTrusted = "trusted"
 const rewardsTrustLookupTimeout = 500 * time.Millisecond
+const rewardsTrustSweepDegradedThreshold = 3
 
 func (s *Server) routingAdmissionTier(ctx context.Context, auth providerAuth, providerID string, pinned bool) pool.Tier {
 	if pinned {
@@ -58,4 +59,67 @@ func (s *Server) ApplyRewardsTrustTier(providerID, tier string) {
 		Str("routing_tier", string(updated.Tier)).
 		Str("rewards_trust_tier", tier).
 		Msg("live provider routing tier reconciled from rewards trust")
+}
+
+func (s *Server) runRewardsTrustTierReconciliationSweep() {
+	if s == nil || s.pool == nil || s.rewardsTrust == nil {
+		return
+	}
+	var eligible, succeeded, failed int
+	for _, provider := range s.pool.Snapshot() {
+		if provider.Tier == pool.TierPinned {
+			continue
+		}
+		if _, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); !ok {
+			continue
+		}
+		if provider.AuthState != pool.AuthBearerValidated {
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		eligible++
+		lookupCtx, cancel := context.WithTimeout(context.Background(), rewardsTrustLookupTimeout)
+		tier, err := s.rewardsTrust.ProviderTrustTier(lookupCtx, provider.ProviderID)
+		cancel()
+		if err != nil {
+			failed++
+			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("rewards trust tier reconciliation failed")
+			continue
+		}
+		succeeded++
+		routingTier := pool.TierProvisional
+		if strings.EqualFold(strings.TrimSpace(tier), rewardsTrustTierTrusted) {
+			routingTier = pool.TierTrusted
+		}
+		if provider.Tier != routingTier {
+			s.ApplyRewardsTrustTier(provider.ProviderID, string(routingTier))
+		}
+	}
+	if eligible == 0 {
+		s.rewardsTrustSweepFailures = 0
+		return
+	}
+	if failed > 0 && succeeded == 0 {
+		s.rewardsTrustSweepFailures++
+		s.log.Warn().
+			Int("eligible_sessions", eligible).
+			Int("consecutive_failures", s.rewardsTrustSweepFailures).
+			Msg("rewards trust tier reconciliation skipped; trust store unavailable")
+		if s.rewardsTrustSweepFailures >= rewardsTrustSweepDegradedThreshold {
+			for _, provider := range s.pool.Snapshot() {
+				if provider.Tier == pool.TierTrusted {
+					s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+				}
+			}
+		}
+		return
+	}
+	if s.rewardsTrustSweepFailures > 0 {
+		s.log.Info().
+			Int("prior_consecutive_failures", s.rewardsTrustSweepFailures).
+			Msg("rewards trust tier reconciliation recovered")
+	}
+	s.rewardsTrustSweepFailures = 0
 }

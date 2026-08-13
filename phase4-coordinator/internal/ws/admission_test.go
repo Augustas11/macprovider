@@ -111,6 +111,56 @@ func TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust(t *testing.T) {
 	}
 }
 
+func TestRewardsTrustReconciliationDemotesLiveTrustedProvider(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierProvisional)},
+	}))
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("reconciled tier = %s, want provisional", got.Tier)
+	}
+}
+
+func TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierProvisional,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthSelfMinted,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+		tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+	}))
+	s.sessions.Store(sessionKey("provider-a", "session-a"), &providerSession{})
+
+	s.runRewardsTrustTierReconciliationSweep()
+
+	got, ok := registry.Resolve("provider-a", "session-a")
+	if !ok {
+		t.Fatal("provider disappeared")
+	}
+	if got.Tier != pool.TierProvisional {
+		t.Fatalf("non-bearer reconciled tier = %s, want provisional", got.Tier)
+	}
+}
+
 func TestAdmissionManagerPendingReservationsEnforcePoolCap(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	adm := NewAdmissionManager(config.AdmissionConfig{
@@ -298,11 +348,11 @@ type fakeRewardsTrustStore struct {
 	err   error
 }
 
-func (f fakeRewardsTrustStore) ProviderTrustTier(context.Context, string) (string, error) {
+func (f fakeRewardsTrustStore) ProviderTrustTier(_ context.Context, providerID string) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
-	return f.tiers["provider-a"], nil
+	return f.tiers[providerID], nil
 }
 
 func (f failingAdmissionStateStore) LoadAdmissionState(context.Context) (AdmissionState, error) {

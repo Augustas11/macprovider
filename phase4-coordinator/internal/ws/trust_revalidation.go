@@ -76,6 +76,7 @@ func (s *Server) runTrustRevalidationLoop() {
 // resets the counter and clears the degraded signal.
 func (s *Server) runTrustRevalidationSweep() {
 	s.runAdmissionEvidenceRevalidationSweep()
+	s.runRewardsTrustTierReconciliationSweep()
 	if s.providerTrust == nil {
 		return
 	}

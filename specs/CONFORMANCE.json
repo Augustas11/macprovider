@@ -1235,12 +1235,16 @@
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetEarnedTrustTier",
         "phase4-coordinator/internal/ws/admission.go:func (a *AdmissionManager) requestQuotaLimit",
         "phase4-coordinator/internal/ws/rewards_trust.go:routingAdmissionTier",
+        "phase4-coordinator/internal/ws/rewards_trust.go:runRewardsTrustTierReconciliationSweep",
         "phase4-coordinator/internal/rewards/unlock.go:func (r *Runner) notifyTrustTierChanged"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/admission_test.go::TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault",
         "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust",
+        "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesLiveTrustedProvider",
+        "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession",
         "phase4-coordinator/internal/pool/provider_test.go::TestRegistrySetEarnedTrustTierDoesNotUnpinOperatorProvider",
+        "phase4-coordinator/internal/pool/provider_test.go::TestRegistrySetEarnedTrustTierRequiresBearerValidatedForTrusted",
         "phase4-coordinator/internal/config/config_test.go::TestAdmissionTrustedQuotaDefaultUnlimitedAndRejectsNegative"
       ],
       "journeys": [],

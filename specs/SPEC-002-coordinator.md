@@ -10,8 +10,10 @@
   provisional Sybil quota by default (`admission.trusted_quota_per_hour: 0`
   means unlimited) while remaining distinct from operator-pinned providers.
   Rewards demotion back to `provisional` MUST revoke the trusted routing
-  quota for live sessions. Tokenless or mismatched-auth sessions remain
-  `provisional` even if they claim a trusted provider ID.
+  quota for live sessions, either from rewards-runner callbacks or the
+  bounded active-session trust reconciliation sweep. Tokenless or
+  mismatched-auth sessions remain `provisional` even if they claim a trusted
+  provider ID.
 
 **Change log v1.5.6 (2026-07-29, B1 — per-request provider TTFT/decode persistence):**
 - `request_log` gains nullable `ttft_ms` and `decode_ms` columns. New
@@ -1338,7 +1340,7 @@ The coordinator recognizes four admission tiers:
 | Tier | Source | Admission | Routing weight |
 |---|---|---|---|
 | Pinned | `config.providers[]` | Operator pre-approved | 1.0 |
-| Trusted | durable rewards trust state (`provider_emission_state.trust_tier='trusted'`) plus matching bearer-authenticated provider identity | Automatic after earned rewards trust; revoked on rewards demotion | 1.0 |
+| Trusted | durable rewards trust state (`provider_emission_state.trust_tier='trusted'`) plus matching bearer-authenticated provider identity | Automatic after earned rewards trust; revoked on rewards demotion or bounded reconciliation sweep | 1.0 |
 | Provisional | Unknown `provider_id` | Auto on hello, rate-limited | 0.3 (configurable) |
 | Rejected | `rejected_providers` table | Never. WS close 4009. | N/A |
 
@@ -1362,8 +1364,12 @@ The coordinator recognizes four admission tiers:
   positive operator value MAY cap trusted providers with the same
   sliding-hour semantics. Rewards trust demotion MUST move live
   non-pinned sessions back to the provisional routing tier so this
-  elevated quota is revoked. Pinned providers remain unlimited and are
-  not demoted by rewards trust changes.
+  elevated quota is revoked. The coordinator MUST run bounded
+  active-session reconciliation against the durable rewards trust store
+  whenever DB-backed trusted admission lookup is enabled, so DB-backed
+  demotions still revoke live trusted quota if the rewards runner callback
+  is unavailable. Pinned providers remain unlimited and are not demoted by
+  rewards trust changes.
 
 **FR-P17. Provisional admission persistence.**
 Provisional admissions are persisted to SQLite:
@@ -4253,9 +4259,10 @@ token, provider admission returns `tier: "trusted"`, `/poolz` shows
 but no matching bearer-authenticated identity, admission remains
 `tier: "provisional"`. When rewards demotes the provider to
 `trust_tier='provisional'`, the live non-pinned pool entry changes back
-to `tier: "provisional"` and the provisional request quota applies.
+to `tier: "provisional"` through the live callback or bounded trust
+reconciliation sweep, and the provisional request quota applies.
 
-Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust'`
+Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession'`
 
 **AC-14. admin/reject.**
 Connect a provisional provider. `POST /admin/reject/{provider_id}`.

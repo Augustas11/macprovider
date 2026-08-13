@@ -1197,6 +1197,9 @@ func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, b
 	default:
 		return Provider{}, false
 	}
+	if tier == TierTrusted && p.AuthState != AuthBearerValidated {
+		return Provider{}, false
+	}
 	p.Tier = tier
 	cp := *p
 	cp.conn = nil
