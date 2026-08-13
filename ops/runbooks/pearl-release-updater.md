@@ -117,7 +117,7 @@ liveness follows the currently ready/routable provider fleet and no longer
 requires the expected-fleet file's static provider count or model set; legacy
 rollback and qualification checks remain scoped to their explicit protected
 fleet. The updater pins that complete runtime, service, and timer as rollout
-authority `issue-825-canary-fleet-r6` at source commit `ea499964818b9541173860f97166db65bfbbed91`;
+authority `issue-825-canary-fleet-r6` at source commit `9eba07d1d16d593e2a6449c8549f18d8fc8694f8`;
 the default `PEARL_UPDATER_BUYER_CANARY_MODE=required` posture fails `--plan`
 on any SHA drift, missing credential, invalid protected-fleet expected-fleet
 document, absent reviewed enable gate, active emergency-disable sentinel,
