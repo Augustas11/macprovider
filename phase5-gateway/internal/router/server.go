@@ -90,6 +90,7 @@ func (s *Server) readStore() ReadStore {
 type Store interface {
 	storage.AuthStore
 	storage.UsageStore
+	storage.WalletSessionStore
 	storage.AuditStore
 	storage.FeedbackStore
 	storage.CapacityStore
@@ -107,6 +108,10 @@ type ReadStore interface {
 	storage.ExplorerStore
 	DailyUsage(ctx context.Context, accountID, windowDate string) (int64, int64, error)
 	ListAPIKeys(ctx context.Context, accountID string) ([]storage.APIKeySummary, error)
+	ListWalletSessions(ctx context.Context, accountID string) ([]storage.WalletSession, error)
+	GetWalletSession(ctx context.Context, accountID, sessionID string) (storage.WalletSession, error)
+	WalletSessionUsage(ctx context.Context, accountID, sessionID string) (storage.WalletSessionUsage, error)
+	ListWalletSessionUsageDetails(ctx context.Context, accountID, sessionID string, limit int, cursor string, since, until time.Time) ([]storage.WalletSessionUsageDetail, string, error)
 	GetCapacityTier(ctx context.Context) (storage.CapacityTier, error)
 }
 
@@ -210,6 +215,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/auth/demo-session", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleDemoSession)))
 	mux.HandleFunc("/auth/api-keys", s.handleAPIKeys)
 	mux.HandleFunc("/auth/api-keys/", s.handleAPIKeyAction)
+	if s.cfg.Auth.WalletSessions.Enabled {
+		mux.Handle("/auth/wallet-sessions/challenges", s.withWalletSessionCORS([]string{http.MethodPost}, http.HandlerFunc(s.handleWalletSessionChallenges)))
+		mux.Handle("/auth/wallet-sessions", s.withWalletSessionCORS([]string{http.MethodGet, http.MethodPost}, http.HandlerFunc(s.handleWalletSessions)))
+		mux.Handle("/auth/wallet-sessions/", s.withWalletSessionCORS([]string{http.MethodGet, http.MethodDelete}, http.HandlerFunc(s.handleWalletSessionItem)))
+	}
 	mux.HandleFunc("/account", s.handleAccount)
 	mux.HandleFunc("/docs", s.handleDocs)
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
@@ -304,8 +314,21 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
-	if _, ok := s.authenticateAny(w, r); !ok {
+	authn, ok := s.authenticateAny(w, r)
+	if !ok {
 		return
+	}
+	if authn.WalletSession != nil {
+		s.setWalletSessionHeaders(w.Header())
+		if !s.requireEmptyWalletSessionBody(w, r) {
+			return
+		}
+		if _, ok := s.requireWalletSessionSignature(w, r, "/v1/models", nil); !ok {
+			return
+		}
+		if !s.admitWalletSessionMetadata(w, r, authn.WalletSession, "/v1/models") {
+			return
+		}
 	}
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/models", nil)
 	if err != nil {
@@ -338,6 +361,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["tier1_disclosure"] = disclosure
+	if authn.WalletSession != nil {
+		filterModelsForWalletSession(body, walletModelAllowlist(authn.WalletSession.Session))
+	}
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
 }
@@ -938,10 +964,12 @@ var gatewayRetryableByCode = map[string]bool{
 	// rate_limit_exceeded code left true only because the round-3 revert
 	// didn't name it; runbook item 20 reverted it to false alongside its
 	// three siblings — see gatewayPermanentCodes.)
-	"account_request_rate_exceeded": true,
-	"account_concurrency_exceeded":  true,
-	"demo_concurrency_exceeded":     true,
-	"quota_exhausted":               true,
+	"account_request_rate_exceeded":   true,
+	"account_concurrency_exceeded":    true,
+	"demo_concurrency_exceeded":       true,
+	"quota_exhausted":                 true,
+	"wallet_session_rate_limited":     true,
+	"wallet_session_storage_conflict": true,
 	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
 	// all three ("paused"/"closed ... while capacity catches up") already
 	// promises the buyer this resolves with time; the code must agree.
@@ -972,9 +1000,45 @@ var gatewayPermanentCodes = map[string]bool{
 	"duplicate_request_id": true, "invalid_conversation_tag": true,
 	"invalid_feedback_source": true, "invalid_feedback": true, "invalid_rating": true,
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
-	"invalid_limit": true, "api_key_lookup_failed": true,
-	"request_content_encoding_unsupported": true,
-	"unsupported_content_shape":            true,
+	"invalid_limit": true, "invalid_cursor": true, "api_key_lookup_failed": true,
+	"ambiguous_credentials":                    true,
+	"request_content_encoding_unsupported":     true,
+	"unsupported_content_shape":                true,
+	"wallet_account_auth_required":             true,
+	"invalid_wallet_session":                   true,
+	"wallet_algorithm_unsupported":             true,
+	"wallet_canonical_invalid":                 true,
+	"wallet_challenge_consumed":                true,
+	"wallet_challenge_expired":                 true,
+	"wallet_identity_conflict":                 true,
+	"wallet_signature_invalid":                 true,
+	"wallet_session_admission_failed":          true,
+	"wallet_session_active_cap_exceeded":       true,
+	"wallet_session_body_forbidden":            true,
+	"wallet_session_cap_invalid":               true,
+	"wallet_session_challenge_failed":          true,
+	"wallet_session_duplicate_request":         true,
+	"wallet_session_expiry_invalid":            true,
+	"wallet_session_expired":                   true,
+	"wallet_session_exhausted":                 true,
+	"wallet_session_inactive":                  true,
+	"wallet_session_issuance_failed":           true,
+	"wallet_session_load_failed":               true,
+	"wallet_session_lookup_failed":             true,
+	"wallet_session_model_not_allowed":         true,
+	"wallet_session_not_found":                 true,
+	"wallet_session_query_forbidden":           true,
+	"wallet_session_replay_capacity_exhausted": true,
+	"wallet_session_replay_mismatch":           true,
+	"wallet_session_request_cap_exceeded":      true,
+	"wallet_session_request_id_required":       true,
+	"wallet_session_revoked":                   true,
+	"wallet_session_scope_mismatch":            true,
+	"wallet_session_signature_invalid":         true,
+	"wallet_session_signature_stale":           true,
+	"wallet_session_store_failed":              true,
+	"wallet_sessions_disabled":                 true,
+	"wallet_account_mismatch":                  true,
 	// Round-3 SECURITY MEDIUM revert: round-2 classified these three true
 	// as part of the rate_limit_exceeded family, but unlike
 	// account_request_rate_exceeded/account_concurrency_exceeded/

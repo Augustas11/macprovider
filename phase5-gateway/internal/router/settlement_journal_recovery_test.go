@@ -99,6 +99,78 @@ func seedJournalReservation(t *testing.T, store *sqlite.Store, accountID, reques
 	}
 }
 
+func seedJournalWalletReservation(t *testing.T, store *sqlite.Store, accountID, sessionID, requestID string, tokens int64) {
+	t.Helper()
+	if err := store.CreateAccount(context.Background(), storage.Account{
+		AccountID: accountID, Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedNow(),
+	}); err != nil && !strings.Contains(err.Error(), "UNIQUE") {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	nonce := []byte("nonce-" + sessionID)
+	if err := store.StoreWalletSessionChallenge(context.Background(), storage.WalletSessionChallenge{
+		NonceHash:          nonce,
+		AccountID:          accountID,
+		WalletNamespace:    "ed25519",
+		WalletFingerprint:  "wallet-" + sessionID,
+		Purpose:            "wallet-session-registration-v1",
+		Audience:           "macprovider.test",
+		RequestedExpiresAt: fixedNow().Add(time.Hour),
+		PerRequestTokenCap: tokens,
+		TotalTokenCap:      tokens * 10,
+		ModelAllowlistJSON: `["model-a"]`,
+		SessionPublicKey:   []byte("session-public-key"),
+		CreatedAt:          fixedNow(),
+		ExpiresAt:          fixedNow().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreWalletSessionChallenge: %v", err)
+	}
+	if _, err := store.RegisterWalletSession(context.Background(), storage.WalletSessionRegistrationRequest{
+		ChallengeNonceHash:    nonce,
+		SessionID:             sessionID,
+		AccountID:             accountID,
+		WalletNamespace:       "ed25519",
+		WalletFingerprint:     "wallet-" + sessionID,
+		Audience:              "macprovider.test",
+		RequestedExpiresAt:    fixedNow().Add(time.Hour),
+		PerRequestTokenCap:    tokens,
+		TotalTokenCap:         tokens * 10,
+		ModelAllowlistJSON:    `["model-a"]`,
+		SessionPublicKey:      []byte("session-public-key"),
+		BearerHash:            []byte("bearer-" + sessionID),
+		BearerKeyID:           "k1",
+		VerificationPublicKey: []byte("verify-" + sessionID),
+		CreatedAt:             fixedNow(),
+		MaxActivePerAccount:   10,
+		MaxActivePerWallet:    10,
+	}); err != nil {
+		t.Fatalf("RegisterWalletSession: %v", err)
+	}
+	if _, err := store.AdmitWalletSessionInference(context.Background(), storage.WalletSessionAdmissionRequest{
+		SessionID:       sessionID,
+		AccountID:       accountID,
+		RequestID:       requestID,
+		Method:          http.MethodPost,
+		CanonicalRoute:  "/v1/chat/completions",
+		ModelID:         "model-a",
+		WindowDate:      journalTestWindow,
+		RequestedTokens: tokens,
+		DailyQuota:      100000,
+		Replay: storage.WalletSessionReplayMaterial{
+			SessionID:           sessionID,
+			RequestID:           requestID,
+			Method:              http.MethodPost,
+			CanonicalRoute:      "/v1/chat/completions",
+			SemanticHeadersHash: []byte("headers"),
+			RawBodyHash:         []byte("body"),
+			BodyBytes:           128,
+		},
+		CreatedAt: fixedNow(),
+		ExpiresAt: fixedNow().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("AdmitWalletSessionInference: %v", err)
+	}
+}
+
 func journalSettleEffect(accountID, requestID string) journal.Record {
 	return journal.Record{
 		AccountID:        accountID,
@@ -903,6 +975,46 @@ func TestSettlementJournal_ConflictPathReleasesActiveHold(t *testing.T) {
 	// The money row stays operator-visible/unresolved: still unsealed.
 	if scan, _ := jnl.Scan(); len(scan.Unsealed) != 1 {
 		t.Fatalf("Unsealed=%d want 1 (conflict must not seal)", len(scan.Unsealed))
+	}
+}
+
+func TestSettlementJournal_WalletConflictPathReleasesAccountHold(t *testing.T) {
+	srv, store, dbPath, jnl, _ := newJournalHarness(t, nil)
+	seedJournalWalletReservation(t, store, "acct_wallet_confhold", "ws_confhold", "req-wallet-confhold", 100)
+	rec := journalSettleEffect("acct_wallet_confhold", "req-wallet-confhold")
+	rec.WalletSessionID = "ws_confhold"
+	if err := jnl.WriteEffect(rec); err != nil {
+		t.Fatalf("WriteEffect: %v", err)
+	}
+	if err := store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: "req-wallet-confhold", AccountID: "acct_wallet_confhold",
+		WindowDate: rec.WindowDate, PromptTokens: rec.PromptTokens,
+		CompletionTokens: rec.CompletionTokens + 1, TotalTokens: rec.TotalTokens + 1,
+		TokenSource: rec.TokenSource, Outcome: rec.Outcome, CreatedAt: fixedNow(),
+	}); err != nil {
+		t.Fatalf("EnsureUsageEvent seed: %v", err)
+	}
+
+	summary, err := srv.RecoverSettlementJournal(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RecoverSettlementJournal: %v", err)
+	}
+	if summary.Retried != 1 {
+		t.Fatalf("summary=%+v want the conflict to enter the retry path", summary)
+	}
+	snap := gatewaySettlementSnapshot(t, dbPath, "acct_wallet_confhold")
+	if snap.activeRows != 0 || snap.activeReserved != 0 {
+		t.Fatalf("wallet conflict path left the account hold active: %+v", snap)
+	}
+	usage, err := store.WalletSessionUsage(context.Background(), "acct_wallet_confhold", "ws_confhold")
+	if err != nil {
+		t.Fatalf("WalletSessionUsage: %v", err)
+	}
+	if usage.ReservedTokens != 0 || usage.HeldTokens != 0 {
+		t.Fatalf("wallet usage=%+v want no active or held exposure after conflict refund", usage)
+	}
+	if scan, _ := jnl.Scan(); len(scan.Unsealed) != 1 {
+		t.Fatalf("Unsealed=%d want 1 (wallet conflict must not seal)", len(scan.Unsealed))
 	}
 }
 

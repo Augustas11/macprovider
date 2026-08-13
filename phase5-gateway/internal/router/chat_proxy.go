@@ -43,9 +43,10 @@ type tokenUsage struct {
 }
 
 type usageSubject struct {
-	AccountID     string
-	DemoIdentity  string
-	DemoTokenHash string
+	AccountID       string
+	DemoIdentity    string
+	DemoTokenHash   string
+	WalletSessionID string
 }
 
 const (
@@ -187,6 +188,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		dailyQuota = s.cfg.Quotas.DemoDailyTokensPerIP
 		maxAllowed = s.cfg.Limits.DemoMaxTokensPerRequest
+	} else if authn.WalletSession != nil {
+		subject = usageSubject{AccountID: authn.WalletSession.Session.AccountID, WalletSessionID: authn.WalletSession.Session.SessionID}
 	} else {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
@@ -211,6 +214,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if int64(len(body)) > s.cfg.Limits.RequestBodyBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return
+	}
+	originalBody := body
+	if authn.WalletSession != nil {
+		if _, ok := s.requireWalletSessionSignature(w, r, walletCanonicalRouteForRequest(r), originalBody); !ok {
+			return
+		}
 	}
 	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
 		writeSpec019PreflightError(
@@ -293,6 +302,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// falls through to the durable duplicate_request_id 409 below.
 	var dedupeFingerprint string
 	if dedupeWindow := s.idlessDedupeWindow(); dedupeWindow > 0 &&
+		authn.WalletSession == nil &&
 		requestIDClass(r) == retry503RequestIDClassGatewayGenerated &&
 		strings.TrimSpace(r.Header.Get("Idempotency-Key")) == "" {
 		dedupeFingerprint = idlessRequestFingerprint(
@@ -419,18 +429,25 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	window := s.now().UTC().Format("2006-01-02")
 	reservationMaxAge := time.Duration(s.cfg.Quotas.ReservationMaxAgeHours) * time.Hour
-	decision, err := s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
-		AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
-		RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
-		CreatedAt: s.now(), ExpiresAt: s.now().Add(reservationMaxAge),
-	})
+	var decision storage.QuotaDecision
+	var sessionDecision storage.WalletSessionAdmissionDecision
+	if authn.WalletSession != nil {
+		sessionDecision, err = s.admitWalletSessionInference(r, authn.WalletSession, originalBody, model, reservationTokens, dailyQuota, window, s.now().Add(reservationMaxAge))
+		decision = sessionDecision.AccountQuota
+	} else {
+		decision, err = s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
+			AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
+			RequestedTokens: reservationTokens, DailyQuota: dailyQuota,
+			CreatedAt: s.now(), ExpiresAt: s.now().Add(reservationMaxAge),
+		})
+	}
 	if errors.Is(err, storage.ErrQuotaExceeded) {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
 		return
 	}
 	if err != nil && decision.Admitted {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 	}
 	// Belt-and-suspenders: if the store returned an unexpected error but the
 	// decision already shows quota exceeded, surface 429 rather than 500.
@@ -441,7 +458,25 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrReservationExists) {
+			if authn.WalletSession != nil {
+				s.recordWalletSessionAudit(r.Context(), subject.AccountID, subject.WalletSessionID, "wallet_session_rejected", "gateway", map[string]any{
+					"request_id":      requestID(r),
+					"canonical_route": walletCanonicalRouteForRequest(r),
+					"reason":          "storage_conflict",
+				})
+				writeError(w, http.StatusConflict, "invalid_request_error", "wallet_session_storage_conflict", "Wallet-session state changed concurrently")
+				return
+			}
 			writeError(w, http.StatusConflict, "invalid_request_error", "duplicate_request_id", "Request ID already has an active quota reservation")
+			return
+		}
+		if authn.WalletSession != nil {
+			s.recordWalletSessionAudit(r.Context(), subject.AccountID, subject.WalletSessionID, "wallet_session_rejected", "gateway", map[string]any{
+				"request_id":      requestID(r),
+				"canonical_route": walletCanonicalRouteForRequest(r),
+				"reason":          walletSessionAdmissionAuditReason(err),
+			})
+			s.writeWalletAdmissionError(w, err, sessionDecision)
 			return
 		}
 		// Defensive cleanup: if the reservation INSERT committed before the
@@ -449,7 +484,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// If no row was written, RefundReservation is a safe no-op
 		// (returns ErrReservationNotFound which we ignore here).
 		if !decision.Admitted {
-			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+			s.refundWalletAwareReservation(subject, requestID(r))
 		}
 		// If the error is a client disconnect, avoid writing a response to a
 		// dead connection — the buyer already gave up.
@@ -486,7 +521,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: s.now(), ExpiresAt: s.now().Add(requestBound + time.Minute),
 	})
 	if errors.Is(concurrencyErr, storage.ErrQuotaExceeded) {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 		slog.Warn("chat completion concurrency limited",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -500,7 +535,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", concurrencyErrCode, concurrencyErrMsg)
 		return
 	} else if concurrencyErr != nil {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 		if errors.Is(concurrencyErr, context.Canceled) || errors.Is(concurrencyErr, context.DeadlineExceeded) {
 			return
 		}
@@ -521,7 +556,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
-				_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+				s.refundWalletAwareReservation(subject, requestID(r))
 				writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
 				return
 			}
@@ -585,8 +620,31 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return upReq, nil
 	}
+	if authn.WalletSession != nil {
+		if err := s.store.ArmWalletSessionDispatch(r.Context(), storage.WalletSessionDispatchArm{
+			SessionID: authn.WalletSession.Session.SessionID, AccountID: subject.AccountID,
+			RequestID: requestID(r), CanonicalRoute: walletCanonicalRouteForRequest(r), ArmedAt: s.now().UTC(),
+		}); err != nil {
+			s.refundWalletAwareReservation(subject, requestID(r))
+			s.recordWalletSessionAudit(r.Context(), subject.AccountID, subject.WalletSessionID, "wallet_session_rejected", "gateway", map[string]any{
+				"request_id":      requestID(r),
+				"canonical_route": walletCanonicalRouteForRequest(r),
+				"reason":          "dispatch_fence",
+			})
+			s.writeWalletAdmissionError(w, err, sessionDecision)
+			return
+		}
+	}
 	timing.markCoordinatorStart(s.now())
 	resp, retryExhausted, priorProviderDispatch, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
+	if authn.WalletSession != nil && err == nil && resp != nil {
+		if markErr := s.store.MarkWalletSessionDispatched(context.Background(), authn.WalletSession.Session.SessionID, requestID(r), s.now().UTC()); markErr != nil {
+			_ = resp.Body.Close()
+			_ = s.store.HoldWalletSessionReservation(context.Background(), subject.AccountID, subject.WalletSessionID, requestID(r), s.now().UTC())
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Settlement failed")
+			return
+		}
+	}
 	if err == nil && resp != nil && structuredStreaming {
 		// #760 audit (code lane): the retry loop returns its last retryable
 		// 502/503 with err == nil when the admission budget expires during
@@ -615,7 +673,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeStructuredOutputTimeoutSSE(w, requestID(r))
 			return
 		}
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
@@ -820,7 +878,7 @@ func (b *coord503PrefixErrBody) Close() error { return nil }
 func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, window string) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
@@ -1069,7 +1127,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	invalidReportedUsage := false
 	terminalStructuredErrorCode := ""
 	refundTerminalStructuredError := func() {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 	}
 	settleReported := func(outcome string) {
 		usage := *reported
@@ -1685,7 +1743,7 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 			return
 		}
 	}
-	if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+	if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 		slog.Error("gateway no-provider refund failed after audit row",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -1750,7 +1808,7 @@ func (s *Server) recordRefundedCoordinatorAudit(w http.ResponseWriter, r *http.R
 			"outcome", outcome,
 			"error", err,
 		)
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 		return false
 	}
@@ -1764,7 +1822,7 @@ func (s *Server) settleOrRefundPreStreamUpstreamError(w http.ResponseWriter, r *
 	if !s.recordRefundedCoordinatorAudit(w, r, subject, window, outcome) {
 		return false
 	}
-	if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+	if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 		slog.Error("gateway pre-stream upstream-error refund failed after audit row",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -1793,7 +1851,7 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
 	switch finality.Action {
 	case settlementFinalityLegacy, settlementFinalityRefund:
-		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway settlement refund failed before provider error response",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -2082,7 +2140,7 @@ func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, pr
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
 	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
 		slog.Error("gateway settlement failed before response", "request_id", requestID(r), "account_id", subject.AccountID, "source", source, "outcome", outcome, "error", err)
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 		return false
 	}
@@ -2121,7 +2179,7 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 		)
 		return true
 	case settlementFinalityRefund:
-		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway settlement refund failed before response",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -2168,7 +2226,7 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 	case settlementFinalityDebit:
 		s.markStreamingSettlementHoldForReconciliation(r, subject, finality)
 	case settlementFinalityRefund:
-		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway streaming settlement refund failed after coordinator receipt finality",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -2204,7 +2262,7 @@ func gatewayInvalidResponseOverridesCoordinatorFinality(outcome string) bool {
 func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
 	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.store.MarkReservationSettlementHold(holdCtx, subject.AccountID, requestID(r)); err != nil {
+	if err := s.holdWalletAwareReservation(holdCtx, subject, requestID(r)); err != nil {
 		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
 			slog.Info("gateway skipped streaming settlement hold after coordinator finality because reservation is not active",
 				"request_id", requestID(r),
@@ -2222,9 +2280,21 @@ func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, s
 			"settlement_reason", finality.Reason,
 			"error", err,
 		)
-		refundCtx, refundCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer refundCancel()
-		if refundErr := s.store.RefundReservation(refundCtx, subject.AccountID, requestID(r), s.now().Unix()); refundErr != nil && !errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
+		if subject.WalletSessionID != "" {
+			if quarantineErr := s.store.QuarantineWalletSessionReservation(context.Background(), subject.AccountID, subject.WalletSessionID, requestID(r), s.now().UTC()); quarantineErr != nil &&
+				!errors.Is(quarantineErr, storage.ErrReservationNotFound) && !errors.Is(quarantineErr, storage.ErrReservationTerminal) {
+				slog.Error("gateway failed to quarantine wallet-session reservation after settlement hold marker failure",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"wallet_session_id", subject.WalletSessionID,
+					"settlement_outcome", finality.Outcome,
+					"settlement_reason", finality.Reason,
+					"error", quarantineErr,
+				)
+			}
+			return
+		}
+		if refundErr := s.refundWalletAwareReservation(subject, requestID(r)); refundErr != nil && !errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
 			slog.Error("gateway failed to refund streaming reservation after settlement hold marker failure",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -2271,7 +2341,7 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 			"settlement_fallback_deadline_unix_ms", deadline.UnixMilli(),
 		)
 	}
-	if err := s.store.MarkReservationSettlementHold(ctx, subject.AccountID, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) && !errors.Is(err, storage.ErrReservationTerminal) {
+	if err := s.holdWalletAwareReservation(ctx, subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) && !errors.Is(err, storage.ErrReservationTerminal) {
 		slog.Error("gateway streaming settlement hold marker failed",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -2485,6 +2555,7 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		Outcome:          outcome,
 		DemoIdentity:     subject.DemoIdentity,
 		DemoTokenHash:    subject.DemoTokenHash,
+		WalletSessionID:  subject.WalletSessionID,
 	}); journalErr != nil {
 		// FAIL-OPEN, deliberately. The buyer already has the bytes; refusing
 		// to settle because the journal is unavailable would turn a
@@ -2564,7 +2635,19 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 				"settle_error", err.Error(),
 				"fallback_error", fallbackErr.Error(),
 			)
-			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+			if subject.WalletSessionID != "" {
+				if quarantineErr := s.store.QuarantineWalletSessionReservation(context.Background(), subject.AccountID, subject.WalletSessionID, requestID(r), s.now().UTC()); quarantineErr != nil &&
+					!errors.Is(quarantineErr, storage.ErrReservationNotFound) && !errors.Is(quarantineErr, storage.ErrReservationTerminal) {
+					slog.Error("gateway failed to quarantine wallet-session reservation after SPEC-006 fallback insert failure",
+						"request_id", requestID(r),
+						"account_id", subject.AccountID,
+						"wallet_session_id", subject.WalletSessionID,
+						"error", quarantineErr.Error(),
+					)
+				}
+			} else {
+				_ = s.refundWalletAwareReservation(subject, requestID(r))
+			}
 			return
 		}
 		// Fallback insert succeeded (or the row already existed via
@@ -2606,7 +2689,12 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// IS still active (e.g., settleRequest failed on a transient
 		// DB error, leaving the reservation row in 'active' state),
 		// the call releases the quota hold.
-		refundErr := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		var refundErr error
+		if subject.WalletSessionID != "" {
+			refundErr = s.sealWalletSessionUsageEvent(subject, requestID(r), prompt+completion)
+		} else {
+			refundErr = s.refundWalletAwareReservation(subject, requestID(r))
+		}
 		// SEAL (#763): the durable bill exists (usage_events) and the hold is
 		// released, so the effect is complete and must never be re-driven.
 		//
@@ -2685,6 +2773,13 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 	if subject.DemoIdentity != "" {
 		return s.store.SettleDemoReservation(context.Background(), settlement, storage.DemoUsageEvent{
 			RequestID: requestID(r), ClientIP: subject.DemoIdentity, DemoTokenHash: subject.DemoTokenHash, CreatedAt: s.now(),
+		})
+	}
+	if subject.WalletSessionID != "" {
+		return s.store.FinalizeWalletSessionReservation(context.Background(), storage.WalletSessionReservationSettlement{
+			SessionID: subject.WalletSessionID, AccountID: subject.AccountID, RequestID: requestID(r),
+			PromptTokens: prompt, CompletionTokens: completion, MaxTotalTokens: maxTotal,
+			TokenSource: source, Outcome: outcome, SettledAt: s.now(),
 		})
 	}
 	return s.store.SettleReservation(context.Background(), settlement)

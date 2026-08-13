@@ -30,6 +30,7 @@ import (
 const (
 	defaultSettlementJournalRecoveryLimit = 100
 	maxSettlementJournalRecoveryLimit     = 500
+	walletSessionClaimRecoveryMinAge      = 30 * time.Second
 	// settlementJournalMaxConflictAttempts bounds how many passes an
 	// ErrUsageEventConflict effect is retried before it is quarantined.
 	// A conflict means the durable row disagrees with the journaled payload,
@@ -54,6 +55,12 @@ type SettlementJournalRecoverySummary struct {
 	Retried int `json:"retried"`
 	Errors  int `json:"errors"`
 	Pruned  int `json:"pruned"`
+	// DispatchHeld counts wallet-session dispatch arms whose buyer response
+	// never reached a durable settlement effect before the grace window.
+	DispatchHeld int64 `json:"dispatch_held"`
+	// ClaimsRefunded counts wallet-session reservations that never armed
+	// dispatch before their stale-claim recovery window elapsed.
+	ClaimsRefunded int64 `json:"claims_refunded"`
 	// Malformed and Unsealed describe the journal as scanned, before the
 	// pass ran.
 	Malformed int `json:"malformed"`
@@ -127,6 +134,30 @@ func (s *Server) RecoverSettlementJournal(ctx context.Context, limit int) (Settl
 			summary.Retried++
 		}
 	}
+	if held, err := s.store.HoldStaleWalletSessionDispatchArms(ctx, now.Add(-grace), now); err != nil {
+		summary.Errors++
+		slog.Error("gateway wallet-session stale dispatch-arm recovery failed", "error", err)
+		s.recordWalletSessionAudit(ctx, "", "", "wallet_session_settlement_reconcile_failed", "gateway", map[string]any{
+			"phase": "dispatch_arm_recovery",
+			"error": safeAuditError(err),
+		})
+	} else {
+		summary.DispatchHeld = held
+	}
+	claimGrace := grace
+	if claimGrace < walletSessionClaimRecoveryMinAge {
+		claimGrace = walletSessionClaimRecoveryMinAge
+	}
+	if refunded, err := s.store.RefundStaleWalletSessionClaims(ctx, now.Add(-claimGrace), now); err != nil {
+		summary.Errors++
+		slog.Error("gateway wallet-session stale claim recovery failed", "error", err)
+		s.recordWalletSessionAudit(ctx, "", "", "wallet_session_settlement_reconcile_failed", "gateway", map[string]any{
+			"phase": "claim_recovery",
+			"error": safeAuditError(err),
+		})
+	} else {
+		summary.ClaimsRefunded = refunded
+	}
 
 	if retention := time.Duration(s.cfg.Settlement.JournalRetentionHours) * time.Hour; retention > 0 {
 		pruned, err := s.journal.Prune(now.Add(-retention))
@@ -185,6 +216,19 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 			DemoTokenHash: rec.DemoTokenHash,
 			CreatedAt:     s.now(),
 		})
+	} else if rec.WalletSessionID != "" {
+		settleErr = s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
+			SessionID:        rec.WalletSessionID,
+			AccountID:        rec.AccountID,
+			RequestID:        rec.RequestID,
+			PromptTokens:     rec.PromptTokens,
+			CompletionTokens: rec.CompletionTokens,
+			TotalTokens:      rec.TotalTokens,
+			MaxTotalTokens:   rec.MaxTotalTokens,
+			TokenSource:      rec.TokenSource,
+			Outcome:          rec.Outcome,
+			SettledAt:        s.now(),
+		})
 	} else {
 		settleErr = s.store.SettleReservation(ctx, settlement)
 	}
@@ -225,7 +269,13 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 		// retry/quarantine below, but the quota HOLD must not keep
 		// double-counting against the buyer while it does. Best-effort
 		// release; already-terminal is the benign sentinel.
-		if refundErr := s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix()); refundErr != nil &&
+		var refundErr error
+		if rec.WalletSessionID != "" {
+			refundErr = s.store.RefundWalletSessionReservation(ctx, rec.AccountID, rec.WalletSessionID, rec.RequestID, s.now())
+		} else {
+			refundErr = s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix())
+		}
+		if refundErr != nil &&
 			!errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
 			// Audit R3 (architect MEDIUM): a failed hold release must NOT
 			// consume a conflict attempt — quarantining on the final attempt
@@ -277,13 +327,26 @@ func (s *Server) redriveSettlementEffect(ctx context.Context, rec journal.Record
 	// MEDIUM — the mirror of the settleAfterCommit gate): sealing past a
 	// failed refund would suppress this very re-drive and leave the active
 	// hold double-counting until the reaper.
-	if refundErr := s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix()); refundErr != nil &&
+	var refundErr error
+	if rec.WalletSessionID != "" {
+		refundErr = s.store.SealWalletSessionUsageEvent(ctx, rec.AccountID, rec.WalletSessionID, rec.RequestID, rec.TotalTokens, s.now())
+	} else {
+		refundErr = s.store.RefundReservation(ctx, rec.AccountID, rec.RequestID, s.now().Unix())
+	}
+	if refundErr != nil &&
 		!errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
 		slog.Warn("gateway settlement journal re-drive refund failed; leaving effect unsealed",
 			"account_id", rec.AccountID,
 			"request_id", rec.RequestID,
 			"error", refundErr,
 		)
+		if rec.WalletSessionID != "" {
+			s.recordWalletSessionAudit(ctx, rec.AccountID, rec.WalletSessionID, "wallet_session_settlement_reconcile_failed", "gateway", map[string]any{
+				"request_id": rec.RequestID,
+				"phase":      "journal_usage_event_release",
+				"error":      safeAuditError(refundErr),
+			})
+		}
 		return journal.RecoveredRetry, nil
 	}
 	s.sealSettlementEffect(key, journal.SealUsageEvent)

@@ -153,6 +153,7 @@ type Record struct {
 	Outcome          string `json:"outcome,omitempty"`
 	DemoIdentity     string `json:"demo_identity,omitempty"`
 	DemoTokenHash    string `json:"demo_token_hash,omitempty"`
+	WalletSessionID  string `json:"wallet_session_id,omitempty"`
 
 	// Seal payload (kind == KindSeal): SealSettled or SealUsageEvent.
 	Result string `json:"result,omitempty"`

@@ -27,6 +27,115 @@ func TestAccountAdmissionDefaults(t *testing.T) {
 	}
 }
 
+func TestWalletSessionsDefaultOffDoesNotRequireSecrets(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Auth.WalletSessions = WalletSessionsConfig{}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected default-off wallet sessions without wallet secrets: %v", err)
+	}
+}
+
+func TestWalletSessionsEnabledRequiresSecrets(t *testing.T) {
+	cfg := validWalletSessionTestConfig()
+	cfg.Auth.WalletSessions.BearerHashKeys = nil
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth.wallet_sessions.bearer_hash_keys") {
+		t.Fatalf("Validate() error=%v, want bearer_hash_keys rejection", err)
+	}
+
+	cfg = validWalletSessionTestConfig()
+	cfg.Auth.WalletSessions.WalletFingerprintSecret = "too-short"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "wallet_fingerprint_secret") {
+		t.Fatalf("Validate() error=%v, want wallet_fingerprint_secret rejection", err)
+	}
+}
+
+func TestWalletSessionsRejectsPrefixAndSecretReuse(t *testing.T) {
+	cfg := validWalletSessionTestConfig()
+	cfg.Auth.WalletSessions.BearerPrefix = "mp_"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bearer_prefix") {
+		t.Fatalf("Validate() error=%v, want prefix rejection", err)
+	}
+
+	cfg = validWalletSessionTestConfig()
+	cfg.Auth.KeyHashSecret = strings.Repeat("k", 32)
+	cfg.Auth.WalletSessions.BearerHashKeys["current"] = cfg.Auth.KeyHashSecret
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must differ from auth.key_hash_secret") {
+		t.Fatalf("Validate() error=%v, want secret reuse rejection", err)
+	}
+
+	cfg = validWalletSessionTestConfig()
+	cfg.Auth.WalletSessions.WalletFingerprintSecret = strings.Repeat("w", 32)
+	cfg.Auth.WalletSessions.BearerHashKeys["current"] = cfg.Auth.WalletSessions.WalletFingerprintSecret
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must differ from auth.wallet_sessions.wallet_fingerprint_secret") {
+		t.Fatalf("Validate() error=%v, want wallet-secret reuse rejection", err)
+	}
+}
+
+func TestWalletSessionsEnvResolution(t *testing.T) {
+	t.Setenv("MP_TEST_WALLET_BEARER_KEY", strings.Repeat("a", 32))
+	t.Setenv("MP_TEST_WALLET_FINGERPRINT_SECRET", strings.Repeat("b", 32))
+	path := writeTempConfig(t, `
+listen: {bind_address: "127.0.0.1", port: 9443}
+proxy: {trusted_cidrs: ["127.0.0.1"]}
+public: {base_url: "https://api.example.test", account_path: "/account"}
+coordinator:
+  buyer_url: "https://coordinator-buyer.example.test"
+  operator_url: "https://coordinator-operator.example.test"
+  operator_key: "operator-key"
+  service_token: "service-token"
+  poolz_poll_interval_s: 10
+storage: {driver: "sqlite", db_path: "gateway.db"}
+auth:
+  key_prefix: "mp_"
+  key_hash: "hmac_sha256"
+  key_hash_secret: "api-key-hash-secret"
+  github_oauth_enabled: true
+  oauth:
+    callback_allowlist: ["https://api.example.test/auth/github/callback"]
+    return_to_allowlist: []
+    state_max_per_ip: 20
+    github:
+      client_id: "client-id"
+      client_secret: "client-secret"
+      authorize_url: "https://github.com/login/oauth/authorize"
+      token_url: "https://github.com/login/oauth/access_token"
+      user_url: "https://api.github.com/user"
+  demo: {signing_secret: "demo-secret"}
+  wallet_sessions:
+    enabled: true
+    bearer_prefix: "mps_"
+    max_session_ttl_seconds: 3600
+    max_challenge_ttl_seconds: 300
+    max_total_token_cap: 100000
+    max_per_request_token_cap: 4096
+    max_active_sessions_per_account: 100
+    max_active_sessions_per_wallet: 20
+    challenge_issuance_per_ip_per_hour: 60
+    session_issuance_per_account_per_hour: 60
+    challenge_body_bytes: 16384
+    registration_body_bytes: 16384
+    bearer_hash_keys: {current: "env:MP_TEST_WALLET_BEARER_KEY"}
+    current_bearer_hash_key_id: "current"
+    wallet_fingerprint_secret: "env:MP_TEST_WALLET_FINGERPRINT_SECRET"
+    wallet_fingerprint_secret_version: "v1"
+    signature_max_age_seconds: 300
+    signature_max_future_skew_seconds: 30
+    metadata_requests_per_minute: 120
+    replay_max_rows_per_session: 10000
+    replay_max_bytes_per_session: 4194304
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() wallet-session env config: %v", err)
+	}
+	if got := cfg.Auth.WalletSessions.BearerHashKeys["current"]; got != strings.Repeat("a", 32) {
+		t.Fatalf("bearer hash key not resolved from env")
+	}
+	if got := cfg.Auth.WalletSessions.WalletFingerprintSecret; got != strings.Repeat("b", 32) {
+		t.Fatalf("wallet fingerprint secret not resolved from env")
+	}
+}
+
 // Post-#92 (PR #167), retargeted after #760/#784: header timeout must cover
 // the admission phase so a slow first-event stream does not false-fail before
 // the configured pre-header budget expires. See SPEC-002 FR-P11a C2b +
@@ -401,6 +510,25 @@ func validTestConfig() Config {
 	cfg.Auth.OAuth.GitHub.ClientID = "client-id"
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	return cfg
+}
+
+func validWalletSessionTestConfig() Config {
+	cfg := validTestConfig()
+	cfg.Auth.WalletSessions.Enabled = true
+	cfg.Auth.WalletSessions.BearerHashKeys = map[string]string{"current": strings.Repeat("w", 32)}
+	cfg.Auth.WalletSessions.CurrentBearerHashKeyID = "current"
+	cfg.Auth.WalletSessions.WalletFingerprintSecret = strings.Repeat("f", 32)
+	cfg.Auth.WalletSessions.WalletFingerprintSecretVersion = "v1"
+	return cfg
+}
+
+func writeTempConfig(t *testing.T, contents string) string {
+	t.Helper()
+	path := t.TempDir() + "/gateway.yaml"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	return path
 }
 
 // ---- issue #760: per-phase deadline config --------------------------------

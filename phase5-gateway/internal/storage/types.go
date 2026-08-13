@@ -127,12 +127,13 @@ type ReservationRequest struct {
 }
 
 type ActiveReservation struct {
-	AccountID      string
-	RequestID      string
-	WindowDate     string
-	ReservedTokens int64
-	ExpiresAt      time.Time
-	CreatedAt      time.Time
+	AccountID       string
+	RequestID       string
+	WalletSessionID string
+	WindowDate      string
+	ReservedTokens  int64
+	ExpiresAt       time.Time
+	CreatedAt       time.Time
 }
 
 type QuotaDecision struct {
@@ -168,6 +169,175 @@ type ConcurrencyDecision struct {
 	Admitted bool
 	Limit    int
 	Active   int
+}
+
+type WalletSessionChallenge struct {
+	NonceHash          []byte
+	AccountID          string
+	WalletNamespace    string
+	WalletFingerprint  string
+	Purpose            string
+	Audience           string
+	RequestedExpiresAt time.Time
+	PerRequestTokenCap int64
+	TotalTokenCap      int64
+	ModelAllowlistJSON string
+	SessionPublicKey   []byte
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	ConsumedAt         time.Time
+	ConsumedSessionID  string
+}
+
+type WalletIdentity struct {
+	AccountID             string
+	WalletNamespace       string
+	WalletFingerprint     string
+	Status                string
+	VerificationPublicKey []byte
+	CreatedAt             time.Time
+	RevokedAt             time.Time
+}
+
+type WalletSession struct {
+	SessionID             string
+	AccountID             string
+	WalletNamespace       string
+	WalletFingerprint     string
+	Status                string
+	ExpiresAt             time.Time
+	TotalTokenCap         int64
+	PerRequestTokenCap    int64
+	ModelAllowlistJSON    string
+	BearerHash            []byte
+	BearerKeyID           string
+	VerificationPublicKey []byte
+	SessionPublicKey      []byte
+	CreatedAt             time.Time
+	RevokedAt             time.Time
+	RevokedBy             string
+	RevokedReason         string
+}
+
+type WalletSessionUsage struct {
+	SessionID       string
+	AccountID       string
+	TotalCap        int64
+	PerRequestCap   int64
+	SettledTokens   int64
+	ReservedTokens  int64
+	HeldTokens      int64
+	RemainingTokens int64
+	RequestCount    int
+}
+
+type WalletSessionUsageDetail struct {
+	RequestID            string
+	UsageEventID         string
+	QuotaReservationID   string
+	SessionReservationID string
+	ModelID              string
+	ReservedTokens       int64
+	SettledTokens        int64
+	PromptTokens         int64
+	CompletionTokens     int64
+	TotalTokens          int64
+	TokenSource          string
+	Outcome              string
+	TerminalStatus       string
+	ReconciliationStatus string
+	ReservationCreatedAt time.Time
+	ReservationSettledAt time.Time
+	UsageEventCreatedAt  time.Time
+}
+
+type WalletSessionRegistrationRequest struct {
+	ChallengeNonceHash    []byte
+	SessionID             string
+	AccountID             string
+	WalletNamespace       string
+	WalletFingerprint     string
+	Audience              string
+	RequestedExpiresAt    time.Time
+	PerRequestTokenCap    int64
+	TotalTokenCap         int64
+	ModelAllowlistJSON    string
+	SessionPublicKey      []byte
+	BearerHash            []byte
+	BearerKeyID           string
+	VerificationPublicKey []byte
+	CreatedAt             time.Time
+	MaxActivePerAccount   int
+	MaxActivePerWallet    int
+}
+
+type WalletSessionReplayMaterial struct {
+	SessionID           string
+	RequestID           string
+	Method              string
+	CanonicalRoute      string
+	SemanticHeadersHash []byte
+	RawBodyHash         []byte
+	BodyBytes           int64
+	MetadataClientIP    string
+}
+
+type WalletSessionAdmissionRequest struct {
+	SessionID       string
+	AccountID       string
+	RequestID       string
+	Method          string
+	CanonicalRoute  string
+	ModelID         string
+	WindowDate      string
+	RequestedTokens int64
+	DailyQuota      int64
+	Replay          WalletSessionReplayMaterial
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+}
+
+type WalletSessionAdmissionDecision struct {
+	Admitted         bool
+	AccountID        string
+	SessionID        string
+	RequestID        string
+	AccountQuota     QuotaDecision
+	SessionUsed      int64
+	SessionReserved  int64
+	SessionRemaining int64
+}
+
+type WalletSessionMetadataAdmissionRequest struct {
+	SessionID      string
+	AccountID      string
+	Replay         WalletSessionReplayMaterial
+	WindowStart    time.Time
+	RateLimit      int
+	MaxReplayRows  int
+	MaxReplayBytes int64
+	CreatedAt      time.Time
+}
+
+type WalletSessionDispatchArm struct {
+	SessionID      string
+	AccountID      string
+	RequestID      string
+	CanonicalRoute string
+	ArmedAt        time.Time
+}
+
+type WalletSessionReservationSettlement struct {
+	SessionID        string
+	AccountID        string
+	RequestID        string
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	MaxTotalTokens   int64
+	TokenSource      string
+	Outcome          string
+	SettledAt        time.Time
 }
 
 type FeedbackEvent struct {
