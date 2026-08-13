@@ -1,7 +1,16 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.7 (2026-08-13, rewards-trusted routing quota)
+**Version:** 1.5.8 (2026-08-13, rewards-trusted routing quota custody proof)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.8 (2026-08-13, rewards-trusted routing quota custody proof):**
+- Tightens rewards-trusted routing custody continuity: matching bearer auth and
+  durable rewards trust are not sufficient by themselves. The live session MUST
+  also prove custody of a pre-existing durable admission identity key before the
+  coordinator assigns routing tier `trusted`. Absence of revoked token history,
+  first-time durable identity enrollment, generic migration exemption, or a
+  newly self-minted bearer remains `provisional` until a later session proves
+  the already-enrolled durable key.
 
 **Change log v1.5.7 (2026-08-13, rewards-trusted routing quota):**
 - Adds the routing/admission tier `trusted`, sourced from durable rewards
@@ -13,12 +22,10 @@
   `provisional` MUST revoke the trusted routing quota for live sessions, either
   from rewards-runner callbacks or the sweep-wide bounded active-session trust
   reconciliation sweep. Tokenless or mismatched-auth sessions remain
-  `provisional` even if they claim a trusted provider ID. A provider ID with
-  revoked credential history MUST stay `provisional` for rewards-trusted
-  routing unless the live session proves custody of the pre-existing durable
-  admission identity key; a stored durable-identity row, first-time enrollment,
-  generic migration exemption, or newly self-minted bearer is not sufficient by
-  itself to inherit old rewards trust. Trusted providers that trip canary
+  `provisional` even if they claim a trusted provider ID. A stored
+  durable-identity row, first-time enrollment, generic migration exemption, or
+  newly self-minted bearer is not sufficient by itself to inherit old rewards
+  trust. Trusted providers that trip canary
   degradation MUST keep that recovery hold across reconnects, including
   fail-closed provisional reconnects and later trusted promotion, until a
   canary recovery pass clears it.
@@ -783,7 +790,7 @@ if provider_id in config.providers[]:
 else:
     if hello bearer auth is validated
        and hello provider_id matches the authenticated provider_id
-       and provider_id has credential-custody continuity
+       and provider_id has live proof of a pre-existing durable admission identity key
        and durable rewards trust_tier(provider_id) == "trusted":
         tier = trusted  (subject to trusted request quota, FR-P16)
     else:
@@ -1359,7 +1366,7 @@ The coordinator recognizes four admission tiers:
 | Tier | Source | Admission | Routing weight |
 |---|---|---|---|
 | Pinned | `config.providers[]` | Operator pre-approved | 1.0 |
-| Trusted | durable rewards trust state (`provider_emission_state.trust_tier='trusted'`) plus matching bearer-authenticated provider identity plus credential-custody continuity | Automatic after earned rewards trust; revoked on rewards demotion, bounded reconciliation sweep, or custody-transfer failure | 1.0 |
+| Trusted | durable rewards trust state (`provider_emission_state.trust_tier='trusted'`) plus matching bearer-authenticated provider identity plus live proof of a pre-existing durable admission identity key | Automatic after earned rewards trust; revoked on rewards demotion, bounded reconciliation sweep, or custody-transfer failure | 1.0 |
 | Provisional | Unknown `provider_id` | Auto on hello, rate-limited | 0.3 (configurable) |
 | Rejected | `rejected_providers` table | Never. WS close 4009. | N/A |
 
@@ -1391,12 +1398,12 @@ The coordinator recognizes four admission tiers:
   live trusted quota if the rewards runner callback is unavailable; lookup
   errors fail closed to the provisional tier after the bounded failure
   window or immediately for sessions left unresolved by the sweep deadline.
-  A provider ID with revoked token history MUST fail closed to provisional for
-  trusted quota unless the live session proves custody of the pre-existing
-  durable admission identity key. Reissuing a bearer through
+  Trusted quota MUST fail closed to provisional unless the live session proves
+  custody of the pre-existing durable admission identity key. Absence of revoked
+  token history is not proof of custody. Reissuing a bearer through
   referral/self-service after revocation, first-time durable identity
-  enrollment, or generic migration exemption is not sufficient by itself to
-  inherit old rewards trust.
+  enrollment, generic migration exemption, or newly self-minted bearer is not
+  sufficient by itself to inherit old rewards trust.
   Pinned providers remain unlimited and are not demoted by rewards trust
   changes.
 - `malibu_emission.writer_dsn`, when present and successfully opened, is the
@@ -4289,12 +4296,13 @@ Run by: `phase4-coordinator/scripts/test-promote.sh`
 **AC-13a. Rewards-trusted quota elevation.**
 Given a provider with durable rewards trust
 `provider_emission_state.trust_tier='trusted'`, a matching bearer
-token, and credential-custody continuity, provider admission returns
+token, and live proof of a pre-existing durable admission identity key,
+provider admission returns
 `tier: "trusted"`, `/poolz` shows `tier: "trusted"`, and buyer routing
 does not apply the `admission.provisional_quota_per_hour` cap. With the
 same provider ID but no matching bearer-authenticated identity, or with
-revoked token history and no live proof of the pre-existing durable
-admission identity key, admission remains `tier: "provisional"`. When
+no live proof of the pre-existing durable admission identity key, admission
+remains `tier: "provisional"` even if no revoked-token history exists. When
 rewards demotes the provider to
 `trust_tier='provisional'`, the live non-pinned pool entry changes back
 to `tier: "provisional"` through the live callback or bounded trust
@@ -4307,7 +4315,7 @@ degradation remains degraded and unroutable across reconnects, including a
 temporary fail-closed provisional reconnect and later trusted promotion, until
 canary recovery clears the sanction.
 
-Run by: `cd phase4-coordinator && go test ./internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation|TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation|TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody|TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory|TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHistory|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess|TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders|TestHandleDisconnectClearsRewardsTrustLookupFailure' && go test ./internal/pool -run 'TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect'`
+Run by: `cd phase4-coordinator && go test ./internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRoutingAdmissionTierRejectsTrustedQuotaWithoutDurableIdentityProofEvenWithoutRevocation|TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation|TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation|TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody|TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDemotesTrustedProviderWithoutDurableIdentityProof|TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory|TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHistory|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess|TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders|TestHandleDisconnectClearsRewardsTrustLookupFailure' && go test ./internal/pool -run 'TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect'`
 
 **AC-14. admin/reject.**
 Connect a provisional provider. `POST /admin/reject/{provider_id}`.

@@ -182,8 +182,12 @@ func (s *Server) trustedRoutingCustodyEligibleWithProof(ctx context.Context, pro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.tokens == nil {
+	if durableIdentityVerified {
 		return true
+	}
+	if s.tokens == nil {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider token custody history unavailable and live durable admission identity proof missing; keeping rewards-trusted routing provisional")
+		return false
 	}
 	history, ok := s.tokens.(providerTokenCustodyHistoryStore)
 	if !ok {
@@ -197,14 +201,12 @@ func (s *Server) trustedRoutingCustodyEligibleWithProof(ctx context.Context, pro
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider token custody history lookup failed; keeping rewards-trusted routing provisional")
 		return false
 	}
-	if !revoked {
-		return true
-	}
-	if !durableIdentityVerified {
+	if revoked {
 		s.log.Warn().Str("provider_id", providerID).Msg("provider has revoked token history without live durable admission identity proof; keeping rewards-trusted routing provisional")
-		return false
+	} else {
+		s.log.Warn().Str("provider_id", providerID).Msg("provider lacks live durable admission identity proof; keeping rewards-trusted routing provisional")
 	}
-	return true
+	return false
 }
 
 func (s *Server) liveDurableAdmissionIdentityVerified(providerID string) bool {
