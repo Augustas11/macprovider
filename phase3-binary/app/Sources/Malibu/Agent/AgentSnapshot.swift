@@ -706,8 +706,8 @@ enum AgentSnapshotPresenter {
             return status.detail
         case .serving where !s.providerEarningsFresh:
             return "Ready for customer work · earnings unavailable"
-        case .serving where s.earningsUsdcToday == nil:
-            return "Ready for customer work · waiting for the first paid job"
+        case .serving where idleEarningsAreZero(s):
+            return idleHonestySubtitle(s)
         case .serving:
             return s.currentModelID
         case .reconnecting where isLocalOnly(s):
@@ -721,6 +721,23 @@ enum AgentSnapshotPresenter {
         default:
             return nil
         }
+    }
+
+    /// Ready + $0 is usually a quiet network, not a broken Mac. Queue depth
+    /// and today's request count distinguish those cases from work waiting
+    /// locally or unpaid work that has not settled.
+    private static func idleHonestySubtitle(_ s: AgentSnapshot) -> String {
+        if (s.queueDepth ?? 0) > 0 {
+            return "Ready · work is queued on this Mac"
+        }
+        if (s.requestsServedToday ?? 0) > 0 {
+            return "Ready · work ran; paid credits appear when a job settles"
+        }
+        return "Ready for customer work · network is quiet"
+    }
+
+    private static func idleEarningsAreZero(_ s: AgentSnapshot) -> Bool {
+        (s.earningsUsdcToday ?? 0) == 0
     }
 
     static func stateLine(_ s: AgentSnapshot) -> String {
@@ -793,8 +810,14 @@ enum AgentSnapshotPresenter {
         if (skips["model_not_loaded"] ?? 0) > 0 {
             return "Model is preparing — earning starts when ready"
         }
+        if (s.queueDepth ?? 0) > 0 {
+            return "Work is queued on this Mac"
+        }
         if isNetworkReady(s) || s.state == .serving {
-            return "Eligible, waiting for work"
+            if (s.requestsServedToday ?? 0) > 0, idleEarningsAreZero(s) {
+                return "Work ran today · paid credits show when a job settles"
+            }
+            return "Eligible · network is quiet"
         }
         return nil
     }

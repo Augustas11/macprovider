@@ -39,7 +39,7 @@ final class DashboardViewTests: XCTestCase {
         )
     }
 
-    func testFreshServingWithoutEarningsWaitsForFirstPaidJob() {
+    func testFreshServingWithoutEarningsShowsQuietNetwork() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
@@ -48,7 +48,60 @@ final class DashboardViewTests: XCTestCase {
 
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Ready for customer work · waiting for the first paid job"
+            "Ready for customer work · network is quiet"
+        )
+    }
+
+    func testFreshServingWithZeroEarningsIsNetworkQuietNotBroken() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.coordinatorConnected = true
+        snapshot.networkState = "buyer_serving"
+        snapshot.providerEarningsFresh = true
+        snapshot.earningsUsdcToday = 0
+        snapshot.currentModelID = "Qwen3-8B"
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            "Ready for customer work · network is quiet"
+        )
+    }
+
+    func testQueuedWorkBeatsQuietNetworkCopy() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.coordinatorConnected = true
+        snapshot.networkState = "buyer_serving"
+        snapshot.providerEarningsFresh = true
+        snapshot.earningsUsdcToday = 0
+        snapshot.queueDepth = 2
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            "Ready · work is queued on this Mac"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.eligibilityLine(snapshot),
+            "Work is queued on this Mac"
+        )
+    }
+
+    func testUnsettledWorkCopyWhenRequestsExistWithoutPaidCredits() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.coordinatorConnected = true
+        snapshot.networkState = "buyer_serving"
+        snapshot.providerEarningsFresh = true
+        snapshot.earningsUsdcToday = 0
+        snapshot.requestsServedToday = 4
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            "Ready · work ran; paid credits appear when a job settles"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.eligibilityLine(snapshot),
+            "Work ran today · paid credits show when a job settles"
         )
     }
 
@@ -168,9 +221,17 @@ final class DashboardViewTests: XCTestCase {
         )
 
         snapshot.idlePrewarmSummary = .empty
-        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Eligible, waiting for work")
+        XCTAssertEqual(AgentSnapshotPresenter.eligibilityLine(snapshot), "Eligible · network is quiet")
 
         snapshot.providerEarningsFresh = false
         XCTAssertNil(AgentSnapshotPresenter.eligibilityLine(snapshot))
+    }
+
+    func testRecoveryCopyIsOnTheDashboardSurface() {
+        XCTAssertEqual(DashboardCopy.resetProviderTitle, "Reset provider service")
+        XCTAssertEqual(DashboardCopy.exportDiagnosticsTitle, "Export diagnostics…")
+        XCTAssertEqual(DashboardCopy.recoveryHelpTitle, "If something is stuck")
+        XCTAssertFalse(DashboardCopy.resetProviderConfirmDetail.contains("launchd"))
+        XCTAssertFalse(DashboardCopy.resetProviderConfirmDetail.lowercased().contains("cli"))
     }
 }

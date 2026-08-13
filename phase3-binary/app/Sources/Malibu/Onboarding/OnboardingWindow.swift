@@ -22,7 +22,7 @@ enum OnboardingWindow {
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable]
         window.title = "Set up Malibu"
-        window.setContentSize(NSSize(width: 520, height: 620))
+        window.setContentSize(NSSize(width: 520, height: 680))
         window.center()
         window.isReleasedWhenClosed = false
         return window
@@ -34,7 +34,7 @@ enum OnboardingCopy {
     static let introDetail = "Malibu monitors the background provider and shows earnings here while setup continues."
     static let idleDetail = "Installs provider software, picks a model, and registers this Mac for customer work."
     static let repairDetail = "Repairs the background service while preserving your provider identity and downloaded model files."
-    static let installingFallback = "Installing provider software. First model download and local checks can take 10-30 minutes with little visible progress."
+    static let installingFallback = "Installing provider software. First model download and local checks can take 10-30 minutes. This screen updates as each stage starts."
     static let importingProviderAccess = "Confirming saved provider access before Malibu attaches."
     static let liveDetailPrefix = "Using"
     static let referralCaption = "Paste the code or malibu.tech/j#... link from the person who invited you. Malibu sends it once during setup and does not store the invite."
@@ -133,19 +133,11 @@ private struct OnboardingRootView: View {
         case .runningCLIInstall:
             stageRow(
                 title: "Installing provider",
-                detail: controller.installProgressHint
+                detail: controller.installProgress?.detail
                     ?? OnboardingCopy.installingFallback
             ) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 12) {
-                        ProgressView().controlSize(.small)
-                        if let started = controller.installStartedAt {
-                            Text("Elapsed \(formattedElapsed(since: started))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 10) {
+                    installProgressMeter
                     advancedLogDisclosure(lines: controller.installLogLines)
                 }
             }
@@ -202,6 +194,59 @@ private struct OnboardingRootView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var installProgressMeter: some View {
+        let progress = controller.installProgress ?? .starting
+        VStack(alignment: .leading, spacing: 8) {
+            ProgressView(value: progress.overallFraction)
+                .progressViewStyle(.linear)
+            HStack {
+                if let started = controller.installStartedAt {
+                    Text("Elapsed \(formattedElapsed(since: started))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Spacer()
+                if let percent = progress.percentLabel {
+                    Text(percent)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(CLIInstallRunner.InstallProgress.Stage.allCases.filter { $0 != .starting }, id: \.rawValue) { stage in
+                    HStack(spacing: 8) {
+                        Image(systemName: stageIcon(for: stage, current: progress.stage))
+                            .foregroundStyle(stageColor(for: stage, current: progress.stage))
+                            .font(.caption)
+                            .frame(width: 12)
+                        Text(stage.title)
+                            .font(.caption)
+                            .foregroundStyle(stage <= progress.stage ? Color.primary : Color.secondary)
+                        if stage == progress.stage, let percent = progress.percentLabel {
+                            Text(percent)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func stageIcon(for stage: CLIInstallRunner.InstallProgress.Stage, current: CLIInstallRunner.InstallProgress.Stage) -> String {
+        if stage < current { return "checkmark.circle.fill" }
+        if stage == current { return "circle.inset.filled" }
+        return "circle"
+    }
+
+    private func stageColor(for stage: CLIInstallRunner.InstallProgress.Stage, current: CLIInstallRunner.InstallProgress.Stage) -> Color {
+        if stage < current { return .green }
+        if stage == current { return MalibuBrand.coral }
+        return .secondary
     }
 
     @ViewBuilder

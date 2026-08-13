@@ -11,6 +11,7 @@ final class MenuBarController {
         case checkForUpdates
         case updateCLI
         case exportDiagnostics
+        case resetProviderService
         case openSettings
         case quitAndUninstall
     }
@@ -107,6 +108,7 @@ final class MenuBarController {
         menu.addItem(action("Open Dashboard", key: "d") { self.onAction(.openDashboard) })
         menu.addItem(action(String(localized: "Settings…", comment: "Menu bar settings action"), key: ",") { self.onAction(.openSettings) })
         menu.addItem(action("Set up…", key: "o") { self.onAction(.openOnboarding) })
+        menu.addItem(action("Reset Provider Service…", key: "") { self.onAction(.resetProviderService) })
         menu.addItem(action("Export Diagnostics…", key: "") { self.onAction(.exportDiagnostics) })
         menu.addItem(.separator())
         menu.addItem(action("Pause", key: "") { self.onAction(.pause) })

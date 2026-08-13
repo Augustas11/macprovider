@@ -5,11 +5,13 @@ import SwiftUI
 enum DashboardWindow {
     static func make(
         agent: MalibuAgent,
-        onExportDiagnostics: @escaping () -> Void
+        onExportDiagnostics: @escaping () -> Void,
+        onResetProvider: @escaping () -> Void
     ) -> NSWindow {
         let hosting = NSHostingController(rootView: DashboardView(
             agent: agent,
-            onExportDiagnostics: onExportDiagnostics
+            onExportDiagnostics: onExportDiagnostics,
+            onResetProvider: onResetProvider
         ))
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -25,6 +27,13 @@ enum DashboardCopy {
     static let currentStateTitle = "Current state"
     static let meaningTitle = "What this means"
     static let nextActionTitle = "Next safe action"
+    static let resetProviderTitle = "Reset provider service"
+    static let exportDiagnosticsTitle = "Export diagnostics…"
+    static let recoveryHelpTitle = "If something is stuck"
+    static let resetProviderConfirmTitle = "Reset the provider service on this Mac?"
+    static let resetProviderConfirmDetail = "Repairs the background service and keeps your provider identity and downloaded models. Use this if setup is stuck or the provider will not start."
+    static let resetProviderConfirmButton = "Reset provider service"
+    static let resetProviderCancelButton = "Cancel"
 
     static func modelRowStatusLine(currentModelID: String?, switcherStatusLine: String) -> String {
         if currentModelID != nil {
@@ -57,6 +66,7 @@ enum DashboardCopy {
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
     let onExportDiagnostics: () -> Void
+    let onResetProvider: () -> Void
     @State private var showAddWalletSheet = false
     @State private var showModelSheet = false
     @ObservedObject private var modelStore = ModelManagementStore.shared
@@ -257,6 +267,7 @@ private struct DashboardView: View {
                         MetricRow(title: DashboardCopy.nextActionTitle, value: action)
                     }
                     primaryActionButton
+                    recoveryActions
                     DisclosureGroup("Advanced diagnostics") {
                         VStack(alignment: .leading, spacing: 12) {
                             MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
@@ -328,9 +339,6 @@ private struct DashboardView: View {
                             if !agent.logLines.isEmpty {
                                 LogTailView(lines: agent.logLines)
                                     .frame(minHeight: 120, maxHeight: 180)
-                            }
-                            Button("Export redacted diagnostics...") {
-                                onExportDiagnostics()
                             }
                             MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
                             MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
@@ -408,11 +416,28 @@ private struct DashboardView: View {
                 Task { await agent.repairAdmissionIdentity() }
             }
         case .exportDiagnostics:
-            Button("Export redacted diagnostics...") {
+            Button(DashboardCopy.exportDiagnosticsTitle) {
                 onExportDiagnostics()
             }
         case nil:
             EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var recoveryActions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(DashboardCopy.recoveryHelpTitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button(DashboardCopy.resetProviderTitle) {
+                    onResetProvider()
+                }
+                Button(DashboardCopy.exportDiagnosticsTitle) {
+                    onExportDiagnostics()
+                }
+            }
         }
     }
 
