@@ -1175,6 +1175,7 @@ func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
 		return Provider{}, false
 	}
 	p.Tier = tier
+	r.applyCanarySanctionLocked(p)
 	cp := *p
 	cp.conn = nil
 	return cp, true
@@ -1201,6 +1202,7 @@ func (r *Registry) SetEarnedTrustTier(providerID string, tier Tier) (Provider, b
 		return Provider{}, false
 	}
 	p.Tier = tier
+	r.applyCanarySanctionLocked(p)
 	cp := *p
 	cp.conn = nil
 	return cp, true
@@ -1826,7 +1828,7 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
 	sanction, ok := r.canarySanctions[p.ProviderID]
-	if !ok || (p.Tier != TierPinned && p.Tier != TierTrusted) {
+	if !ok {
 		return
 	}
 	p.CanaryFailCount = sanction.failCount

@@ -743,6 +743,42 @@ func TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect(t *testing.T) {
 	if !registry.CanaryRecoveryEligible("trusted-a", "session-b") {
 		t.Fatal("reconnected trusted provider should require canary recovery")
 	}
+
+	registry.Register(&Provider{
+		ProviderID:     "trusted-a",
+		AssignedID:     "session-c",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+		AuthState:      AuthBearerValidated,
+	}, nil)
+	provisionalReconnect, ok := registry.Resolve("trusted-a", "session-c")
+	if !ok {
+		t.Fatal("provisional reconnect not found")
+	}
+	if provisionalReconnect.State != StateDegraded || provisionalReconnect.RoutingEligible() {
+		t.Fatalf("provisional reconnect with trusted canary sanction = %+v, want degraded and unroutable", provisionalReconnect)
+	}
+	if provisionalReconnect.Tier != TierProvisional {
+		t.Fatalf("provisional reconnect tier = %s, want provisional", provisionalReconnect.Tier)
+	}
+	if !registry.CanaryRecoveryEligible("trusted-a", "session-c") {
+		t.Fatal("provisional reconnect should preserve canary recovery hold")
+	}
+
+	promoted, ok := registry.SetEarnedTrustTier("trusted-a", TierTrusted)
+	if !ok {
+		t.Fatal("trusted promotion failed")
+	}
+	if promoted.Tier != TierTrusted || promoted.State != StateDegraded || promoted.RoutingEligible() {
+		t.Fatalf("trusted promotion after provisional reconnect = %+v, want trusted but still degraded and unroutable", promoted)
+	}
+	if !registry.CanaryRecoveryEligible("trusted-a", "session-c") {
+		t.Fatal("trusted promotion should not clear canary recovery hold")
+	}
 }
 
 // registerFloorPeer registers a second routing-eligible provider serving

@@ -14,7 +14,8 @@
   sweep-wide bounded active-session trust reconciliation sweep. Tokenless or
   mismatched-auth sessions remain `provisional` even if they claim a trusted
   provider ID. Trusted providers that trip canary degradation MUST keep that
-  recovery hold across reconnects until a canary recovery pass clears it.
+  recovery hold across reconnects, including fail-closed provisional reconnects
+  and later trusted promotion, until a canary recovery pass clears it.
 - When `malibu_emission.writer_dsn` is configured, the coordinator MAY use
   that rewards DB as a read-only trusted-routing lookup source even if
   `malibu_emission.enabled` is false. Lookup errors fail closed to
@@ -4287,8 +4288,9 @@ When `malibu_emission.writer_dsn` is configured but
 `malibu_emission.enabled` is false, admission and reconciliation still use
 the rewards DB for read-only trusted-routing lookup and fail closed to
 `provisional` on lookup errors. A trusted provider that trips canary
-degradation remains degraded and unroutable across reconnects until canary
-recovery clears the sanction.
+degradation remains degraded and unroutable across reconnects, including a
+temporary fail-closed provisional reconnect and later trusted promotion, until
+canary recovery clears the sanction.
 
 Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess|TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders|TestHandleDisconnectClearsRewardsTrustLookupFailure'` and `go test ./phase4-coordinator/internal/pool -run 'TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect'`
 
