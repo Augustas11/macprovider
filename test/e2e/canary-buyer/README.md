@@ -148,6 +148,8 @@ match. Its serving floor is one ready or busy provider with a fresh heartbeat.
 Its
 request/token budget starts from the configured conservative floor and grows
 only to one 8-token request per live model discovered from that snapshot.
+A 429 or other request failure on any live model aborts the run immediately,
+so a quota-exhausted Llama box will prevent this Mac's Qwen probe from running.
 Each provider heartbeat carries versioned `safety_telemetry`; the coordinator
 validates it, stamps receipt freshness, and publishes it through authenticated
 `/poolz`. Version 2 binds the observation to the coordinator session, binary,
