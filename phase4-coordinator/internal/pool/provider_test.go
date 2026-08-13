@@ -696,6 +696,55 @@ func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
 	}
 }
 
+func TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.Register(&Provider{
+		ProviderID:     "trusted-a",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierTrusted,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	registerFloorPeer(registry, "trusted-peer", "model-a")
+	at := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+
+	first := registry.RecordCanaryResult("trusted-a", "session-a", false, at, 2)
+	if first.Count != 1 || first.Tripped != CanaryTripNone {
+		t.Fatalf("first canary result = %+v", first)
+	}
+	second := registry.RecordCanaryResult("trusted-a", "session-a", false, at.Add(time.Minute), 2)
+	if second.Count != 2 || second.Tripped != CanaryTripDegraded || second.Tier != TierTrusted {
+		t.Fatalf("second canary result = %+v", second)
+	}
+
+	registry.Register(&Provider{
+		ProviderID:     "trusted-a",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierTrusted,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	reconnected, ok := registry.Resolve("trusted-a", "session-b")
+	if !ok {
+		t.Fatal("reconnected provider not found")
+	}
+	if reconnected.State != StateDegraded || reconnected.RoutingEligible() {
+		t.Fatalf("reconnected trusted canary-sanctioned provider = %+v, want degraded and unroutable", reconnected)
+	}
+	if reconnected.CanaryFailCount != 2 {
+		t.Fatalf("reconnected canary fail count = %d, want 2", reconnected.CanaryFailCount)
+	}
+	if !registry.CanaryRecoveryEligible("trusted-a", "session-b") {
+		t.Fatal("reconnected trusted provider should require canary recovery")
+	}
+}
+
 // registerFloorPeer registers a second routing-eligible provider serving
 // modelID so the FR-CAN22 last-provider floor does not spare the provider under
 // test — letting sanction/recovery tests still exercise the trip path.

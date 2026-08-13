@@ -5205,6 +5205,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
+	s.clearRewardsTrustLookupFailure(providerID, assignedID)
 	s.pruneIdlePrewarmLimits(s.now())
 	binaryVersion := ""
 	var conn net.Conn

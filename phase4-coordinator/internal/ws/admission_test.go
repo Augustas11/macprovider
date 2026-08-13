@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"path/filepath"
 	"testing"
 	"time"
@@ -220,6 +221,74 @@ func TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWit
 	}
 }
 
+func TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders(t *testing.T) {
+	oldLookupTimeout := rewardsTrustLookupTimeout
+	oldSweepDeadline := rewardsTrustSweepDeadline
+	rewardsTrustLookupTimeout = 25 * time.Millisecond
+	rewardsTrustSweepDeadline = 60 * time.Millisecond
+	t.Cleanup(func() {
+		rewardsTrustLookupTimeout = oldLookupTimeout
+		rewardsTrustSweepDeadline = oldSweepDeadline
+	})
+
+	registry := pool.NewRegistry(nil)
+	for i := 0; i < 8; i++ {
+		id := "provider-" + string(rune('a'+i))
+		registry.Register(&pool.Provider{
+			ProviderID: id,
+			AssignedID: "session-" + id,
+			Tier:       pool.TierTrusted,
+			State:      pool.StateReady,
+			AuthState:  pool.AuthBearerValidated,
+		}, nil)
+	}
+	s := NewServer(config.Default(), registry, zerolog.Nop(), WithProviderRewardsTrustTierStore(blockingRewardsTrustStore{}))
+	for i := 0; i < 8; i++ {
+		id := "provider-" + string(rune('a'+i))
+		s.sessions.Store(sessionKey(id, "session-"+id), &providerSession{})
+	}
+
+	start := time.Now()
+	s.runRewardsTrustTierReconciliationSweep()
+	elapsed := time.Since(start)
+
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("sweep elapsed = %s, want bounded by sweep deadline", elapsed)
+	}
+	demoted := 0
+	for _, provider := range registry.Snapshot() {
+		if provider.Tier == pool.TierProvisional {
+			demoted++
+		}
+	}
+	if demoted == 0 {
+		t.Fatal("stalled sweep deadline did not demote any unresolved trusted providers")
+	}
+}
+
+func TestHandleDisconnectClearsRewardsTrustLookupFailure(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Tier:       pool.TierTrusted,
+		State:      pool.StateReady,
+		AuthState:  pool.AuthBearerValidated,
+	}, nil)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	s.sessions.Store(sessionKey("provider-a", "session-a"), newProviderSession("provider-a", "session-a", serverConn, 1))
+	key := sessionKey("provider-a", "session-a")
+	s.rewardsTrustSweepFailures.Store(key, 2)
+
+	s.handleDisconnect("provider-a", "session-a")
+
+	if _, ok := s.rewardsTrustSweepFailures.Load(key); ok {
+		t.Fatal("rewards trust lookup failure counter survived disconnect")
+	}
+}
+
 func TestAdmissionManagerPendingReservationsEnforcePoolCap(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	adm := NewAdmissionManager(config.AdmissionConfig{
@@ -406,6 +475,13 @@ type fakeRewardsTrustStore struct {
 	tiers  map[string]string
 	errors map[string]error
 	err    error
+}
+
+type blockingRewardsTrustStore struct{}
+
+func (blockingRewardsTrustStore) ProviderTrustTier(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
 }
 
 func (f fakeRewardsTrustStore) ProviderTrustTier(_ context.Context, providerID string) (string, error) {

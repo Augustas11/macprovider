@@ -13,8 +13,12 @@ type ProviderRewardsTrustTierStore interface {
 }
 
 const rewardsTrustTierTrusted = "trusted"
-const rewardsTrustLookupTimeout = 500 * time.Millisecond
 const rewardsTrustSweepDegradedThreshold = 3
+
+var (
+	rewardsTrustLookupTimeout = 500 * time.Millisecond
+	rewardsTrustSweepDeadline = trustRevalidationSweepDeadlineCap
+)
 
 func (s *Server) routingAdmissionTier(ctx context.Context, auth providerAuth, providerID string, pinned bool) pool.Tier {
 	if pinned {
@@ -65,6 +69,8 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 	if s == nil || s.pool == nil || s.rewardsTrust == nil {
 		return
 	}
+	sweepCtx, cancel := context.WithTimeout(context.Background(), rewardsTrustSweepDeadline)
+	defer cancel()
 	var eligible, succeeded, failed int
 	for _, provider := range s.pool.Snapshot() {
 		if provider.Tier == pool.TierPinned {
@@ -82,9 +88,25 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 			continue
 		}
 		eligible++
-		lookupCtx, cancel := context.WithTimeout(context.Background(), rewardsTrustLookupTimeout)
+		if sweepCtx.Err() != nil {
+			failed++
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
+		lookupCtx, cancel := context.WithTimeout(sweepCtx, rewardsTrustLookupTimeout)
 		tier, err := s.rewardsTrust.ProviderTrustTier(lookupCtx, provider.ProviderID)
 		cancel()
+		if sweepCtx.Err() != nil {
+			failed++
+			s.rewardsTrustSweepFailures.Delete(key)
+			if provider.Tier == pool.TierTrusted {
+				s.ApplyRewardsTrustTier(provider.ProviderID, string(pool.TierProvisional))
+			}
+			continue
+		}
 		if err != nil {
 			failed++
 			failures := s.recordRewardsTrustLookupFailure(key)
@@ -129,6 +151,13 @@ func (s *Server) runRewardsTrustTierReconciliationSweep() {
 			Msg("rewards trust tier reconciliation recovered")
 	}
 	s.rewardsTrustStoreFailures = 0
+}
+
+func (s *Server) clearRewardsTrustLookupFailure(providerID, assignedID string) {
+	if s == nil {
+		return
+	}
+	s.rewardsTrustSweepFailures.Delete(sessionKey(providerID, assignedID))
 }
 
 func (s *Server) recordRewardsTrustLookupFailure(key string) int {

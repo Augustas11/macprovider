@@ -1826,7 +1826,7 @@ func (r *Registry) ClearBenchmarkQuarantines() int {
 
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
 	sanction, ok := r.canarySanctions[p.ProviderID]
-	if !ok || p.Tier != TierPinned {
+	if !ok || (p.Tier != TierPinned && p.Tier != TierTrusted) {
 		return
 	}
 	p.CanaryFailCount = sanction.failCount

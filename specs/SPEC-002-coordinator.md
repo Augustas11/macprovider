@@ -11,9 +11,10 @@
   means unlimited) while remaining distinct from operator-pinned providers.
   Rewards demotion back to `provisional` MUST revoke the trusted routing
   quota for live sessions, either from rewards-runner callbacks or the
-  bounded active-session trust reconciliation sweep. Tokenless or
+  sweep-wide bounded active-session trust reconciliation sweep. Tokenless or
   mismatched-auth sessions remain `provisional` even if they claim a trusted
-  provider ID.
+  provider ID. Trusted providers that trip canary degradation MUST keep that
+  recovery hold across reconnects until a canary recovery pass clears it.
 - When `malibu_emission.writer_dsn` is configured, the coordinator MAY use
   that rewards DB as a read-only trusted-routing lookup source even if
   `malibu_emission.enabled` is false. Lookup errors fail closed to
@@ -1376,10 +1377,14 @@ The coordinator recognizes four admission tiers:
   non-pinned sessions back to the provisional routing tier so this
   elevated quota is revoked. The coordinator MUST run bounded
   active-session reconciliation against the durable rewards trust store
-  whenever DB-backed trusted admission lookup is enabled, so DB-backed
-  demotions still revoke live trusted quota if the rewards runner callback
-  is unavailable. Pinned providers remain unlimited and are not demoted by
-  rewards trust changes.
+  whenever DB-backed trusted admission lookup is enabled, under a
+  sweep-wide deadline so a stalled trust store cannot make revocation
+  latency scale with live provider count. DB-backed demotions still revoke
+  live trusted quota if the rewards runner callback is unavailable; lookup
+  errors fail closed to the provisional tier after the bounded failure
+  window or immediately for sessions left unresolved by the sweep deadline.
+  Pinned providers remain unlimited and are not demoted by rewards trust
+  changes.
 - `malibu_emission.writer_dsn`, when present and successfully opened, is the
   durable rewards trust lookup source for trusted routing. This read-only
   trusted-routing bridge is intentionally independent of
@@ -4281,9 +4286,11 @@ reconciliation sweep, and the provisional request quota applies.
 When `malibu_emission.writer_dsn` is configured but
 `malibu_emission.enabled` is false, admission and reconciliation still use
 the rewards DB for read-only trusted-routing lookup and fail closed to
-`provisional` on lookup errors.
+`provisional` on lookup errors. A trusted provider that trips canary
+degradation remains degraded and unroutable across reconnects until canary
+recovery clears the sanction.
 
-Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess'`
+Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess|TestRewardsTrustReconciliationSweepDeadlineDemotesUnresolvedTrustedProviders|TestHandleDisconnectClearsRewardsTrustLookupFailure'` and `go test ./phase4-coordinator/internal/pool -run 'TestRecordCanaryResultHoldsTrustedDegradedAcrossReconnect'`
 
 **AC-14. admin/reject.**
 Connect a provisional provider. `POST /admin/reject/{provider_id}`.
