@@ -1248,6 +1248,7 @@
         "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRejectsTrustedQuotaAfterLegacyTokenRevocation",
         "phase4-coordinator/internal/ws/admission_test.go::TestRoutingAdmissionTierRequiresVerifiedDurableIdentityAfterRevocation",
         "phase4-coordinator/internal/ws/admission_test.go::TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody",
+        "phase4-coordinator/internal/ws/admission_test.go::TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesLiveTrustedProvider",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationDemotesTrustedProviderWithRevokedLegacyTokenHistory",
         "phase4-coordinator/internal/ws/admission_test.go::TestRewardsTrustReconciliationKeepsVerifiedDurableIdentityAfterRevokedHistory",

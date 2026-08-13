@@ -109,6 +109,22 @@ func (a *AdmissionManager) CheckAdmitAs(hello Hello, tier pool.Tier, connectedPr
 	return a.evaluateAdmissionLocked(hello, tier, connectedProvisional, false)
 }
 
+func (a *AdmissionManager) CheckAdmitAsWithoutCapacity(hello Hello, tier pool.Tier) (pool.Tier, gobwas.StatusCode, string) {
+	if tier == pool.TierPinned {
+		return pool.TierPinned, 0, ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	tier = normalizeAdmissionTier(tier)
+	if _, ok := a.rejected[hello.ProviderID]; ok {
+		return pool.TierRejected, CloseBanned, "banned: provider " + hello.ProviderID + " has been rejected by operator"
+	}
+	if a.cfg.PinnedOnly {
+		return pool.TierRejected, CloseBanned, "banned: provider " + hello.ProviderID + " has been rejected by operator"
+	}
+	return tier, 0, ""
+}
+
 func (a *AdmissionManager) ReserveAdmissionAs(hello Hello, tier pool.Tier, connectedProvisional int) (pool.Tier, gobwas.StatusCode, string) {
 	if tier == pool.TierPinned {
 		return pool.TierPinned, 0, ""

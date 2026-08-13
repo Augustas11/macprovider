@@ -283,6 +283,68 @@ func TestIdentityProofMarksOnlyExistingDurableKeyAsQuotaCustody(t *testing.T) {
 	}
 }
 
+func TestV2DeferredAdmissionAllowsVerifiedTrustedQuotaWhenProvisionalPoolFull(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, _, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeToken(ctx, first.TokenPrefix); err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := store.IssueToken(ctx, "provider-a", "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindAdmissionIdentity(ctx, "provider-a", bearer, pub, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Admission.ProvisionalPoolMax = 0
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop(),
+		WithTokenValidator(store),
+		WithBootstrapTokenStore(store),
+		WithProviderRewardsTrustTierStore(fakeRewardsTrustStore{
+			tiers: map[string]string{"provider-a": string(pool.TierTrusted)},
+		}),
+	)
+	hello := capacityTestHello(2)
+
+	entry, ok := s.prepareProviderAdmissionDeferredQuota(nil, providerAuth{validated: true, providerID: "provider-a"}, hello)
+	if !ok {
+		t.Fatal("deferred v2 admission rejected before durable identity proof")
+	}
+	if entry.Tier != pool.TierProvisional {
+		t.Fatalf("pre-proof tier = %s, want provisional", entry.Tier)
+	}
+
+	finalTier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, true)
+	if finalTier != pool.TierTrusted {
+		t.Fatalf("post-proof tier = %s, want trusted", finalTier)
+	}
+	if tier, code, reason := s.admission.ReserveAdmissionAs(hello, finalTier, s.connectedProvisional()); tier != pool.TierTrusted || code != 0 || reason != "" {
+		t.Fatalf("trusted reserve after proof = tier:%s code:%d reason:%q, want trusted success", tier, code, reason)
+	}
+
+	unverifiedTier := s.routingAdmissionTierWithCustody(ctx, providerAuth{validated: true, providerID: "provider-a"}, "provider-a", false, false)
+	if unverifiedTier != pool.TierProvisional {
+		t.Fatalf("unverified tier = %s, want provisional", unverifiedTier)
+	}
+	if _, code, _ := s.admission.ReserveAdmissionAs(hello, unverifiedTier, s.connectedProvisional()); code != CloseProvisionalPoolFull {
+		t.Fatalf("unverified reserve code = %d, want provisional pool full", code)
+	}
+}
+
 func TestRewardsTrustReconciliationDemotesLiveTrustedProvider(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registry.Register(&pool.Provider{

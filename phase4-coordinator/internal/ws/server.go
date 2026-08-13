@@ -1774,7 +1774,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	if initial.CredentialBootstrap {
 		entry, ok = s.prepareCredentialBootstrap(conn, connectionAuth, initial)
 	} else {
-		entry, ok = s.prepareProviderAdmission(conn, connectionAuth, initial.Hello())
+		entry, ok = s.prepareProviderAdmissionDeferredQuota(conn, connectionAuth, initial.Hello())
 	}
 	if !ok {
 		return "", ""
@@ -2432,6 +2432,14 @@ func (s *Server) observeCredentialBootstrap(outcome string) {
 }
 
 func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
+	return s.prepareProviderAdmissionWithQuotaCheck(conn, auth, hello, true)
+}
+
+func (s *Server) prepareProviderAdmissionDeferredQuota(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
+	return s.prepareProviderAdmissionWithQuotaCheck(conn, auth, hello, false)
+}
+
+func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth providerAuth, hello Hello, checkQuota bool) (*pool.Provider, bool) {
 	// Exact pre-fix sets listed in first_hop_bridge_ids may open an
 	// update-only session so public 1.8.48 can persist coordinator
 	// compatibility admission and run ordinary `macprovider-cli update`
@@ -2490,10 +2498,23 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		// consumed only after this admission path and all evidence checks pass.
 	}
 	requestedTier := s.routingAdmissionTier(context.Background(), auth, hello.ProviderID, pinned)
-	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, requestedTier, false)
-	if closeCode != 0 {
-		s.close(conn, closeCode, closeReason)
-		return nil, false
+	tier := requestedTier
+	if checkQuota {
+		var closeCode gobwas.StatusCode
+		var closeReason string
+		tier, closeCode, closeReason = s.checkOrRecordAdmission(hello, requestedTier, false)
+		if closeCode != 0 {
+			s.close(conn, closeCode, closeReason)
+			return nil, false
+		}
+	} else {
+		var closeCode gobwas.StatusCode
+		var closeReason string
+		tier, closeCode, closeReason = s.checkAdmissionWithoutCapacity(hello, requestedTier)
+		if closeCode != 0 {
+			s.close(conn, closeCode, closeReason)
+			return nil, false
+		}
 	}
 	endpointURL := ""
 	inferencePath := pool.InferencePathWSTunneled
@@ -2961,6 +2982,10 @@ func (s *Server) checkOrRecordAdmission(hello Hello, tier pool.Tier, record bool
 		return s.admission.AdmitAs(hello, tier, s.connectedProvisional())
 	}
 	return s.admission.CheckAdmitAs(hello, tier, s.connectedProvisional())
+}
+
+func (s *Server) checkAdmissionWithoutCapacity(hello Hello, tier pool.Tier) (pool.Tier, gobwas.StatusCode, string) {
+	return s.admission.CheckAdmitAsWithoutCapacity(hello, tier)
 }
 
 // compareSemver is a thin alias for the coordinator's single version
