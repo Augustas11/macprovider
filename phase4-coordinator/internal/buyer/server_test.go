@@ -5411,6 +5411,38 @@ func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsPinnedMeteredQuotaReturnsTierNeutralMessage(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	adm := providerws.NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 10,
+		ProvisionalPoolMax:              10,
+		ProvisionalQuotaPerHour:         1,
+		ProvisionalTierWeight:           0.3,
+	}, time.Now)
+	adm.RecordRequest(pool.Provider{ProviderID: "p1", Tier: pool.TierProvisional})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithAdmission(adm, 0.3),
+	)
+	headers := http.Header{}
+	headers.Set("X-MacProvider-Provider", "p1")
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), headers)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"message":"Pinned metered provider is over request quota"`)) {
+		t.Fatalf("body missing tier-neutral pinned quota message: %s", rr.Body.String())
+	}
+	if rr.Header().Get("Retry-After") != "3600" {
+		t.Fatalf("Retry-After = %q, want 3600", rr.Header().Get("Retry-After"))
+	}
+}
+
 func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))

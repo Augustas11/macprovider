@@ -14,6 +14,10 @@
   bounded active-session trust reconciliation sweep. Tokenless or
   mismatched-auth sessions remain `provisional` even if they claim a trusted
   provider ID.
+- When `malibu_emission.writer_dsn` is configured, the coordinator MAY use
+  that rewards DB as a read-only trusted-routing lookup source even if
+  `malibu_emission.enabled` is false. Lookup errors fail closed to
+  `provisional`.
 
 **Change log v1.5.6 (2026-07-29, B1 — per-request provider TTFT/decode persistence):**
 - `request_log` gains nullable `ttft_ms` and `decode_ms` columns. New
@@ -769,15 +773,21 @@ if provider_id in config.providers[]:
         # Only operator-configured endpoints may enable HTTP-forwarding.
         inference_path = WS_TUNNELED
 else:
-    tier = provisional  (subject to admission rate limits, FR-P16)
+    if hello bearer auth is validated
+       and hello provider_id matches the authenticated provider_id
+       and durable rewards trust_tier(provider_id) == "trusted":
+        tier = trusted  (subject to trusted request quota, FR-P16)
+    else:
+        tier = provisional  (subject to admission rate limits, FR-P16)
     if hello.endpoint_url is present and non-empty:
-        # Q1 OPERATOR DECISION (v1.1.1): Provisional providers operate
-        # EXCLUSIVELY in WS-tunneled mode. Self-reported endpoint_url
-        # from unknown provider_ids is IGNORED to prevent abuse (a Sybil
-        # attacker could register N provisional providers each pointing
-        # endpoint_url at a target server to amplify traffic via the
-        # coordinator). The coordinator logs at warn level:
-        # "provisional provider <id> sent endpoint_url <url>; ignored,
+        # Q1 OPERATOR DECISION (v1.1.1): Non-pinned providers operate
+        # EXCLUSIVELY in WS-tunneled mode, including rewards-trusted
+        # providers. Self-reported endpoint_url from non-pinned provider_ids
+        # is IGNORED to prevent abuse (a Sybil attacker could register N
+        # provisional providers each pointing endpoint_url at a target server
+        # to amplify traffic via the coordinator). The coordinator logs at
+        # warn level:
+        # "non-pinned provider <id> sent endpoint_url <url>; ignored,
         # forcing WS-tunneled mode."
         inference_path = WS_TUNNELED
     else:
@@ -1370,6 +1380,13 @@ The coordinator recognizes four admission tiers:
   demotions still revoke live trusted quota if the rewards runner callback
   is unavailable. Pinned providers remain unlimited and are not demoted by
   rewards trust changes.
+- `malibu_emission.writer_dsn`, when present and successfully opened, is the
+  durable rewards trust lookup source for trusted routing. This read-only
+  trusted-routing bridge is intentionally independent of
+  `malibu_emission.enabled`: operators may pause emissions while preserving
+  already-earned routing trust. If the DB is absent, unreachable, or returns
+  an error for a lookup, the affected non-pinned provider is treated as
+  `provisional` until a successful trusted lookup occurs again.
 
 **FR-P17. Provisional admission persistence.**
 Provisional admissions are persisted to SQLite:
@@ -2090,9 +2107,9 @@ function route(request, pool, headers) -> provider | error:
             return error(503, "Pinned provider not available")
         if not model_id_equal(provider.model_id, model):
             return error(404, "Pinned provider serves different model")
-        # v1.1.1: check provisional quota even for pinned-by-header requests
-        if not check_provisional_quota(provider):
-            return error(429, "Pinned provisional provider is over request quota")
+        # v1.5.7: check any metered routing quota even for pinned-by-header requests
+        if not check_metered_request_quota(provider):
+            return error(429, "Pinned metered provider is over request quota")
         return provider
 
     # Step 2: Filter candidates
@@ -4261,6 +4278,10 @@ but no matching bearer-authenticated identity, admission remains
 `trust_tier='provisional'`, the live non-pinned pool entry changes back
 to `tier: "provisional"` through the live callback or bounded trust
 reconciliation sweep, and the provisional request quota applies.
+When `malibu_emission.writer_dsn` is configured but
+`malibu_emission.enabled` is false, admission and reconciliation still use
+the rewards DB for read-only trusted-routing lookup and fail closed to
+`provisional` on lookup errors.
 
 Run by: `go test ./phase4-coordinator/internal/ws -run 'TestAdmissionManagerTrustedTierBypassesProvisionalQuotaByDefault|TestAdmissionManagerTrustedTierHonorsConfiguredQuota|TestRoutingAdmissionTierRequiresAuthenticatedRewardsTrust|TestRewardsTrustReconciliationDemotesLiveTrustedProvider|TestRewardsTrustReconciliationDoesNotPromoteNonBearerSession|TestRewardsTrustReconciliationDemotesProviderAfterRepeatedLookupFailuresWithMixedSuccess'`
 
