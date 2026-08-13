@@ -219,28 +219,186 @@ enum CLIInstallRunner {
         return await InstalledProviderMonitor.isHealthy(port: port)
     }
 
+    /// Visible install stages for onboarding. Tests inject process and log
+    /// lines so this does not depend on a live `ps` snapshot.
+    struct InstallProgress: Equatable {
+        enum Stage: Int, CaseIterable, Comparable {
+            case starting
+            case downloadingRelease
+            case installingCLI
+            case downloadingModel
+            case autotune
+            case registering
+
+            static func < (lhs: Stage, rhs: Stage) -> Bool {
+                lhs.rawValue < rhs.rawValue
+            }
+
+            var title: String {
+                switch self {
+                case .starting: return "Starting"
+                case .downloadingRelease: return "Provider software"
+                case .installingCLI: return "Install software"
+                case .downloadingModel: return "Model download"
+                case .autotune: return "Mac check"
+                case .registering: return "Registering"
+                }
+            }
+
+            /// Model download is the long wait; weight the bar that way.
+            var overallBase: Double {
+                switch self {
+                case .starting: return 0.04
+                case .downloadingRelease: return 0.10
+                case .installingCLI: return 0.16
+                case .downloadingModel: return 0.20
+                case .autotune: return 0.88
+                case .registering: return 0.96
+                }
+            }
+        }
+
+        var stage: Stage
+        var detail: String
+        var downloadFraction: Double?
+
+        var overallFraction: Double {
+            if stage == .downloadingModel {
+                let span = 0.66
+                return min(0.86, stage.overallBase + span * (downloadFraction ?? 0.04))
+            }
+            return min(0.99, stage.overallBase)
+        }
+
+        var percentLabel: String? {
+            guard let downloadFraction else { return nil }
+            return "\(Int((downloadFraction * 100).rounded()))%"
+        }
+
+        static let starting = InstallProgress(
+            stage: .starting,
+            detail: "Starting installer…",
+            downloadFraction: nil
+        )
+    }
+
     /// Human-readable hint for onboarding UI while `install.sh` runs long silent phases.
     enum ActivityMonitor {
-        static func snapshot() -> String {
-            let lines = macproviderProcessLines()
-            if lines.contains(where: { $0.contains("autotune --recommend") }) {
-                return "Benchmarking models for your Mac — often 10–30 minutes on first run. The log can look frozen; that is normal."
+        static func snapshot(logLines: [String] = []) -> InstallProgress {
+            progress(
+                processLines: macproviderProcessLines(),
+                logLines: logLines,
+                cliInstalled: FileManager.default.isExecutableFile(
+                    atPath: NSHomeDirectory() + "/macprovider/macprovider-cli"
+                )
+            )
+        }
+
+        static func progress(
+            processLines: [String],
+            logLines: [String] = [],
+            cliInstalled: Bool = false
+        ) -> InstallProgress {
+            let combined = processLines + logLines
+            let downloadFraction = parseDownloadFraction(from: combined)
+            let looksLikeModelDownload = processLines.contains(where: {
+                $0.contains("models pull") || $0.lowercased().contains("huggingface")
+            }) || logLines.contains(where: { line in
+                let lower = line.lowercased()
+                return lower.contains("huggingface")
+                    || lower.contains("safetensors")
+                    || lower.contains("models pull")
+                    || (lower.contains("downloading") && (line.contains("%") || lower.contains("model")))
+            }) || (cliInstalled && downloadFraction != nil)
+
+            if processLines.contains(where: { $0.contains("autotune --recommend") }) {
+                return InstallProgress(
+                    stage: .autotune,
+                    detail: "Checking which model fits this Mac — often 10–30 minutes on first run.",
+                    downloadFraction: nil
+                )
             }
-            if let bench = lines.first(where: { $0.contains("serve --no-join") }) {
-                let model = extractFlag("--model", from: bench) ?? "a candidate model"
-                return "Testing \(shortModelName(model)) performance…"
+            if let bench = processLines.first(where: { $0.contains("serve --no-join") }) {
+                let model = extractFlag("--model", from: bench).map(shortModelName) ?? "a candidate model"
+                return InstallProgress(
+                    stage: .autotune,
+                    detail: "Testing \(model) performance…",
+                    downloadFraction: nil
+                )
             }
-            if lines.contains(where: { $0.contains("models pull") || $0.contains("huggingface") }) {
-                return "Downloading model weights from Hugging Face…"
+            if looksLikeModelDownload {
+                if let downloadFraction {
+                    return InstallProgress(
+                        stage: .downloadingModel,
+                        detail: "Downloading model weights — \(Int((downloadFraction * 100).rounded()))%",
+                        downloadFraction: downloadFraction
+                    )
+                }
+                return InstallProgress(
+                    stage: .downloadingModel,
+                    detail: "Downloading model weights…",
+                    downloadFraction: nil
+                )
             }
-            let cliPath = NSHomeDirectory() + "/macprovider/macprovider-cli"
-            if FileManager.default.isExecutableFile(atPath: cliPath) {
-                return "Provider CLI installed. Running autotune and model checks next…"
+            if cliInstalled {
+                return InstallProgress(
+                    stage: .installingCLI,
+                    detail: "Provider software installed. Model download and Mac checks are next.",
+                    downloadFraction: nil
+                )
             }
-            if lines.contains(where: { $0.contains("curl") && $0.contains("github") }) {
-                return "Downloading provider release from GitHub…"
+            if processLines.contains(where: { $0.contains("curl") && $0.lowercased().contains("github") }) {
+                return InstallProgress(
+                    stage: .downloadingRelease,
+                    detail: "Downloading provider software…",
+                    downloadFraction: nil
+                )
             }
-            return "Install in progress…"
+            return InstallProgress(
+                stage: .starting,
+                detail: "Install in progress…",
+                downloadFraction: nil
+            )
+        }
+
+        static func parseDownloadFraction(from lines: [String]) -> Double? {
+            let percent = try! NSRegularExpression(pattern: #"(\d{1,3}(?:\.\d+)?)\s*%"#)
+            let bytes = try! NSRegularExpression(
+                pattern: #"(\d+(?:\.\d+)?)\s*(GiB|GB|MiB|MB)\s*/\s*(\d+(?:\.\d+)?)\s*(GiB|GB|MiB|MB)"#,
+                options: .caseInsensitive
+            )
+            for line in lines.reversed() {
+                let range = NSRange(line.startIndex..., in: line)
+                if let match = percent.firstMatch(in: line, range: range),
+                   let valueRange = Range(match.range(at: 1), in: line),
+                   let value = Double(line[valueRange]),
+                   value >= 0,
+                   value <= 100 {
+                    return value / 100
+                }
+                if let match = bytes.firstMatch(in: line, range: range),
+                   let n1Range = Range(match.range(at: 1), in: line),
+                   let u1Range = Range(match.range(at: 2), in: line),
+                   let n2Range = Range(match.range(at: 3), in: line),
+                   let u2Range = Range(match.range(at: 4), in: line),
+                   let n1 = Double(line[n1Range]),
+                   let n2 = Double(line[n2Range]),
+                   n2 > 0 {
+                    let from = n1 * byteUnitMultiplier(String(line[u1Range]))
+                    let to = n2 * byteUnitMultiplier(String(line[u2Range]))
+                    guard to > 0 else { continue }
+                    return min(1, from / to)
+                }
+            }
+            return nil
+        }
+
+        private static func byteUnitMultiplier(_ unit: String) -> Double {
+            switch unit.uppercased() {
+            case "GIB", "GB": return 1_024 * 1_024 * 1_024
+            case "MIB", "MB": return 1_024 * 1_024
+            default: return 1
+            }
         }
 
         private static func macproviderProcessLines() -> [String] {

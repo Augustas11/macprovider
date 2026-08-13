@@ -94,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .resume: Task { await agent.resume() }
         case .checkForUpdates, .updateCLI: Task { await agent.updateCLINow() }
         case .exportDiagnostics: exportDiagnostics()
+        case .resetProviderService: resetProviderService()
         case .openSettings:
             SettingsWindowPresenter.shared.present()
         case .quitAndUninstall:
@@ -115,6 +116,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    private func resetProviderService() {
+        guard confirmResetProvider() else { return }
+        presentOnboarding(repairExistingInstall: true)
+    }
+
+    private func confirmResetProvider() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = DashboardCopy.resetProviderConfirmTitle
+        alert.informativeText = DashboardCopy.resetProviderConfirmDetail
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: DashboardCopy.resetProviderConfirmButton)
+        alert.addButton(withTitle: DashboardCopy.resetProviderCancelButton)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     // SPEC-026 §7.3: consume(_:) / presentLinkError(_:) retired along with
     // the browser callback handler. Provider onboarding now happens
     // in-App via LaunchProviderController (SPEC-026 §7.2, follow-up impl
@@ -124,6 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         replacementConfirmed: Bool = false,
         repairExistingInstall: Bool = false
     ) {
+        if repairExistingInstall, onboardingWindow != nil {
+            onboardingWindow?.close()
+            onboardingWindow = nil
+        }
         if onboardingWindow == nil {
             onboardingWindow = OnboardingWindow.make(
                 agent: agent,
@@ -249,7 +269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dashboardWindow == nil {
             dashboardWindow = DashboardWindow.make(
                 agent: agent,
-                onExportDiagnostics: { [weak self] in self?.exportDiagnostics() }
+                onExportDiagnostics: { [weak self] in self?.exportDiagnostics() },
+                onResetProvider: { [weak self] in self?.resetProviderService() }
             )
         }
         dashboardWindow?.makeKeyAndOrderFront(nil)

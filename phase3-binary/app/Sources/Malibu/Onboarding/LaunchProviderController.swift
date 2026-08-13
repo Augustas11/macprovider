@@ -22,7 +22,7 @@ final class LaunchProviderController: ObservableObject {
 
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var installLogLines: [String] = []
-    @Published private(set) var installProgressHint: String?
+    @Published private(set) var installProgress: CLIInstallRunner.InstallProgress?
     @Published private(set) var installStartedAt: Date?
     @Published var referralInput = ""
     @Published private(set) var referralInputAvailable = false
@@ -446,12 +446,14 @@ final class LaunchProviderController: ObservableObject {
 
     private func beginInstallProgressWatch() {
         installStartedAt = Date()
-        installProgressHint = "Starting installer…"
+        installProgress = .starting
         installProgressTask?.cancel()
         installProgressTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.installProgressHint = CLIInstallRunner.ActivityMonitor.snapshot()
+                self.installProgress = CLIInstallRunner.ActivityMonitor.snapshot(
+                    logLines: self.installLogLines
+                )
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
@@ -461,7 +463,7 @@ final class LaunchProviderController: ObservableObject {
         installProgressTask?.cancel()
         installProgressTask = nil
         installStartedAt = nil
-        installProgressHint = nil
+        installProgress = nil
     }
 }
 
