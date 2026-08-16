@@ -233,6 +233,10 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
+	mux.Handle("/v1/rate-card", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCard)))
+	mux.Handle("/v1/rate-card.sig", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicRateCardSig)))
+	mux.Handle("/v1/stats/overview", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsOverview)))
+	mux.Handle("/v1/network-stats", s.withCORS(http.MethodGet, http.HandlerFunc(s.handlePublicStatsOverview)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/metrics", s.handleMetrics)
@@ -1073,7 +1077,8 @@ var gatewayPermanentCodes = map[string]bool{
 	"demo_session_check_failed": true, "demo_token_issuance_failed": true,
 	"demo_session_record_failed": true, "api_key_rotation_failed": true,
 	"api_key_revoke_failed": true, "internal_error": true,
-	"coordinator_models_error": true, "tier2_metadata_unavailable": true,
+	"coordinator_models_error": true, "coordinator_rate_card_error": true,
+	"coordinator_stats_error": true, "tier2_metadata_unavailable": true,
 	"usage_load_failed": true, "keys_load_failed": true,
 	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
 	"feedback_store_failed": true, "settlement_reconcile_load_failed": true,
