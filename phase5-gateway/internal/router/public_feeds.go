@@ -16,10 +16,16 @@ import (
 // buyer API host must mount the same GET paths so SDKs using
 // base_url=https://api.malibu.tech/v1 can read prices and pool snapshot.
 const (
-	publicUpstreamMaxBytes = 1 << 20
-	publicUpstreamTimeout  = 10 * time.Second
-	publicStatsCacheTTL    = 30 * time.Second
-	publicRateCardCacheTTL = 5 * time.Minute
+	// Match coordinator signed-feed contracts in
+	// phase4-coordinator/internal/buyer/autotune_feeds.go
+	// (maxAutotuneFeedBytes / maxAutotuneSidecarBytes). A valid
+	// rate-card between 1 MiB and 4 MiB must pass through api.malibu.tech.
+	publicRateCardMaxBytes    = 4 << 20
+	publicRateCardSigMaxBytes = 16 << 10
+	publicStatsMaxBytes       = 1 << 20
+	publicUpstreamTimeout     = 10 * time.Second
+	publicStatsCacheTTL       = 30 * time.Second
+	publicRateCardCacheTTL    = 5 * time.Minute
 )
 
 const (
@@ -76,6 +82,17 @@ func isPublicFeedPath(path string) bool {
 
 func isRateCardPairPath(path string) bool {
 	return path == publicRateCardPath || path == publicRateCardSigPath
+}
+
+func publicFeedMaxBytes(upstreamPath string) int64 {
+	switch upstreamPath {
+	case publicRateCardPath:
+		return publicRateCardMaxBytes
+	case publicRateCardSigPath:
+		return publicRateCardSigMaxBytes
+	default:
+		return publicStatsMaxBytes
+	}
 }
 
 func publicFeedCacheTTL(upstreamPath string) time.Duration {
@@ -197,11 +214,12 @@ func (s *Server) fetchPublicFeed(ctx context.Context, clientReq *http.Request, b
 	if isDisallowedPublicUpstreamStatus(resp.StatusCode) {
 		return publicFeedFetch{gatewayErr: true}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, publicUpstreamMaxBytes+1))
+	limit := publicFeedMaxBytes(upstreamPath)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return publicFeedFetch{gatewayErr: true}
 	}
-	if int64(len(body)) > publicUpstreamMaxBytes {
+	if int64(len(body)) > limit {
 		return publicFeedFetch{gatewayErr: true}
 	}
 	return publicFeedFetch{

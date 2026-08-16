@@ -409,7 +409,7 @@ func TestPublicFeedsRejectRedirectsAndOversizedBodies(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", publicUpstreamMaxBytes+2))),
+				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", publicStatsMaxBytes+2))),
 			}, nil
 		default:
 			t.Errorf("unexpected upstream %s", r.URL.String())
@@ -429,6 +429,55 @@ func TestPublicFeedsRejectRedirectsAndOversizedBodies(t *testing.T) {
 
 	oversize := assertStatus(t, h, http.MethodGet, "/v1/stats/overview", "", "", "192.0.2.10", http.StatusBadGateway)
 	assertErrorCode(t, oversize.Body.String(), "coordinator_stats_error")
+}
+
+func TestPublicFeedsAcceptsCoordinatorSizedRateCard(t *testing.T) {
+	largeBody := strings.Repeat("a", publicStatsMaxBytes+1)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/rate-card":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, largeBody), nil
+		case "/v1/rate-card.sig":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardSig), nil
+		default:
+			t.Errorf("unexpected upstream %s", r.URL.String())
+			return responseWithBody(http.StatusNotFound, nil, ""), nil
+		}
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://buyer.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/rate-card", "", "", "192.0.2.10", http.StatusOK)
+	if resp.Body.String() != largeBody {
+		t.Fatalf("rate-card len=%d want coordinator-valid size %d", resp.Body.Len(), len(largeBody))
+	}
+}
+
+func TestPublicFeedsRejectsOversizedRateCard(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/rate-card":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(strings.Repeat("x", publicRateCardMaxBytes+2))),
+			}, nil
+		case "/v1/rate-card.sig":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardSig), nil
+		default:
+			t.Errorf("unexpected upstream %s", r.URL.String())
+			return responseWithBody(http.StatusNotFound, nil, ""), nil
+		}
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://buyer.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/rate-card", "", "", "192.0.2.10", http.StatusBadGateway)
+	assertErrorCode(t, resp.Body.String(), "coordinator_rate_card_error")
 }
 
 func TestPublicFeedsCoordinatorUnavailable(t *testing.T) {
