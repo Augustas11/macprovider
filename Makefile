@@ -75,6 +75,8 @@ test-dist:
 	bash scripts/test-release-publication-provenance.sh
 	bash scripts/test-compatibility-set-manifest.sh
 	bash scripts/test-compatibility-artifact-index.sh
+	bash scripts/test-agent-onboarding-skill.sh
+	bash scripts/test-agent-onboarding-publication.sh
 	bash scripts/test-release-discovery-head.sh
 	bash scripts/test-release-discovery-transport.sh
 	bash scripts/test-renew-release-discovery-head.sh

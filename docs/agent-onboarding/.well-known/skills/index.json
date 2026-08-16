@@ -1,0 +1,15 @@
+{
+  "schema_version": "https://get.malibu.tech/.well-known/skills/index.v1",
+  "updated_at": "2026-08-16",
+  "skills": [
+    {
+      "id": "macprovider-agent-onboarding",
+      "name": "MacProvider Agent Onboarding",
+      "description": "Agent-readable MacProvider provider onboarding, recovery, uninstall, and buyer SDK compatibility guidance.",
+      "url": "https://get.malibu.tech/skill.md",
+      "source_path": "docs/agent-onboarding/SKILL.md",
+      "content_type": "text/markdown; charset=utf-8",
+      "sha256": "12053c20a33f4c49b9eab1d1a3eeed867bdcec0944b8845a1c1eb172a3f3a4fa"
+    }
+  ]
+}

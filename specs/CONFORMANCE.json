@@ -62,7 +62,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.11.0",
+      "version": "0.11.1",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -4045,6 +4045,32 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
         "rationale": "Gateway config validation, disabled compatibility, relay-blind metadata limiter, and replay storage DDL are implemented/tested locally; production enablement and signed journey-result evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-003-R001",
+      "spec_id": "SPEC-003",
+      "state": "pending",
+      "implementation": [
+        "docs/agent-onboarding/SKILL.md:MacProvider Agent Onboarding Skill",
+        "docs/agent-onboarding/.well-known/skills/index.json:macprovider-agent-onboarding",
+        "scripts/verify-agent-onboarding-skill.py:REQUIRED_SKILL_SNIPPETS",
+        "scripts/install-agent-onboarding-publication.sh:agent-onboarding-current",
+        "scripts/publish-agent-onboarding-skill.sh:MALIBU_GET_WEBROOT"
+      ],
+      "tests": [
+        "scripts/test-agent-onboarding-skill.sh:verify-agent-onboarding-skill.py",
+        "scripts/test-agent-onboarding-publication.sh:unsafe agent onboarding publication was accepted",
+        "scripts/verify-agent-onboarding-hosted.sh:hosted skill bytes differ from repo source",
+        "Makefile:test-dist"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/926",
+        "rationale": "The repo now contains the Malibu-domain hosted agent onboarding skill source, discovery index, and drift validator; the requirement remains pending until the public get.malibu.tech route is published and byte-compared against the repo artifact."
       }
     }
   ]
