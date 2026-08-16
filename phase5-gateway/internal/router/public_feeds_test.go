@@ -197,6 +197,8 @@ func TestPublicFeedsSurvivePublicAPIPause(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/rate-card":
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardBody), nil
+		case "/v1/rate-card.sig":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testRateCardSig), nil
 		case "/v1/stats/overview":
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsBody), nil
 		default:
@@ -212,11 +214,13 @@ func TestPublicFeedsSurvivePublicAPIPause(t *testing.T) {
 	fullKey := createAccountAndKey(t, store, cfg, "acct_public_feeds_pause")
 
 	assertStatus(t, h, http.MethodGet, "/v1/rate-card", "", "", "192.0.2.10", http.StatusOK)
+	assertStatus(t, h, http.MethodGet, "/v1/rate-card.sig", "", "", "192.0.2.10", http.StatusOK)
 	assertStatus(t, h, http.MethodGet, "/v1/stats/overview", "", "", "192.0.2.10", http.StatusOK)
+	assertStatus(t, h, http.MethodGet, "/v1/network-stats", "", "", "192.0.2.10", http.StatusOK)
 	paused := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "192.0.2.10", http.StatusServiceUnavailable)
 	assertErrorCode(t, paused.Body.String(), "public_api_paused")
-	if upstreamHits != 2 {
-		t.Fatalf("upstream hits=%d want 2 public-feed fetches", upstreamHits)
+	if upstreamHits != 3 {
+		t.Fatalf("upstream hits=%d want 3 public-feed fetches", upstreamHits)
 	}
 }
 
@@ -276,13 +280,15 @@ func TestPublicFeedsPassThroughStatsStaleAndRateLimit(t *testing.T) {
 	if notModified.Body.Len() != 0 {
 		t.Fatalf("304 body=%q", notModified.Body.String())
 	}
+	if got := notModified.Header().Get("Content-Type"); got != "" {
+		t.Fatalf("304 synthesized Content-Type=%q", got)
+	}
 }
 
 func TestPublicFeedsHeadHasNoBody(t *testing.T) {
+	var methods []string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Method != http.MethodHead {
-			t.Errorf("method=%s want HEAD", r.Method)
-		}
+		methods = append(methods, r.Method)
 		return responseWithBody(http.StatusOK, http.Header{
 			"Content-Type":  []string{"application/json"},
 			"Cache-Control": []string{"public, max-age=30"},
@@ -299,6 +305,38 @@ func TestPublicFeedsHeadHasNoBody(t *testing.T) {
 	}
 	if got := resp.Header().Get("Cache-Control"); got != "public, max-age=30" {
 		t.Fatalf("HEAD cache-control=%q", got)
+	}
+	if len(methods) != 1 || methods[0] != http.MethodGet {
+		t.Fatalf("upstream methods=%v want GET so chi GET-only feeds still work", methods)
+	}
+
+	rateCard := assertStatus(t, h, http.MethodHead, "/v1/rate-card", "", "", "192.0.2.10", http.StatusOK)
+	if rateCard.Body.Len() != 0 {
+		t.Fatalf("rate-card HEAD body=%q", rateCard.Body.String())
+	}
+}
+
+func TestPublicFeedsCacheCollapsesRepeatReads(t *testing.T) {
+	hits := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		hits++
+		if r.URL.Path != "/v1/stats/overview" {
+			t.Errorf("unexpected upstream %s", r.URL.String())
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, testStatsBody), nil
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://buyer.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+
+	assertStatus(t, h, http.MethodGet, "/v1/stats/overview", "", "", "192.0.2.10", http.StatusOK)
+	alias := assertStatus(t, h, http.MethodGet, "/v1/network-stats", "", "", "192.0.2.10", http.StatusOK)
+	if alias.Body.String() != testStatsBody {
+		t.Fatalf("cached alias body=%q", alias.Body.String())
+	}
+	if hits != 1 {
+		t.Fatalf("upstream hits=%d want 1 cached overview fetch", hits)
 	}
 }
 

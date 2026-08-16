@@ -71,6 +71,7 @@ type Server struct {
 	journal SettlementJournal
 	// journalAttempts bounds conflicted re-drives before quarantine.
 	journalAttempts *settlementJournalAttempts
+	publicFeedCache map[string]publicFeedCacheEntry
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -184,6 +185,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		idlessDedupe:     newIdlessDedupeIndex(),
 		journal:          discardSettlementJournal{},
 		journalAttempts:  newSettlementJournalAttempts(),
+		publicFeedCache:  make(map[string]publicFeedCacheEntry),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -710,6 +712,10 @@ func (s *Server) statusFromPoolz(ctx context.Context) (statusResponse, error) {
 
 func (s *Server) coordinatorBuyerURL() string {
 	return s.cfg.Coordinator.BuyerURL
+}
+
+func (s *Server) coordinatorOperatorURL() string {
+	return s.cfg.Coordinator.OperatorURL
 }
 
 func (s *Server) flushStatusCache() {
