@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
@@ -20,10 +21,10 @@ const (
 )
 
 func TestPublicFeedsUnauthenticatedExactBytes(t *testing.T) {
-	var sawAuth bool
+	var sawAuth atomic.Bool
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("X-Demo-Token") != "" {
-			sawAuth = true
+			sawAuth.Store(true)
 		}
 		switch {
 		case r.URL.Host == "buyer.test" && r.URL.Path == "/v1/rate-card":
@@ -92,7 +93,7 @@ func TestPublicFeedsUnauthenticatedExactBytes(t *testing.T) {
 	if got := alias.Body.String(); got != testStatsBody {
 		t.Fatalf("network-stats alias body=%q want overview bytes", got)
 	}
-	if sawAuth {
+	if sawAuth.Load() {
 		t.Fatal("public feed proxy forwarded buyer credentials upstream")
 	}
 }
@@ -284,9 +285,14 @@ func TestPublicFeedsPassThroughStatsStaleAndRateLimit(t *testing.T) {
 }
 
 func TestPublicFeedsHeadHasNoBody(t *testing.T) {
-	var methods []string
+	var (
+		mu      sync.Mutex
+		methods []string
+	)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
 		methods = append(methods, r.Method)
+		mu.Unlock()
 		return responseWithBody(http.StatusOK, http.Header{
 			"Content-Type":  []string{"application/json"},
 			"Cache-Control": []string{"public, max-age=30"},
