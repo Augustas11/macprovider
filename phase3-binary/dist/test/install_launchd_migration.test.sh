@@ -13,6 +13,7 @@ names = [
     "xml_escape",
     "write_atomic_install_file",
     "reclaim_launchd_service",
+    "reclaim_legacy_launchd_service",
     "render_plist",
     "render_watchdog_plist",
     "install_plist",
@@ -35,6 +36,12 @@ for name in names:
     else:
         raise SystemExit(f"could not extract {name}")
 PY
+printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/functions.sh"
+printf '%s\n' 'WATCHDOG_LABEL="${WATCHDOG_LABEL:-live.malibu.provider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_LABEL="${LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"' >> "$TMP/functions.sh"
 
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/plutil" <<'EOF'

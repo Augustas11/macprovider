@@ -64,6 +64,7 @@ names = {
     "launchd_label_is_disabled", "capture_manual_provider_for_recovery",
     "pid_is_live_non_zombie", "stop_owned_manual_provider",
     "validate_port_value", "ensure_port_free", "reclaim_launchd_service",
+    "reclaim_legacy_launchd_service",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 i = 0
@@ -82,6 +83,12 @@ while i < len(lines):
             break
 PY
 printf '%s\n' 'REFERRAL_REPLACE_INCUMBENT="${REFERRAL_REPLACE_INCUMBENT:-0}"' >> "$TMP/functions.sh"
+printf '%s\n' 'PROVIDER_LABEL="${PROVIDER_LABEL:-live.malibu.provider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PROVIDER_LABEL="${LEGACY_PROVIDER_LABEL:-live.streamvc.macprovider}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_PLIST_PATH="${LEGACY_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist}"' >> "$TMP/functions.sh"
+printf '%s\n' 'WATCHDOG_LABEL="${WATCHDOG_LABEL:-live.malibu.provider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_LABEL="${LEGACY_WATCHDOG_LABEL:-live.streamvc.macprovider-watchdog}"' >> "$TMP/functions.sh"
+printf '%s\n' 'LEGACY_WATCHDOG_PLIST_PATH="${LEGACY_WATCHDOG_PLIST_PATH:-$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist}"' >> "$TMP/functions.sh"
 
 # Emit a FULL-schema lifecycle-state record matching the real store's
 # JSONEncoder(.sortedKeys) output (compact, alphabetically sorted keys). This is
@@ -563,11 +570,11 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 service_file="$CASE_ROOT/service-active"
 disabled_file="$CASE_ROOT/service-disabled"
 case "$*" in
-  *macprovider-install-recovery*)
+  *macprovider-install-recovery*|*malibu.provider-install-recovery*)
     service_file="$CASE_ROOT/recovery-service-active"
     disabled_file="$CASE_ROOT/recovery-service-disabled"
     ;;
-  *macprovider-watchdog*)
+  *macprovider-watchdog*|*malibu.provider-watchdog*)
     service_file="$CASE_ROOT/watchdog-service-active"
     disabled_file="$CASE_ROOT/watchdog-service-disabled"
     ;;
@@ -576,7 +583,7 @@ case "$1" in
   print)
     [ -f "$service_file" ] || exit 1
     case "$*" in
-      *macprovider-watchdog*)
+      *macprovider-watchdog*|*malibu.provider-watchdog*)
         printf 'program = %s\npath = %s\n' \
           "$CASE_ROOT/home/.local/share/macprovider-watchdog/macprovider-health-monitor" \
           "$CASE_ROOT/home/Library/LaunchAgents/live.malibu.provider-watchdog.plist"
@@ -599,7 +606,7 @@ case "$1" in
     rm -f "$service_file"
     ;;
   bootstrap)
-    if printf '%s' "$*" | grep -q 'macprovider-install-recovery'; then
+    if printf '%s' "$*" | grep -Eq 'macprovider-install-recovery|malibu[.]provider-install-recovery'; then
       : > "$service_file"
       exit 0
     fi
@@ -611,7 +618,7 @@ case "$1" in
     : > "$service_file"
     ;;
   kickstart)
-    if printf '%s' "$*" | grep -q 'macprovider-install-recovery'; then
+    if printf '%s' "$*" | grep -Eq 'macprovider-install-recovery|malibu[.]provider-install-recovery'; then
       exit 0
     fi
     if [ "${FAIL_ONCE_ACTION:-}" = "kickstart" ] && [ -f "$CASE_ROOT/fail-once" ]; then

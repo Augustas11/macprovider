@@ -54,7 +54,7 @@
       {
         "id": "step-02-install-launch-identity",
         "status": "pass",
-        "assertion": "The provider installed and launched v1.8.61 from signed release assets, preserved a stable redacted provider identity, and ran launchd service live.malibu.provider.",
+        "assertion": "The provider installed and launched v1.8.61 from signed release assets, preserved a stable redacted provider identity, and ran launchd service live.streamvc.macprovider.",
         "artifacts": [
           "redacted-provider-prebeta-admission"
         ]
@@ -94,7 +94,7 @@
       {
         "id": "step-07-buyer-serving-smoke",
         "status": "pass",
-        "assertion": "A buyer smoke request through api.malibu.tech returned HTTP 200 for mlx-community/Qwen3-8B-4bit and Pearl routing selected the same redacted provider as the only matching candidate.",
+        "assertion": "A buyer smoke request through api.streamvc.live returned HTTP 200 for mlx-community/Qwen3-8B-4bit and Pearl routing selected the same redacted provider as the only matching candidate.",
         "artifacts": [
           "redacted-provider-prebeta-admission"
         ]

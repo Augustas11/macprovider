@@ -3492,10 +3492,10 @@ class PearlUpdaterTests(unittest.TestCase):
                 updater_module.CANARY_AUTHORITY_FILES[installed],
                 hashlib.sha256(source_at_authority).hexdigest(),
             )
-        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "issue-825-canary-fleet-r6")
+        self.assertEqual(updater_module.CANARY_AUTHORITY_VERSION, "malibu-domain-migration-r1")
         self.assertEqual(
             updater_module.CANARY_AUTHORITY_COMMIT,
-            "b907cd7e9111318745196c02a0666dfb725e452d",
+            "9abc82072e87415614b7256cb05e429e3ab1f45c",
         )
         subprocess.run(
             ["git", "cat-file", "-e", f"{updater_module.CANARY_AUTHORITY_COMMIT}^{{commit}}"],
@@ -3661,7 +3661,7 @@ class PearlUpdaterTests(unittest.TestCase):
             {
                 "schema_version": 1,
                 "kind": "legacy_rollback",
-                "authority": "issue-825-canary-fleet-r6",
+                "authority": "malibu-domain-migration-r1",
                 "transaction_id": "a" * 64,
                 "expires_at": observed["document"]["expires_at"],
                 "providers": [

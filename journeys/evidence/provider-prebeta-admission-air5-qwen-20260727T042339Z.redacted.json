@@ -40,7 +40,7 @@
     {
       "id": "step-02-install-launch-identity",
       "status": "pass",
-      "assertion": "The provider installed and launched v1.8.61 from signed release assets, preserved a stable redacted provider identity, and ran launchd service live.malibu.provider.",
+      "assertion": "The provider installed and launched v1.8.61 from signed release assets, preserved a stable redacted provider identity, and ran launchd service live.streamvc.macprovider.",
       "artifacts": [
         "redacted-provider-prebeta-admission"
       ]
@@ -80,7 +80,7 @@
     {
       "id": "step-07-buyer-serving-smoke",
       "status": "pass",
-      "assertion": "A buyer smoke request through api.malibu.tech returned HTTP 200 for mlx-community/Qwen3-8B-4bit and Pearl routing selected the same redacted provider as the only matching candidate.",
+      "assertion": "A buyer smoke request through api.streamvc.live returned HTTP 200 for mlx-community/Qwen3-8B-4bit and Pearl routing selected the same redacted provider as the only matching candidate.",
       "artifacts": [
         "redacted-provider-prebeta-admission"
       ]
@@ -131,7 +131,7 @@
       "binary_version": "1.8.61",
       "provider_binary_path": "provider-home/macprovider/macprovider-cli",
       "binary_sha256": "822590b704f5363f092a142b0a442d8b3b8b47b19f65b324883ddd400208da88",
-      "launchd_label": "live.malibu.provider",
+      "launchd_label": "live.streamvc.macprovider",
       "launchd_state": "running",
       "local_model_id": "qwen3-8b"
     },
@@ -163,7 +163,7 @@
       "provider_waiting_after_run": []
     },
     "buyer_smoke": {
-      "base": "https://api.malibu.tech",
+      "base": "https://api.streamvc.live",
       "requested_model": "mlx-community/Qwen3-8B-4bit",
       "http_status": 200,
       "response_id_sha256": "23d5a0a0adb67f716fcd9d504ef4bfd88fd261f3b02ada4ab8b16d3dd3aa5a4b",
